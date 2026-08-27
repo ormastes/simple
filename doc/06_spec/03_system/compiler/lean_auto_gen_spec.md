@@ -1,30 +1,6 @@
 # Lean Auto Gen Specification
 
-> <details>
-
-<!-- sdn-diagram:id=lean_auto_gen_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lean_auto_gen_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lean_auto_gen_spec -> spipe
-lean_auto_gen_spec -> verification
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lean_auto_gen_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Lean Auto-Generation.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,13 +19,25 @@ lean_auto_gen_spec -> verification
 
 #### reports generation flags
 
+- reports generation flags
+   - Expected: structure_gen.AutoLeanMode.Full.generates_structures() is true
+   - Expected: structure_gen.AutoLeanMode.Full.generates_lookups() is true
+   - Expected: structure_gen.AutoLeanMode.Full.generates_beq() is true
+   - Expected: structure_gen.AutoLeanMode.StructureOnly.generates_structures() is true
+   - Expected: structure_gen.AutoLeanMode.StructureOnly.generates_lookups() is false
+   - Expected: structure_gen.AutoLeanMode.Skip.generates_structures() is false
+   - Expected: structure_gen.AutoLeanMode.Determinism.generates_theorems() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports generation flags")
 expect(structure_gen.AutoLeanMode.Full.generates_structures()).to_equal(true)
 expect(structure_gen.AutoLeanMode.Full.generates_lookups()).to_equal(true)
 expect(structure_gen.AutoLeanMode.Full.generates_beq()).to_equal(true)
@@ -65,22 +53,18 @@ expect(structure_gen.AutoLeanMode.Determinism.generates_theorems()).to_equal(tru
 
 #### generates structures and inductives
 
-1. var class def = structure gen SimpleClassDef new
-2. class def = class def add field
-3. class def = class def add field
-4. var enum def = structure gen SimpleEnumDef new
-5. enum def = enum def add variant
-6. enum def = enum def add variant
-7. var generator = structure gen StructureGenerator new
+- generates structures and inductives
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates structures and inductives")
 var class_def = structure_gen.SimpleClassDef.new("TraitDef")
 class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("name", "text"))
 class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("methods", "TraitMethod").with_list())
@@ -106,16 +90,18 @@ expect(enum_out).to_contain("| io")
 
 #### generates lookup scaffolding
 
-1. var generator = lookup gen LookupGenerator new
+- generates lookup scaffolding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates lookup scaffolding")
 val registry = lookup_gen.RegistryDef.new("Trait")
 var generator = lookup_gen.LookupGenerator.new()
 val env_out = generator.generate_env_type(registry)
@@ -135,13 +121,18 @@ expect(contains_out).to_contain("isSome")
 
 #### generates instantiation scaffolding
 
+- generates instantiation scaffolding
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates instantiation scaffolding")
 val generic_def = instantiation_gen.GenericTypeDef.new("Class")
 val generator = instantiation_gen.InstantiationGenerator.new()
 val out = generator.generate_instantiate(generic_def)
@@ -157,19 +148,18 @@ expect(out).to_contain("Option ClassDef")
 
 #### generates BEq functions and reflexivity proofs
 
-1. var type def = beq gen BeqTypeDef new
-2. type def = type def add variant
-3. type def = type def add variant
-4. var generator = beq gen BeqGenerator new
+- generates BEq functions and reflexivity proofs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates BEq functions and reflexivity proofs")
 var type_def = beq_gen.BeqTypeDef.new("Effect")
 type_def = type_def.add_variant(beq_gen.BeqVariant.new("Pure", []))
 type_def = type_def.add_variant(beq_gen.BeqVariant.new("Io", []))
@@ -193,13 +183,18 @@ expect(proof_out).to_contain("rfl")
 
 #### generates determinism and empty lookup theorems
 
+- generates determinism and empty lookup theorems
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates determinism and empty lookup theorems")
 val det = theorem_gen.generate_determinism_theorem("lookup_trait", [("env", "List TraitDef")], "TraitDef")
 val lookup_empty = theorem_gen.generate_standard_lookup_theorems(["Trait"])
 
@@ -216,18 +211,7 @@ expect(lookup_empty).to_contain("containsTrait_empty")
 
 #### builds a proof-clean file set
 
-1. var registry = auto gen TypeRegistry new
-2. var class def = structure gen SimpleClassDef new
-3. class def = class def add field
-4. class def = class def add field
-5. registry = registry add class
-6. var enum def = structure gen SimpleEnumDef new
-7. enum def = enum def add variant
-8. enum def = enum def add variant
-9. registry = registry add enum
-10. var config = auto gen AutoGenConfig new
-11. var generator = auto gen AutoGenerator new
-12. generator = generator set registry
+- builds a proof-clean file set
    - Expected: files.len() equals `4`
    - Expected: files[0].0 equals `Generated_Types.lean`
    - Expected: files[1].0 equals `Generated_Lookups.lean`
@@ -246,10 +230,12 @@ expect(lookup_empty).to_contain("containsTrait_empty")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("builds a proof-clean file set")
 var registry = auto_gen.TypeRegistry.new()
 var class_def = structure_gen.SimpleClassDef.new("Person")
 class_def = class_def.add_field(structure_gen.SimpleFieldDef.new("name", "text"))
@@ -287,13 +273,21 @@ expect(files[3].1.contains("axiom")).to_equal(false)
 
 #### maps Simple types to Lean types
 
+- maps Simple types to Lean types
+   - Expected: structure_gen.translate_type_to_lean("text", false, false) equals `String`
+   - Expected: structure_gen.translate_type_to_lean("i32", false, false) equals `Int`
+   - Expected: structure_gen.translate_type_to_lean("TraitDef", false, false) equals `TraitDef`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maps Simple types to Lean types")
 expect(structure_gen.translate_type_to_lean("text", false, false)).to_equal("String")
 expect(structure_gen.translate_type_to_lean("i32", false, false)).to_equal("Int")
 expect(structure_gen.translate_type_to_lean("TraitDef", false, false)).to_equal("TraitDef")
@@ -305,13 +299,18 @@ expect(structure_gen.translate_type_to_lean("TraitDef", false, false)).to_equal(
 
 #### generate lookup and BEq helper output
 
+- generate lookup and BEq helper output
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generate lookup and BEq helper output")
 val lookups = lookup_gen.generate_standard_lookups("Trait")
 val beq_output = beq_gen.generate_simple_enum_beq("Mode", ["Online", "Offline"])
 
@@ -329,12 +328,12 @@ expect(beq_output).to_contain("mode_beq_refl")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/lean_auto_gen_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Lean Auto-Generation.
 - Lean Auto-Generation
 
 ## Scenario Summary
@@ -349,3 +348,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ecc6d828e4e1edf57a5038d38e66d994b8d6b659a928620fcb951c9985b7c685`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ecc6d828e4e1edf57a5038d38e66d994b8d6b659a928620fcb951c9985b7c685`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ecc6d828e4e1edf57a5038d38e66d994b8d6b659a928620fcb951c9985b7c685`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/compiler/lean_auto_gen_spec.spl
+mirror: doc/06_spec/03_system/compiler/lean_auto_gen_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/compiler/lean_auto_gen_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/compiler/lean_auto_gen_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/compiler/lean_auto_gen_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/compiler/lean_auto_gen_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports generation flags' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/lean_auto_gen_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates structures and inductives' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/lean_auto_gen_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates lookup scaffolding' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

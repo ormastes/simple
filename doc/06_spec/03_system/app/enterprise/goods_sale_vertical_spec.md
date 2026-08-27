@@ -24,7 +24,7 @@ The first proving vertical of the Simple Enterprise Suite, exercised end to end 
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/goods_sale_vertical_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -79,6 +79,11 @@ Lane: .spipe/simple_enterprise_suite (Wave C, AC-9/AC-10).
 
 #### sells, collects payment, and refunds with consistent ledgers
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- sells, collects payment, and refunds with consistent ledgers
 - Open a clean store and publish the catalog
    - Expected: add.reason equals `accepted`
 - Receive 10 units of stock
@@ -102,10 +107,12 @@ Lane: .spipe/simple_enterprise_suite (Wave C, AC-9/AC-10).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sells, collects payment, and refunds with consistent ledgers")
 step("Open a clean store and publish the catalog")
 val store = fresh_store("e2e")
 val t = tenant_a()
@@ -155,6 +162,7 @@ store_close(store)
 
 #### rejects an inactive session
 
+- rejects an inactive session
 - Attempt an order with an inactive session
    - Expected: r.reason equals `invalid-session`
 
@@ -162,10 +170,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects an inactive session")
 val store = fresh_store("guard_session")
 val t = tenant_a()
 val clerk = clerk_a()
@@ -182,6 +192,7 @@ store_close(store)
 
 #### rejects a role without order permission
 
+- rejects a role without order permission
 - Attempt an order as a viewer
    - Expected: r.reason equals `forbidden`
 
@@ -189,10 +200,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects a role without order permission")
 val store = fresh_store("guard_role")
 val t = tenant_a()
 val viewer = viewer_a()
@@ -206,6 +219,7 @@ store_close(store)
 
 #### rejects an unknown SKU and an oversell
 
+- rejects an unknown SKU and an oversell
 - Order an unknown SKU
    - Expected: r1.reason equals `not-found`
 - Order more units than available — stock must never go negative
@@ -216,10 +230,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects an unknown SKU and an oversell")
 val store = fresh_store("guard_stock")
 val t = tenant_a()
 val admin = admin_a()
@@ -244,6 +260,7 @@ store_close(store)
 
 #### replaying the same order command changes nothing
 
+- replaying the same order command changes nothing
 - Place the order once
    - Expected: first.reason equals `accepted`
 - Replay the SAME idempotency key
@@ -257,10 +274,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaying the same order command changes nothing")
 val store = fresh_store("replay")
 val t = tenant_a()
 val admin = admin_a()
@@ -294,6 +313,7 @@ store_close(store)
 
 #### replays an order that consumed the last of the stock
 
+- replays an order that consumed the last of the stock
 - Seed exactly 3 units — enough for exactly one order of 3
 - Place the order for all 3 units
    - Expected: first.reason equals `accepted`
@@ -311,10 +331,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replays an order that consumed the last of the stock")
 val store = fresh_store("replay_last_stock")
 val t = tenant_a()
 val admin = admin_a()
@@ -351,6 +373,7 @@ store_close(store)
 
 #### replays a payment whose own effect advanced the order status
 
+- replays a payment whose own effect advanced the order status
 - Pay once — status advances created -> paid
    - Expected: paid.reason equals `accepted`
    - Expected: sale_order_status(store, "tenant-a", "order-500") equals `paid`
@@ -367,10 +390,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replays a payment whose own effect advanced the order status")
 val store = fresh_store("replay_pay")
 val t = tenant_a()
 val admin = admin_a()
@@ -410,6 +435,7 @@ store_close(store)
 
 #### replays a refund whose own effect advanced the order status
 
+- replays a refund whose own effect advanced the order status
 - Refund once — status advances paid -> refunded
    - Expected: refunded.reason equals `accepted`
 - Replay the SAME refund key — must return duplicate-key, not invalid-record
@@ -425,10 +451,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replays a refund whose own effect advanced the order status")
 val store = fresh_store("replay_refund")
 val t = tenant_a()
 val admin = admin_a()
@@ -469,6 +497,7 @@ store_close(store)
 
 #### tenant B cannot read or affect tenant A's catalog and stock
 
+- tenant B cannot read or affect tenant A's catalog and stock
 - Tenant B sees no stock and no product for tenant A's SKU
    - Expected: sale_available_stock(store, "tenant-b", "SKU-1") equals `0`
 - A tenant-B clerk cannot order tenant A's product
@@ -482,10 +511,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tenant B cannot read or affect tenant A's catalog and stock")
 val store = fresh_store("isolation")
 val ta = tenant_a()
 val admin = admin_a()
@@ -521,6 +552,7 @@ store_close(store)
 
 #### reopens the database with orders, stock, and ledgers intact
 
+- reopens the database with orders, stock, and ledgers intact
 - Close the store (simulated shutdown)
 - Reopen and verify orders, stock, journal, audit, and replay guard
    - Expected: sale_order_status(store2, "tenant-a", "order-300") equals `created`
@@ -533,10 +565,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reopens the database with orders, stock, and ledgers intact")
 val store = fresh_store("restart")
 val t = tenant_a()
 val admin = admin_a()
@@ -584,3 +618,54 @@ store_close(store2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `91ae9b934f36c0665ae36d17f6358fb6edc732591dcd623059d6f043a2f1222f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `91ae9b934f36c0665ae36d17f6358fb6edc732591dcd623059d6f043a2f1222f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `91ae9b934f36c0665ae36d17f6358fb6edc732591dcd623059d6f043a2f1222f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/goods_sale_vertical_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/goods_sale_vertical_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/goods_sale_vertical_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/goods_sale_vertical_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/goods_sale_vertical_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/goods_sale_vertical_spec.spl:112:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sells, collects payment, and refunds with consistent ledgers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/goods_sale_vertical_spec.spl:158:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects an inactive session' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/goods_sale_vertical_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a role without order permission' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

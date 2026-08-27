@@ -1,129 +1,109 @@
-# SimpleOS toolchain deployment and desktop boot
+# simpleos_toolchain_deployment_desktop_boot_spec
 
-## Purpose
+> REQ-SOS-TD-001..004: fail-closed production desktop/toolchain evidence.
 
-Prove that one admitted x86_64 SimpleOS deployment image boots through the
-production OVMF/GRUB desktop path and uses its embedded Simple toolchain to
-compile, link, and execute exact `Hello World` inside that same guest.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Preconditions
+<details>
+<summary>Full Scenario Manual</summary>
 
-- An admitted pure-Simple Stage 4 host CLI produced the target payload.
-- `/SYS/SIMPLETOOL.SDN` and the external image-admission receipt validate.
-- The image contains the canonical Simple aliases, genuine guest-static
-  `ld.lld`, runtime inputs, linker script, and `/HELLO.SPL`.
-- OVMF CODE, writable per-run VARS, GRUB EFI, QEMU, framebuffer capture, and
-  SSH evidence are available.
+# simpleos_toolchain_deployment_desktop_boot_spec
 
-Unavailable prerequisites are BLOCKED failures. There is no opt-in skip or
-non-execution green path.
+REQ-SOS-TD-001..004: fail-closed production desktop/toolchain evidence.
 
-Current source status (2026-08-16): the production wrapper and shared receipt
-validator exist. Their 16-case hermetic self-test passes with
-`platform_acceptance_claimed=false`; production mode uses the canonical
-Stage-4 provenance verifier rather than path or marker-based admission.
-Default live mode remains blocked because the canonical desktop owner has no
-same-run network/SSHD guest-command hook, so the system scenario has no runtime
-PASS.
+## At a Glance
 
-**TEST_BLOCKED (2026-08-16):** no current-source, canonically admitted
-pure-Simple CLI is available in this worktree or the registered worktrees.
-Runtime execution, SPipe docgen, and `sspec-maintain scan` were therefore not
-run. This Markdown is the reviewed mirrored manual for the future-executable
-spec; it is not generated-runtime evidence and cannot promote the live gate.
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-## Procedure
+REQ-SOS-TD-001..004: fail-closed production desktop/toolchain evidence.
 
-### Validate the receipt contract without claiming platform acceptance
+## Scenarios
 
-Run the production wrapper with `--self-test`. The scenario requires exit zero,
-empty stderr, the exact PASS prefix, all 16 validator cases, and
-`platform_acceptance_claimed=false`. This is positive host-fixture evidence
-only; it does not claim a booted desktop or guest execution.
+### REQ-SOS-TD-001..004: SimpleOS deployment desktop toolchain
 
-### Reject extra receipt self-test arguments
+#### boots one admitted production image and runs guest-built Hello World
 
-Run `--self-test unexpected`. The scenario requires usage exit 2, empty stdout,
-and the canonical usage message. Accepting extra arguments would make the
-evidence mode ambiguous and is an error.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-### Reject production execution without an admitted runtime
 
-Run production mode after explicitly removing `SIMPLE_BIN`,
-`SIMPLEOS_TOOLCHAIN_IMAGE`, and `SIMPLEOS_STAGE4_ADMISSION_RECEIPT` from the
-child environment. The scenario requires exit 1, empty stdout, and
-`blocked:simple-bin-not-set`; a skip or non-execution PASS is forbidden.
+<details>
+<summary>Executable SSpec</summary>
 
-### Prepare the toolchain deployment image
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
 
-Run `prepare_toolchain_deployment_fixture`, which executes
-`scripts/check/check-simpleos-toolchain-desktop-boot.shs`. Then
-`require_toolchain_deployment_manifest` validates the embedded component
-manifest and closed-image admission receipt, including all canonical paths and
-record hashes.
-
-### Boot the SimpleOS production desktop
-
-`require_simpleos_desktop_boot_receipt` requires the same-run receipt to bind
-the admitted image/kernel to OVMF, per-run VARS, GRUB, exact QEMU argv,
-`gui_entry_desktop.spl`, desktop/readiness/scanout markers, and framebuffer
-evidence.
-
-### Compile and run Hello World inside the guest
-
-The production wrapper must record these guest commands in order:
-
-```sh
-/usr/bin/simple --version
-/usr/bin/simple compile --emit-object /HELLO.SPL -o /HELLO.O
-/usr/bin/ld.lld -flavor gnu --no-mmap-output-file -T /sysrt/simpleos.ld -nostdlib -static --gc-sections -o /HELLO.ELF /usr/lib/CRT0.O /usr/lib/SIMAIN.O /HELLO.O --start-group /usr/lib/SIMPRT.A /usr/lib/SOSLIB.A --end-group
-/HELLO.ELF
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-SOS-TD-001..004
 ```
 
-`require_guest_hello_receipt` requires every rc to be zero, `/HELLO.ELF` to be
-static ET_EXEC with no `PT_INTERP`, stdout to equal `Hello World`, stderr to be
-empty, and the output to come from the mounted filesystem.
+</details>
 
-## Expected evidence
+## Scenario Summary
 
-- `build/os/evidence/SIMPLETOOL.SDN`
-- `build/os/evidence/simpleos-toolchain-image-admission-v1.sdn`
-- `build/os/evidence/simpleos-toolchain-desktop-guest-v1.sdn`
-- Same-run serial, SSH, framebuffer/readback, command, output, and ELF evidence
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-All records end in `record_sha256` over sorted canonical fields excluding that
-field.
 
-## Failure handling
+</details>
 
-The scenario fails on wrapper failure, missing/stale records, wrong schema or
-status, absent component identity, missing desktop/framebuffer marker, altered
-guest command, nonzero rc, wrong ELF identity, output mismatch, or absent
-record hash. Rust seed, host compilation, `-kernel`, `isa-debug-exit`, marker
-apps, fixed SSH responses, and historical artifacts are rejected.
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-## Requirement traceability
+Requirements covered by the scenarios in this manual:
 
-| Requirement | Executable scenario/checker | Evidence |
-|---|---|---|
-| REQ-SOS-TD-001 | missing-runtime rejection; prepare step | fail-closed admission plus admitted producer and target payload identity |
-| REQ-004 / REQ-SOS-TD-002 | receipt self-test; manifest checker | 16-case host-fixture contract plus embedded manifest and image receipt |
-| REQ-SOS-TD-003 / NFR-005 | missing-runtime rejection; desktop checker | no unqualified production PASS; OVMF/GRUB/QEMU/desktop/framebuffer receipt when qualified |
-| REQ-005 / REQ-007 | guest checker | exact commands, ELF, output, and rc |
-| REQ-SOS-TD-004 | self-test boundary scenarios; all helpers | strict CLI surface, frozen names, visible steps, and fail-closed behavior |
+- `REQ-SSPEC-SYSTEM`
+- `REQ-SOS-TD-001..004`
+<!-- sspec-maintain:traceability:end -->
 
-## Static quality scorecard
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-- Four executable scenarios: one positive host-fixture path, one CLI edge, one
-  admission error, and one full live-guest path.
-- Every scenario has concrete built-in matcher assertions.
-- The live scenario still calls the production owner and validates durable
-  receipts; no source-string or test-only live oracle was added.
-- Runtime, docgen, and all-seven-score maintenance status: `TEST_BLOCKED` until
-  a canonically admitted pure-Simple CLI is available.
+- Canonical SPipe generation for source `bdaf1ae03b113e1cd1e24a8d93046776c7e106c65551422f8b78f577be2ce7f6`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-## Operator result
+Source SHA-256: `bdaf1ae03b113e1cd1e24a8d93046776c7e106c65551422f8b78f577be2ce7f6`.
+<!-- sspec-maintain:provenance:end -->
 
-PASS is valid only when the executable scenario completes all three visible
-steps. A failure naming `blocked:` is an honest incomplete production result,
-not a skip.
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bdaf1ae03b113e1cd1e24a8d93046776c7e106c65551422f8b78f577be2ce7f6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl
+mirror: doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md (current)
+findings: 4 blockers: 1
+  narrative=100 structure=90 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=85; blocker cap makes effective=49
+doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl:136:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'boots one admitted production image and runs guest-built Hello World' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+<!-- sspec-maintain:scorecard:end -->

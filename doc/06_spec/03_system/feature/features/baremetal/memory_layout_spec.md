@@ -2,29 +2,6 @@
 
 > This file keeps the original intent of the memory-layout spec while replacing
 
-<!-- sdn-diagram:id=memory_layout_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=memory_layout_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-memory_layout_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=memory_layout_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 22 | 22 | 0 | 0 |
@@ -44,7 +21,7 @@ This file keeps the original intent of the memory-layout spec while replacing
 | Category | Language / Bare-Metal |
 | Status | In Progress |
 | Source | `test/03_system/feature/features/baremetal/memory_layout_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 This file keeps the original intent of the memory-layout spec while replacing
@@ -58,16 +35,18 @@ unsupported attribute syntax with a parser-safe local harness.
 
 #### lays out fields in declaration order
 
-1. assert offsets
+- lays out fields in declaration order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lays out fields in declaration order")
 val result = compute_layout([1, 4, 2], [1, 4, 2], false, 1)
 assert_offsets(result, [0, 4, 8])
 ```
@@ -76,17 +55,18 @@ assert_offsets(result, [0, 4, 8])
 
 #### aligns fields to their natural alignment
 
-1. check
-2. check
+- aligns fields to their natural alignment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("aligns fields to their natural alignment")
 val result = compute_layout([1, 4, 2], [1, 4, 2], false, 1)
 check(result.alignment == 4)
 check(result.size == 12)
@@ -96,16 +76,18 @@ check(result.size == 12)
 
 #### pads struct to alignment at end
 
-1. check
+- pads struct to alignment at end
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pads struct to alignment at end")
 val result = compute_layout([1, 4, 2], [1, 4, 2], false, 1)
 check(result.size % result.alignment == 0)
 ```
@@ -116,17 +98,18 @@ check(result.size % result.alignment == 0)
 
 #### removes all padding
 
-1. assert offsets
-2. check
+- removes all padding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("removes all padding")
 val result = compute_layout([1, 4, 2], [1, 4, 2], true, 1)
 assert_offsets(result, [0, 1, 5])
 check(result.size == 7)
@@ -136,16 +119,18 @@ check(result.size == 7)
 
 #### has alignment of 1
 
-1. check
+- has alignment of 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has alignment of 1")
 val result = compute_layout([1, 4, 2], [1, 4, 2], true, 1)
 check(result.alignment == 1)
 ```
@@ -154,17 +139,18 @@ check(result.alignment == 1)
 
 #### uses packed layout for compact records
 
-1. assert offsets
-2. check
+- uses packed layout for compact records
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses packed layout for compact records")
 val result = compute_layout([2, 2, 1], [2, 2, 1], true, 1)
 assert_offsets(result, [0, 2, 4])
 check(result.size == 5)
@@ -176,17 +162,18 @@ check(result.size == 5)
 
 #### increases alignment
 
-1. check
-2. check
+- increases alignment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("increases alignment")
 val result = compute_layout([4, 2], [4, 2], false, 8)
 check(result.alignment == 8)
 check(result.size == 8)
@@ -196,16 +183,18 @@ check(result.size == 8)
 
 #### combines with repr C
 
-1. assert offsets
+- combines with repr C
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines with repr C")
 val result = compute_layout([4, 2], [4, 2], false, 8)
 assert_offsets(result, [0, 4])
 ```
@@ -214,16 +203,18 @@ assert_offsets(result, [0, 4])
 
 #### requires power of 2
 
-1. check
+- requires power of 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires power of 2")
 val alignment = 1
 check(alignment == 1)
 ```
@@ -234,16 +225,18 @@ check(alignment == 1)
 
 #### computes C layout offsets
 
-1. assert offsets
+- computes C layout offsets
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes C layout offsets")
 val result = compute_layout([1, 2, 4], [1, 2, 4], false, 1)
 assert_offsets(result, [0, 2, 4])
 ```
@@ -252,16 +245,18 @@ assert_offsets(result, [0, 2, 4])
 
 #### computes packed offsets
 
-1. assert offsets
+- computes packed offsets
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes packed offsets")
 val result = compute_layout([1, 2, 4], [1, 2, 4], true, 1)
 assert_offsets(result, [0, 1, 3])
 ```
@@ -274,17 +269,18 @@ assert_offsets(result, [0, 1, 3])
 
 #### has correct integer sizes
 
-1. check
-2. check
+- has correct integer sizes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct integer sizes")
 val size_i32 = 4
 val size_i64 = 8
 check(size_i32 == 4)
@@ -295,17 +291,18 @@ check(size_i64 == 8)
 
 #### has correct integer alignments
 
-1. check
-2. check
+- has correct integer alignments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct integer alignments")
 val align_i32 = 4
 val align_i64 = 8
 check(align_i32 == 4)
@@ -318,17 +315,18 @@ check(align_i64 == 8)
 
 #### has correct float sizes
 
-1. check
-2. check
+- has correct float sizes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct float sizes")
 val size_f32 = 4
 val size_f64 = 8
 check(size_f32 == 4)
@@ -339,17 +337,18 @@ check(size_f64 == 8)
 
 #### has correct float alignments
 
-1. check
-2. check
+- has correct float alignments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct float alignments")
 val align_f32 = 4
 val align_f64 = 8
 check(align_f32 == 4)
@@ -362,16 +361,18 @@ check(align_f64 == 8)
 
 #### has correct bool size
 
-1. check
+- has correct bool size
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct bool size")
 val bool_size = 1
 check(bool_size == 1)
 ```
@@ -380,16 +381,18 @@ check(bool_size == 1)
 
 #### has correct char size
 
-1. check
+- has correct char size
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct char size")
 val char_size = 4
 check(char_size == 4)
 ```
@@ -402,17 +405,18 @@ check(char_size == 4)
 
 #### has correct GDT entry layout
 
-1. check
-2. check
+- has correct GDT entry layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct GDT entry layout")
 val gdt = compute_layout([2, 2, 1, 1, 1, 1], [2, 2, 1, 1, 1, 1], false, 1)
 check(gdt.size == 8)
 check(gdt.alignment == 2)
@@ -424,17 +428,18 @@ check(gdt.alignment == 2)
 
 #### has correct IDT entry layout
 
-1. check
-2. check
+- has correct IDT entry layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct IDT entry layout")
 val idt = compute_layout([2, 2, 2, 2], [2, 2, 2, 2], false, 1)
 check(idt.size == 8)
 check(idt.alignment == 2)
@@ -446,17 +451,18 @@ check(idt.alignment == 2)
 
 #### has correct ethernet header layout
 
-1. assert offsets
-2. check
+- has correct ethernet header layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct ethernet header layout")
 val ethernet = compute_layout([6, 6, 2], [1, 1, 2], false, 1)
 assert_offsets(ethernet, [0, 6, 12])
 check(ethernet.size == 14)
@@ -466,16 +472,18 @@ check(ethernet.size == 14)
 
 #### has correct IPv4 header layout
 
-1. check
+- has correct IPv4 header layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct IPv4 header layout")
 val ipv4 = compute_layout([1, 1, 2, 2, 2, 1, 1, 2, 4, 4], [1, 1, 2, 2, 2, 1, 1, 2, 4, 4], false, 1)
 check(ipv4.size == 20)
 ```
@@ -486,17 +494,18 @@ check(ipv4.size == 20)
 
 #### has correct register layout
 
-1. assert offsets
-2. check
+- has correct register layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has correct register layout")
 val mmio = compute_layout([4, 4, 4, 4], [4, 4, 4, 4], false, 4)
 assert_offsets(mmio, [0, 4, 8, 12])
 check(mmio.size == 16)
@@ -516,3 +525,51 @@ check(mmio.size == 16)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `91b9d889e2a4cf8d7a3b99a5c7bba47d201c01c1fdcd88b4e28ecfe51224197f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `91b9d889e2a4cf8d7a3b99a5c7bba47d201c01c1fdcd88b4e28ecfe51224197f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `91b9d889e2a4cf8d7a3b99a5c7bba47d201c01c1fdcd88b4e28ecfe51224197f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/features/baremetal/memory_layout_spec.spl
+mirror: doc/06_spec/03_system/feature/features/baremetal/memory_layout_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/features/baremetal/memory_layout_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/features/baremetal/memory_layout_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/features/baremetal/memory_layout_spec.spl:74:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lays out fields in declaration order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/baremetal/memory_layout_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'aligns fields to their natural alignment' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/baremetal/memory_layout_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pads struct to alignment at end' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

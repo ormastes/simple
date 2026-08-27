@@ -2,29 +2,6 @@
 
 > Matrix multiplication is implemented in the interpreter with proper dimension checking
 
-<!-- sdn-diagram:id=matrix_multiplication_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=matrix_multiplication_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-matrix_multiplication_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=matrix_multiplication_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 37 | 37 | 0 | 0 |
@@ -44,7 +21,7 @@ Matrix multiplication is implemented in the interpreter with proper dimension ch
 | Category | Operators \| Linear Algebra |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/matrix_multiplication_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Implementation Details
@@ -56,6 +33,8 @@ and automatic float/int promotion. Codegen mode delegates to the interpreter.
 
 ```simple
 # Scalars
+use std.spec.step
+
 val result = 3 @ 4  # 12
 
 # Dot product
@@ -80,13 +59,22 @@ val result = m @ v  # [50, 122]
 
 #### multiplies two integers
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- multiplies two integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies two integers")
 val result = 3 @ 4
 expect result == 12
 ```
@@ -95,13 +83,18 @@ expect result == 12
 
 #### multiplies two floats
 
+- multiplies two floats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies two floats")
 val result = 2.5 @ 4.0
 expect result == 10.0
 ```
@@ -110,13 +103,18 @@ expect result == 10.0
 
 #### handles mixed int/float (int @ float)
 
+- handles mixed int/float (int @ float)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles mixed int/float (int @ float)")
 val result = 3 @ 2.5
 expect result == 7.5
 ```
@@ -125,13 +123,18 @@ expect result == 7.5
 
 #### handles mixed int/float (float @ int)
 
+- handles mixed int/float (float @ int)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles mixed int/float (float @ int)")
 val result = 2.5 @ 3
 expect result == 7.5
 ```
@@ -140,13 +143,18 @@ expect result == 7.5
 
 #### handles zero multiplication
 
+- handles zero multiplication
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles zero multiplication")
 val result = 0 @ 100
 expect result == 0
 ```
@@ -155,16 +163,18 @@ expect result == 0
 
 #### handles negative numbers
 
-1. expect result ==
+- handles negative numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles negative numbers")
 val result = (-3) @ 4
 expect result == (-12)
 ```
@@ -173,13 +183,18 @@ expect result == (-12)
 
 #### handles negative floats
 
+- handles negative floats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles negative floats")
 val result = (-2.5) @ (-4.0)
 expect result == 10.0
 ```
@@ -190,13 +205,18 @@ expect result == 10.0
 
 #### computes dot product of integer vectors
 
+- computes dot product of integer vectors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes dot product of integer vectors")
 val a = [1, 2, 3]
 val b = [4, 5, 6]
 val result = a @ b
@@ -207,13 +227,18 @@ expect result == 32  # 1*4 + 2*5 + 3*6 = 32
 
 #### computes dot product of float vectors
 
+- computes dot product of float vectors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes dot product of float vectors")
 val a = [1.0, 2.0, 3.0]
 val b = [4.0, 5.0, 6.0]
 val result = a @ b
@@ -224,13 +249,18 @@ expect result == 32.0
 
 #### computes dot product with mixed int/float
 
+- computes dot product with mixed int/float
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes dot product with mixed int/float")
 val a = [1, 2, 3]
 val b = [1.5, 2.5, 3.5]
 val result = a @ b
@@ -241,13 +271,18 @@ expect result == 17.0  # 1*1.5 + 2*2.5 + 3*3.5
 
 #### handles zero vector
 
+- handles zero vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles zero vector")
 val a = [1, 2, 3]
 val b = [0, 0, 0]
 val result = a @ b
@@ -258,13 +293,18 @@ expect result == 0
 
 #### handles single element vectors
 
+- handles single element vectors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single element vectors")
 val a = [5]
 val b = [3]
 val result = a @ b
@@ -275,16 +315,18 @@ expect result == 15
 
 #### handles negative vectors
 
-1. expect result ==
+- handles negative vectors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles negative vectors")
 val a = [1, -2, 3]
 val b = [-4, 5, -6]
 val result = a @ b
@@ -295,13 +337,18 @@ expect result == (-32)  # 1*(-4) + (-2)*5 + 3*(-6) = -32
 
 #### handles orthogonal vectors (dot product = 0)
 
+- handles orthogonal vectors (dot product = 0)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles orthogonal vectors (dot product = 0)")
 val a = [1, 0]
 val b = [0, 1]
 val result = a @ b
@@ -312,13 +359,18 @@ expect result == 0
 
 #### computes dot product of longer vectors
 
+- computes dot product of longer vectors
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes dot product of longer vectors")
 val a = [1, 2, 3, 4, 5]
 val b = [2, 3, 4, 5, 6]
 val result = a @ b
@@ -331,13 +383,18 @@ expect result == 70  # 2 + 6 + 12 + 20 + 30
 
 #### multiplies 2x2 matrices
 
+- multiplies 2x2 matrices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies 2x2 matrices")
 val a = [[1, 2], [3, 4]]
 val b = [[5, 6], [7, 8]]
 val c = a @ b
@@ -348,17 +405,18 @@ expect c == [[19, 22], [43, 50]]
 
 #### multiplies 2x3 and 3x2 matrices
 
-1. expect c[0] len
-2. expect c len
+- multiplies 2x3 and 3x2 matrices
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies 2x3 and 3x2 matrices")
 val a = [[1, 2, 3], [4, 5, 6]]
 val b = [[7, 8], [9, 10], [11, 12]]
 val c = a @ b
@@ -377,13 +435,18 @@ expect c[1][1] == 154
 
 #### multiplies identity matrix
 
+- multiplies identity matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies identity matrix")
 val identity = [[1, 0], [0, 1]]
 val a = [[3, 4], [5, 6]]
 val result = identity @ a
@@ -397,13 +460,18 @@ expect result == a
 
 #### multiplies 3x3 identity
 
+- multiplies 3x3 identity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies 3x3 identity")
 val a = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
 val b = [[2, 3, 4], [5, 6, 7], [8, 9, 10]]
 val c = a @ b
@@ -414,13 +482,18 @@ expect c == b
 
 #### handles 1x1 matrices
 
+- handles 1x1 matrices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles 1x1 matrices")
 val a = [[5]]
 val b = [[3]]
 val c = a @ b
@@ -431,13 +504,18 @@ expect c == [[15]]
 
 #### handles rectangular matrices (tall @ wide)
 
+- handles rectangular matrices (tall @ wide)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles rectangular matrices (tall @ wide)")
 val a = [[1], [2], [3]]  # 3x1
 val b = [[4, 5, 6]]      # 1x3
 val c = a @ b            # 3x3
@@ -451,13 +529,18 @@ expect c == [[4, 5, 6], [8, 10, 12], [12, 15, 18]]
 
 #### handles zero matrix
 
+- handles zero matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles zero matrix")
 val a = [[1, 2], [3, 4]]
 val zero = [[0, 0], [0, 0]]
 val c = a @ zero
@@ -471,13 +554,18 @@ expect c == [[0, 0], [0, 0]]
 
 #### handles negative matrices
 
+- handles negative matrices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles negative matrices")
 val a = [[1, 2], [3, 4]]
 val b = [[-1, 0], [0, -1]]
 val c = a @ b
@@ -493,13 +581,18 @@ expect c == [[-1, -2], [-3, -4]]
 
 #### multiplies 2x3 matrix by 3x1 vector
 
+- multiplies 2x3 matrix by 3x1 vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies 2x3 matrix by 3x1 vector")
 val a = [[1, 2, 3], [4, 5, 6]]
 val b = [7, 8, 9]
 val c = a @ b
@@ -516,13 +609,18 @@ expect c == [50, 122]
 
 #### multiplies 3x2 matrix by 2x1 vector
 
+- multiplies 3x2 matrix by 2x1 vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies 3x2 matrix by 2x1 vector")
 val a = [[1, 2], [3, 4], [5, 6]]
 val b = [10, 20]
 val c = a @ b
@@ -539,13 +637,18 @@ expect c == [50, 110, 170]
 
 #### multiplies identity matrix by vector
 
+- multiplies identity matrix by vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies identity matrix by vector")
 val identity = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
 val v = [5, 10, 15]
 val result = identity @ v
@@ -562,13 +665,18 @@ expect result == v
 
 #### multiplies vector by matrix (1x2 @ 2x3)
 
+- multiplies vector by matrix (1x2 @ 2x3)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies vector by matrix (1x2 @ 2x3)")
 val a = [1, 2]
 val b = [[3, 4, 5], [6, 7, 8]]
 val c = a @ b
@@ -585,13 +693,18 @@ expect c == [15, 18, 21]
 
 #### multiplies vector by identity matrix
 
+- multiplies vector by identity matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies vector by identity matrix")
 val v = [5, 10]
 val identity = [[1, 0], [0, 1]]
 val result = v @ identity
@@ -608,13 +721,18 @@ expect result == v
 
 #### handles single column matrix
 
+- handles single column matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single column matrix")
 val m = [[1], [2], [3]]
 val v = [4]
 val result = m @ v
@@ -633,13 +751,18 @@ expect result == [4, 8, 12]
 
 #### promotes int matrix to float when multiplied with float matrix
 
+- promotes int matrix to float when multiplied with float matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("promotes int matrix to float when multiplied with float matrix")
 val a = [[1, 2], [3, 4]]
 val b = [[1.5, 2.5], [3.5, 4.5]]
 val c = a @ b
@@ -654,13 +777,18 @@ expect c == expected
 
 #### promotes int vector to float when multiplied with float vector
 
+- promotes int vector to float when multiplied with float vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("promotes int vector to float when multiplied with float vector")
 val a = [1, 2, 3]
 val b = [1.5, 2.5, 3.5]
 val result = a @ b
@@ -674,13 +802,18 @@ expect result == 17.0
 
 #### handles mixed int/float matrix-vector
 
+- handles mixed int/float matrix-vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles mixed int/float matrix-vector")
 val m = [[1, 2], [3, 4]]
 val v = [1.5, 2.5]
 val result = m @ v
@@ -696,13 +829,18 @@ expect result == [6.5, 14.5]
 
 #### multiplies diagonal matrices
 
+- multiplies diagonal matrices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies diagonal matrices")
 val a = [[2, 0], [0, 3]]
 val b = [[4, 0], [0, 5]]
 val c = a @ b
@@ -713,13 +851,18 @@ expect c == [[8, 0], [0, 15]]
 
 #### multiplies upper triangular matrices
 
+- multiplies upper triangular matrices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies upper triangular matrices")
 val a = [[1, 2], [0, 3]]
 val b = [[4, 5], [0, 6]]
 val c = a @ b
@@ -733,13 +876,18 @@ expect c == [[4, 17], [0, 18]]
 
 #### multiplies symmetric matrix
 
+- multiplies symmetric matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies symmetric matrix")
 val a = [[1, 2], [2, 1]]
 val b = [[3, 4], [4, 3]]
 val c = a @ b
@@ -755,13 +903,18 @@ expect c == [[11, 10], [10, 11]]
 
 #### satisfies associativity: (A @ B) @ C == A @ (B @ C)
 
+- satisfies associativity: (A @ B) @ C == A @ (B @ C)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("satisfies associativity: (A @ B) @ C == A @ (B @ C)")
 val a = [[1, 2], [3, 4]]
 val b = [[5, 6], [7, 8]]
 val c = [[9, 10], [11, 12]]
@@ -774,13 +927,18 @@ expect left == right
 
 #### is NOT commutative: A @ B != B @ A (in general)
 
+- is NOT commutative: A @ B != B @ A (in general)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is NOT commutative: A @ B != B @ A (in general)")
 val a = [[1, 2], [3, 4]]
 val b = [[5, 6], [7, 8]]
 val ab = a @ b
@@ -802,3 +960,51 @@ expect ab != ba
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4d2df331788baf65d22e16719ec1eb7524eb726b23f235f5911a0e8bb9642712`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4d2df331788baf65d22e16719ec1eb7524eb726b23f235f5911a0e8bb9642712`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4d2df331788baf65d22e16719ec1eb7524eb726b23f235f5911a0e8bb9642712`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/matrix_multiplication_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/matrix_multiplication_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/matrix_multiplication_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/matrix_multiplication_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/matrix_multiplication_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'multiplies two integers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/matrix_multiplication_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'multiplies two floats' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/matrix_multiplication_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles mixed int/float (int @ float)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

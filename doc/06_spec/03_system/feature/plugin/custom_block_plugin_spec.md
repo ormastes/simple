@@ -1,29 +1,6 @@
-# custom_block_plugin_spec
+# Custom Block Plugin Specification
 
-> Custom Block Plugin — AC-2 Spec
-
-<!-- sdn-diagram:id=custom_block_plugin_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=custom_block_plugin_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-custom_block_plugin_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=custom_block_plugin_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering AC-2: Custom Block Plugin — add and replace.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,26 +9,7 @@ custom_block_plugin_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# custom_block_plugin_spec
-
-Custom Block Plugin — AC-2 Spec
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #AC2-BLOCK-PLUGIN |
-| Category | Plugin / BlockRegistry |
-| Status | Planned (Phase 5 implements; Phase 4 specifies) |
-| Source | `test/03_system/feature/plugin/custom_block_plugin_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Custom Block Plugin — AC-2 Spec
-
-Validates the BlockRegistry-driven plugin path using local doubles.
-Phase 5 swaps doubles for real imports from
-src/compiler/15.blocks/blocks/registry.spl and easy.spl.
+# Custom Block Plugin Specification
 
 ## Scenarios
 
@@ -59,18 +17,22 @@ src/compiler/15.blocks/blocks/registry.spl and easy.spl.
 
 #### new block registers and is visible
 
-1.  reset registry
-2. check
-3. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- new block registers and is visible
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("new block registers and is visible")
 _reset_registry()
 val csv_def = BlockDef.create("csv", "raw")
 val _ok = register_block(csv_def)
@@ -83,16 +45,18 @@ check(all.contains("csv"))
 
 #### block parser-fn is invoked on use
 
-1. check
+- block parser-fn is invoked on use
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("block parser-fn is invoked on use")
 # In-process path: call the parser-fn directly (end-to-end source
 # compilation is not testable in interpreter mode).
 val payload = "1,2,3"
@@ -104,19 +68,18 @@ check(result == "1,2,3")
 
 #### unregister_block removes the entry
 
-1.  reset registry
-2. check
-3. check
-4. check
+- unregister_block removes the entry
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unregister_block removes the entry")
 _reset_registry()
 val csv_def = BlockDef.create("csv", "raw")
 val _ok = register_block(csv_def)
@@ -130,20 +93,18 @@ check(not is_block("csv"))
 
 #### with_block scope-registers and auto-cleans
 
-1.  reset registry
-2. fn body
-3. is block
-4. check
-5. check
+- with_block scope-registers and auto-cleans
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("with_block scope-registers and auto-cleans")
 _reset_registry()
 val csv_def = BlockDef.create("csv", "raw")
 fn body() -> bool:
@@ -157,19 +118,18 @@ check(not is_block("csv"))
 
 #### replacing a built-in is rejected — built-in stays intact
 
-1.  reset registry
-2. check
-3. check
-4. check
+- replacing a built-in is rejected — built-in stays intact
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replacing a built-in is rejected — built-in stays intact")
 # register_block now returns false when keyword is already taken.
 # Attempt to register a fake 'm' def; registry must reject it and
 # the original built-in definition must be unchanged.
@@ -189,21 +149,18 @@ check(after.mode == original.mode)
 
 #### replace flow: unregister then register succeeds with new def
 
-1.  reset registry
-2. check
-3. unregister block
-4. check
-5. check
-6. check
+- replace flow: unregister then register succeeds with new def
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replace flow: unregister then register succeeds with new def")
 _reset_registry()
 val csv_v1 = BlockDef.create("csv", "raw")
 val _ok1 = register_block(csv_v1)
@@ -221,22 +178,18 @@ check(current.description == "csv v2")
 
 #### use_plugin semantics: blocks register only after explicit activate_plugin call
 
-1.  reset registry
-2.  reset plugin hooks
-3. fn csv register
-4. register simple plugin
-5. check
-6. check
-7. check
+- use_plugin semantics: blocks register only after explicit activate_plugin call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("use_plugin semantics: blocks register only after explicit activate_plugin call")
 # Validates the two-phase contract from plugin_startup.spl:
 #   Phase 1 (index): plugin hook is registered but blocks NOT yet active
 #   Phase 2 (activate): activate_plugin("csv_plugin") fires the hook,
@@ -269,6 +222,21 @@ check(is_block("csv"))
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/feature/plugin/custom_block_plugin_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering AC-2: Custom Block Plugin — add and replace.
+- AC-2: Custom Block Plugin — add and replace
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -281,3 +249,51 @@ check(is_block("csv"))
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `85670747e38e654e8649ac44cc1d5e568651da436c1193103edd020c43808bfc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `85670747e38e654e8649ac44cc1d5e568651da436c1193103edd020c43808bfc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `85670747e38e654e8649ac44cc1d5e568651da436c1193103edd020c43808bfc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/plugin/custom_block_plugin_spec.spl
+mirror: doc/06_spec/03_system/feature/plugin/custom_block_plugin_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/plugin/custom_block_plugin_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/plugin/custom_block_plugin_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/plugin/custom_block_plugin_spec.spl:153:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'new block registers and is visible' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/plugin/custom_block_plugin_spec.spl:163:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'block parser-fn is invoked on use' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/plugin/custom_block_plugin_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unregister_block removes the entry' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

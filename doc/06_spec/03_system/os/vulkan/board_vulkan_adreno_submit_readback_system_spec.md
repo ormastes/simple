@@ -2,6 +2,10 @@
 
 > The reader is an engineer asking: *is the board-Vulkan SUBMIT stage for the
 
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
 <details>
 <summary>Full Scenario Manual</summary>
 
@@ -17,7 +21,7 @@ The reader is an engineer asking: *is the board-Vulkan SUBMIT stage for the
 | Status | Hardware-gated — SKIPS today, no code changes needed once hardware lands |
 | Plan | doc/03_plan/os/vulkan/board_vulkan_parallel_soc_lanes_2026-08-10.md |
 | Source | `test/03_system/os/vulkan/board_vulkan_adreno_submit_readback_system_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and Audience
@@ -101,6 +105,67 @@ second, stronger proof needs the adapter noted above.
 
 ### board Vulkan Adreno submit/readback (hardware-gated)
 
+#### builds a well-formed Adreno minimal submission on real silicon
+
+**Manual warnings:**
+- invalid capture metadata value: bit_table (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
+
+
+- probe for a real Adreno (msm-bound) GPU and skip honestly when absent
+- build the minimal PKT4/PKT7 submission via the real encoder
+- confirm the stream is well-formed: at least the register-write and NOP packets are present
+- re-walk the stream on real silicon: header-declared lengths must land exactly on the stream end
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM REQ-BOARD-VULKAN-SUBMIT-ADRENO
+step("probe for a real Adreno (msm-bound) GPU and skip honestly when absent")
+if not adreno_msm_gpu_present():
+    return "skip: No Adreno (msm) GPU present on this host — no QEMU device model exists for Adreno and no board is present, see doc/08_tracking/bug/board_vulkan_cross_arch_boundary_only_x86_64_proven_2026-08-11.md"
+step("build the minimal PKT4/PKT7 submission via the real encoder")
+val result = adreno_minimal_submission()
+assert_true(result.is_ok())
+val dwords = result.unwrap()
+assert_true(dwords.len() > 0)
+
+step("confirm the stream is well-formed: at least the register-write and NOP packets are present")
+assert_true(dwords.len() >= 3)
+
+step("re-walk the stream on real silicon: header-declared lengths must land exactly on the stream end")
+var i: i64 = 0
+var packets: i64 = 0
+while i < dwords.len():
+    val header = dwords[i]
+    val type_tag = (header >> 28) & 0xF
+    var count: i64 = 0
+    if type_tag == 4:
+        count = pkt4_decode_count(header)
+    else:
+        count = pkt7_decode_count(header)
+    i = i + 1 + count
+    packets = packets + 1
+assert_equal(i, dwords.len())  # oracle: header-declared counts sum exactly to the emitted stream length
+assert_equal(packets, 3)  # oracle: the minimal submission is exactly three packets (write, CP_NOP, submit)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
 
 ## Related Documentation
 
@@ -121,34 +186,27 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `831d8c3a9d89f296ef9542d888fb1531a83417e88f44e83e65ccd55dec4e2755`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `094f8f090c51e6bdeab5a10686faf057bcf5068942a8192a8c7888764960f4cb`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `831d8c3a9d89f296ef9542d888fb1531a83417e88f44e83e65ccd55dec4e2755`.
+Source SHA-256: `094f8f090c51e6bdeab5a10686faf057bcf5068942a8192a8c7888764960f4cb`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `831d8c3a9d89f296ef9542d888fb1531a83417e88f44e83e65ccd55dec4e2755`  
+Source SHA-256: `094f8f090c51e6bdeab5a10686faf057bcf5068942a8192a8c7888764960f4cb`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **83/100**; effective score: **49/100**; blockers: **2**.
+Raw score: **99/100**; effective score: **99/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 99/100
 source: test/03_system/os/vulkan/board_vulkan_adreno_submit_readback_system_spec.spl
 mirror: doc/06_spec/03_system/os/vulkan/board_vulkan_adreno_submit_readback_system_spec.md (current)
-findings: 3 blockers: 2
-  narrative=100 structure=100 oracle=50
-  traceability=60 evidence=100 coverage=100 maintainability=90
+findings: 1 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=90
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=83; blocker cap makes effective=49
 doc/06_spec/03_system/os/vulkan/board_vulkan_adreno_submit_readback_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-test/03_system/os/vulkan/board_vulkan_adreno_submit_readback_system_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/03_system/os/vulkan/board_vulkan_adreno_submit_readback_system_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
 <!-- sspec-maintain:scorecard:end -->

@@ -2,29 +2,6 @@
 
 > Validates explicit CUDA device-buffer allocation and transfer helpers. The test
 
-<!-- sdn-diagram:id=cuda_device_buffer_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cuda_device_buffer_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cuda_device_buffer_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cuda_device_buffer_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -44,7 +21,7 @@ Validates explicit CUDA device-buffer allocation and transfer helpers. The test
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/scilib/cuda_device_buffer_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Validates explicit CUDA device-buffer allocation and transfer helpers. The test
@@ -57,22 +34,27 @@ codes instead of failing scalar science-lib verification.
 
 #### round-trips host i64 values through a device buffer when CUDA is available
 
-1. fail
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- round-trips host i64 values through a device buffer when CUDA is available
+   - Expected: bytes equals `16`
    - Expected: out[0] equals `11`
    - Expected: out[1] equals `22`
-2. fail
    - Expected: buffer.free() equals `CUDA_SUCCESS`
-3. fail
    - Expected: buffer.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("round-trips host i64 values through a device buffer when CUDA is available")
 val result = CudaBuffer.allocate(16)
 if cuda_available():
     match result:
@@ -105,8 +87,13 @@ else:
 
 #### copies between device buffers without an implicit host fallback
 
-1. fail
-2. fail
+- copies between device buffers without an implicit host fallback
+   - Expected: src.copy_from_i64_values([7, 9]).unwrap() equals `16`
+   - Expected: src.copy_to(dst, 16).unwrap() equals `16`
+   - Expected: out[0] equals `7`
+   - Expected: out[1] equals `9`
+   - Expected: src.free() equals `CUDA_SUCCESS`
+   - Expected: dst.free() equals `CUDA_SUCCESS`
    - Expected: buffer.free() equals `CUDA_SUCCESS`
    - Expected: buffer.free() equals `CUDA_SUCCESS`
 
@@ -114,10 +101,12 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("copies between device buffers without an implicit host fallback")
 val left = CudaBuffer.allocate(16)
 val right = CudaBuffer.allocate(16)
 if cuda_available():
@@ -153,16 +142,19 @@ else:
 
 #### rejects invalid transfer sizes before backend execution
 
-1. fail
+- rejects invalid transfer sizes before backend execution
+   - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects invalid transfer sizes before backend execution")
 val result = CudaBuffer(ptr: 1, size: 8).copy_from_i64_values([1, 2])
 match result:
     case Err(code):
@@ -177,8 +169,7 @@ match result:
 
 #### round-trips a Float64 host NDArray through CUDA-owned storage when available
 
-1. [Float64 new
-2. Shape new
+- round-trips a Float64 host NDArray through CUDA-owned storage when available
    - Expected: device_array.shape equals `host.shape`
    - Expected: device_array.dtype equals `DType.F64`
    - Expected: device_array.device equals `Device.CUDA(index: 0)`
@@ -188,17 +179,18 @@ match result:
    - Expected: round_trip.get_f64_at([Index.new(1), Index.new(0)]) equals `Float64.new(3.75)`
    - Expected: round_trip.get_f64_at([Index.new(1), Index.new(1)]) equals `Float64.new(4.5)`
    - Expected: device_array.free() equals `CUDA_SUCCESS`
-3. fail
    - Expected: device_array.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("round-trips a Float64 host NDArray through CUDA-owned storage when available")
 val host = make_f64_array(
     [Float64.new(1.5), Float64.new(-2.25), Float64.new(3.75), Float64.new(4.5)],
     Shape.new([Index.new(2), Index.new(2)])
@@ -231,16 +223,19 @@ else:
 
 #### rejects non-Float64 host arrays before device allocation
 
-1. fail
+- rejects non-Float64 host arrays before device allocation
+   - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects non-Float64 host arrays before device allocation")
 val host = make_i64_array([Int64.new(1), Int64.new(2)], Shape.new([Index.new(2)]))
 val result = CudaNDArray.from_f64_array(host, 0)
 match result:
@@ -256,10 +251,7 @@ match result:
 
 #### adds, subtracts, multiplies, and divides Float64 CUDA-owned arrays with device-side kernels
 
-1. [Float64 new
-2. Shape new
-3. [Float64 new
-4. Shape new
+- adds, subtracts, multiplies, and divides Float64 CUDA-owned arrays with device-side kernels
    - Expected: added.to_host_f64().unwrap().get_f64(Index.new(0)) equals `Float64.new(10.0)`
    - Expected: added.to_host_f64().unwrap().get_f64(Index.new(3)) equals `Float64.new(3.0)`
    - Expected: subbed.to_host_f64().unwrap().get_f64(Index.new(1)) equals `Float64.new(3.0)`
@@ -272,8 +264,6 @@ match result:
    - Expected: divided.free() equals `CUDA_SUCCESS`
    - Expected: left.free() equals `CUDA_SUCCESS`
    - Expected: right.free() equals `CUDA_SUCCESS`
-5. fail
-6. fail
    - Expected: left.free() equals `CUDA_SUCCESS`
    - Expected: right.free() equals `CUDA_SUCCESS`
 
@@ -281,10 +271,12 @@ match result:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds, subtracts, multiplies, and divides Float64 CUDA-owned arrays with device-side kernels")
 val left_host = make_f64_array(
     [Float64.new(8.0), Float64.new(6.0), Float64.new(4.0), Float64.new(2.0)],
     Shape.new([Index.new(4)])
@@ -337,28 +329,20 @@ else:
 
 #### rejects shape and device mismatches before CUDA arithmetic transfers
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
-4. buffer: CudaBuffer
-5. shape: Shape new
-6. device: Device CUDA
-7. buffer: CudaBuffer
-8. shape: Shape new
-9. device: Device CUDA
+- rejects shape and device mismatches before CUDA arithmetic transfers
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-10. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-11. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects shape and device mismatches before CUDA arithmetic transfers")
 val left = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 8),
     shape: Shape.new([Index.new(1)]),
@@ -393,8 +377,7 @@ match left.add_f64(device_mismatch):
 
 #### applies scalar Float64 arithmetic to CUDA-owned arrays
 
-1. [Float64 new
-2. Shape new
+- applies scalar Float64 arithmetic to CUDA-owned arrays
    - Expected: added_host.get_f64(Index.new(0)) equals `Float64.new(10.0)`
    - Expected: subbed_host.get_f64(Index.new(1)) equals `Float64.new(5.0)`
    - Expected: multiplied_host.get_f64(Index.new(2)) equals `Float64.new(12.0)`
@@ -404,17 +387,18 @@ match left.add_f64(device_mismatch):
    - Expected: multiplied.free() equals `CUDA_SUCCESS`
    - Expected: divided.free() equals `CUDA_SUCCESS`
    - Expected: device_array.free() equals `CUDA_SUCCESS`
-3. fail
    - Expected: device_array.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies scalar Float64 arithmetic to CUDA-owned arrays")
 val host = make_f64_array(
     [Float64.new(8.0), Float64.new(6.0), Float64.new(4.0), Float64.new(2.0)],
     Shape.new([Index.new(4)])
@@ -454,20 +438,19 @@ else:
 
 #### rejects scalar arithmetic for non-Float64 CUDA owners before backend execution
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
+- rejects scalar arithmetic for non-Float64 CUDA owners before backend execution
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-4. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects scalar arithmetic for non-Float64 CUDA owners before backend execution")
 val ints = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 16),
     shape: Shape.new([Index.new(2)]),
@@ -487,9 +470,7 @@ match ints.add_scalar_f64(Float64.new(1.0)):
 
 #### reshapes, flattens, and transposes CUDA-owned Float64 arrays with device copies
 
-1. Float64 new
-2. Float64 new
-3. Shape new
+- reshapes, flattens, and transposes CUDA-owned Float64 arrays with device copies
    - Expected: reshaped_host.shape equals `Shape.new([Index.new(3), Index.new(2)])`
    - Expected: reshaped_host.get_f64_at([Index.new(0), Index.new(0)]) equals `Float64.new(1.0)`
    - Expected: reshaped_host.get_f64_at([Index.new(2), Index.new(1)]) equals `Float64.new(6.0)`
@@ -502,17 +483,18 @@ match ints.add_scalar_f64(Float64.new(1.0)):
    - Expected: flattened.free() equals `CUDA_SUCCESS`
    - Expected: transposed.free() equals `CUDA_SUCCESS`
    - Expected: device_array.free() equals `CUDA_SUCCESS`
-4. fail
    - Expected: device_array.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reshapes, flattens, and transposes CUDA-owned Float64 arrays with device copies")
 val host = make_f64_array(
     [
         Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
@@ -556,29 +538,27 @@ else:
 
 #### keeps empty CUDA-owned Float64 shape operations typed and allocation-free
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
+- keeps empty CUDA-owned Float64 shape operations typed and allocation-free
    - Expected: device_array.buffer.ptr equals `0`
    - Expected: device_array.buffer.size equals `0`
    - Expected: flattened.shape equals `Shape.new([Index.new(0)])`
    - Expected: flattened.to_host_f64().unwrap().len().value equals `0`
    - Expected: flattened.free() equals `CUDA_SUCCESS`
-4. fail
    - Expected: transposed.shape equals `Shape.new([Index.new(3), Index.new(0)])`
    - Expected: transposed.to_host_f64().unwrap().len().value equals `0`
    - Expected: transposed.free() equals `CUDA_SUCCESS`
-5. fail
    - Expected: device_array.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps empty CUDA-owned Float64 shape operations typed and allocation-free")
 val device_array = CudaNDArray(
     buffer: CudaBuffer(ptr: 0, size: 0),
     shape: Shape.new([Index.new(0), Index.new(3)]),
@@ -608,29 +588,22 @@ expect(device_array.free()).to_equal(CUDA_SUCCESS)
 
 #### rejects invalid CUDA reshape and transpose requests before backend execution
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
-4. buffer: CudaBuffer
-5. shape: Shape new
-6. device: Device CUDA
+- rejects invalid CUDA reshape and transpose requests before backend execution
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-7. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-8. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-9. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-10. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects invalid CUDA reshape and transpose requests before backend execution")
 val vector = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 24),
     shape: Shape.new([Index.new(3)]),
@@ -671,10 +644,7 @@ match matrix.reshape_f64(Shape.new([Index.new(4)])):
 
 #### concatenates and stacks one-dimensional CUDA-owned Float64 arrays with device copies
 
-1. [Float64 new
-2. Shape new
-3. [Float64 new
-4. Shape new
+- concatenates and stacks one-dimensional CUDA-owned Float64 arrays with device copies
    - Expected: concatenated_host.shape equals `Shape.new([Index.new(4)])`
    - Expected: concatenated_host.get_f64(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: concatenated_host.get_f64(Index.new(3)) equals `Float64.new(4.0)`
@@ -685,8 +655,6 @@ match matrix.reshape_f64(Shape.new([Index.new(4)])):
    - Expected: stacked.free() equals `CUDA_SUCCESS`
    - Expected: left.free() equals `CUDA_SUCCESS`
    - Expected: right.free() equals `CUDA_SUCCESS`
-5. fail
-6. fail
    - Expected: left.free() equals `CUDA_SUCCESS`
    - Expected: right.free() equals `CUDA_SUCCESS`
 
@@ -694,10 +662,12 @@ match matrix.reshape_f64(Shape.new([Index.new(4)])):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("concatenates and stacks one-dimensional CUDA-owned Float64 arrays with device copies")
 val left_host = make_f64_array(
     [Float64.new(1.0), Float64.new(2.0)],
     Shape.new([Index.new(2)])
@@ -748,35 +718,22 @@ else:
 
 #### rejects invalid CUDA concatenate and stack requests before backend execution
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
-4. buffer: CudaBuffer
-5. shape: Shape new
-6. device: Device CUDA
-7. buffer: CudaBuffer
-8. shape: Shape new
-9. device: Device CUDA
-10. buffer: CudaBuffer
-11. shape: Shape new
-12. device: Device CUDA
+- rejects invalid CUDA concatenate and stack requests before backend execution
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-13. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-14. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-15. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-16. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects invalid CUDA concatenate and stack requests before backend execution")
 val vector = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 16),
     shape: Shape.new([Index.new(2)]),
@@ -829,24 +786,24 @@ match CudaNDArray.stack_1d_f64([vector, short]):
 
 #### computes device-side Float64 scalar reductions for CUDA-owned arrays
 
-1. [Float64 new
-2. Shape new
+- computes device-side Float64 scalar reductions for CUDA-owned arrays
    - Expected: device_array.sum_f64().unwrap() equals `Float64.new(6.0)`
    - Expected: device_array.mean_f64().unwrap() equals `Float64.new(1.5)`
    - Expected: device_array.min_f64().unwrap() equals `Float64.new(-2.0)`
    - Expected: device_array.max_f64().unwrap() equals `Float64.new(4.0)`
    - Expected: device_array.free() equals `CUDA_SUCCESS`
-3. fail
    - Expected: device_array.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes device-side Float64 scalar reductions for CUDA-owned arrays")
 val host = make_f64_array(
     [Float64.new(1.0), Float64.new(-2.0), Float64.new(3.0), Float64.new(4.0)],
     Shape.new([Index.new(4)])
@@ -874,24 +831,21 @@ else:
 
 #### rejects empty CUDA mean/min/max before transfer
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
+- rejects empty CUDA mean/min/max before transfer
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-4. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-5. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-6. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects empty CUDA mean/min/max before transfer")
 val empty = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 0),
     shape: Shape.new([Index.new(0)]),
@@ -919,9 +873,7 @@ match empty.max_f64():
 
 #### computes device-side Float64 axis sums and means for two-dimensional CUDA-owned arrays
 
-1. Float64 new
-2. Float64 new
-3. Shape new
+- computes device-side Float64 axis sums and means for two-dimensional CUDA-owned arrays
    - Expected: axis0_host.shape equals `Shape.new([Index.new(3)])`
    - Expected: axis0_host.get_f64(Index.new(0)) equals `Float64.new(5.0)`
    - Expected: axis0_host.get_f64(Index.new(1)) equals `Float64.new(7.0)`
@@ -940,17 +892,18 @@ match empty.max_f64():
    - Expected: mean0.free() equals `CUDA_SUCCESS`
    - Expected: mean1.free() equals `CUDA_SUCCESS`
    - Expected: device_array.free() equals `CUDA_SUCCESS`
-4. fail
    - Expected: device_array.free() equals `CUDA_SUCCESS`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes device-side Float64 axis sums and means for two-dimensional CUDA-owned arrays")
 val host = make_f64_array(
     [
         Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
@@ -1004,27 +957,21 @@ else:
 
 #### rejects invalid CUDA axis reductions before backend execution
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
-4. buffer: CudaBuffer
-5. shape: Shape new
-6. device: Device CUDA
+- rejects invalid CUDA axis reductions before backend execution
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-7. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-8. fail
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-9. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects invalid CUDA axis reductions before backend execution")
 val vector = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 16),
     shape: Shape.new([Index.new(2)]),
@@ -1060,26 +1007,7 @@ match matrix.mean_axis_f64(Axis.new(2)):
 
 #### slices one-dimensional and two-dimensional CUDA-owned Float64 arrays
 
-1. [Float64 new
-2. Shape new
-3. Float64 new
-4. Float64 new
-5. Float64 new
-6. Shape new
-7. Slice new
-8. Slice new
-9. Slice new
-10. Slice new
-11. Slice new
-12. Slice new
-13. Slice new
-14. Slice new
-15. Slice new
-16. Slice new
-17. Slice new
-18. Slice new
-19. Slice new
-20. Slice new
+- slices one-dimensional and two-dimensional CUDA-owned Float64 arrays
    - Expected: contiguous_host_slice.shape equals `Shape.new([Index.new(2)])`
    - Expected: contiguous_host_slice.get_f64(Index.new(0)) equals `Float64.new(2.0)`
    - Expected: contiguous_host_slice.get_f64(Index.new(1)) equals `Float64.new(3.0)`
@@ -1132,8 +1060,6 @@ match matrix.mean_axis_f64(Axis.new(2)):
    - Expected: empty_col_matrix_slice.free() equals `CUDA_SUCCESS`
    - Expected: vector.free() equals `CUDA_SUCCESS`
    - Expected: matrix.free() equals `CUDA_SUCCESS`
-21. fail
-22. fail
    - Expected: vector.free() equals `CUDA_SUCCESS`
    - Expected: matrix.free() equals `CUDA_SUCCESS`
 
@@ -1141,10 +1067,12 @@ match matrix.mean_axis_f64(Axis.new(2)):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 133 lines folded for reproduction.
+Runnable source: 135 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("slices one-dimensional and two-dimensional CUDA-owned Float64 arrays")
 val vector_host = make_f64_array(
     [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0), Float64.new(4.0)],
     Shape.new([Index.new(4)])
@@ -1284,27 +1212,20 @@ else:
 
 #### rejects invalid CUDA slice requests before transfer
 
-1. buffer: CudaBuffer
-2. shape: Shape new
-3. device: Device CUDA
-4. buffer: CudaBuffer
-5. shape: Shape new
-6. device: Device CUDA
+- rejects invalid CUDA slice requests before transfer
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-7. fail
-8. Slice new
-9. Slice new
    - Expected: code equals `CUDA_ERROR_INVALID_VALUE`
-10. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects invalid CUDA slice requests before transfer")
 val vector = CudaNDArray(
     buffer: CudaBuffer(ptr: 1, size: 32),
     shape: Shape.new([Index.new(4)]),
@@ -1346,3 +1267,57 @@ match matrix.slice_2d_f64(
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-SCILIB-C-002`
+- `REQ-SCILIB-C-004`
+- `REQ-SCILIB-C-005`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `da31a0d412ac39a2a7000eefb619f3cd9203b3700548cd40ee207d4088b8d262`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `da31a0d412ac39a2a7000eefb619f3cd9203b3700548cd40ee207d4088b8d262`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `da31a0d412ac39a2a7000eefb619f3cd9203b3700548cd40ee207d4088b8d262`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/scilib/cuda_device_buffer_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/cuda_device_buffer_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/cuda_device_buffer_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/cuda_device_buffer_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/cuda_device_buffer_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 14 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/scilib/cuda_device_buffer_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'round-trips host i64 values through a device buffer when CUDA is available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/cuda_device_buffer_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'copies between device buffers without an implicit host fallback' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/cuda_device_buffer_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects invalid transfer sizes before backend execution' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

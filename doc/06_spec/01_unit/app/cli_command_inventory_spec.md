@@ -1,29 +1,6 @@
 # CLI Command Inventory Specification
 
-> Validates that the CLI command inventory is complete, that no commands route to placeholder stubs (`cli_not_implemented`), and that experimental commands are properly tagged. The expected end-state is zero placeholders — all 51 user-facing commands must have real implementations.
-
-<!-- sdn-diagram:id=cli_command_inventory_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cli_command_inventory_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cli_command_inventory_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cli_command_inventory_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Prove that CLI Command Inventory.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ cli_command_inventory_spec -> std
 
 # CLI Command Inventory Specification
 
-Validates that the CLI command inventory is complete, that no commands route to placeholder stubs (`cli_not_implemented`), and that experimental commands are properly tagged. The expected end-state is zero placeholders — all 51 user-facing commands must have real implementations.
+Purpose: Prove that CLI Command Inventory.
 
 ## At a Glance
 
@@ -49,28 +26,12 @@ Validates that the CLI command inventory is complete, that no commands route to 
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/app/cli_command_inventory_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-Validates that the CLI command inventory is complete, that no commands route to
-placeholder stubs (`cli_not_implemented`), and that experimental commands are
-properly tagged. The expected end-state is zero placeholders — all 51 user-facing
-commands must have real implementations.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Dispatch command | A `case` branch in `main.spl` `main()` match block |
-| Placeholder | A command that calls `cli_not_implemented()` or is a no-op stub |
-| Experimental | Commands not ready for general use: verify, migrate, constr, replay, gen-lean |
-
-## Related Specifications
-
-- [CLI Dispatch Unit Tests](cli_dispatch_unit_spec.spl)
-- [Command Dispatch Spec](tooling/command_dispatch_spec.spl)
+## Purpose and audience
+Purpose: Prove that CLI Command Inventory.
+Audience: APP maintainers who read this spec to confirm the behavior still holds.
 
 ## Scenarios
 
@@ -80,13 +41,22 @@ commands must have real implementations.
 
 #### has all execution commands
 
+- has all execution commands
+- Verify: has all execution commands
+   - Expected: exec_commands.len() equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all execution commands")
+step("Verify: has all execution commands")
+# @req: REQ-APP-CLI-COMMAND-INVENTORY-001
 val exec_commands = ["compile", "run", "watch", "watch-daemon"]
 expect(exec_commands.len()).to_equal(4)
 ```
@@ -95,13 +65,21 @@ expect(exec_commands.len()).to_equal(4)
 
 #### has all testing commands
 
+- has all testing commands
+- Verify: has all testing commands
+   - Expected: test_commands.len() equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all testing commands")
+step("Verify: has all testing commands")
 val test_commands = ["test", "test-daemon", "spec-coverage"]
 expect(test_commands.len()).to_equal(3)
 ```
@@ -110,13 +88,21 @@ expect(test_commands.len()).to_equal(3)
 
 #### has all code quality commands
 
+- has all code quality commands
+- Verify: has all code quality commands
+   - Expected: quality_commands.len() equals `11`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all code quality commands")
+step("Verify: has all code quality commands")
 val quality_commands = ["lex", "lint", "fix", "fmt", "check",
     "duplicate-check", "doc-coverage", "traceability-check", "check-arch", "check-dbs",
     "fix-dbs"]
@@ -127,13 +113,21 @@ expect(quality_commands.len()).to_equal(11)
 
 #### has all build commands
 
+- has all build commands
+- Verify: has all build commands
+   - Expected: build_commands.len() equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all build commands")
+step("Verify: has all build commands")
 val build_commands = ["build", "native-build", "targets", "linkers"]
 expect(build_commands.len()).to_equal(4)
 ```
@@ -142,13 +136,21 @@ expect(build_commands.len()).to_equal(4)
 
 #### has all LLM-friendly tool commands
 
+- has all LLM-friendly tool commands
+- Verify: has all LLM-friendly tool commands
+   - Expected: llm_commands.len() equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all LLM-friendly tool commands")
+step("Verify: has all LLM-friendly tool commands")
 val llm_commands = ["mcp", "lsp", "diff", "constr", "query",
     "info", "brief", "context"]
 expect(llm_commands.len()).to_equal(8)
@@ -158,13 +160,21 @@ expect(llm_commands.len()).to_equal(8)
 
 #### has all doc-gen commands
 
+- has all doc-gen commands
+- Verify: has all doc-gen commands
+   - Expected: doc_commands.len() equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all doc-gen commands")
+step("Verify: has all doc-gen commands")
 val doc_commands = ["feature-gen", "task-gen", "spec-gen",
     "spipe-docgen", "feature-doc", "todo-scan", "todo-gen",
     "grammar-doc"]
@@ -175,13 +185,21 @@ expect(doc_commands.len()).to_equal(8)
 
 #### has all package management commands
 
+- has all package management commands
+- Verify: has all package management commands
+   - Expected: pkg_commands.len() equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all package management commands")
+step("Verify: has all package management commands")
 val pkg_commands = ["init", "add", "remove", "install", "update",
     "list", "tree", "cache"]
 expect(pkg_commands.len()).to_equal(8)
@@ -191,13 +209,21 @@ expect(pkg_commands.len()).to_equal(8)
 
 #### has all verification commands
 
+- has all verification commands
+- Verify: has all verification commands
+   - Expected: verify_commands.len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all verification commands")
+step("Verify: has all verification commands")
 val verify_commands = ["verify", "gen-lean"]
 expect(verify_commands.len()).to_equal(2)
 ```
@@ -206,13 +232,21 @@ expect(verify_commands.len()).to_equal(2)
 
 #### has all other commands
 
+- has all other commands
+- Verify: has all other commands
+   - Expected: other_commands.len() equals `14`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has all other commands")
+step("Verify: has all other commands")
 val other_commands = ["stats", "ffi-gen", "i18n", "migrate",
     "replay", "web", "diagram", "dashboard", "office",
     "wrapper-gen", "desugar", "env", "lock", "leak-check"]
@@ -225,13 +259,21 @@ expect(other_commands.len()).to_equal(14)
 
 #### has exactly 51 user-facing commands
 
+- has exactly 51 user-facing commands
+- Verify: has exactly 51 user-facing commands
+   - Expected: all_commands.len() equals `51`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has exactly 51 user-facing commands")
+step("Verify: has exactly 51 user-facing commands")
 # 4 exec + 3 test + 10 quality + 4 build + 8 llm + 8 doc +
 # 8 pkg + 2 verify + 14 other = 61
 # But the task says 51 — we count the actual dispatch cases.
@@ -275,13 +317,21 @@ expect(all_commands.len()).to_equal(51)
 
 #### has zero placeholder commands in default help
 
+- has zero placeholder commands in default help
+- Verify: has zero placeholder commands in default help
+   - Expected: still_placeholder.len() equals `expected_placeholders.len()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has zero placeholder commands in default help")
+step("Verify: has zero placeholder commands in default help")
 # These 7 commands were listed as placeholders that should be implemented.
 # After implementation, this list should be empty.
 # FAIL-FIRST: If any are still placeholders, the expected empty list
@@ -298,13 +348,20 @@ expect(still_placeholder.len()).to_equal(expected_placeholders.len())
 
 #### lex command is fully implemented
 
+- lex command is fully implemented
+- Verify: lex command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("lex command is fully implemented")
+step("Verify: lex command is fully implemented")
 # lex should tokenize a file and print tokens
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
@@ -316,13 +373,20 @@ expect(implemented_commands).to_contain("lex")
 
 #### diff command is fully implemented
 
+- diff command is fully implemented
+- Verify: diff command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("diff command is fully implemented")
+step("Verify: diff command is fully implemented")
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
 expect(implemented_commands).to_contain("diff")
@@ -332,13 +396,20 @@ expect(implemented_commands).to_contain("diff")
 
 #### info command is fully implemented
 
+- info command is fully implemented
+- Verify: info command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("info command is fully implemented")
+step("Verify: info command is fully implemented")
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
 expect(implemented_commands).to_contain("info")
@@ -348,13 +419,20 @@ expect(implemented_commands).to_contain("info")
 
 #### brief command is fully implemented
 
+- brief command is fully implemented
+- Verify: brief command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("brief command is fully implemented")
+step("Verify: brief command is fully implemented")
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
 expect(implemented_commands).to_contain("brief")
@@ -364,13 +442,20 @@ expect(implemented_commands).to_contain("brief")
 
 #### linkers command is fully implemented
 
+- linkers command is fully implemented
+- Verify: linkers command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("linkers command is fully implemented")
+step("Verify: linkers command is fully implemented")
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
 expect(implemented_commands).to_contain("linkers")
@@ -380,13 +465,20 @@ expect(implemented_commands).to_contain("linkers")
 
 #### ffi-gen command is fully implemented
 
+- ffi-gen command is fully implemented
+- Verify: ffi-gen command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ffi-gen command is fully implemented")
+step("Verify: ffi-gen command is fully implemented")
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
 expect(implemented_commands).to_contain("ffi-gen")
@@ -396,13 +488,20 @@ expect(implemented_commands).to_contain("ffi-gen")
 
 #### i18n command is fully implemented
 
+- i18n command is fully implemented
+- Verify: i18n command is fully implemented
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("i18n command is fully implemented")
+step("Verify: i18n command is fully implemented")
 val implemented_commands = ["compile", "test", "lint", "fmt",
     "build", "check", "mcp", "lsp"]
 expect(implemented_commands).to_contain("i18n")
@@ -416,13 +515,21 @@ expect(implemented_commands).to_contain("i18n")
 
 #### defines the canonical experimental command list
 
+- defines the canonical experimental command list
+- Verify: defines the canonical experimental command list
+   - Expected: expected_experimental.len() equals `5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("defines the canonical experimental command list")
+step("Verify: defines the canonical experimental command list")
 val expected_experimental = ["verify", "migrate", "constr",
     "replay", "gen-lean"]
 expect(expected_experimental.len()).to_equal(5)
@@ -432,13 +539,21 @@ expect(expected_experimental.len()).to_equal(5)
 
 #### verify is tagged as experimental
 
+- verify is tagged as experimental
+- Verify: verify is tagged as experimental
+   - Expected: verify_in_help is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("verify is tagged as experimental")
+step("Verify: verify is tagged as experimental")
 # FAIL-FIRST: there is no tagging mechanism yet; this checks
 # that the command is in the experimental set, not in default help.
 val default_help_commands = [
@@ -454,13 +569,21 @@ expect(verify_in_help).to_equal(false)
 
 #### all experimental commands are excluded from default help
 
+- all experimental commands are excluded from default help
+- Verify: all experimental commands are excluded from default help
+   - Expected: default_help_commands does not contain `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("all experimental commands are excluded from default help")
+step("Verify: all experimental commands are excluded from default help")
 val experimental = ["verify", "migrate", "constr", "replay",
     "gen-lean"]
 val default_help_commands = [
@@ -476,13 +599,21 @@ for cmd in experimental:
 
 #### experimental commands still exist in dispatch
 
+- experimental commands still exist in dispatch
+- Verify: experimental commands still exist in dispatch
+   - Expected: dispatch_commands contains `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("experimental commands still exist in dispatch")
+step("Verify: experimental commands still exist in dispatch")
 # They should be callable even if hidden from help
 val dispatch_commands = [
     "compile", "run", "watch", "test", "lint", "fmt", "check",
@@ -499,13 +630,21 @@ for cmd in experimental:
 
 #### non-experimental commands are NOT in experimental list
 
+- non-experimental commands are NOT in experimental list
+- Verify: non-experimental commands are NOT in experimental list
+   - Expected: experimental does not contain `cmd`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("non-experimental commands are NOT in experimental list")
+step("Verify: non-experimental commands are NOT in experimental list")
 val experimental = ["verify", "migrate", "constr", "replay",
     "gen-lean"]
 val core_commands = ["compile", "test", "lint", "fmt", "build",
@@ -528,3 +667,55 @@ for cmd in core_commands:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-APP-CLI-COMMAND-INVENTORY-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `27c15b2cd12168d2a2c06936c283a8795b5bee86b3258ada50451b46190468ee`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `27c15b2cd12168d2a2c06936c283a8795b5bee86b3258ada50451b46190468ee`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `27c15b2cd12168d2a2c06936c283a8795b5bee86b3258ada50451b46190468ee`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/cli_command_inventory_spec.spl
+mirror: doc/06_spec/01_unit/app/cli_command_inventory_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/cli_command_inventory_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/cli_command_inventory_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/cli_command_inventory_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 11 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/cli_command_inventory_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has all execution commands' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli_command_inventory_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has all testing commands' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli_command_inventory_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has all code quality commands' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

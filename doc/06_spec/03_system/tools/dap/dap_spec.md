@@ -2,29 +2,6 @@
 
 > DAP Server BDD Specification Tests.
 
-<!-- sdn-diagram:id=dap_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=dap_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-dap_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=dap_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 25 | 25 | 0 | 0 |
@@ -43,7 +20,7 @@ DAP Server BDD Specification Tests.
 | Category | Developer Tools |
 | Status | Active |
 | Source | `test/03_system/tools/dap/dap_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 DAP Server BDD Specification Tests.
@@ -56,19 +33,18 @@ breakpoints, stack frames, threads, variables, and launch configuration.
 
 #### should identify event types with pattern matching
 
-1. expect get event type
-2. expect get event type
-3. expect get event type
-4. expect get event type
+- should identify event types with pattern matching
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should identify event types with pattern matching")
 val stopped = DapEvent.Stopped(reason: "breakpoint", thread_id: 1)
 val continued = DapEvent.Continued(thread_id: 1)
 val terminated = DapEvent.Terminated
@@ -84,18 +60,18 @@ expect get_event_type(exited) == "exited"
 
 #### should determine if event requires response
 
-1. expect requires response
-2. expect requires response
-3. expect requires response
+- should determine if event requires response
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should determine if event requires response")
 val stopped = DapEvent.Stopped(reason: "breakpoint", thread_id: 1)
 val output = DapEvent.Output(category: "stdout", output: "Hello")
 val breakpoint_event = DapEvent.Breakpoint(breakpoint_id: 1)
@@ -109,13 +85,18 @@ expect requires_response(breakpoint_event) == true
 
 #### should extract data from stopped event
 
+- should extract data from stopped event
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should extract data from stopped event")
 val event = DapEvent.Stopped(reason: "breakpoint", thread_id: 5)
 
 match event:
@@ -132,17 +113,18 @@ match event:
 
 #### should create and validate breakpoints
 
-1. expect is valid breakpoint
-2. expect is valid breakpoint
+- should create and validate breakpoints
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create and validate breakpoints")
 val valid_bp = Breakpoint {
     id: 1,
     location: SourceLocation { path: "test.spl", line: 10, column: 0 },
@@ -167,16 +149,18 @@ expect is_valid_breakpoint(invalid_bp) == false
 
 #### should count verified breakpoints
 
-1. expect count verified breakpoints
+- should count verified breakpoints
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should count verified breakpoints")
 val breakpoints = [
     Breakpoint {
         id: 1,
@@ -208,16 +192,18 @@ expect count_verified_breakpoints(breakpoints) == 2
 
 #### should filter verified breakpoints
 
-1. expect len
+- should filter verified breakpoints
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should filter verified breakpoints")
 val breakpoints = [
     Breakpoint {
         id: 1,
@@ -244,17 +230,18 @@ expect verified[0].state == BreakpointState.Verified
 
 #### should handle empty breakpoint list
 
-1. expect count verified breakpoints
-2. expect len
+- should handle empty breakpoint list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle empty breakpoint list")
 val breakpoints = []
 
 expect count_verified_breakpoints(breakpoints) == 0
@@ -267,13 +254,18 @@ expect len(filter_verified_breakpoints(breakpoints)) == 0
 
 #### should create stack frames
 
+- should create stack frames
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create stack frames")
 val frame = StackFrame {
     id: 0,
     name: "main",
@@ -289,13 +281,18 @@ expect frame.location.line == 42
 
 #### should format stack frame for display
 
+- should format stack frame for display
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should format stack frame for display")
 val frame = StackFrame {
     id: 0,
     name: "calculate",
@@ -310,16 +307,18 @@ expect formatted == "calculate at math.spl"
 
 #### should create stack trace
 
-1. expect len
+- should create stack trace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create stack trace")
 val frames = [
     StackFrame {
         id: 0,
@@ -349,13 +348,18 @@ expect frames[2].name == "outer"
 
 #### should create thread info
 
+- should create thread info
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create thread info")
 val thread = ThreadInfo {
     id: 1,
     name: "Main Thread",
@@ -371,17 +375,18 @@ expect thread.state == ThreadState.Running
 
 #### should check thread state
 
-1. expect is thread stopped
-2. expect is thread stopped
+- should check thread state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should check thread state")
 val running_thread = ThreadInfo {
     id: 1,
     name: "Thread 1",
@@ -402,16 +407,18 @@ expect is_thread_stopped(stopped_thread) == true
 
 #### should extract thread IDs
 
-1. expect len
+- should extract thread IDs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should extract thread IDs")
 val threads = [
     ThreadInfo { id: 1, name: "Thread 1", state: ThreadState.Running },
     ThreadInfo { id: 2, name: "Thread 2", state: ThreadState.Stopped },
@@ -429,13 +436,18 @@ expect ids[2] == 3
 
 #### should count threads by state
 
+- should count threads by state
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should count threads by state")
 val threads = [
     ThreadInfo { id: 1, name: "T1", state: ThreadState.Running },
     ThreadInfo { id: 2, name: "T2", state: ThreadState.Stopped },
@@ -456,13 +468,18 @@ expect stopped_count == 1
 
 #### should create variable info
 
+- should create variable info
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create variable info")
 val var_info = Variable {
     name: "x",
     value: "42",
@@ -478,13 +495,18 @@ expect var_info.value_type == "i64"
 
 #### should represent different types
 
+- should represent different types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should represent different types")
 val int_var = Variable { name: "count", value: "10", value_type: "i64" }
 val str_var = Variable { name: "message", value: "hello", value_type: "str" }
 val bool_var = Variable { name: "flag", value: "true", value_type: "bool" }
@@ -498,16 +520,18 @@ expect bool_var.value_type == "bool"
 
 #### should collect variables in scope
 
-1. expect len
+- should collect variables in scope
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should collect variables in scope")
 val variables = [
     Variable { name: "x", value: "1", value_type: "i64" },
     Variable { name: "y", value: "2", value_type: "i64" },
@@ -524,16 +548,18 @@ expect variables[0].name == "x"
 
 #### should create launch configuration
 
-1. expect len
+- should create launch configuration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create launch configuration")
 val config = LaunchConfig {
     program: "/path/to/program.spl",
     args: ["--verbose", "--debug"],
@@ -551,16 +577,18 @@ expect config.stop_on_entry == true
 
 #### should handle empty arguments
 
-1. expect len
+- should handle empty arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle empty arguments")
 val config = LaunchConfig {
     program: "app.spl",
     args: [],
@@ -576,13 +604,18 @@ expect config.stop_on_entry == false
 
 #### should validate program path
 
+- should validate program path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should validate program path")
 val config = LaunchConfig {
     program: "test.spl",
     args: [],
@@ -599,18 +632,18 @@ expect config.program != ""
 
 #### should process array of events
 
-1. DapEvent Stopped
-2. DapEvent Output
-3. DapEvent Continued
+- should process array of events
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should process array of events")
 val events = [
     DapEvent.Stopped(reason: "breakpoint", thread_id: 1),
     DapEvent.Output(category: "stdout", output: "Debug message"),
@@ -629,20 +662,18 @@ expect response_required_count == 1
 
 #### should collect event types
 
-1. DapEvent Stopped
-2. DapEvent Continued
-3. DapEvent Exited
-4. types push
-5. expect len
+- should collect event types
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should collect event types")
 val events = [
     DapEvent.Stopped(reason: "breakpoint", thread_id: 1),
     DapEvent.Continued(thread_id: 1),
@@ -663,17 +694,18 @@ expect types[2] == "exited"
 
 #### should handle terminal events
 
-1. expect get event type
-2. expect get event type
+- should handle terminal events
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle terminal events")
 val terminated = DapEvent.Terminated
 val exited = DapEvent.Exited(exit_code: 0)
 expect get_event_type(terminated) == "terminated"
@@ -686,13 +718,18 @@ expect get_event_type(exited) == "exited"
 
 #### should transition breakpoint states
 
+- should transition breakpoint states
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should transition breakpoint states")
 val bp_pending = Breakpoint {
     id: 1,
     location: SourceLocation { path: "test.spl", line: 10, column: 0 },
@@ -718,19 +755,18 @@ expect bp_verified.state == BreakpointState.Verified
 
 #### should track breakpoint lifecycle
 
-1. state list push
-2. state list push
-3. state list push
-4. expect len
+- should track breakpoint lifecycle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should track breakpoint lifecycle")
 val states = []
 var state_list = []
 
@@ -755,3 +791,69 @@ expect len(state_list) == 3
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c7f8bccbbe2636e72700536894b4fa90c4a284508086925a79d4407a207c42d5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c7f8bccbbe2636e72700536894b4fa90c4a284508086925a79d4407a207c42d5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c7f8bccbbe2636e72700536894b4fa90c4a284508086925a79d4407a207c42d5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/tools/dap/dap_spec.spl
+mirror: doc/06_spec/03_system/tools/dap/dap_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/dap/dap_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/dap/dap_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/dap/dap_spec.spl:172:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should identify event types with pattern matching' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/dap/dap_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should identify event types with pattern matching' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/dap/dap_spec.spl:185:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should determine if event requires response' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/dap/dap_spec.spl:185:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should determine if event requires response' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/dap/dap_spec.spl:196:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should extract data from stopped event' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/dap/dap_spec.spl:196:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should extract data from stopped event' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/dap/dap_spec.spl:215:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should create and validate breakpoints' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/dap/dap_spec.spl:237:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should count verified breakpoints' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/dap/dap_spec.spl:266:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should filter verified breakpoints' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

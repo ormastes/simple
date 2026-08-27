@@ -2,29 +2,6 @@
 
 > Tests that NDArray<T> preserves dtype metadata through construction and elementwise operations. Public surface uses typed DType enum (DType.F64, DType.F32, DType.I64, DType.Bool) — never raw string tags.
 
-<!-- sdn-diagram:id=ndarray_dtype_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ndarray_dtype_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ndarray_dtype_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ndarray_dtype_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -47,7 +24,7 @@ Tests that NDArray<T> preserves dtype metadata through construction and elementw
 | Plan | doc/03_plan/agent_tasks/scilib_port_ndarray.md |
 | Design | doc/05_design/scilib_port_architecture.md |
 | Source | `test/03_system/feature/scilib/ndarray_dtype_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -81,13 +58,19 @@ T-NDARRAY-09/10 land — no skip(), no weakened assertions.
 
 #### array([Float64...]) reports DType.F64
 
+- array([Float64...]) reports DType.F64
+   - Expected: a.dtype equals `DType.F64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("array([Float64...]) reports DType.F64")
 val a = array([Float64.new(1.0), Float64.new(2.0)])
 expect(a.dtype).to_equal(DType.F64)
 ```
@@ -96,13 +79,19 @@ expect(a.dtype).to_equal(DType.F64)
 
 #### zeros(shape) reports DType.F64
 
+- zeros(shape) reports DType.F64
+   - Expected: a.dtype equals `DType.F64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("zeros(shape) reports DType.F64")
 val a = zeros(Shape.new([Index.new(3)]))
 expect(a.dtype).to_equal(DType.F64)
 ```
@@ -111,13 +100,19 @@ expect(a.dtype).to_equal(DType.F64)
 
 #### ones(shape) reports DType.F64
 
+- ones(shape) reports DType.F64
+   - Expected: a.dtype equals `DType.F64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ones(shape) reports DType.F64")
 val a = ones(Shape.new([Index.new(2)]))
 expect(a.dtype).to_equal(DType.F64)
 ```
@@ -126,13 +121,19 @@ expect(a.dtype).to_equal(DType.F64)
 
 #### full(shape, Float64) reports DType.F64
 
+- full(shape, Float64) reports DType.F64
+   - Expected: a.dtype equals `DType.F64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("full(shape, Float64) reports DType.F64")
 val a = full(Shape.new([Index.new(4)]), Float64.new(3.0))
 expect(a.dtype).to_equal(DType.F64)
 ```
@@ -143,13 +144,19 @@ expect(a.dtype).to_equal(DType.F64)
 
 #### array_f32([Float32...]) reports DType.F32
 
+- array_f32([Float32...]) reports DType.F32
+   - Expected: a.dtype equals `DType.F32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("array_f32([Float32...]) reports DType.F32")
 val a = array_f32([Float32.new(1.0), Float32.new(2.0)])
 expect(a.dtype).to_equal(DType.F32)
 ```
@@ -160,13 +167,19 @@ expect(a.dtype).to_equal(DType.F32)
 
 #### array_i64([Int64...]) reports DType.I64
 
+- array_i64([Int64...]) reports DType.I64
+   - Expected: a.dtype equals `DType.I64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("array_i64([Int64...]) reports DType.I64")
 val a = array_i64([Int64.new(10), Int64.new(20)])
 expect(a.dtype).to_equal(DType.I64)
 ```
@@ -177,13 +190,20 @@ expect(a.dtype).to_equal(DType.I64)
 
 #### array_bool stores bool data correctly
 
+- array_bool stores bool data correctly
+   - Expected: a.len().value equals `2`
+   - Expected: a.data_bool.len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("array_bool stores bool data correctly")
 val a = array_bool([Bool.new(true), Bool.new(false)])
 expect(a.len().value).to_equal(2)
 expect(a.data_bool.len()).to_equal(2)
@@ -195,17 +215,19 @@ expect(a.data_bool.len()).to_equal(2)
 
 #### Float64 array keeps DType.F64 after reshape to 2x2
 
-1. Float64 new
+- Float64 array keeps DType.F64 after reshape to 2x2
    - Expected: a.dtype equals `DType.F64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Float64 array keeps DType.F64 after reshape to 2x2")
 val a = array([Float64.new(1.0), Float64.new(2.0),
                Float64.new(3.0), Float64.new(4.0)]
              ).reshape(Shape.new([Index.new(2), Index.new(2)]))
@@ -216,17 +238,19 @@ expect(a.dtype).to_equal(DType.F64)
 
 #### Int64 array keeps DType.I64 after reshape to 2x3
 
-1. Int64 new
+- Int64 array keeps DType.I64 after reshape to 2x3
    - Expected: a.dtype equals `DType.I64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Int64 array keeps DType.I64 after reshape to 2x3")
 val a = array_i64([Int64.new(1), Int64.new(2), Int64.new(3),
                    Int64.new(4), Int64.new(5), Int64.new(6)]
                  ).reshape(Shape.new([Index.new(2), Index.new(3)]))
@@ -239,13 +263,19 @@ expect(a.dtype).to_equal(DType.I64)
 
 #### Float64 add preserves DType.F64
 
+- Float64 add preserves DType.F64
+   - Expected: r.dtype equals `DType.F64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Float64 add preserves DType.F64")
 val a = array([Float64.new(1.0), Float64.new(2.0)])
 val b = array([Float64.new(3.0), Float64.new(4.0)])
 val r = a.add(b)
@@ -256,13 +286,19 @@ expect(r.dtype).to_equal(DType.F64)
 
 #### Float32 add preserves DType.F32
 
+- Float32 add preserves DType.F32
+   - Expected: r.dtype equals `DType.F32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Float32 add preserves DType.F32")
 val a = array_f32([Float32.new(1.0), Float32.new(2.0)])
 val b = array_f32([Float32.new(3.0), Float32.new(4.0)])
 val r = a.add(b)
@@ -273,13 +309,19 @@ expect(r.dtype).to_equal(DType.F32)
 
 #### Float64 mul preserves DType.F64
 
+- Float64 mul preserves DType.F64
+   - Expected: r.dtype equals `DType.F64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Float64 mul preserves DType.F64")
 val a = array([Float64.new(2.0), Float64.new(3.0)])
 val b = array([Float64.new(4.0), Float64.new(5.0)])
 val r = a.mul(b)
@@ -301,8 +343,59 @@ expect(r.dtype).to_equal(DType.F64)
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/agent_tasks/scilib_port_ndarray.md](doc/03_plan/agent_tasks/scilib_port_ndarray.md)
-- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
+- **Plan:** `doc/03_plan/agent_tasks/scilib_port_ndarray.md`
+- **Design:** `doc/05_design/scilib_port_architecture.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `baa831e5cf23e8584bf2ffb8f5379e0aa2b9dbc2a0ef4bf2bd7d923690fe8a13`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `baa831e5cf23e8584bf2ffb8f5379e0aa2b9dbc2a0ef4bf2bd7d923690fe8a13`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `baa831e5cf23e8584bf2ffb8f5379e0aa2b9dbc2a0ef4bf2bd7d923690fe8a13`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/feature/scilib/ndarray_dtype_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/ndarray_dtype_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/ndarray_dtype_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/ndarray_dtype_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/ndarray_dtype_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/scilib/ndarray_dtype_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'array([Float64...]) reports DType.F64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/ndarray_dtype_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'zeros(shape) reports DType.F64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/ndarray_dtype_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ones(shape) reports DType.F64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

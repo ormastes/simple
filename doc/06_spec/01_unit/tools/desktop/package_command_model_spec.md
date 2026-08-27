@@ -1,30 +1,6 @@
 # Package Command Model Specification
 
-> <details>
-
-<!-- sdn-diagram:id=package_command_model_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=package_command_model_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-package_command_model_spec -> std
-package_command_model_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=package_command_model_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering package command model.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,25 @@ package_command_model_spec -> common
 
 #### plans package installation
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- plans package installation
+   - Expected: plan.action equals `install`
+   - Expected: plan.package_name equals `git`
+   - Expected: plan.assume_yes is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("plans package installation")
 val plan = parse_package_command(["install", "-y", "git"]).unwrap()
 
 expect(plan.action).to_equal("install")
@@ -59,13 +47,20 @@ expect(plan.assume_yes).to_equal(true)
 
 #### plans list without a package name
 
+- plans list without a package name
+   - Expected: plan.action equals `list`
+   - Expected: plan.package_name equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("plans list without a package name")
 val plan = parse_package_command(["list"]).unwrap()
 
 expect(plan.action).to_equal("list")
@@ -76,13 +71,19 @@ expect(plan.package_name).to_equal("")
 
 #### rejects missing package names for install
 
+- rejects missing package names for install
+   - Expected: parse_package_command(["install"]).is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("rejects missing package names for install")
 expect(parse_package_command(["install"]).is_err()).to_equal(true)
 ```
 
@@ -90,13 +91,20 @@ expect(parse_package_command(["install"]).is_err()).to_equal(true)
 
 #### summarizes planned action
 
+- summarizes planned action
+   - Expected: plan.dry_run is true
+   - Expected: package_command_summary(plan) equals `pkg remove tmux`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("summarizes planned action")
 val plan = parse_package_command(["remove", "--dry-run", "tmux"]).unwrap()
 
 expect(plan.dry_run).to_equal(true)
@@ -112,12 +120,12 @@ expect(package_command_summary(plan)).to_equal("pkg remove tmux")
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/tools/desktop/package_command_model_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering package command model.
 - package command model
 
 ## Scenario Summary
@@ -132,3 +140,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b6f1085a49b5b02ba4be2d25cda6e15eb004702876544270e2214863b4768be3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b6f1085a49b5b02ba4be2d25cda6e15eb004702876544270e2214863b4768be3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b6f1085a49b5b02ba4be2d25cda6e15eb004702876544270e2214863b4768be3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/tools/desktop/package_command_model_spec.spl
+mirror: doc/06_spec/01_unit/tools/desktop/package_command_model_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/tools/desktop/package_command_model_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/tools/desktop/package_command_model_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/tools/desktop/package_command_model_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'plans package installation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/tools/desktop/package_command_model_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'plans list without a package name' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/tools/desktop/package_command_model_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects missing package names for install' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

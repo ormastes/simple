@@ -1,29 +1,6 @@
 # TreeSitter Advanced Outline Parsing Specification
 
-> use compiler.treesitter.*
-
-<!-- sdn-diagram:id=treesitter_query_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=treesitter_query_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-treesitter_query_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=treesitter_query_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ treesitter_query_spec -> compiler
 
 # TreeSitter Advanced Outline Parsing Specification
 
-use compiler.treesitter.*
+use std.spec.step
 
 ## At a Glance
 
@@ -44,12 +21,14 @@ use compiler.treesitter.*
 | Category | Infrastructure \| Parser |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/treesitter_query_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## API
 
 ```simple
+use std.spec.step
+
 use compiler.treesitter.*
 
 var ts = TreeSitter.new(source)
@@ -62,18 +41,22 @@ val outline = ts.parse_outline()
 
 #### parses struct with type parameter
 
-1. var ts = TreeSitter new
-2. expect outline structs len
-3. expect s type params len
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- parses struct with type parameter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses struct with type parameter")
 val source = "struct Box<T>:\n    value: T"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -87,18 +70,18 @@ expect s.type_params.len() to_equal 1
 
 #### parses class with multiple type parameters
 
-1. var ts = TreeSitter new
-2. expect outline classes len
-3. expect c type params len
+- parses class with multiple type parameters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses class with multiple type parameters")
 val source = "class Pair<A, B>:\n    first: A\n    second: B"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -114,17 +97,18 @@ expect c.type_params.len() to_equal 2
 
 #### parses trait with methods
 
-1. var ts = TreeSitter new
-2. expect outline traits len
+- parses trait with methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses trait with methods")
 val source = "trait Drawable:\n    fn draw():\n        pass\n    fn area() -> f64:\n        0.0"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -137,17 +121,18 @@ expect t.name to_equal "Drawable"
 
 #### parses empty trait
 
-1. var ts = TreeSitter new
-2. expect outline traits len
+- parses empty trait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses empty trait")
 val source = "trait Marker:\n    pass"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -162,17 +147,18 @@ expect t.name to_equal "Marker"
 
 #### parses impl with methods
 
-1. var ts = TreeSitter new
-2. expect outline impls len
+- parses impl with methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses impl with methods")
 val source = "impl Point:\n    fn get_x() -> i64:\n        self.x\n    fn get_y() -> i64:\n        self.y"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -183,17 +169,18 @@ expect outline.impls.len() to_equal 1
 
 #### parses impl with static method
 
-1. var ts = TreeSitter new
-2. expect outline impls len
+- parses impl with static method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses impl with static method")
 val source = "impl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -206,17 +193,18 @@ expect outline.impls.len() to_equal 1
 
 #### parses type alias
 
-1. var ts = TreeSitter new
-2. expect outline type aliases len
+- parses type alias
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses type alias")
 val source = "type Point2D = Point"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -231,17 +219,18 @@ expect ta.name to_equal "Point2D"
 
 #### parses val declaration
 
-1. var ts = TreeSitter new
-2. expect outline constants len
+- parses val declaration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses val declaration")
 val source = "val PI = 3.14"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -255,17 +244,18 @@ expect c.is_mutable to_equal false
 
 #### parses var declaration
 
-1. var ts = TreeSitter new
-2. expect outline constants len
+- parses var declaration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses var declaration")
 val source = "var counter = 0"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -281,18 +271,18 @@ expect c.is_mutable to_equal true
 
 #### parses traits and impls together
 
-1. var ts = TreeSitter new
-2. expect outline traits len
-3. expect outline impls len
+- parses traits and impls together
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses traits and impls together")
 val source = "trait Shape:\n    fn area() -> f64:\n        0.0\n\nimpl Circle:\n    fn area() -> f64:\n        3.14"
 var ts = TreeSitter.new(source)
 val outline = ts.parse_outline()
@@ -314,3 +304,51 @@ expect outline.impls.len() to_equal 1
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c42e1a673dd0ad8b79c8aa5384ae82012527a5677dba48e8ef615b492bb92f27`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c42e1a673dd0ad8b79c8aa5384ae82012527a5677dba48e8ef615b492bb92f27`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c42e1a673dd0ad8b79c8aa5384ae82012527a5677dba48e8ef615b492bb92f27`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/treesitter_query_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/treesitter_query_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/treesitter_query_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/treesitter_query_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/treesitter_query_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses struct with type parameter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/treesitter_query_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses class with multiple type parameters' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/treesitter_query_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses trait with methods' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

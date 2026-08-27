@@ -2,29 +2,6 @@
 
 > Tests that TRACE32 CMM GUI patterns are correctly detected in local CMM fixture files. Reads each .cmm file at runtime, scans every line, and verifies the expected GUI dialog and widget patterns are found.
 
-<!-- sdn-diagram:id=t32_cmm_gui_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=t32_cmm_gui_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-t32_cmm_gui_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=t32_cmm_gui_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 27 | 27 | 0 | 0 |
@@ -43,7 +20,7 @@ Tests that TRACE32 CMM GUI patterns are correctly detected in local CMM fixture 
 | Category | Application |
 | Status | In Progress |
 | Source | `test/03_system/feature/app/t32_tools/t32_cmm_gui_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,24 +37,18 @@ expected GUI dialog and widget patterns are found.
 
 #### finds all window layout patterns
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
-4. expect pattern
-5. expect pattern
-6. expect pattern
-7. expect pattern
-8. expect pattern
-9. expect pattern
+- finds all window layout patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds all window layout patterns")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/rcar3_window.cmm")
@@ -98,24 +69,18 @@ expect_pattern(patterns,"winpage_select")
 
 #### finds dialog block with all controls
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
-4. expect pattern
-5. expect pattern
-6. expect pattern
-7. expect pattern
-8. expect pattern
-9. expect pattern
+- finds dialog block with all controls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds dialog block with all controls")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/spreadtrum_main.cmm")
@@ -136,21 +101,18 @@ expect_pattern(patterns,"dialog_end")
 
 #### finds dialog with line separator
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
-4. expect pattern
-5. expect pattern
-6. expect pattern
+- finds dialog with line separator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds dialog with line separator")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/bl602_wifi.cmm")
@@ -168,19 +130,18 @@ expect_pattern(patterns,"close_handler")
 
 #### finds all AREA operations
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
-4. expect pattern
+- finds all AREA operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds all AREA operations")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/imx6sx_qspi.cmm")
@@ -196,20 +157,18 @@ expect_pattern(patterns,"area_clear")
 
 #### finds AREA with dimensions and AREA.RESet
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
-4. expect pattern
-5. expect pattern
+- finds AREA with dimensions and AREA.RESet
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds AREA with dimensions and AREA.RESet")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/ch32v307_kernel.cmm")
@@ -226,17 +185,18 @@ expect_pattern(patterns,"menu_reprogram")
 
 #### finds SCREEN.ALways and window positions
 
-1. expect pattern
-2. expect pattern
+- finds SCREEN.ALways and window positions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds SCREEN.ALways and window positions")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/sifive_e31_debug.cmm")
@@ -250,17 +210,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds SCREEN and MENU patterns
 
-1. expect pattern
-2. expect pattern
+- finds SCREEN and MENU patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds SCREEN and MENU patterns")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/qnx_beagle.cmm")
@@ -274,16 +235,18 @@ expect_pattern(patterns,"menu_reprogram")
 
 #### finds MENU pattern
 
-1. expect pattern
+- finds MENU pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds MENU pattern")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/linux_vm.cmm")
@@ -296,18 +259,18 @@ expect_pattern(patterns,"menu_reprogram")
 
 #### finds DIALOG.YESNO and layout
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
+- finds DIALOG.YESNO and layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds DIALOG.YESNO and layout")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32h7_flash.cmm")
@@ -322,18 +285,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds BLE dialog and window layout
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
+- finds BLE dialog and window layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds BLE dialog and window layout")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32wb_ble.cmm")
@@ -348,19 +311,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds multi-core debug layout
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
-4. expect pattern
+- finds multi-core debug layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds multi-core debug layout")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32wb_dual_core.cmm")
@@ -376,18 +338,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds SWD debug layout
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
+- finds SWD debug layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds SWD debug layout")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32h7_swd_debug.cmm")
@@ -402,18 +364,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds peripheral viewer layout
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
+- finds peripheral viewer layout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds peripheral viewer layout")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32h7_peripheral.cmm")
@@ -428,18 +390,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds OTP flash patterns
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
+- finds OTP flash patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds OTP flash patterns")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/stm32/stm32wb_flash_otp.cmm")
@@ -454,16 +416,18 @@ expect_pattern(patterns,"winpos")
 
 #### finds flash erase dialog
 
-1. expect pattern
+- finds flash erase dialog
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds flash erase dialog")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/riscv/esp32c3_flash.cmm")
@@ -476,16 +440,18 @@ expect_pattern(patterns,"dialog_yesno")
 
 #### finds device secure dialog
 
-1. expect pattern
+- finds device secure dialog
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds device secure dialog")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/s32k_flash.cmm")
@@ -498,16 +464,18 @@ expect_pattern(patterns,"dialog_yesno")
 
 #### finds design file dialog
 
-1. expect pattern
+- finds design file dialog
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds design file dialog")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/web/polarfire_program.cmm")
@@ -520,18 +488,18 @@ expect_pattern(patterns,"dialog_ok")
 
 #### expected_cli/web/rcar3_window.cmm has SCREEN.OFF
 
-1. expect pattern
-2. expect pattern
-3. expect pattern
+- expected_cli/web/rcar3_window.cmm has SCREEN.OFF
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expected_cli/web/rcar3_window.cmm has SCREEN.OFF")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/web/rcar3_window.cmm")
@@ -544,17 +512,18 @@ expect_pattern(patterns,"area_select")
 
 #### expected_cli/web/spreadtrum_main.cmm has SCREEN.OFF
 
-1. expect pattern
-2. expect pattern
+- expected_cli/web/spreadtrum_main.cmm has SCREEN.OFF
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expected_cli/web/spreadtrum_main.cmm has SCREEN.OFF")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/web/spreadtrum_main.cmm")
@@ -566,17 +535,18 @@ expect_pattern(patterns,"area_create")
 
 #### expected_cli/riscv/bl602_wifi.cmm has SCREEN.OFF
 
-1. expect pattern
-2. expect pattern
+- expected_cli/riscv/bl602_wifi.cmm has SCREEN.OFF
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expected_cli/riscv/bl602_wifi.cmm has SCREEN.OFF")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/riscv/bl602_wifi.cmm")
@@ -588,17 +558,18 @@ expect_pattern(patterns,"area_create")
 
 #### expected_cli/stm32/stm32wb_dual_core.cmm has SCREEN.OFF
 
-1. expect pattern
-2. expect pattern
+- expected_cli/stm32/stm32wb_dual_core.cmm has SCREEN.OFF
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expected_cli/stm32/stm32wb_dual_core.cmm has SCREEN.OFF")
 if not _has_fixtures:
     skip:
 val patterns = scan_cmm_gui(FIXTURE_BASE + "/expected_cli/stm32/stm32wb_dual_core.cmm")
@@ -612,13 +583,19 @@ expect_pattern(patterns,"area_create")
 
 #### fe310_blinky.cmm has no GUI
 
+- fe310_blinky.cmm has no GUI
+   - Expected: patterns.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fe310_blinky.cmm has no GUI")
 if not _has_fixtures:
     expect(_has_fixtures).to_be(false)
 else:
@@ -632,13 +609,19 @@ else:
 
 #### classifies SCREEN.ALways
 
+- classifies SCREEN.ALways
+   - Expected: cmm_classify_pattern("SCREEN.ALways") equals `screen_always`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("classifies SCREEN.ALways")
 expect(cmm_classify_pattern("SCREEN.ALways")).to_equal("screen_always")
 ```
 
@@ -646,13 +629,19 @@ expect(cmm_classify_pattern("SCREEN.ALways")).to_equal("screen_always")
 
 #### classifies AREA.RESet
 
+- classifies AREA.RESet
+   - Expected: cmm_classify_pattern("AREA.RESet") equals `area_reset`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("classifies AREA.RESet")
 expect(cmm_classify_pattern("AREA.RESet")).to_equal("area_reset")
 ```
 
@@ -660,13 +649,19 @@ expect(cmm_classify_pattern("AREA.RESet")).to_equal("area_reset")
 
 #### classifies MENU.ReProgram
 
+- classifies MENU.ReProgram
+   - Expected: cmm_classify_pattern("MENU.ReProgram ~~/demo/arm/kernel/qnx/qnx.men") equals `menu_reprogram`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("classifies MENU.ReProgram")
 expect(cmm_classify_pattern("MENU.ReProgram ~~/demo/arm/kernel/qnx/qnx.men")).to_equal("menu_reprogram")
 ```
 
@@ -674,13 +669,19 @@ expect(cmm_classify_pattern("MENU.ReProgram ~~/demo/arm/kernel/qnx/qnx.men")).to
 
 #### classifies DIALOG.STRing
 
+- classifies DIALOG.STRing
+   - Expected: cmm_classify_pattern("DIALOG.STRing(project.name)") equals `dialog_string`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("classifies DIALOG.STRing")
 expect(cmm_classify_pattern("DIALOG.STRing(project.name)")).to_equal("dialog_string")
 ```
 
@@ -688,13 +689,18 @@ expect(cmm_classify_pattern("DIALOG.STRing(project.name)")).to_equal("dialog_str
 
 #### does not classify non-GUI as GUI
 
+- does not classify non-GUI as GUI
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("does not classify non-GUI as GUI")
 expect(cmm_is_gui_pattern("SYStem.Up")).to_be(false)
 expect(cmm_is_gui_pattern("Break.Set main")).to_be(false)
 expect(cmm_is_gui_pattern("Data.dump D:0x0")).to_be(false)
@@ -716,3 +722,54 @@ expect(cmm_is_gui_pattern("")).to_be(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `35cbe43bd240916552576315c026c63ffe1d71c6c5a8c2711d9db380b745d2d8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `35cbe43bd240916552576315c026c63ffe1d71c6c5a8c2711d9db380b745d2d8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `35cbe43bd240916552576315c026c63ffe1d71c6c5a8c2711d9db380b745d2d8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/feature/app/t32_tools/t32_cmm_gui_spec.spl
+mirror: doc/06_spec/03_system/feature/app/t32_tools/t32_cmm_gui_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/app/t32_tools/t32_cmm_gui_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/app/t32_tools/t32_cmm_gui_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/app/t32_tools/t32_cmm_gui_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/app/t32_tools/t32_cmm_gui_spec.spl:195:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds all window layout patterns' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/t32_tools/t32_cmm_gui_spec.spl:212:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds dialog block with all controls' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/t32_tools/t32_cmm_gui_spec.spl:229:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds dialog with line separator' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Backend Entry Args Numeric Guard Specification
 
-> <details>
-
-<!-- sdn-diagram:id=backend_entry_args_numeric_guard_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=backend_entry_args_numeric_guard_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-backend_entry_args_numeric_guard_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=backend_entry_args_numeric_guard_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering ui backend entry args numeric guard.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,18 +17,40 @@ backend_entry_args_numeric_guard_spec
 
 #### defaults malformed port values
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- defaults malformed port values
+   - Expected: parse_ui_port_or_default("notaport", 3000) equals `3000`
+   - Expected: parse_ui_port_or_default("", 3000) equals `3000`
+   - Expected: parse_ui_port_or_default("  ", 3000) equals `3000`
+   - Expected: parse_ui_port_or_default("80x0", 3000) equals `3000`
+   - Expected: parse_ui_port_or_default("-1", 3000) equals `3000`
+   - Expected: parse_ui_port_or_default("8080", 3000) equals `8080`
+   - Expected: parse_ui_port_or_default(" 80 ", 3000) equals `80`
+   - Expected: parse_ui_port_or_default("0", 3000) equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val source = rt_file_read_text("src/app/ui/backend_entry_args.spl") ?? ""
-
-expect(source).to_contain("pub fn parse_ui_port_or_default(value: text, default: i32) -> i32")
-expect(source).to_contain("trimmed.to_int() ?? default")
-expect(source.contains("trimmed.to_int()\n")).to_equal(false)
+# @req REQ-SSPEC-APP
+step("defaults malformed port values")
+# oracle: malformed port text falls back to the caller default
+expect(parse_ui_port_or_default("notaport", 3000)).to_equal(3000)
+expect(parse_ui_port_or_default("", 3000)).to_equal(3000)
+expect(parse_ui_port_or_default("  ", 3000)).to_equal(3000)
+expect(parse_ui_port_or_default("80x0", 3000)).to_equal(3000)
+expect(parse_ui_port_or_default("-1", 3000)).to_equal(3000)
+# oracle: decimal port text parses exactly; surrounding whitespace trimmed
+expect(parse_ui_port_or_default("8080", 3000)).to_equal(8080)
+expect(parse_ui_port_or_default(" 80 ", 3000)).to_equal(80)
+expect(parse_ui_port_or_default("0", 3000)).to_equal(0)
 ```
 
 </details>
@@ -63,12 +62,12 @@ expect(source.contains("trimmed.to_int()\n")).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/backend_entry_args_numeric_guard_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering ui backend entry args numeric guard.
 - ui backend entry args numeric guard
 
 ## Scenario Summary
@@ -83,3 +82,48 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `42ecd250f39abdb64ddd2839cdde04a1a4c0ee1f104cb9523a247f0a55592ccb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `42ecd250f39abdb64ddd2839cdde04a1a4c0ee1f104cb9523a247f0a55592ccb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `42ecd250f39abdb64ddd2839cdde04a1a4c0ee1f104cb9523a247f0a55592ccb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/01_unit/app/ui/backend_entry_args_numeric_guard_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/backend_entry_args_numeric_guard_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/backend_entry_args_numeric_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/backend_entry_args_numeric_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/backend_entry_args_numeric_guard_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/ui/backend_entry_args_numeric_guard_spec.spl:11:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defaults malformed port values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

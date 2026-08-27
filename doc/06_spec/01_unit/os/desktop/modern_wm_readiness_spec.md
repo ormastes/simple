@@ -2,30 +2,6 @@
 
 > Verifies one combined readiness report for the modern Web WM, SimpleOS
 
-<!-- sdn-diagram:id=modern_wm_readiness_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=modern_wm_readiness_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-modern_wm_readiness_spec -> std
-modern_wm_readiness_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=modern_wm_readiness_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 2 | 2 | 0 | 0 |
@@ -44,7 +20,7 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/desktop/modern_wm_readiness_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Verifies one combined readiness report for the modern Web WM, SimpleOS
@@ -56,132 +32,197 @@ Verifies one combined readiness report for the modern Web WM, SimpleOS
 
 #### passes when Web quality and OS shell motion contracts are all present
 
+- passes when Web quality and OS shell motion contracts are all present
+   - Expected: report.os_render_icon_inner_padding_px equals `3`
+   - Expected: report.os_render_icon_mask_shape equals `circle`
+   - Expected: report.os_render_icon_image_fit equals `cover`
+   - Expected: report.os_render_command_palette_max_width_px equals `680`
+   - Expected: report.os_render_notification_max_width_px equals `360`
+   - Expected: report.os_render_notification_center_max_width_px equals `340`
+   - Expected: report.os_render_live_activity_max_width_px equals `420`
+   - Expected: report.os_render_workspace_switcher_max_width_px equals `360`
+   - Expected: report.os_render_shortcut_overlay_max_width_px equals `420`
+   - Expected: report.os_render_app_launcher_max_width_px equals `520`
+   - Expected: report.os_render_context_menu_max_width_px equals `280`
+   - Expected: report.os_render_snap_layouts_max_width_px equals `360`
+   - Expected: report.os_render_window_switcher_max_width_px equals `460`
+   - Expected: report.os_render_quick_settings_max_width_px equals `300`
+   - Expected: report.os_render_hot_corner_max_size_px equals `44`
+   - Expected: report.os_render_resize_hud_max_width_px equals `240`
+   - Expected: report.os_render_gesture_hints_max_width_px equals `360`
+   - Expected: report.os_render_taskbar_preview_max_width_px equals `320`
+   - Expected: report.os_render_stage_rail_max_width_px equals `88`
+   - Expected: report.os_render_screen_capture_max_width_px equals `560`
+   - Expected: report.os_render_clipboard_history_max_width_px equals `360`
+   - Expected: report.os_render_privacy_indicator_max_width_px equals `300`
+   - Expected: report.os_render_system_hud_max_width_px equals `280`
+   - Expected: report.os_render_wallpaper_picker_max_width_px equals `380`
+   - Expected: report.os_render_dock_stack_max_width_px equals `340`
+   - Expected: report.os_render_widget_gallery_max_width_px equals `440`
+   - Expected: report.os_render_touch_target_min_height_px equals `44`
+   - Expected: report.os_render_layout_safe_area_px equals `16`
+   - Expected: report.os_render_layout_panel_gap_px equals `12`
+   - Expected: report.os_render_layout_min_touch_target_px equals `44`
+   - Expected: report.titlebar_height_px equals `38`
+   - Expected: report.window_min_width_px equals `200`
+   - Expected: report.window_min_height_px equals `120`
+   - Expected: report.title_input_min_width_px equals `140`
+   - Expected: report.taskbar_icon_size_px equals `26`
+   - Expected: report.system_hud_max_width_px equals `280`
+   - Expected: report.privacy_indicator_max_width_px equals `300`
+   - Expected: report.workspace_switcher_max_width_px equals `420`
+   - Expected: report.clipboard_history_max_width_px equals `360`
+   - Expected: report.screen_capture_max_width_px equals `560`
+   - Expected: report.quick_settings_max_width_px equals `300`
+   - Expected: report.notification_center_max_width_px equals `340`
+   - Expected: report.live_activity_max_width_px equals `420`
+   - Expected: report.hot_corner_max_size_px equals `44`
+   - Expected: report.resize_hud_max_width_px equals `240`
+   - Expected: report.gesture_hints_max_width_px equals `360`
+   - Expected: report.command_palette_max_width_px equals `680`
+   - Expected: report.quality_inspector_max_width_px equals `420`
+   - Expected: report.control_center_max_width_px equals `320`
+   - Expected: report.desktop_widget_max_width_px equals `260`
+   - Expected: report.app_launcher_max_width_px equals `520`
+   - Expected: report.wallpaper_picker_max_width_px equals `380`
+   - Expected: report.accent_palette_max_width_px equals `360`
+   - Expected: report.dock_stack_max_width_px equals `340`
+   - Expected: report.stage_rail_max_width_px equals `88`
+   - Expected: report.window_switcher_max_width_px equals `460`
+   - Expected: report.top_menu_bar_height_px equals `38`
+   - Expected: report.overview_card_min_width_px equals `180`
+   - Expected: report.touch_target_min_height_px equals `44`
+   - Expected: report.notes[0] equals `modern WM readiness passed`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 203 lines folded for reproduction.
+Runnable source: 205 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("passes when Web quality and OS shell motion contracts are all present")
 val report = modern_wm_readiness_report("glass_dark")
-expect(report.passed)
-expect(report.web_quality_ready)
-expect(report.os_dock_ready)
-expect(report.os_taskbar_ready)
-expect(report.os_affordances_ready)
-expect(report.lifecycle_motion_ready)
-expect(report.rendered_motion_ready)
-expect(report.rendered_affordances_ready)
-expect(report.os_render_quality_ready)
-expect(report.os_render_theme_configured)
-expect(report.os_render_round_scrollbars)
-expect(report.os_render_round_icon_converter)
-expect(report.os_render_icon_policy_ready)
+assert_true(report.passed)
+assert_true(report.web_quality_ready)
+assert_true(report.os_dock_ready)
+assert_true(report.os_taskbar_ready)
+assert_true(report.os_affordances_ready)
+assert_true(report.lifecycle_motion_ready)
+assert_true(report.rendered_motion_ready)
+assert_true(report.rendered_affordances_ready)
+assert_true(report.os_render_quality_ready)
+assert_true(report.os_render_theme_configured)
+assert_true(report.os_render_round_scrollbars)
+assert_true(report.os_render_round_icon_converter)
+assert_true(report.os_render_icon_policy_ready)
 expect(report.os_render_icon_inner_padding_px).to_equal(3)
 expect(report.os_render_icon_mask_shape).to_equal("circle")
 expect(report.os_render_icon_image_fit).to_equal("cover")
-expect(report.os_render_titlebar_input_ready)
-expect(report.os_render_traffic_controls_ready)
-expect(report.os_render_animated_background_ready)
-expect(report.os_render_window_interaction_ready)
-expect(report.os_render_command_palette_ready)
+assert_true(report.os_render_titlebar_input_ready)
+assert_true(report.os_render_traffic_controls_ready)
+assert_true(report.os_render_animated_background_ready)
+assert_true(report.os_render_window_interaction_ready)
+assert_true(report.os_render_command_palette_ready)
 expect(report.os_render_command_palette_max_width_px).to_equal(680)
-expect(report.os_render_theme_accent_controls_ready)
-expect(report.os_render_focus_depth_ready)
-expect(report.os_render_lifecycle_animation_ready)
-expect(report.os_render_taskbar_interaction_ready)
-expect(report.os_render_dock_magnification_ready)
-expect(report.os_render_notification_feedback_ready)
+assert_true(report.os_render_theme_accent_controls_ready)
+assert_true(report.os_render_focus_depth_ready)
+assert_true(report.os_render_lifecycle_animation_ready)
+assert_true(report.os_render_taskbar_interaction_ready)
+assert_true(report.os_render_dock_magnification_ready)
+assert_true(report.os_render_notification_feedback_ready)
 expect(report.os_render_notification_max_width_px).to_equal(360)
-expect(report.os_render_notification_center_ready)
+assert_true(report.os_render_notification_center_ready)
 expect(report.os_render_notification_center_max_width_px).to_equal(340)
-expect(report.os_render_live_activity_ready)
+assert_true(report.os_render_live_activity_ready)
 expect(report.os_render_live_activity_max_width_px).to_equal(420)
-expect(report.os_render_workspace_switcher_ready)
+assert_true(report.os_render_workspace_switcher_ready)
 expect(report.os_render_workspace_switcher_max_width_px).to_equal(360)
-expect(report.os_render_keyboard_shortcut_overlay_ready)
+assert_true(report.os_render_keyboard_shortcut_overlay_ready)
 expect(report.os_render_shortcut_overlay_max_width_px).to_equal(420)
-expect(report.os_render_app_launcher_ready)
+assert_true(report.os_render_app_launcher_ready)
 expect(report.os_render_app_launcher_max_width_px).to_equal(520)
-expect(report.os_render_context_menu_ready)
+assert_true(report.os_render_context_menu_ready)
 expect(report.os_render_context_menu_max_width_px).to_equal(280)
-expect(report.os_render_snap_layouts_ready)
+assert_true(report.os_render_snap_layouts_ready)
 expect(report.os_render_snap_layouts_max_width_px).to_equal(360)
-expect(report.os_render_window_switcher_ready)
+assert_true(report.os_render_window_switcher_ready)
 expect(report.os_render_window_switcher_max_width_px).to_equal(460)
-expect(report.os_render_quick_settings_ready)
+assert_true(report.os_render_quick_settings_ready)
 expect(report.os_render_quick_settings_max_width_px).to_equal(300)
-expect(report.os_render_hot_corners_ready)
+assert_true(report.os_render_hot_corners_ready)
 expect(report.os_render_hot_corner_max_size_px).to_equal(44)
-expect(report.os_render_resize_hud_ready)
+assert_true(report.os_render_resize_hud_ready)
 expect(report.os_render_resize_hud_max_width_px).to_equal(240)
-expect(report.os_render_gesture_hints_ready)
+assert_true(report.os_render_gesture_hints_ready)
 expect(report.os_render_gesture_hints_max_width_px).to_equal(360)
-expect(report.taskbar_attention_ready)
-expect(report.os_render_taskbar_preview_ready)
+assert_true(report.taskbar_attention_ready)
+assert_true(report.os_render_taskbar_preview_ready)
 expect(report.os_render_taskbar_preview_max_width_px).to_equal(320)
-expect(report.os_render_stage_rail_ready)
+assert_true(report.os_render_stage_rail_ready)
 expect(report.os_render_stage_rail_max_width_px).to_equal(88)
-expect(report.os_render_screen_capture_ready)
+assert_true(report.os_render_screen_capture_ready)
 expect(report.os_render_screen_capture_max_width_px).to_equal(560)
-expect(report.os_render_clipboard_history_ready)
+assert_true(report.os_render_clipboard_history_ready)
 expect(report.os_render_clipboard_history_max_width_px).to_equal(360)
-expect(report.os_render_privacy_indicator_ready)
+assert_true(report.os_render_privacy_indicator_ready)
 expect(report.os_render_privacy_indicator_max_width_px).to_equal(300)
-expect(report.os_render_system_hud_ready)
+assert_true(report.os_render_system_hud_ready)
 expect(report.os_render_system_hud_max_width_px).to_equal(280)
-expect(report.os_render_wallpaper_picker_ready)
+assert_true(report.os_render_wallpaper_picker_ready)
 expect(report.os_render_wallpaper_picker_max_width_px).to_equal(380)
-expect(report.os_render_dock_stack_ready)
+assert_true(report.os_render_dock_stack_ready)
 expect(report.os_render_dock_stack_max_width_px).to_equal(340)
-expect(report.os_render_widget_gallery_ready)
+assert_true(report.os_render_widget_gallery_ready)
 expect(report.os_render_widget_gallery_max_width_px).to_equal(440)
 expect(report.os_render_contrast_ratio_x100).to_be_greater_than(449)
-expect(report.os_render_bounded_layout)
+assert_true(report.os_render_bounded_layout)
 expect(report.os_render_touch_target_min_height_px).to_equal(44)
-expect(report.os_render_layout_policy_ready)
+assert_true(report.os_render_layout_policy_ready)
 expect(report.os_render_layout_safe_area_px).to_equal(16)
 expect(report.os_render_layout_panel_gap_px).to_equal(12)
 expect(report.os_render_layout_min_touch_target_px).to_equal(44)
-expect(report.color_checked)
+assert_true(report.color_checked)
 expect(report.contrast_ratio_x100).to_be_greater_than(449)
-expect(report.size_layout_configured)
+assert_true(report.size_layout_configured)
 expect(report.titlebar_height_px).to_equal(38)
 expect(report.window_min_width_px).to_equal(200)
 expect(report.window_min_height_px).to_equal(120)
 expect(report.title_input_min_width_px).to_equal(140)
 expect(report.taskbar_icon_size_px).to_equal(26)
-expect(report.system_hud_ready)
+assert_true(report.system_hud_ready)
 expect(report.system_hud_max_width_px).to_equal(280)
-expect(report.privacy_indicator_ready)
+assert_true(report.privacy_indicator_ready)
 expect(report.privacy_indicator_max_width_px).to_equal(300)
-expect(report.context_menu_actions_ready)
-expect(report.context_menu_keyboard_ready)
-expect(report.context_menu_workspace_targets_ready)
-expect(report.context_menu_visuals_ready)
-expect(report.workspace_switcher_ready)
-expect(report.workspace_switcher_actions_ready)
+assert_true(report.context_menu_actions_ready)
+assert_true(report.context_menu_keyboard_ready)
+assert_true(report.context_menu_workspace_targets_ready)
+assert_true(report.context_menu_visuals_ready)
+assert_true(report.workspace_switcher_ready)
+assert_true(report.workspace_switcher_actions_ready)
 expect(report.workspace_switcher_max_width_px).to_equal(420)
-expect(report.clipboard_history_ready)
-expect(report.clipboard_history_search_ready)
+assert_true(report.clipboard_history_ready)
+assert_true(report.clipboard_history_search_ready)
 expect(report.clipboard_history_max_width_px).to_equal(360)
-expect(report.screen_capture_ready)
+assert_true(report.screen_capture_ready)
 expect(report.screen_capture_max_width_px).to_equal(560)
-expect(report.quick_settings_ready)
-expect(report.quick_settings_levels_ready)
+assert_true(report.quick_settings_ready)
+assert_true(report.quick_settings_levels_ready)
 expect(report.quick_settings_max_width_px).to_equal(300)
-expect(report.notification_center_ready)
-expect(report.notification_center_actions_ready)
-expect(report.notification_center_filters_ready)
+assert_true(report.notification_center_ready)
+assert_true(report.notification_center_actions_ready)
+assert_true(report.notification_center_filters_ready)
 expect(report.notification_center_max_width_px).to_equal(340)
-expect(report.live_activity_ready)
-expect(report.live_activity_controls_ready)
+assert_true(report.live_activity_ready)
+assert_true(report.live_activity_controls_ready)
 expect(report.live_activity_max_width_px).to_equal(420)
-expect(report.hot_corners_ready)
+assert_true(report.hot_corners_ready)
 expect(report.hot_corner_max_size_px).to_equal(44)
-expect(report.resize_hud_ready)
+assert_true(report.resize_hud_ready)
 expect(report.resize_hud_max_width_px).to_equal(240)
-expect(report.gesture_hints_ready)
+assert_true(report.gesture_hints_ready)
 expect(report.gesture_hints_max_width_px).to_equal(360)
 expect(report.command_palette_max_width_px).to_equal(680)
 expect(report.quality_inspector_max_width_px).to_equal(420)
@@ -192,79 +233,79 @@ expect(report.wallpaper_picker_max_width_px).to_equal(380)
 expect(report.accent_palette_max_width_px).to_equal(360)
 expect(report.dock_stack_max_width_px).to_equal(340)
 expect(report.stage_rail_max_width_px).to_equal(88)
-expect(report.window_switcher_ready)
+assert_true(report.window_switcher_ready)
 expect(report.window_switcher_max_width_px).to_equal(460)
 expect(report.top_menu_bar_height_px).to_equal(38)
 expect(report.overview_card_min_width_px).to_equal(180)
 expect(report.touch_target_min_height_px).to_equal(44)
-expect(report.responsive_layout_ready)
-expect(report.command_palette_ready)
-expect(report.quality_inspector_ready)
-expect(report.quality_inspector_summary_ready)
-expect(report.quality_inspector_details_ready)
-expect(report.quality_inspector_policy_ready)
-expect(report.quality_inspector_actions_ready)
-expect(report.quality_inspector_filters_ready)
-expect(report.quality_inspector_check_detail_ready)
-expect(report.quality_inspector_audit_mode_ready)
-expect(report.quality_inspector_guidance_ready)
-expect(report.quality_inspector_fix_action_ready)
-expect(report.quality_inspector_motion_preview_ready)
-expect(report.quality_inspector_motion_samples_ready)
-expect(report.quality_inspector_motion_policy_ready)
-expect(report.quality_inspector_animation_preview_ready)
-expect(report.quality_inspector_widget_preview_ready)
-expect(report.quality_inspector_material_preview_ready)
-expect(report.quality_inspector_surface_preview_ready)
-expect(report.quality_inspector_color_preview_ready)
-expect(report.quality_inspector_layout_preview_ready)
-expect(report.quality_inspector_titlebar_preview_ready)
-expect(report.quality_inspector_icon_preview_ready)
-expect(report.quality_inspector_typography_preview_ready)
-expect(report.quality_inspector_depth_preview_ready)
-expect(report.quality_inspector_interaction_preview_ready)
-expect(report.quality_inspector_state_preview_ready)
-expect(report.quality_inspector_verbosity_preview_ready)
-expect(report.quality_inspector_performance_preview_ready)
-expect(report.quality_inspector_spatial_preview_ready)
-expect(report.quality_inspector_responsive_preview_ready)
-expect(report.quality_inspector_accessibility_preview_ready)
-expect(report.command_palette_grouping_ready)
-expect(report.title_input_ready)
-expect(report.title_command_modes_ready)
-expect(report.visual_layering_ready)
-expect(report.motion_verbosity_control)
-expect(report.lifecycle_motion_profile_ready)
-expect(report.round_icon_converter)
-expect(report.round_scrollbars)
-expect(report.translucent_shell)
-expect(report.accessible_controls_ready)
-expect(report.snap_assist_ready)
-expect(report.drag_snap_feedback_ready)
-expect(report.snap_layout_palette_ready)
-expect(report.window_arrange_ready)
-expect(report.desktop_peek_ready)
-expect(report.taskbar_preview_actions_ready)
-expect(report.desktop_widgets_ready)
-expect(report.desktop_widget_controls_ready)
-expect(report.desktop_items_ready)
-expect(report.top_menu_bar_ready)
-expect(report.focus_mode_ready)
-expect(report.wallpaper_picker_ready)
-expect(report.accent_palette_ready)
-expect(report.dock_stack_ready)
-expect(report.app_launcher_ready)
-expect(report.app_launcher_categories_ready)
-expect(report.shortcut_overlay_ready)
-expect(report.shortcut_overlay_search_ready)
-expect(report.wm_tooltips_ready)
-expect(report.widget_gallery_ready)
-expect(report.stage_rail_ready)
-expect(report.stage_rail_actions_ready)
-expect(report.window_overview_ready)
-expect(report.window_overview_search_ready)
-expect(report.control_center_ready)
-expect(report.control_center_personalization_ready)
+assert_true(report.responsive_layout_ready)
+assert_true(report.command_palette_ready)
+assert_true(report.quality_inspector_ready)
+assert_true(report.quality_inspector_summary_ready)
+assert_true(report.quality_inspector_details_ready)
+assert_true(report.quality_inspector_policy_ready)
+assert_true(report.quality_inspector_actions_ready)
+assert_true(report.quality_inspector_filters_ready)
+assert_true(report.quality_inspector_check_detail_ready)
+assert_true(report.quality_inspector_audit_mode_ready)
+assert_true(report.quality_inspector_guidance_ready)
+assert_true(report.quality_inspector_fix_action_ready)
+assert_true(report.quality_inspector_motion_preview_ready)
+assert_true(report.quality_inspector_motion_samples_ready)
+assert_true(report.quality_inspector_motion_policy_ready)
+assert_true(report.quality_inspector_animation_preview_ready)
+assert_true(report.quality_inspector_widget_preview_ready)
+assert_true(report.quality_inspector_material_preview_ready)
+assert_true(report.quality_inspector_surface_preview_ready)
+assert_true(report.quality_inspector_color_preview_ready)
+assert_true(report.quality_inspector_layout_preview_ready)
+assert_true(report.quality_inspector_titlebar_preview_ready)
+assert_true(report.quality_inspector_icon_preview_ready)
+assert_true(report.quality_inspector_typography_preview_ready)
+assert_true(report.quality_inspector_depth_preview_ready)
+assert_true(report.quality_inspector_interaction_preview_ready)
+assert_true(report.quality_inspector_state_preview_ready)
+assert_true(report.quality_inspector_verbosity_preview_ready)
+assert_true(report.quality_inspector_performance_preview_ready)
+assert_true(report.quality_inspector_spatial_preview_ready)
+assert_true(report.quality_inspector_responsive_preview_ready)
+assert_true(report.quality_inspector_accessibility_preview_ready)
+assert_true(report.command_palette_grouping_ready)
+assert_true(report.title_input_ready)
+assert_true(report.title_command_modes_ready)
+assert_true(report.visual_layering_ready)
+assert_true(report.motion_verbosity_control)
+assert_true(report.lifecycle_motion_profile_ready)
+assert_true(report.round_icon_converter)
+assert_true(report.round_scrollbars)
+assert_true(report.translucent_shell)
+assert_true(report.accessible_controls_ready)
+assert_true(report.snap_assist_ready)
+assert_true(report.drag_snap_feedback_ready)
+assert_true(report.snap_layout_palette_ready)
+assert_true(report.window_arrange_ready)
+assert_true(report.desktop_peek_ready)
+assert_true(report.taskbar_preview_actions_ready)
+assert_true(report.desktop_widgets_ready)
+assert_true(report.desktop_widget_controls_ready)
+assert_true(report.desktop_items_ready)
+assert_true(report.top_menu_bar_ready)
+assert_true(report.focus_mode_ready)
+assert_true(report.wallpaper_picker_ready)
+assert_true(report.accent_palette_ready)
+assert_true(report.dock_stack_ready)
+assert_true(report.app_launcher_ready)
+assert_true(report.app_launcher_categories_ready)
+assert_true(report.shortcut_overlay_ready)
+assert_true(report.shortcut_overlay_search_ready)
+assert_true(report.wm_tooltips_ready)
+assert_true(report.widget_gallery_ready)
+assert_true(report.stage_rail_ready)
+assert_true(report.stage_rail_actions_ready)
+assert_true(report.window_overview_ready)
+assert_true(report.window_overview_search_ready)
+assert_true(report.control_center_ready)
+assert_true(report.control_center_personalization_ready)
 expect(report.notes[0]).to_equal("modern WM readiness passed")
 ```
 
@@ -272,13 +313,18 @@ expect(report.notes[0]).to_equal("modern WM readiness passed")
 
 #### summarizes the readiness gates for release evidence
 
+- summarizes the readiness gates for release evidence
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 202 lines folded for reproduction.
+Runnable source: 204 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("summarizes the readiness gates for release evidence")
 val summary = modern_wm_readiness_summary("glass_dark")
 expect(summary).to_contain("modern_wm_readiness")
 expect(summary).to_contain("status=pass")
@@ -497,3 +543,45 @@ expect(summary).to_contain("control_center_personalization=true")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ede79e451b1689d33961b6fe39902cc3d106cc31eaa7accfe9fd50fffbb604d8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ede79e451b1689d33961b6fe39902cc3d106cc31eaa7accfe9fd50fffbb604d8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ede79e451b1689d33961b6fe39902cc3d106cc31eaa7accfe9fd50fffbb604d8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/01_unit/os/desktop/modern_wm_readiness_spec.spl
+mirror: doc/06_spec/01_unit/os/desktop/modern_wm_readiness_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/desktop/modern_wm_readiness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/desktop/modern_wm_readiness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/desktop/modern_wm_readiness_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 57 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+<!-- sspec-maintain:scorecard:end -->

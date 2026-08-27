@@ -1,30 +1,6 @@
 # Platform Specification
 
-> <details>
-
-<!-- sdn-diagram:id=platform_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=platform_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-platform_spec -> std
-platform_spec -> nogc_sync_mut
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=platform_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering AppConfig platform detection.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,13 +19,19 @@ platform_spec -> nogc_sync_mut
 
 #### detects a known platform
 
+- detects a known platform
+   - Expected: known is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects a known platform")
 val config = AppConfig.from_env("test", "1.0")
 val p = config.platform
 # Must be one of the known platforms
@@ -61,13 +43,19 @@ expect(known).to_equal(true)
 
 #### detects a known architecture
 
+- detects a known architecture
+   - Expected: known is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects a known architecture")
 val config = AppConfig.from_env("test", "1.0")
 val a = config.arch
 val known = a == "x86_64" or a == "aarch64" or a == "riscv64" or a == "i686"
@@ -80,13 +68,19 @@ expect(known).to_equal(true)
 
 #### linux is desktop
 
+- linux is desktop
+   - Expected: c.is_desktop() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("linux is desktop")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "linux", arch: "x86_64")
 expect(c.is_desktop()).to_equal(true)
 ```
@@ -95,13 +89,19 @@ expect(c.is_desktop()).to_equal(true)
 
 #### macos is desktop
 
+- macos is desktop
+   - Expected: c.is_desktop() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("macos is desktop")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "macos", arch: "aarch64")
 expect(c.is_desktop()).to_equal(true)
 ```
@@ -110,13 +110,19 @@ expect(c.is_desktop()).to_equal(true)
 
 #### windows is desktop
 
+- windows is desktop
+   - Expected: c.is_desktop() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("windows is desktop")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "windows", arch: "x86_64")
 expect(c.is_desktop()).to_equal(true)
 ```
@@ -125,13 +131,19 @@ expect(c.is_desktop()).to_equal(true)
 
 #### freebsd is desktop
 
+- freebsd is desktop
+   - Expected: c.is_desktop() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("freebsd is desktop")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "freebsd", arch: "x86_64")
 expect(c.is_desktop()).to_equal(true)
 ```
@@ -142,13 +154,20 @@ expect(c.is_desktop()).to_equal(true)
 
 #### ios is mobile
 
+- ios is mobile
+   - Expected: c.is_mobile() is true
+   - Expected: c.is_desktop() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ios is mobile")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "ios", arch: "aarch64")
 expect(c.is_mobile()).to_equal(true)
 expect(c.is_desktop()).to_equal(false)
@@ -158,13 +177,20 @@ expect(c.is_desktop()).to_equal(false)
 
 #### android is mobile
 
+- android is mobile
+   - Expected: c.is_mobile() is true
+   - Expected: c.is_desktop() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("android is mobile")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "android", arch: "aarch64")
 expect(c.is_mobile()).to_equal(true)
 expect(c.is_desktop()).to_equal(false)
@@ -176,13 +202,20 @@ expect(c.is_desktop()).to_equal(false)
 
 #### wasm32 is wasm
 
+- wasm32 is wasm
+   - Expected: c.is_wasm() is true
+   - Expected: c.is_desktop() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wasm32 is wasm")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "wasi", arch: "wasm32")
 expect(c.is_wasm()).to_equal(true)
 expect(c.is_desktop()).to_equal(false)
@@ -192,13 +225,19 @@ expect(c.is_desktop()).to_equal(false)
 
 #### wasm64 is wasm
 
+- wasm64 is wasm
+   - Expected: c.is_wasm() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wasm64 is wasm")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "wasi", arch: "wasm64")
 expect(c.is_wasm()).to_equal(true)
 ```
@@ -209,13 +248,20 @@ expect(c.is_wasm()).to_equal(true)
 
 #### none platform is baremetal
 
+- none platform is baremetal
+   - Expected: c.is_baremetal() is true
+   - Expected: c.is_desktop() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("none platform is baremetal")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "none", arch: "riscv32")
 expect(c.is_baremetal()).to_equal(true)
 expect(c.is_desktop()).to_equal(false)
@@ -227,13 +273,19 @@ expect(c.is_desktop()).to_equal(false)
 
 #### x86_64 is 64-bit
 
+- x86_64 is 64-bit
+   - Expected: c.is_64bit() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("x86_64 is 64-bit")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "linux", arch: "x86_64")
 expect(c.is_64bit()).to_equal(true)
 ```
@@ -242,13 +294,19 @@ expect(c.is_64bit()).to_equal(true)
 
 #### aarch64 is 64-bit
 
+- aarch64 is 64-bit
+   - Expected: c.is_64bit() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("aarch64 is 64-bit")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "ios", arch: "aarch64")
 expect(c.is_64bit()).to_equal(true)
 ```
@@ -257,13 +315,19 @@ expect(c.is_64bit()).to_equal(true)
 
 #### riscv64 is 64-bit
 
+- riscv64 is 64-bit
+   - Expected: c.is_64bit() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("riscv64 is 64-bit")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "linux", arch: "riscv64")
 expect(c.is_64bit()).to_equal(true)
 ```
@@ -272,13 +336,19 @@ expect(c.is_64bit()).to_equal(true)
 
 #### wasm32 is not 64-bit
 
+- wasm32 is not 64-bit
+   - Expected: c.is_64bit() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wasm32 is not 64-bit")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "wasi", arch: "wasm32")
 expect(c.is_64bit()).to_equal(false)
 ```
@@ -287,13 +357,19 @@ expect(c.is_64bit()).to_equal(false)
 
 #### riscv32 is not 64-bit
 
+- riscv32 is not 64-bit
+   - Expected: c.is_64bit() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("riscv32 is not 64-bit")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "none", arch: "riscv32")
 expect(c.is_64bit()).to_equal(false)
 ```
@@ -304,13 +380,22 @@ expect(c.is_64bit()).to_equal(false)
 
 #### desktop is not mobile, wasm, or baremetal
 
+- desktop is not mobile, wasm, or baremetal
+   - Expected: c.is_desktop() is true
+   - Expected: c.is_mobile() is false
+   - Expected: c.is_wasm() is false
+   - Expected: c.is_baremetal() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("desktop is not mobile, wasm, or baremetal")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "linux", arch: "x86_64")
 expect(c.is_desktop()).to_equal(true)
 expect(c.is_mobile()).to_equal(false)
@@ -322,13 +407,22 @@ expect(c.is_baremetal()).to_equal(false)
 
 #### mobile is not desktop, wasm, or baremetal
 
+- mobile is not desktop, wasm, or baremetal
+   - Expected: c.is_mobile() is true
+   - Expected: c.is_desktop() is false
+   - Expected: c.is_wasm() is false
+   - Expected: c.is_baremetal() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("mobile is not desktop, wasm, or baremetal")
 val c = AppConfig.create(name: "t", version: "0", args: [], platform: "android", arch: "aarch64")
 expect(c.is_mobile()).to_equal(true)
 expect(c.is_desktop()).to_equal(false)
@@ -345,12 +439,12 @@ expect(c.is_baremetal()).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/platform_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering AppConfig platform detection.
 - AppConfig platform detection
 
 ## Scenario Summary
@@ -365,3 +459,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `67db1cc5863e263d9a1f040d1a22ab1d047d149dd8c2a30121fc380aada1a6fc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `67db1cc5863e263d9a1f040d1a22ab1d047d149dd8c2a30121fc380aada1a6fc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `67db1cc5863e263d9a1f040d1a22ab1d047d149dd8c2a30121fc380aada1a6fc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/platform_spec.spl
+mirror: doc/06_spec/01_unit/app/platform_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/platform_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/platform_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/platform_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects a known platform' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/platform_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects a known architecture' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/platform_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'linux is desktop' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

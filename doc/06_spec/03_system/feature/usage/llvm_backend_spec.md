@@ -2,30 +2,6 @@
 
 > The LLVM backend:
 
-<!-- sdn-diagram:id=llvm_backend_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=llvm_backend_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-llvm_backend_spec -> compiler
-llvm_backend_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=llvm_backend_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 33 | 33 | 0 | 0 |
@@ -46,7 +22,7 @@ The LLVM backend:
 | Difficulty | 5/5 |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/llvm_backend_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Key Concepts
@@ -91,13 +67,18 @@ The LLVM backend:
 
 #### env_skip: LLVM not available
 
+- env_skip: LLVM not available
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("env_skip: LLVM not available")
 val reason = test_env_gate_skip("SIMPLE_LLVM_TEST")
 expect(reason).to_contain("Skipped")
 ```
@@ -108,17 +89,18 @@ expect(reason).to_contain("Skipped")
 
 #### generates code for integer addition
 
-1. fn add
-2. expect add
+- generates code for integer addition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for integer addition")
 fn add(a: i32, b: i32) -> i32:
     a + b
 expect add(5, 3) == 8
@@ -128,17 +110,18 @@ expect add(5, 3) == 8
 
 #### generates code for integer multiplication
 
-1. fn multiply
-2. expect multiply
+- generates code for integer multiplication
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for integer multiplication")
 fn multiply(a: i32, b: i32) -> i32:
     a * b
 expect multiply(5, 3) == 15
@@ -148,17 +131,18 @@ expect multiply(5, 3) == 15
 
 #### generates code for floating-point operations
 
-1. fn divide
-2. expect
+- generates code for floating-point operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for floating-point operations")
 fn divide(a: f64, b: f64) -> f64:
     a / b
 val result = divide(10.0, 2.0)
@@ -171,18 +155,18 @@ expect (result - 5.0).abs() < 0.001
 
 #### generates code for if-else branches
 
-1. fn classify
-2. expect classify
-3. expect classify
+- generates code for if-else branches
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for if-else branches")
 fn classify(x: i32) -> text:
     if x > 0:
         "positive"
@@ -199,17 +183,18 @@ expect classify(-3) == "non-positive"
 
 #### generates code for loops
 
-1. fn count up
-2. expect count up
+- generates code for loops
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for loops")
 fn count_up(n: i32) -> i32:
     var sum = 0
     var i = 0
@@ -229,19 +214,18 @@ expect count_up(5) == 10
 
 #### handles function calls
 
-1. fn outer
-2. fn inner
-3. inner
-4. expect outer
+- handles function calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles function calls")
 fn outer(x: i32) -> i32:
     fn inner(y: i32) -> i32:
         y * 2
@@ -253,18 +237,18 @@ expect outer(3) == 11
 
 #### handles recursive function calls
 
-1. fn fibonacci
-2. fibonacci
-3. expect fibonacci
+- handles recursive function calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles recursive function calls")
 fn fibonacci(n: i32) -> i32:
     if n <= 1:
         n
@@ -279,17 +263,18 @@ expect fibonacci(6) == 8
 
 #### generates code for variable assignment
 
-1. fn variable ops
-2. expect variable ops
+- generates code for variable assignment
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for variable assignment")
 fn variable_ops():
     var x = 5
     x = x + 3
@@ -301,18 +286,18 @@ expect variable_ops() == 8
 
 #### handles mutable struct fields
 
-1. fn move point
-2. var p = Point
-3.
+- handles mutable struct fields
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles mutable struct fields")
 class Point:
     x: i32
     y: i32
@@ -332,17 +317,18 @@ expect y == 20
 
 #### generates code for list operations
 
-1. fn list ops
-2. expect list ops
+- generates code for list operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for list operations")
 fn list_ops():
     val items = [1, 2, 3, 4, 5]
     items.length
@@ -353,17 +339,18 @@ expect list_ops() == 5
 
 #### generates code for map operations
 
-1. fn map ops
-2. expect map ops
+- generates code for map operations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for map operations")
 fn map_ops():
     val items = {"a": 1, "b": 2}
     items["a"]
@@ -376,17 +363,18 @@ expect map_ops() == 1
 
 #### generates code for type conversions
 
-1. fn convert
-2. expect
+- generates code for type conversions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates code for type conversions")
 fn convert():
     val i = 42
     val f = i.to_f64()
@@ -401,17 +389,18 @@ expect (result - 42.0).abs() < 0.001
 
 #### preserves correct semantics under optimization
 
-1. fn optimizable
-2. expect optimizable
+- preserves correct semantics under optimization
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves correct semantics under optimization")
 fn optimizable(n: i32) -> i32:
     val x = 5
     val y = 3
@@ -426,17 +415,18 @@ expect optimizable(2) == 10
 
 #### maintains correct results with loop optimization
 
-1. fn loop opt
-2. expect loop opt
+- maintains correct results with loop optimization
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains correct results with loop optimization")
 fn loop_opt(n: i32) -> i32:
     var result = 1
     var i = 1
@@ -456,13 +446,19 @@ expect loop_opt(5) == 120
 
 #### generates passes for optimization levels
 
+- generates passes for optimization levels
+   - Expected: debug_passes.len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates passes for optimization levels")
 val debug_passes = passes_for_level(OptimizationLevel.Debug)
 expect(debug_passes.len()).to_equal(2)
 val speed_passes = passes_for_level(OptimizationLevel.Speed)
@@ -477,17 +473,18 @@ expect(aggressive_passes.len()).to_be_greater_than(8)
 
 #### emits debug info header
 
-1. var builder = LlvmIRBuilder  create
-2. builder emit debug info header
+- emits debug info header
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits debug info header")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86_64)
 var builder = LlvmIRBuilder__create("test", target)
 builder.emit_debug_info_header("test.spl", "/home/user")
@@ -502,20 +499,18 @@ expect(ir).to_contain("test.spl")
 
 #### emits typed function calls
 
-1. var builder = LlvmIRBuilder  create
-2. builder emit module header
-3. builder start function
-4. builder emit
-5. builder end function
+- emits typed function calls
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits typed function calls")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86_64)
 var builder = LlvmIRBuilder__create("test", target)
 builder.emit_module_header()
@@ -532,17 +527,18 @@ expect(ir).to_contain("call i64 @add")
 
 #### emits datalayout for x86_64
 
-1. var builder = LlvmIRBuilder  create
-2. builder emit module header
+- emits datalayout for x86_64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits datalayout for x86_64")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86_64)
 var builder = LlvmIRBuilder__create("test", target)
 builder.emit_module_header()
@@ -555,17 +551,18 @@ expect(ir).to_contain("n8:16:32:64-S128")
 
 #### emits datalayout for i686
 
-1. var builder = LlvmIRBuilder  create
-2. builder emit module header
+- emits datalayout for i686
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits datalayout for i686")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86)
 var builder = LlvmIRBuilder__create("test", target)
 builder.emit_module_header()
@@ -578,17 +575,18 @@ expect(ir).to_contain("p:32:32")
 
 #### emits datalayout for aarch64
 
-1. var builder = LlvmIRBuilder  create
-2. builder emit module header
+- emits datalayout for aarch64
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits datalayout for aarch64")
 val target = LlvmTargetTriple__from_target(CodegenTarget.AArch64)
 var builder = LlvmIRBuilder__create("test", target)
 builder.emit_module_header()
@@ -601,17 +599,18 @@ expect(ir).to_contain("n32:64-S128")
 
 #### emits datalayout before target triple
 
-1. var builder = LlvmIRBuilder  create
-2. builder emit module header
+- emits datalayout before target triple
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits datalayout before target triple")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86_64)
 var builder = LlvmIRBuilder__create("test", target)
 builder.emit_module_header()
@@ -627,17 +626,19 @@ expect(dl_pos).to_be_less_than(tt_pos)
 
 #### native_int_type is i32 for 32-bit targets
 
-1. var translator = MirToLlvm  create
+- native_int_type is i32 for 32-bit targets
    - Expected: translator.native_int() equals `i32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("native_int_type is i32 for 32-bit targets")
 var translator = MirToLlvm__create("test", CodegenTarget.X86, nil)
 expect(translator.native_int()).to_equal("i32")
 ```
@@ -646,17 +647,19 @@ expect(translator.native_int()).to_equal("i32")
 
 #### native_int_type is i64 for 64-bit targets
 
-1. var translator = MirToLlvm  create
+- native_int_type is i64 for 64-bit targets
    - Expected: translator.native_int() equals `i64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("native_int_type is i64 for 64-bit targets")
 var translator = MirToLlvm__create("test", CodegenTarget.X86_64, nil)
 expect(translator.native_int()).to_equal("i64")
 ```
@@ -665,13 +668,19 @@ expect(translator.native_int()).to_equal("i64")
 
 #### type mapper uses 32-bit pointers for i686
 
+- type mapper uses 32-bit pointers for i686
+   - Expected: mapper.target_bits equals `32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("type mapper uses 32-bit pointers for i686")
 val mapper = LlvmTypeMapper__create_for_target(CodegenTarget.X86)
 expect(mapper.target_bits).to_equal(32)
 ```
@@ -680,13 +689,19 @@ expect(mapper.target_bits).to_equal(32)
 
 #### type mapper uses 64-bit pointers for x86_64
 
+- type mapper uses 64-bit pointers for x86_64
+   - Expected: mapper.target_bits equals `64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("type mapper uses 64-bit pointers for x86_64")
 val mapper = LlvmTypeMapper__create_for_target(CodegenTarget.X86_64)
 expect(mapper.target_bits).to_equal(64)
 ```
@@ -695,17 +710,19 @@ expect(mapper.target_bits).to_equal(64)
 
 #### builder size_type is i32 for 32-bit targets
 
-1. var builder = LlvmIRBuilder  create
+- builder size_type is i32 for 32-bit targets
    - Expected: builder.size_type equals `i32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("builder size_type is i32 for 32-bit targets")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86)
 var builder = LlvmIRBuilder__create("test", target)
 expect(builder.size_type).to_equal("i32")
@@ -715,17 +732,19 @@ expect(builder.size_type).to_equal("i32")
 
 #### builder size_type is i64 for 64-bit targets
 
-1. var builder = LlvmIRBuilder  create
+- builder size_type is i64 for 64-bit targets
    - Expected: builder.size_type equals `i64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("builder size_type is i64 for 64-bit targets")
 val target = LlvmTargetTriple__from_target(CodegenTarget.X86_64)
 var builder = LlvmIRBuilder__create("test", target)
 expect(builder.size_type).to_equal("i64")
@@ -737,28 +756,42 @@ expect(builder.size_type).to_equal("i64")
 
 #### selects correct CPU for x86_64
 
+- selects correct CPU for x86_64
+   - Expected: config.cpu equals `x86-64-v1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects correct CPU for x86_64")
 val config = LlvmTargetConfig__compatibility_build(CodegenTarget.X86_64)
-expect(config.cpu).to_equal("x86-64")
+# Compatibility build pins the documented x86-64-v1 baseline (2003+, no AVX);
+# llvm_backend_tools normalizes v1 -> "x86-64" only at the llc command line.
+expect(config.cpu).to_equal("x86-64-v1")
 ```
 
 </details>
 
 #### selects correct CPU for i686
 
+- selects correct CPU for i686
+   - Expected: config.cpu equals `i686`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects correct CPU for i686")
 val config = LlvmTargetConfig__compatibility_build(CodegenTarget.X86)
 expect(config.cpu).to_equal("i686")
 ```
@@ -767,13 +800,19 @@ expect(config.cpu).to_equal("i686")
 
 #### selects correct CPU for aarch64
 
+- selects correct CPU for aarch64
+   - Expected: config.cpu equals `generic`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects correct CPU for aarch64")
 val config = LlvmTargetConfig__compatibility_build(CodegenTarget.AArch64)
 expect(config.cpu).to_equal("generic")
 ```
@@ -782,13 +821,19 @@ expect(config.cpu).to_equal("generic")
 
 #### selects correct CPU for riscv64
 
+- selects correct CPU for riscv64
+   - Expected: config.cpu equals `generic-rv64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects correct CPU for riscv64")
 val config = LlvmTargetConfig__compatibility_build(CodegenTarget.Riscv64)
 expect(config.cpu).to_equal("generic-rv64")
 ```
@@ -797,13 +842,19 @@ expect(config.cpu).to_equal("generic-rv64")
 
 #### selects correct CPU for riscv32
 
+- selects correct CPU for riscv32
+   - Expected: config.cpu equals `generic-rv32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects correct CPU for riscv32")
 val config = LlvmTargetConfig__compatibility_build(CodegenTarget.Riscv32)
 expect(config.cpu).to_equal("generic-rv32")
 ```
@@ -822,3 +873,54 @@ expect(config.cpu).to_equal("generic-rv32")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a09d0a5e6292fddb765e2ceb6c23653d527663800331b612d6bae266f4968018`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a09d0a5e6292fddb765e2ceb6c23653d527663800331b612d6bae266f4968018`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a09d0a5e6292fddb765e2ceb6c23653d527663800331b612d6bae266f4968018`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/usage/llvm_backend_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/llvm_backend_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/llvm_backend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/llvm_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/llvm_backend_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/usage/llvm_backend_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'env_skip: LLVM not available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/llvm_backend_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates code for integer addition' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/llvm_backend_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates code for integer multiplication' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

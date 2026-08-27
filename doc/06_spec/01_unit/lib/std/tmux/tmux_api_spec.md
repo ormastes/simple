@@ -2,29 +2,6 @@
 
 > Tests for the `std.tmux` module which provides a read/write interface to the tmux terminal multiplexer. The module wraps tmux CLI commands via `shell()` to list sessions, windows, panes, capture pane content, and send keystrokes.
 
-<!-- sdn-diagram:id=tmux_api_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=tmux_api_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-tmux_api_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=tmux_api_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -49,7 +26,7 @@ Tests for the `std.tmux` module which provides a read/write interface to the tmu
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/lib/std/tmux/tmux_api_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -81,6 +58,8 @@ and send keystrokes.
 ## Examples
 
 ```simple
+use std.spec.step
+
 use std.tmux.*
 
 # Check if tmux is available
@@ -100,16 +79,18 @@ if tmux_available():
 
 #### reports whether tmux is installed
 
-1. expect
+- reports whether tmux is installed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("reports whether tmux is installed")
 val available = tmux_available()
 expect (available == true or available == false) to_equal true
 ```
@@ -118,16 +99,18 @@ expect (available == true or available == false) to_equal true
 
 #### reports server running status
 
-1. expect
+- reports server running status
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("reports server running status")
 val running = tmux_server_running()
 expect (running == true or running == false) to_equal true
 ```
@@ -140,16 +123,18 @@ expect (running == true or running == false) to_equal true
 
 #### returns a list without crashing
 
-1. expect sessions len
+- returns a list without crashing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("returns a list without crashing")
 val sessions = tmux_list_sessions()
 expect sessions.len() >= 0 to_equal true
 ```
@@ -160,13 +145,18 @@ expect sessions.len() >= 0 to_equal true
 
 #### returns false for non-existent session
 
+- returns false for non-existent session
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("returns false for non-existent session")
 val exists = tmux_has_session("__nonexistent_test_session_xyz__")
 expect exists to_equal false
 ```
@@ -179,16 +169,18 @@ expect exists to_equal false
 
 #### returns empty list for non-existent session
 
-1. expect windows len
+- returns empty list for non-existent session
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("returns empty list for non-existent session")
 val windows = tmux_list_windows("__nonexistent_test_session_xyz__")
 expect windows.len() to_equal 0
 ```
@@ -199,16 +191,18 @@ expect windows.len() to_equal 0
 
 #### returns empty list for non-existent target
 
-1. expect panes len
+- returns empty list for non-existent target
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("returns empty list for non-existent target")
 val panes = tmux_list_panes("__nonexistent_test_session_xyz__", 0)
 expect panes.len() to_equal 0
 ```
@@ -219,13 +213,18 @@ expect panes.len() to_equal 0
 
 #### returns empty capture for non-existent target
 
+- returns empty capture for non-existent target
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("returns empty capture for non-existent target")
 val result = tmux_capture_pane("__nonexistent_test_session_xyz__", 0, 0)
 expect result.content to_equal ""
 expect result.pane_id to_contain "__nonexistent_test_session_xyz__"
@@ -235,13 +234,18 @@ expect result.pane_id to_contain "__nonexistent_test_session_xyz__"
 
 #### formats pane_id as session:window.pane
 
+- formats pane_id as session:window.pane
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("formats pane_id as session:window.pane")
 val result = tmux_capture_pane("mysess", 2, 3)
 expect result.pane_id to_equal "mysess:2.3"
 ```
@@ -254,13 +258,18 @@ expect result.pane_id to_equal "mysess:2.3"
 
 #### constructs with all fields
 
+- constructs with all fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("constructs with all fields")
 val s = TmuxSession(
     name: "dev",
     windows: 3,
@@ -279,13 +288,18 @@ expect s.created to_equal "1234567890"
 
 #### constructs with all fields
 
+- constructs with all fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("constructs with all fields")
 val w = TmuxWindow(
     session: "main",
     index: 0,
@@ -306,13 +320,18 @@ expect w.panes to_equal 2
 
 #### constructs with all fields
 
+- constructs with all fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("constructs with all fields")
 val p = TmuxPane(
     session: "main",
     window_index: 0,
@@ -337,13 +356,18 @@ expect p.pid to_equal 12345
 
 #### constructs with all fields
 
+- constructs with all fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("constructs with all fields")
 val r = TmuxCaptureResult(
     content: "hello world\nprompt $",
     pane_id: "main:0.0",
@@ -368,3 +392,54 @@ expect r.rows to_equal 24
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `55160659876ee8fb4e2bfaca0dbb74257be433e159f76c7405c9bac024b923d1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `55160659876ee8fb4e2bfaca0dbb74257be433e159f76c7405c9bac024b923d1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `55160659876ee8fb4e2bfaca0dbb74257be433e159f76c7405c9bac024b923d1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/lib/std/tmux/tmux_api_spec.spl
+mirror: doc/06_spec/01_unit/lib/std/tmux/tmux_api_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=55 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/std/tmux/tmux_api_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
+  why: Retained evidence must be visible or linked from the professional manual.
+  improve: Select a supported evidence display and regenerate.
+doc/06_spec/01_unit/lib/std/tmux/tmux_api_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/std/tmux/tmux_api_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/std/tmux/tmux_api_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports whether tmux is installed' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/std/tmux/tmux_api_spec.spl:96:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports server running status' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/std/tmux/tmux_api_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns a list without crashing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

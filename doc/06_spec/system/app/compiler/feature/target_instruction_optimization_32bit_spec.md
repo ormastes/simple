@@ -18,6 +18,34 @@
 ### REQ-TGT-001: target families
 
 #### should classify x86_64 triple
+
+- should classify x86_64 triple
+   - Expected: f equals `X86_64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-TGT-001
+# @req REQ-TGT-001b
+# @req REQ-TGT-002
+# @req REQ-X86-001
+# @req REQ-TGT-003
+# @req REQ-TGT-004
+# @req REQ-PERF-001
+# @req REQ-TGT-005
+# @req REQ-SSPEC-SYSTEM
+step("should classify x86_64 triple")
+val f = target_family_from_triple("x86_64-unknown-linux-gnu")
+expect(f).to_equal("X86_64")
+```
+
+</details>
+
 #### should classify x86_32 triple via i686
 
 - should classify x86_32 triple via i686
@@ -662,7 +690,7 @@ expect(ok).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -710,27 +738,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `d395b1d527dc813e0a76b3c3b5e6345d9f947e00f677c5f74b9e3f260057e9eb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9ae64df6d200634d228100ee7651ec3e55be8d69c0597f567e0121af5b68f03c`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `d395b1d527dc813e0a76b3c3b5e6345d9f947e00f677c5f74b9e3f260057e9eb`.
+Source SHA-256: `9ae64df6d200634d228100ee7651ec3e55be8d69c0597f567e0121af5b68f03c`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `d395b1d527dc813e0a76b3c3b5e6345d9f947e00f677c5f74b9e3f260057e9eb`  
+Source SHA-256: `9ae64df6d200634d228100ee7651ec3e55be8d69c0597f567e0121af5b68f03c`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 86/100
 source: test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl
 mirror: doc/06_spec/system/app/compiler/feature/target_instruction_optimization_32bit_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=90
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=78; blocker cap makes effective=49
 doc/06_spec/system/app/compiler/feature/target_instruction_optimization_32bit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -740,37 +767,31 @@ doc/06_spec/system/app/compiler/feature/target_instruction_optimization_32bit_sp
 test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 8 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:15:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should classify x86_64 triple' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:15:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify x86_64 triple' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:30:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify x86_32 triple via i686' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify x86_32 triple via i686' has no retained capture or evidence
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify x86_64 triple' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:36:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify aarch64 triple' describes the test rather than its outcome
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:29:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify x86_32 triple via i686' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify aarch64 triple' has no retained capture or evidence
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify x86_32 triple via i686' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:42:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify arm32 triple via armv7' describes the test rather than its outcome
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:35:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify aarch64 triple' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify arm32 triple via armv7' has no retained capture or evidence
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify aarch64 triple' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:48:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify rv64 triple' describes the test rather than its outcome
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:41:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify arm32 triple via armv7' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:54:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify rv32 triple' describes the test rather than its outcome
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:47:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify rv64 triple' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:53:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify rv32 triple' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

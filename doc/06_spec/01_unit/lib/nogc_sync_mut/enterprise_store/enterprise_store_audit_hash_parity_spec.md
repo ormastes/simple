@@ -24,7 +24,7 @@ The repo deliberately carries **two** SHA-256 implementations:
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl` |
-| Updated | 2026-08-17 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -89,6 +89,11 @@ Lane: .spipe/simple_enterprise_suite (Goal Set v2, W12-C).
 
 #### matches the published digest for the empty string on both implementations
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- matches the published digest for the empty string on both implementations
 - Hash the empty string with the stdlib and the enterprise duplicate
 - Check each against the published FIPS digest, then against each other
    - Expected: shared equals `reference`
@@ -99,10 +104,12 @@ Lane: .spipe/simple_enterprise_suite (Goal Set v2, W12-C).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("matches the published digest for the empty string on both implementations")
 step("Hash the empty string with the stdlib and the enterprise duplicate")
 val reference = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 val shared = sha256_text("")
@@ -117,6 +124,7 @@ expect(duplicate).to_equal(shared)
 
 #### matches the published digest for \
 
+- matches the published digest for \
 - Hash the FIPS 180-4 one-block vector
 - Check each against the published FIPS digest, then against each other
    - Expected: shared equals `reference`
@@ -127,10 +135,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("matches the published digest for \")
 step("Hash the FIPS 180-4 one-block vector")
 val reference = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 val shared = sha256_text("abc")
@@ -145,6 +155,7 @@ expect(duplicate).to_equal(shared)
 
 #### matches the published digest for the 56-byte two-block FIPS vector
 
+- matches the published digest for the 56-byte two-block FIPS vector
 - Hash the FIPS 180-4 multi-block vector
 - Check each against the published FIPS digest, then against each other
    - Expected: shared equals `reference`
@@ -155,10 +166,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("matches the published digest for the 56-byte two-block FIPS vector")
 step("Hash the FIPS 180-4 multi-block vector")
 val payload = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
 val reference = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
@@ -176,6 +189,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees at 55 bytes, the last length whose padding fits one block
 
+- agrees at 55 bytes, the last length whose padding fits one block
 - Build a 55-byte payload and confirm its length
    - Expected: payload.len() equals `55`
 - Hash it with both implementations
@@ -188,10 +202,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees at 55 bytes, the last length whose padding fits one block")
 step("Build a 55-byte payload and confirm its length")
 val payload = repeat_char("a", 55)
 expect(payload.len()).to_equal(55)
@@ -209,6 +225,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees at 56 bytes, the first length that forces a second block
 
+- agrees at 56 bytes, the first length that forces a second block
 - Build a 56-byte payload and confirm its length
    - Expected: payload.len() equals `56`
 - Hash it with both implementations
@@ -221,10 +238,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees at 56 bytes, the first length that forces a second block")
 step("Build a 56-byte payload and confirm its length")
 val payload = repeat_char("a", 56)
 expect(payload.len()).to_equal(56)
@@ -242,6 +261,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees at 63 bytes, one short of an exact block
 
+- agrees at 63 bytes, one short of an exact block
 - Build a 63-byte payload
    - Expected: payload.len() equals `63`
 - Hash it with both implementations
@@ -254,10 +274,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees at 63 bytes, one short of an exact block")
 step("Build a 63-byte payload")
 val payload = repeat_char("a", 63)
 expect(payload.len()).to_equal(63)
@@ -278,6 +300,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees at exactly 64 bytes, a whole block with no room for padding
 
+- agrees at exactly 64 bytes, a whole block with no room for padding
 - Build a 64-byte payload
    - Expected: payload.len() equals `64`
 - Hash it with both implementations
@@ -290,10 +313,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees at exactly 64 bytes, a whole block with no room for padding")
 step("Build a 64-byte payload")
 val payload = repeat_char("a", 64)
 expect(payload.len()).to_equal(64)
@@ -314,6 +339,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees at 65 bytes, just past the block boundary
 
+- agrees at 65 bytes, just past the block boundary
 - Build a 65-byte payload
    - Expected: payload.len() equals `65`
 - Hash it with both implementations
@@ -326,10 +352,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees at 65 bytes, just past the block boundary")
 step("Build a 65-byte payload")
 val payload = repeat_char("a", 65)
 expect(payload.len()).to_equal(65)
@@ -347,6 +375,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees at 119 and 120 bytes, the same padding edge one block further out
 
+- agrees at 119 and 120 bytes, the same padding edge one block further out
 - Build the 119-byte payload and hash it
    - Expected: p119.len() equals `119`
    - Expected: sha256_text(p119) equals `ref119`
@@ -360,10 +389,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees at 119 and 120 bytes, the same padding edge one block further out")
 step("Build the 119-byte payload and hash it")
 val p119 = repeat_char("a", 119)
 expect(p119.len()).to_equal(119)
@@ -384,6 +415,7 @@ expect(audit_sha256_hex(p120)).to_equal(ref120)
 
 #### agrees on a 1000-byte payload spanning sixteen blocks
 
+- agrees on a 1000-byte payload spanning sixteen blocks
 - Build a 1000-byte payload
    - Expected: payload.len() equals `1000`
 - Hash it with both implementations
@@ -396,10 +428,12 @@ expect(audit_sha256_hex(p120)).to_equal(ref120)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees on a 1000-byte payload spanning sixteen blocks")
 step("Build a 1000-byte payload")
 val payload = repeat_char("a", 1000)
 expect(payload.len()).to_equal(1000)
@@ -417,6 +451,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees on non-ASCII bytes with the high bit set
 
+- agrees on non-ASCII bytes with the high bit set
 - Hash a UTF-8 payload whose bytes exceed 0x7f
 - Check both against the reference digest, catching any sign-extension bug
    - Expected: shared equals `reference`
@@ -427,10 +462,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees on non-ASCII bytes with the high bit set")
 step("Hash a UTF-8 payload whose bytes exceed 0x7f")
 val payload = "héllo wörld ✓ ünïcødé"
 val reference = "9b502626f1db27c225a0d19c78d8b79aa215da78799444f5677f17118eabe4f9"
@@ -446,6 +483,7 @@ expect(duplicate).to_equal(shared)
 
 #### agrees on a realistic audit-record payload
 
+- agrees on a realistic audit-record payload
 - Hash a JSON audit record of the shape the audit chain actually hashes
 - Check both against the reference digest and each other
    - Expected: shared equals `reference`
@@ -456,10 +494,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("agrees on a realistic audit-record payload")
 step("Hash a JSON audit record of the shape the audit chain actually hashes")
 val payload = "{\"actor\":\"admin\",\"op\":\"delete\",\"id\":42}"
 val reference = "beab1980891e2b52299b2e46cc9ae1a34c1caf0df28c465f8f943b38e54189cd"
@@ -477,6 +517,7 @@ expect(duplicate).to_equal(shared)
 
 #### produces a 64-character lowercase hex digest from both implementations
 
+- produces a 64-character lowercase hex digest from both implementations
 - Hash a sample payload with both implementations
 - Verify both digests are 64 hex characters and identical
    - Expected: shared.len() equals `64`
@@ -488,10 +529,12 @@ expect(duplicate).to_equal(shared)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("produces a 64-character lowercase hex digest from both implementations")
 step("Hash a sample payload with both implementations")
 val shared = sha256_text("enterprise")
 val duplicate = audit_sha256_hex("enterprise")
@@ -506,6 +549,7 @@ expect(duplicate).to_equal(duplicate.to_lower())
 
 #### changes both digests identically for a one-bit input difference
 
+- changes both digests identically for a one-bit input difference
 - Hash two payloads differing in a single character
 - Verify the digests differ, and that both implementations agree on each
    - Expected: a_shared == b_shared is false
@@ -517,10 +561,12 @@ expect(duplicate).to_equal(duplicate.to_lower())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("changes both digests identically for a one-bit input difference")
 step("Hash two payloads differing in a single character")
 val a_shared = sha256_text("audit-record-a")
 val b_shared = sha256_text("audit-record-b")
@@ -553,3 +599,54 @@ expect(b_dup).to_equal(b_shared)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bab51507c645a1271b2f0a9e7ecae37b8e88e8fb20c4dcce628a5b1d03331046`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bab51507c645a1271b2f0a9e7ecae37b8e88e8fb20c4dcce628a5b1d03331046`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bab51507c645a1271b2f0a9e7ecae37b8e88e8fb20c4dcce628a5b1d03331046`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the published digest for the empty string on both implementations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl:99:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the published digest for \' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_audit_hash_parity_spec.spl:111:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches the published digest for the 56-byte two-block FIPS vector' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

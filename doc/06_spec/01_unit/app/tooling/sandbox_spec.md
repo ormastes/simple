@@ -1,29 +1,6 @@
-# Sandbox Configuration Specification
+# Sandbox Specification
 
-> Sandbox configuration parsing for resource-constrained execution environments.
-
-<!-- sdn-diagram:id=sandbox_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=sandbox_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-sandbox_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=sandbox_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering sandbox module compilation, memory size parsing logic, sandbox configuration patterns, sandbox flag detection logic, string suffix detection, comma-separated parsing logic, trim whitespace logic, sandbox configuration concepts, argument iteration pattern, flag value parsing pattern, builder pattern validation.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,24 +9,7 @@ sandbox_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Sandbox Configuration Specification
-
-Sandbox configuration parsing for resource-constrained execution environments.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #3130 |
-| Category | Tooling |
-| Status | In Progress |
-| Source | `test/01_unit/app/tooling/sandbox_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Sandbox configuration parsing for resource-constrained execution environments.
-Supports memory limits (K/M/G suffixes), time limits, network isolation, and
-domain whitelisting for secure script execution.
+# Sandbox Specification
 
 ## Scenarios
 
@@ -57,13 +17,22 @@ domain whitelisting for secure script execution.
 
 #### compiles successfully
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- compiles successfully
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compiles successfully")
 expect 1 + 1 == 2
 ```
 
@@ -75,13 +44,18 @@ expect 1 + 1 == 2
 
 #### 512K should be 512 * 1024
 
+- 512K should be 512 * 1024
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("512K should be 512 * 1024")
 val expected = 512 * 1024
 expect expected == 524288
 ```
@@ -92,13 +66,18 @@ expect expected == 524288
 
 #### 256M should be 256 * 1024 * 1024
 
+- 256M should be 256 * 1024 * 1024
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("256M should be 256 * 1024 * 1024")
 val expected = 256 * 1024 * 1024
 expect expected == 268435456
 ```
@@ -109,13 +88,18 @@ expect expected == 268435456
 
 #### 2G should be 2 * 1024 * 1024 * 1024
 
+- 2G should be 2 * 1024 * 1024 * 1024
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("2G should be 2 * 1024 * 1024 * 1024")
 val expected = 2 * 1024 * 1024 * 1024
 expect expected == 2147483648
 ```
@@ -128,13 +112,18 @@ expect expected == 2147483648
 
 #### false is the default for flags
 
+- false is the default for flags
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("false is the default for flags")
 val default_flag = false
 expect default_flag == false
 ```
@@ -147,13 +136,18 @@ expect default_flag == false
 
 #### matches sandbox flag
 
+- matches sandbox flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches sandbox flag")
 expect flag == "--sandbox"
 ```
 
@@ -163,13 +157,18 @@ expect flag == "--sandbox"
 
 #### matches no-network flag
 
+- matches no-network flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches no-network flag")
 expect flag == "--no-network"
 ```
 
@@ -179,13 +178,18 @@ expect flag == "--no-network"
 
 #### matches time-limit flag
 
+- matches time-limit flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches time-limit flag")
 expect flag == "--time-limit"
 ```
 
@@ -195,13 +199,18 @@ expect flag == "--time-limit"
 
 #### matches memory-limit flag
 
+- matches memory-limit flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches memory-limit flag")
 expect flag == "--memory-limit"
 ```
 
@@ -213,16 +222,18 @@ expect flag == "--memory-limit"
 
 #### ends with G
 
-1. expect value ends with
+- ends with G
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ends with G")
 expect value.ends_with("G") == true
 ```
 
@@ -232,16 +243,18 @@ expect value.ends_with("G") == true
 
 #### ends with M
 
-1. expect value ends with
+- ends with M
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ends with M")
 expect value.ends_with("M") == true
 ```
 
@@ -251,16 +264,18 @@ expect value.ends_with("M") == true
 
 #### ends with K
 
-1. expect value ends with
+- ends with K
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ends with K")
 expect value.ends_with("K") == true
 ```
 
@@ -272,16 +287,18 @@ expect value.ends_with("K") == true
 
 #### splits into 3 parts
 
-1. expect parts len
+- splits into 3 parts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("splits into 3 parts")
 expect parts.len() == 3
 ```
 
@@ -289,13 +306,18 @@ expect parts.len() == 3
 
 #### first part is example.com
 
+- first part is example.com
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("first part is example.com")
 expect parts[0] == "example.com"
 ```
 
@@ -303,13 +325,18 @@ expect parts[0] == "example.com"
 
 #### second part is test.org
 
+- second part is test.org
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("second part is test.org")
 expect parts[1] == "test.org"
 ```
 
@@ -317,13 +344,18 @@ expect parts[1] == "test.org"
 
 #### third part is foo.net
 
+- third part is foo.net
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("third part is foo.net")
 expect parts[2] == "foo.net"
 ```
 
@@ -335,13 +367,18 @@ expect parts[2] == "foo.net"
 
 #### trims whitespace
 
+- trims whitespace
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("trims whitespace")
 expect trimmed == "512M"
 ```
 
@@ -353,13 +390,18 @@ expect trimmed == "512M"
 
 #### allows field mutation
 
+- allows field mutation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows field mutation")
 expect config_modified == true
 ```
 
@@ -369,13 +411,18 @@ expect config_modified == true
 
 #### has value
 
+- has value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has value")
 expect some_val == 60
 ```
 
@@ -385,13 +432,18 @@ expect some_val == 60
 
 #### validates None concept
 
+- validates None concept
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates None concept")
 val none_val: Option<i64> = nil
 expect(none_val).to_be_nil()
 ```
@@ -404,13 +456,18 @@ expect(none_val).to_be_nil()
 
 #### iterates 5 times
 
+- iterates 5 times
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("iterates 5 times")
 expect count == 5
 ```
 
@@ -420,16 +477,18 @@ expect count == 5
 
 #### checks bounds correctly
 
-1. expect i + 1 < args len
+- checks bounds correctly
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks bounds correctly")
 expect i + 1 < args.len() == true
 ```
 
@@ -441,13 +500,18 @@ expect i + 1 < args.len() == true
 
 #### increments by 2 for value flags
 
+- increments by 2 for value flags
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("increments by 2 for value flags")
 expect i == 2
 ```
 
@@ -459,17 +523,47 @@ expect i == 2
 
 #### chains operations
 
+- chains operations
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("chains operations")
 expect value == 30
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/tooling/sandbox_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering sandbox module compilation, memory size parsing logic, sandbox configuration patterns, sandbox flag detection logic, string suffix detection, comma-separated parsing logic, trim whitespace logic, sandbox configuration concepts, argument iteration pattern, flag value parsing pattern, builder pattern validation.
+- sandbox module compilation
+- memory size parsing logic
+- sandbox configuration patterns
+- sandbox flag detection logic
+- string suffix detection
+- comma-separated parsing logic
+- trim whitespace logic
+- sandbox configuration concepts
+- argument iteration pattern
+- flag value parsing pattern
+- builder pattern validation
 
 ## Scenario Summary
 
@@ -483,3 +577,51 @@ expect value == 30
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `84770864cee938280ff2698944cc2b2a0318fb6c881a582ce20cfca339aa33ed`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `84770864cee938280ff2698944cc2b2a0318fb6c881a582ce20cfca339aa33ed`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `84770864cee938280ff2698944cc2b2a0318fb6c881a582ce20cfca339aa33ed`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/sandbox_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/sandbox_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/sandbox_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/sandbox_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/sandbox_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles successfully' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/sandbox_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '512K should be 512 * 1024' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/sandbox_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '256M should be 256 * 1024 * 1024' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

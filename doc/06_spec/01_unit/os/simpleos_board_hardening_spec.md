@@ -1,30 +1,6 @@
 # Simpleos Board Hardening Specification
 
-> <details>
-
-<!-- sdn-diagram:id=simpleos_board_hardening_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_board_hardening_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_board_hardening_spec -> std
-simpleos_board_hardening_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_board_hardening_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SimpleOS board hardening catalog.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,18 +17,79 @@ simpleos_board_hardening_spec -> os
 
 #### defines optional protection modes and real board/QEMU contracts
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- defines optional protection modes and real board/QEMU contracts
+   - Expected: simpleos_protection_mode_from_text("off") equals `SimpleOsProtectionMode.Off`
+   - Expected: simpleos_protection_mode_from_text("detect") equals `SimpleOsProtectionMode.Detect`
+   - Expected: simpleos_protection_mode_from_text("enforce") equals `SimpleOsProtectionMode.Enforce`
+   - Expected: simpleos_protection_mode_from_text("fault-test") equals `SimpleOsProtectionMode.FaultTest`
+   - Expected: simpleos_protection_mode_name(SimpleOsProtectionMode.FaultTest) equals `fault-test`
+   - Expected: simpleos_protection_mode_accepts_hardening(SimpleOsProtectionMode.Off) is false
+   - Expected: simpleos_protection_mode_accepts_hardening(SimpleOsProtectionMode.Detect) is false
+   - Expected: simpleos_protection_mode_accepts_hardening(SimpleOsProtectionMode.Enforce) is true
+   - Expected: simpleos_protection_mode_accepts_hardening(SimpleOsProtectionMode.FaultTest) is true
+   - Expected: simpleos_board_known("mps2-an505") is true
+   - Expected: simpleos_board_cpu("mps2-an505") equals `cortex-m33`
+   - Expected: simpleos_board_has_qemu_id("mps2-an505") is true
+   - Expected: cmd.len() equals `14`
+   - Expected: cmd[0] equals `qemu-system-arm`
+   - Expected: cmd[1] equals `-machine`
+   - Expected: cmd[2] equals `mps2-an505`
+   - Expected: cmd[3] equals `-cpu`
+   - Expected: cmd[4] equals `cortex-m33`
+   - Expected: cmd[5] equals `-kernel`
+   - Expected: cmd[6] equals `build/os/simpleos_cm33.elf`
+   - Expected: cmd[7] equals `-serial`
+   - Expected: cmd[8] equals `stdio`
+   - Expected: cmd[9] equals `-monitor`
+   - Expected: cmd[10] equals `none`
+   - Expected: cmd[11] equals `-display`
+   - Expected: cmd[12] equals `none`
+   - Expected: cmd[13] equals `-no-reboot`
+   - Expected: smoke_cmd[0] equals `env`
+   - Expected: smoke_cmd[1] equals `SIMPLEOS_PROTECTION_MODE=fault-test`
+   - Expected: smoke_cmd[2] equals `qemu-system-arm`
+   - Expected: simpleos_board_qemu_requires_semihosting_for_mode("mps2-an505", SimpleOsProtectionMode.FaultTest) is true
+   - Expected: simpleos_board_qemu_requires_semihosting_for_mode("mps2-an505", SimpleOsProtectionMode.Enforce) is false
+   - Expected: rv_cmd[0] equals `env`
+   - Expected: rv_cmd[1] equals `SIMPLEOS_PROTECTION_MODE=enforce`
+   - Expected: rv_cmd[2] equals `qemu-system-riscv64`
+   - Expected: simpleos_board_has_qemu_id("ra4m1-uno-r4") is false
+   - Expected: simpleos_board_has_qemu_id("stm32u585-uno-q") is false
+   - Expected: simpleos_board_physical_script("ra4m1-uno-r4") equals `scripts/os/run_simpleos_ra4m1.shs`
+   - Expected: simpleos_board_physical_script("stm32u585-uno-q") equals `scripts/os/run_simpleos_stm32u585.shs`
+   - Expected: simpleos_board_known("up-squared-apollo-lake") is true
+   - Expected: simpleos_board_cpu("up-squared-apollo-lake") equals `x86_64-apollo-lake`
+   - Expected: simpleos_board_has_qemu_id("up-squared-apollo-lake") is false
+   - Expected: simpleos_board_physical_script("up-squared-apollo-lake") equals `scripts/os/run_simpleos_up_squared_apl.shs`
+   - Expected: up2_cmd equals `["sh", "scripts/os/run_simpleos_up_squared_apl.shs", "--build-only", "--prote... (full value in folded executable source)`
+   - Expected: ra_cmd equals `["sh", "scripts/os/run_simpleos_ra4m1.shs", "--build-only", "--protection=fau... (full value in folded executable source)`
+   - Expected: u585_cmd equals `["sh", "scripts/os/run_simpleos_stm32u585.shs", "--build-only", "--protection... (full value in folded executable source)`
+   - Expected: serial_cmd equals `[`
+   - Expected: simpleos_board_qemu_command_for_id("ra4m1-uno-r4", "ignored").len() equals `0`
+   - Expected: simpleos_board_supports_protection_mode_id("stm32u585-uno-q", SimpleOsProtectionMode.Off) is true
+   - Expected: simpleos_board_supports_protection_mode_id("stm32u585-uno-q", SimpleOsProtectionMode.Detect) is true
+   - Expected: simpleos_board_supports_protection_mode_id("stm32u585-uno-q", SimpleOsProtectionMode.Enforce) is true
+   - Expected: simpleos_board_supports_protection_mode_id("stm32u585-uno-q", SimpleOsProtectionMode.FaultTest) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 89 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("defines optional protection modes and real board/QEMU contracts")
 expect(simpleos_protection_mode_from_text("off")).to_equal(SimpleOsProtectionMode.Off)
 expect(simpleos_protection_mode_from_text("detect")).to_equal(SimpleOsProtectionMode.Detect)
 expect(simpleos_protection_mode_from_text("enforce")).to_equal(SimpleOsProtectionMode.Enforce)
 expect(simpleos_protection_mode_from_text("fault-test")).to_equal(SimpleOsProtectionMode.FaultTest)
-expect(simpleos_protection_mode_from_text("fallback").is_nil()).to_equal(true)
+expect(simpleos_protection_mode_from_text("fallback")).to_be_nil()
 expect(simpleos_protection_mode_name(SimpleOsProtectionMode.FaultTest)).to_equal("fault-test")
 
 expect(simpleos_protection_mode_accepts_hardening(SimpleOsProtectionMode.Off)).to_equal(false)
@@ -108,6 +145,13 @@ expect(simpleos_board_has_qemu_id("ra4m1-uno-r4")).to_equal(false)
 expect(simpleos_board_has_qemu_id("stm32u585-uno-q")).to_equal(false)
 expect(simpleos_board_physical_script("ra4m1-uno-r4")).to_equal("scripts/os/run_simpleos_ra4m1.shs")
 expect(simpleos_board_physical_script("stm32u585-uno-q")).to_equal("scripts/os/run_simpleos_stm32u585.shs")
+expect(simpleos_board_known("up-squared-apollo-lake")).to_equal(true)
+expect(simpleos_board_cpu("up-squared-apollo-lake")).to_equal("x86_64-apollo-lake")
+expect(simpleos_board_has_qemu_id("up-squared-apollo-lake")).to_equal(false)
+expect(simpleos_board_physical_script("up-squared-apollo-lake")).to_equal("scripts/os/run_simpleos_up_squared_apl.shs")
+val up2_cmd = simpleos_board_physical_build_only_command_for_id_with_mode("up-squared-apollo-lake", SimpleOsProtectionMode.Enforce)
+expect(up2_cmd).to_equal(["sh", "scripts/os/run_simpleos_up_squared_apl.shs", "--build-only", "--protection=enforce"])
+expect(simpleos_board_protection_marker_for_id("up-squared-apollo-lake", SimpleOsProtectionMode.Enforce)).to_contain("kind=x86-paging-iommu")
 val ra_cmd = simpleos_board_physical_build_only_command_for_id_with_mode("ra4m1-uno-r4", SimpleOsProtectionMode.FaultTest)
 expect(ra_cmd).to_equal(["sh", "scripts/os/run_simpleos_ra4m1.shs", "--build-only", "--protection=fault-test"])
 val u585_cmd = simpleos_board_physical_build_only_command_for_id_with_mode("stm32u585-uno-q", SimpleOsProtectionMode.Enforce)
@@ -143,13 +187,26 @@ expect(marker).to_contain("kind=pmsav8-mpu")
 
 #### requires runtime evidence before protection modes satisfy acceptance
 
+- requires runtime evidence before protection modes satisfy acceptance
+   - Expected: simpleos_protection_evidence_ready(unchecked) is false
+   - Expected: simpleos_protection_evidence_reason(unchecked) equals `missing-runtime-check`
+   - Expected: simpleos_protection_evidence_ready(detect) is true
+   - Expected: simpleos_protection_evidence_accepts_hardening(detect) is false
+   - Expected: simpleos_protection_evidence_reason(enforce_missing_regions) equals `missing-region-contract`
+   - Expected: simpleos_protection_evidence_reason(fault_missing_recovery) equals `missing-fault-recovery`
+   - Expected: simpleos_protection_evidence_ready(fault_ready) is true
+   - Expected: simpleos_protection_evidence_accepts_hardening(fault_ready) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 70 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires runtime evidence before protection modes satisfy acceptance")
 val unchecked = simpleos_protection_evidence(
     "mps2-an505",
     SimpleOsProtectionMode.Enforce,
@@ -224,13 +281,31 @@ expect(simpleos_protection_evidence_accepts_hardening(fault_ready)).to_equal(tru
 
 #### classifies protection evidence from serial markers
 
+- classifies protection evidence from serial markers
+   - Expected: simpleos_serial_has_protection_probe(an505_serial) is true
+   - Expected: simpleos_serial_has_protection_kind_contract("mps2-an505", an505_serial) is true
+   - Expected: simpleos_serial_has_protection_enabled(an505_serial) is true
+   - Expected: simpleos_serial_has_region_contract(an505_serial) is true
+   - Expected: simpleos_serial_has_fault_recovery(an505_serial) is false
+   - Expected: simpleos_protection_evidence_ready(an505_evidence) is true
+   - Expected: simpleos_protection_evidence_accepts_hardening(an505_evidence) is true
+   - Expected: simpleos_protection_evidence_ready(fault_evidence) is true
+   - Expected: simpleos_protection_evidence_accepts_hardening(fault_evidence) is true
+   - Expected: simpleos_serial_has_protection_kind_contract("stm32u585-uno-q", wrong_kind_serial) is false
+   - Expected: simpleos_protection_evidence_reason(wrong_kind) equals `missing-protection-kind-contract:pmsav8-mpu`
+   - Expected: simpleos_protection_evidence_ready(x86_evidence) is true
+   - Expected: simpleos_protection_evidence_reason(no_runtime) equals `missing-runtime-check`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("classifies protection evidence from serial markers")
 val an505_serial = "[BOOT] Platform: MPS2-AN505 (QEMU)\n[FAULT] MemManage, BusFault, UsageFault enabled; DIV0 trap on\n[MPU] Enabled, 8 regions available, 4 configured\n[BOOT] Entering shell..."
 expect(simpleos_serial_has_protection_probe(an505_serial)).to_equal(true)
 expect(simpleos_serial_has_protection_kind_contract("mps2-an505", an505_serial)).to_equal(true)
@@ -291,13 +366,27 @@ expect(simpleos_protection_evidence_reason(no_runtime)).to_equal("missing-runtim
 
 #### checks physical serial logs with real-board evidence semantics
 
+- checks physical serial logs with real-board evidence semantics
+   - Expected: simpleos_physical_serial_accepts_hardening("stm32u585-uno-q", "fault-test", ready) is true
+   - Expected: simpleos_physical_serial_acceptance_reason("stm32u585-uno-q", "fault-test", ready) equals `ready`
+   - Expected: simpleos_physical_serial_acceptance_reason("stm32u585-uno-q", "fault-test", no_mode) equals `missing-physical-board-marker:stm32u585-uno-q`
+   - Expected: simpleos_serial_has_selected_protection_mode(SimpleOsProtectionMode.FaultTest, no_mode_with_board) is false
+   - Expected: simpleos_physical_serial_acceptance_reason("stm32u585-uno-q", "fault-test", no_mode_with_board) equals `missing-selected-protection-mode:fault-test`
+   - Expected: simpleos_physical_serial_acceptance_reason("stm32u585-uno-q", "fault-test", build_only) equals `real-board-not-run`
+   - Expected: simpleos_physical_serial_acceptance_reason("stm32u585-uno-q", "fault-test", wrong_board) equals `missing-physical-board-marker:stm32u585-uno-q`
+   - Expected: simpleos_physical_serial_acceptance_reason("ra4m1-uno-r4", "detect", diagnostic) equals `diagnostic-protection-mode:detect`
+   - Expected: simpleos_physical_serial_acceptance_reason("mps2-an505", "enforce", ready) equals `missing-physical-board-script:mps2-an505`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("checks physical serial logs with real-board evidence semantics")
 val ready = "board=stm32u585-uno-q\nprotection=fault-test\nkind=pmsav8-mpu\nprotection_probe=pass\nprotection_enabled=pass\nregion_contract=pass\nfault_recovered=pass\n"
 expect(simpleos_physical_serial_accepts_hardening("stm32u585-uno-q", "fault-test", ready)).to_equal(true)
 expect(simpleos_physical_serial_acceptance_reason("stm32u585-uno-q", "fault-test", ready)).to_equal("ready")
@@ -329,12 +418,12 @@ expect(simpleos_physical_serial_acceptance_reason("mps2-an505", "enforce", ready
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/simpleos_board_hardening_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS board hardening catalog.
 - SimpleOS board hardening catalog
 
 ## Scenario Summary
@@ -349,3 +438,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `36843a89589542f0d54abd7f634fc4a0015dea4a9c391a8721869ef3f6c1fd71`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `36843a89589542f0d54abd7f634fc4a0015dea4a9c391a8721869ef3f6c1fd71`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `36843a89589542f0d54abd7f634fc4a0015dea4a9c391a8721869ef3f6c1fd71`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/os/simpleos_board_hardening_spec.spl
+mirror: doc/06_spec/01_unit/os/simpleos_board_hardening_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/simpleos_board_hardening_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/simpleos_board_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/simpleos_board_hardening_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/simpleos_board_hardening_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defines optional protection modes and real board/QEMU contracts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/simpleos_board_hardening_spec.spl:218:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'classifies protection evidence from serial markers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/simpleos_board_hardening_spec.spl:276:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'checks physical serial logs with real-board evidence semantics' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

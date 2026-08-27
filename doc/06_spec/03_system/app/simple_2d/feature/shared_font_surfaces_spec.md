@@ -20,7 +20,7 @@ Checks one persistent 2D glyph batch, warm atlas reuse, atlas-subrect blending, 
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl` |
-| Updated | 2026-07-19 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks one persistent 2D glyph batch, warm atlas reuse, atlas-subrect blending, and fail-closed material behavior.
@@ -39,10 +39,12 @@ does not claim atomic process-global font replacement or a global lock.
 
 #### should prepare stable glyph quads and no warm dirty upload
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should prepare stable glyph quads and no warm dirty upload
 - Prepare one shared font batch for 2D
-- var renderer = setup shared font fixture
-- expect shared font batch
-- expect shared font batch
    - Expected: cold.dirty_rects.len() equals `2`
    - Expected: warm.dirty_rects.len() equals `0`
    - Expected: warm.atlas_generation equals `cold.atlas_generation`
@@ -52,16 +54,17 @@ does not claim atomic process-global font replacement or a global lock.
    - Expected: warm.quads[0].byte_offset equals `0`
    - Expected: warm.quads[1].byte_offset equals `1`
    - Expected: dirty.atlas_owner_identity() equals `warm.atlas_owner_identity()`
-- assert not equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should prepare stable glyph quads and no warm dirty upload")
 step("Prepare one shared font batch for 2D")
 var renderer = setup_shared_font_fixture()
 val cold = renderer.prepare_text("AB", 0xFF336699u32, 16)
@@ -86,25 +89,24 @@ assert_not_equal(dirty.atlas_cache_identity(), warm.atlas_cache_identity())
 
 #### should carry one validated runtime configuration through every material path
 
+- should carry one validated runtime configuration through every material path
 - Prepare one shared font batch for 2D
-- var renderer = setup shared font fixture
-- expect shared font batch
-- expect shared font batch
    - Expected: text_batch.render_config_identity equals `config.identity()`
    - Expected: text_batch.execution_target equals `cpu`
    - Expected: text_batch.execution_policy equals `FontExecutionPolicy.Required`
    - Expected: renderer.prepare_glyph_run_configured(run, 0xFFFFFFFFu32, config).render_config_identity equals `config.identity()`
-- draw ir empty glyph run payload
    - Expected: selected_config_identity equals `config.identity()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should carry one validated runtime configuration through every material path")
 step("Prepare one shared font batch for 2D")
 var renderer = setup_shared_font_fixture()
 val config = FontRenderConfig(
@@ -135,10 +137,9 @@ expect(selected_config_identity).to_equal(config.identity())
 
 #### should preserve selected font identity across cold and warm batches
 
-- var renderer = FontRenderer browser serif default
+- should preserve selected font identity across cold and warm batches
    - Expected: warm.font_identity equals `cold.font_identity`
    - Expected: warm.face_generation equals `cold.face_generation`
-- renderer clear ttf
    - Expected: stale.0 equals `0`
    - Expected: stale.1 equals ``
    - Expected: empty.font_identity equals ``
@@ -150,10 +151,12 @@ expect(selected_config_identity).to_equal(config.identity())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve selected font identity across cold and warm batches")
 var renderer = FontRenderer.browser_serif_default()
 val cold = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
 val warm = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
@@ -180,18 +183,19 @@ if cold.font_identity != "":
 
 #### should feed the 2D blend surface from the shared white-alpha atlas
 
-- var renderer = setup shared font fixture
-- expect shared font batch
+- should feed the 2D blend surface from the shared white-alpha atlas
    - Expected: pixels.len() equals `(quad.width * quad.height).to_i64()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should feed the 2D blend surface from the shared white-alpha atlas")
 var renderer = setup_shared_font_fixture()
 val batch = renderer.prepare_text("A", 0x80402010u32, 16)
 expect_shared_font_batch(batch, 1)
@@ -208,7 +212,7 @@ expect(_nonzero_pixels(pixels)).to_be_greater_than(0)
 
 #### should fail closed for invalid sizes and empty content
 
-- var renderer = setup shared font fixture
+- should fail closed for invalid sizes and empty content
    - Expected: invalid.font_identity equals ``
    - Expected: invalid.face_generation equals `0`
    - Expected: empty.font_identity equals ``
@@ -218,10 +222,12 @@ expect(_nonzero_pixels(pixels)).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed for invalid sizes and empty content")
 var renderer = setup_shared_font_fixture()
 val invalid = renderer.prepare_text("A", 0xFFFFFFFFu32, 0)
 expect(invalid.valid).to_be(false)
@@ -239,7 +245,7 @@ expect(empty.face_generation).to_equal(0)
 
 #### should snapshot supplied glyph-run generation without claiming an identity
 
-- var renderer = setup shared font fixture
+- should snapshot supplied glyph-run generation without claiming an identity
    - Expected: batch.font_identity equals ``
    - Expected: batch.face_generation equals `37`
 
@@ -247,10 +253,12 @@ expect(empty.face_generation).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should snapshot supplied glyph-run generation without claiming an identity")
 var renderer = setup_shared_font_fixture()
 val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 37,
     glyph_ids: [], xs: [], ys: [], clusters: [])
@@ -275,3 +283,72 @@ expect(batch.face_generation).to_equal(37)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b523be944d671d8ca19b78d4f6f6c03dcb18a6d0a80517870883f4a74a81a156`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b523be944d671d8ca19b78d4f6f6c03dcb18a6d0a80517870883f4a74a81a156`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b523be944d671d8ca19b78d4f6f6c03dcb18a6d0a80517870883f4a74a81a156`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl
+mirror: doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simple_2d/feature/shared_font_surfaces_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:49:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should prepare stable glyph quads and no warm dirty upload' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should prepare stable glyph quads and no warm dirty upload' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:72:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should carry one validated runtime configuration through every material path' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should carry one validated runtime configuration through every material path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:100:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve selected font identity across cold and warm batches' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve selected font identity across cold and warm batches' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:125:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should feed the 2D blend surface from the shared white-alpha atlas' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:139:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for invalid sizes and empty content' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl:154:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should snapshot supplied glyph-run generation without claiming an identity' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

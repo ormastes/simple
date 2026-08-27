@@ -24,7 +24,7 @@ This specification proves a bounded two-column CSS Grid slice through the canoni
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -261,143 +261,21 @@ It cannot promote `red-not-run` corpus evidence to PASS.
 
 #### should lower explicit tracks placement span and an implicit row
 
-- Trace implemented CSS properties through canonical rendering
-   - Artifact capture: after_step
-- "<style>" +  grid common css
-   - Artifact capture: after_step
-- "<main id='grid'>" +  grid items
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 13 expected checks
-   - Expected: [a.x, a.y, a.width, a.height] equals `[0, 0, 6, 5]`
-   - Expected: [b.x, b.y, b.width, b.height] equals `[8, 0, 10, 5]`
-   - Expected: [c.x, c.y, c.width, c.height] equals `[0, 7, 18, 7]`
-   - Expected: [d.x, d.y, d.width, d.height] equals `[8, 16, 10, 4]`
-   - Expected: a.parent_id equals `grid`
-   - Expected: b.parent_id equals `grid`
-   - Expected: c.parent_id equals `grid`
-   - Expected: d.parent_id equals `grid`
-   - Expected: _grid_style(grid, "display") equals `grid`
-   - Expected: _grid_style(c, "grid-column") equals `1 / span 2`
-   - Expected: _grid_style(c, "grid-row") equals `2`
-   - Expected: _grid_style(d, "grid-column") equals `2`
-   - Expected: _grid_style(d, "grid-row") equals `3`
-- backend shutdown
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 1 expected check
-   - Expected: frame.skipped_command_count equals `0`
+**Scenario capture:** artifact after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 104 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Trace implemented CSS properties through canonical rendering")
-val html = (
-    "<style>" + _grid_common_css() +
-    "#grid{display:grid;width:18px;" +
-    "grid-template-columns:6px 10px;" +
-    "grid-template-rows:5px 7px;" +
-    "column-gap:2px;row-gap:2px;background:#dbeafe}" +
-    "#c{grid-column:1 / span 2;grid-row:2}" +
-    "#d{grid-column:2;grid-row:3}</style>" +
-    "<main id='grid'>" + _grid_items() + "</main>"
-)
-
-expect(simple_web_layout_debug_style_by_id(
-    html, "grid", "display"
-)).to_equal("grid")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 32, 24, "c", "x"
-)).to_equal("0")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 32, 24, "c", "y"
-)).to_equal("7")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 32, 24, "c", "w"
-)).to_equal("18")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 32, 24, "d", "x"
-)).to_equal("8")
-expect(simple_web_layout_debug_layout_by_id(
-    html, 32, 24, "d", "y"
-)).to_equal("16")
-
-val composition = simple_web_layout_render_html_draw_ir(
-    html, 32, 24
-)
-expect(composition.batches.len()).to_be_greater_than(0)
-val commands: [DrawIrCommand] = if composition.batches.len() > 0:
-    composition.batches[0].commands
-else:
-    []
-val grid_index = _grid_command_index(commands, "grid")
-val a_index = _grid_command_index(commands, "a")
-val b_index = _grid_command_index(commands, "b")
-val c_index = _grid_command_index(commands, "c")
-val d_index = _grid_command_index(commands, "d")
-expect(grid_index).to_be_greater_than(-1)
-expect(a_index).to_be_greater_than(grid_index)
-expect(b_index).to_be_greater_than(a_index)
-expect(c_index).to_be_greater_than(b_index)
-expect(d_index).to_be_greater_than(c_index)
-
-if (
-    grid_index >= 0 and a_index >= 0 and b_index >= 0 and
-    c_index >= 0 and d_index >= 0
-):
-    val grid = commands[grid_index]
-    val a = commands[a_index]
-    val b = commands[b_index]
-    val c = commands[c_index]
-    val d = commands[d_index]
-    expect([grid.x, grid.y, grid.width, grid.height]).to_equal(
-        [0, 0, 18, 20]
-    )
-    expect([a.x, a.y, a.width, a.height]).to_equal([0, 0, 6, 5])
-    expect([b.x, b.y, b.width, b.height]).to_equal([8, 0, 10, 5])
-    expect([c.x, c.y, c.width, c.height]).to_equal([0, 7, 18, 7])
-    expect([d.x, d.y, d.width, d.height]).to_equal([8, 16, 10, 4])
-    expect(a.parent_id).to_equal("grid")
-    expect(b.parent_id).to_equal("grid")
-    expect(c.parent_id).to_equal("grid")
-    expect(d.parent_id).to_equal("grid")
-    expect([
-        grid.clip_rect.x, grid.clip_rect.y,
-        grid.clip_rect.width, grid.clip_rect.height
-    ]).to_equal([0, 0, 32, 24])
-    expect(_grid_style(grid, "display")).to_equal("grid")
-    expect(_grid_style(
-        grid, "grid-template-columns"
-    )).to_equal("6px 10px")
-    expect(_grid_style(
-        grid, "grid-template-rows"
-    )).to_equal("5px 7px")
-    expect(_grid_style(c, "grid-column")).to_equal("1 / span 2")
-    expect(_grid_style(c, "grid-row")).to_equal("2")
-    expect(_grid_style(d, "grid-column")).to_equal("2")
-    expect(_grid_style(d, "grid-row")).to_equal("3")
-
-val backend = Engine2dCompositorBackend.create_named(
-    32, 24, "software"
-)
-val frame = backend.render_draw_ir_composition(composition, [])
-backend.shutdown()
-expect(frame.skipped_command_count).to_equal(0)
-expect(_grid_color_count(
-    frame.pixels, 0xFFEF4444u32
-)).to_equal(30)
-expect(_grid_color_count(
-    frame.pixels, 0xFF22C55Eu32
-)).to_equal(50)
-expect(_grid_color_count(
-    frame.pixels, 0xFF2563EBu32
-)).to_equal(126)
-expect(_grid_color_count(
-    frame.pixels, 0xFFD946EFu32
-)).to_equal(40)
+# @req REQ-WEB-BROWSER-003
+# @req REQ-WEB-BROWSER-004
+# @req REQ-WEB-BROWSER-019
+# @req REQ-WEB-BROWSER-021.
+# @req REQ-WEB-BROWSER-003/004/019/021
 ```
 
 </details>
@@ -407,8 +285,8 @@ expect(_grid_color_count(
 
 #### should drop an over-quota Grid rule without partial mutation
 
+- should drop an over-quota Grid rule without partial mutation
 - Trace implemented CSS properties through canonical rendering
-- "<style>#quota{" +  grid over quota declarations
    - Expected: _grid_style(quota, "display") equals `block`
    - Expected: _grid_style(quota, "grid-column") equals ``
    - Expected: _grid_style(quota, "grid-row") equals ``
@@ -417,10 +295,12 @@ expect(_grid_color_count(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should drop an over-quota Grid rule without partial mutation")
 step("Trace implemented CSS properties through canonical rendering")
 val html = (
     "<style>#quota{" + _grid_over_quota_declarations() +
@@ -463,9 +343,8 @@ if quota_index >= 0:
 
 #### should keep the equivalent block control in vertical flow
 
+- should keep the equivalent block control in vertical flow
 - Trace implemented CSS properties through canonical rendering
-- "<style>" +  grid common css
-- "</style><main id='control'>" +  grid items
    - Expected: [a.x, a.y, a.width, a.height] equals `[0, 0, 18, 5]`
    - Expected: [b.x, b.y, b.width, b.height] equals `[0, 5, 18, 5]`
    - Expected: [c.x, c.y, c.width, c.height] equals `[0, 10, 18, 7]`
@@ -475,17 +354,18 @@ if quota_index >= 0:
    - Expected: c.parent_id equals `control`
    - Expected: d.parent_id equals `control`
    - Expected: _grid_style(control, "display") equals `block`
-- backend shutdown
    - Expected: frame.skipped_command_count equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 71 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep the equivalent block control in vertical flow")
 step("Trace implemented CSS properties through canonical rendering")
 val html = (
     "<style>" + _grid_common_css() +
@@ -582,3 +462,68 @@ expect(_grid_color_count(
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-019`
+- `REQ-WEB-BROWSER-021.`
+- `REQ-WEB-BROWSER-003/004/019/021`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bf0181ee34a682e499f5d9589680eb2fc0f90a66e06eb267ef37e0e506881e2c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bf0181ee34a682e499f5d9589680eb2fc0f90a66e06eb267ef37e0e506881e2c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bf0181ee34a682e499f5d9589680eb2fc0f90a66e06eb267ef37e0e506881e2c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/grid_foundation_wpt_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=75 oracle=90
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/css/grid_foundation_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/grid_foundation_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:313:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should lower explicit tracks placement span and an implicit row' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:313:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should lower explicit tracks placement span and an implicit row' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:432:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should drop an over-quota Grid rule without partial mutation' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:432:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should drop an over-quota Grid rule without partial mutation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:467:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep the equivalent block control in vertical flow' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl:467:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep the equivalent block control in vertical flow' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,29 +2,6 @@
 
 > struct Array<T, const N: usize>:
 
-<!-- sdn-diagram:id=generics_advanced_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=generics_advanced_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-generics_advanced_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=generics_advanced_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -44,7 +21,7 @@ struct Array<T, const N: usize>:
 | Category | Type System \| Generics |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/generics_advanced_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -55,6 +32,8 @@ struct Array<T, const N: usize>:
 data: T
 
 # Where clause
+use std.spec.step
+
 fn filled(value: T) -> T where T: Copy:
 value
 
@@ -79,13 +58,22 @@ fn next() -> Option<Self.Item>
 
 #### parses const generic parameter
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- parses const generic parameter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses const generic parameter")
 struct Array<T, const N: usize>:
     data: T
 
@@ -98,18 +86,18 @@ expect true  # Parsed successfully
 
 #### parses where clause on function
 
-1. fn copy
-2. fn filled
-3. expect filled
+- parses where clause on function
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses where clause on function")
 trait Copy:
     fn copy() -> Self
 
@@ -125,18 +113,18 @@ expect filled(42) == 42
 
 #### parses impl trait for type
 
-1. fn len
-2. fn len
-3. expect list len
+- parses impl trait for type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses impl trait for type")
 trait Len:
     fn len() -> i64
 
@@ -157,17 +145,18 @@ expect list.len() == 42
 
 #### parses generic impl with where
 
-1. fn clone
-2. fn clone
+- parses generic impl with where
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses generic impl with where")
 trait Clone:
     fn clone() -> Self
 
@@ -186,13 +175,18 @@ expect true
 
 #### parses nested generic types
 
+- parses nested generic types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses nested generic types")
 struct Container:
     items: [Option<i64>]
 
@@ -205,17 +199,18 @@ expect true  # Parsed successfully
 
 #### parses tuple return type
 
-1. fn get pair
-2.
+- parses tuple return type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses tuple return type")
 fn get_pair() -> (i64, str):
     (42, "hello")
 
@@ -232,19 +227,18 @@ expect txt == "hello"
 
 #### parses multiple trait bounds
 
-1. fn clone
-2. fn default
-3. fn make<T>
-4. T default
+- parses multiple trait bounds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses multiple trait bounds")
 trait Clone:
     fn clone() -> Self
 
@@ -263,16 +257,18 @@ expect true  # Parsed successfully
 
 #### parses associated type
 
-1. fn next
+- parses associated type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses associated type")
 trait Iterator:
     type Item
 
@@ -295,3 +291,51 @@ expect true  # Parsed successfully
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7e7a57229fdbdbca8705e952b3724c63042e7299de955120a243d05d452966e1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7e7a57229fdbdbca8705e952b3724c63042e7299de955120a243d05d452966e1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7e7a57229fdbdbca8705e952b3724c63042e7299de955120a243d05d452966e1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/generics_advanced_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/generics_advanced_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/generics_advanced_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/generics_advanced_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/generics_advanced_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses const generic parameter' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/generics_advanced_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses where clause on function' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/generics_advanced_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses impl trait for type' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

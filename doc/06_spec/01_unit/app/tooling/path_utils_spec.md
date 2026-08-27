@@ -1,29 +1,6 @@
 # Path Utils Specification
 
-> 1. expect get filename
-
-<!-- sdn-diagram:id=path_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=path_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-path_utils_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=path_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Path Utilities, Filename Extraction, Directory Name, Parent Directory, Path Joining, Extension, Stem, Has Extension, Path Normalization, Absolute Path, Make Relative, Split Path, Complex Scenarios.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,18 +19,18 @@ path_utils_spec -> std
 
 #### extracts filename from unix path
 
-1. expect get filename
-2. expect get filename
-3. expect get filename
+- extracts filename from unix path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts filename from unix path")
 expect get_filename("/home/user/file.txt") == "file.txt"
 expect get_filename("/home/user/") == ""
 expect get_filename("file.txt") == "file.txt"
@@ -63,17 +40,18 @@ expect get_filename("file.txt") == "file.txt"
 
 #### extracts filename from windows path
 
-1. expect get filename
-2. expect get filename
+- extracts filename from windows path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts filename from windows path")
 expect get_filename("C:\\Users\\user\\file.txt") == "file.txt"
 expect get_filename("C:\\Program Files\\app.exe") == "app.exe"
 ```
@@ -82,18 +60,18 @@ expect get_filename("C:\\Program Files\\app.exe") == "app.exe"
 
 #### handles edge cases
 
-1. expect get filename
-2. expect get filename
-3. expect get filename
+- handles edge cases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles edge cases")
 expect get_filename("") == ""
 expect get_filename("/") == ""
 expect get_filename("simple_file") == "simple_file"
@@ -105,17 +83,18 @@ expect get_filename("simple_file") == "simple_file"
 
 #### gets directory name
 
-1. expect get dir name
-2. expect get dir name
+- gets directory name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets directory name")
 expect get_dir_name("/home/user/documents") == "documents"
 expect get_dir_name("/home/user/documents/") == "documents"
 ```
@@ -126,18 +105,18 @@ expect get_dir_name("/home/user/documents/") == "documents"
 
 #### gets parent dir unix
 
-1. expect get parent dir
-2. expect get parent dir
-3. expect get parent dir
+- gets parent dir unix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets parent dir unix")
 expect get_parent_dir("/home/user/file.txt") == "/home/user"
 expect get_parent_dir("/home/user/") == "/home"
 expect get_parent_dir("/home") == "/"
@@ -147,13 +126,18 @@ expect get_parent_dir("/home") == "/"
 
 #### returns option for parent
 
+- returns option for parent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns option for parent")
 val result = get_parent_dir_option("/home/user/file.txt")
 expect result == "/home/user"
 ```
@@ -162,13 +146,18 @@ expect result == "/home/user"
 
 #### returns nil for no parent
 
+- returns nil for no parent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for no parent")
 val result = get_parent_dir_option("file.txt")
 expect result == nil
 ```
@@ -179,17 +168,18 @@ expect result == nil
 
 #### joins unix paths
 
-1. expect join path
-2. expect join path
+- joins unix paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("joins unix paths")
 expect join_path("/home/user", "file.txt") == "/home/user/file.txt"
 expect join_path("/home/user/", "file.txt") == "/home/user/file.txt"
 ```
@@ -198,18 +188,18 @@ expect join_path("/home/user/", "file.txt") == "/home/user/file.txt"
 
 #### handles edge cases
 
-1. expect join path
-2. expect join path
-3. expect join path
+- handles edge cases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles edge cases")
 expect join_path("", "file.txt") == "file.txt"
 expect join_path("/home", "") == "/home"
 expect join_path("", "") == ""
@@ -221,18 +211,18 @@ expect join_path("", "") == ""
 
 #### gets extension
 
-1. expect get extension
-2. expect get extension
-3. expect get extension
+- gets extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets extension")
 expect get_extension("file.txt") == "txt"
 expect get_extension("archive.tar.gz") == "gz"
 expect get_extension("/path/to/file.json") == "json"
@@ -242,18 +232,18 @@ expect get_extension("/path/to/file.json") == "json"
 
 #### returns empty for no extension
 
-1. expect get extension
-2. expect get extension
-3. expect get extension
+- returns empty for no extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns empty for no extension")
 expect get_extension("README") == ""
 expect get_extension("/path/to/file") == ""
 expect get_extension("") == ""
@@ -263,17 +253,18 @@ expect get_extension("") == ""
 
 #### handles hidden files
 
-1. expect get extension
-2. expect get extension
+- handles hidden files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles hidden files")
 expect get_extension(".gitignore") == ""
 expect get_extension(".config.yml") == "yml"
 ```
@@ -284,18 +275,18 @@ expect get_extension(".config.yml") == "yml"
 
 #### gets stem
 
-1. expect get stem
-2. expect get stem
-3. expect get stem
+- gets stem
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets stem")
 expect get_stem("file.txt") == "file"
 expect get_stem("archive.tar.gz") == "archive.tar"
 expect get_stem("/path/to/document.pdf") == "document"
@@ -305,17 +296,18 @@ expect get_stem("/path/to/document.pdf") == "document"
 
 #### handles no extension
 
-1. expect get stem
-2. expect get stem
+- handles no extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles no extension")
 expect get_stem("README") == "README"
 expect get_stem("Makefile") == "Makefile"
 ```
@@ -326,18 +318,18 @@ expect get_stem("Makefile") == "Makefile"
 
 #### checks extension
 
-1. expect has extension
-2. expect has extension
-3. expect has extension
+- checks extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks extension")
 expect has_extension("file.txt", "txt")
 expect has_extension("file.txt", ".txt")
 expect has_extension("archive.TAR", "tar")
@@ -347,17 +339,18 @@ expect has_extension("archive.TAR", "tar")
 
 #### returns false for wrong extension
 
-1. expect not has extension
-2. expect not has extension
+- returns false for wrong extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns false for wrong extension")
 expect not has_extension("file.txt", "pdf")
 expect not has_extension("README", "txt")
 ```
@@ -368,18 +361,18 @@ expect not has_extension("README", "txt")
 
 #### normalizes backslashes
 
-1. expect normalize path
-2. expect normalize path
-3. expect normalize path
+- normalizes backslashes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("normalizes backslashes")
 expect normalize_path("C:\\Users\\user\\file.txt") == "C:/Users/user/file.txt"
 expect normalize_path("/home/user/file.txt") == "/home/user/file.txt"
 expect normalize_path("path\\to\\file") == "path/to/file"
@@ -391,18 +384,18 @@ expect normalize_path("path\\to\\file") == "path/to/file"
 
 #### detects unix absolute paths
 
-1. expect is absolute path
-2. expect is absolute path
-3. expect not is absolute path
+- detects unix absolute paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects unix absolute paths")
 expect is_absolute_path("/home/user/file.txt")
 expect is_absolute_path("/")
 expect not is_absolute_path("relative/path")
@@ -412,18 +405,18 @@ expect not is_absolute_path("relative/path")
 
 #### detects windows absolute paths
 
-1. expect is absolute path
-2. expect is absolute path
-3. expect not is absolute path
+- detects windows absolute paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects windows absolute paths")
 expect is_absolute_path("C:\\Users\\user\\file.txt")
 expect is_absolute_path("D:/data/file.dat")
 expect not is_absolute_path("relative\\path")
@@ -433,17 +426,18 @@ expect not is_absolute_path("relative\\path")
 
 #### handles edge cases
 
-1. expect not is absolute path
-2. expect not is absolute path
+- handles edge cases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles edge cases")
 expect not is_absolute_path("")
 expect not is_absolute_path("file.txt")
 ```
@@ -454,17 +448,18 @@ expect not is_absolute_path("file.txt")
 
 #### makes path relative
 
-1. expect make relative
-2. expect make relative
+- makes path relative
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("makes path relative")
 expect make_relative("/home/user/docs/file.txt", "/home/user") == "docs/file.txt"
 expect make_relative("/home/user/file.txt", "/home/user") == "file.txt"
 ```
@@ -473,13 +468,18 @@ expect make_relative("/home/user/file.txt", "/home/user") == "file.txt"
 
 #### returns original for no common prefix
 
+- returns original for no common prefix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns original for no common prefix")
 val result = make_relative("/var/log/file.txt", "/home/user")
 expect result == "/var/log/file.txt"
 ```
@@ -490,16 +490,18 @@ expect result == "/var/log/file.txt"
 
 #### splits unix path
 
-1. expect parts len
+- splits unix path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("splits unix path")
 val parts = split_path("/home/user/documents/file.txt")
 expect parts.len() == 4
 expect parts[0] == "home"
@@ -512,16 +514,18 @@ expect parts[3] == "file.txt"
 
 #### splits relative path
 
-1. expect parts len
+- splits relative path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("splits relative path")
 val parts = split_path("docs/file.txt")
 expect parts.len() == 2
 expect parts[0] == "docs"
@@ -532,16 +536,18 @@ expect parts[1] == "file.txt"
 
 #### handles empty path
 
-1. expect parts len
+- handles empty path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles empty path")
 val parts = split_path("")
 expect parts.len() == 0
 ```
@@ -552,19 +558,18 @@ expect parts.len() == 0
 
 #### manipulates complex path
 
-1. expect get filename
-2. expect get extension
-3. expect get stem
-4. expect get parent dir
+- manipulates complex path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("manipulates complex path")
 val path = "/home/user/projects/simple/src/main.spl"
 expect get_filename(path) == "main.spl"
 expect get_extension(path) == "spl"
@@ -576,13 +581,18 @@ expect get_parent_dir(path) == "/home/user/projects/simple/src"
 
 #### builds path from components
 
+- builds path from components
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds path from components")
 val base = "/home/user"
 val subdir = "projects"
 val filename = "main.spl"
@@ -595,16 +605,18 @@ expect final_path == "/home/user/projects/main.spl"
 
 #### converts relative path
 
-1. expect parts len
+- converts relative path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts relative path")
 val absolute = "/home/user/projects/simple/src/main.spl"
 val base = "/home/user/projects"
 val relative = make_relative(absolute, base)
@@ -622,12 +634,12 @@ expect parts.len() == 3
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/path_utils_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Path Utilities, Filename Extraction, Directory Name, Parent Directory, Path Joining, Extension, Stem, Has Extension, Path Normalization, Absolute Path, Make Relative, Split Path, Complex Scenarios.
 - Path Utilities
 - Filename Extraction
 - Directory Name
@@ -654,3 +666,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7b78dcd06a434092b8b817de514c32d78246aa3289b5f424dd3951b09581585a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7b78dcd06a434092b8b817de514c32d78246aa3289b5f424dd3951b09581585a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7b78dcd06a434092b8b817de514c32d78246aa3289b5f424dd3951b09581585a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/path_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/path_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/path_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/path_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/path_utils_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts filename from unix path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/path_utils_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts filename from windows path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/path_utils_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles edge cases' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

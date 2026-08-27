@@ -20,7 +20,7 @@ Keeps executable modern SSpec, generated manuals, guides, cooperative review,
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Keeps executable modern SSpec, generated manuals, guides, cooperative review,
@@ -35,8 +35,6 @@ and source-layout contracts synchronized.
 - mirrors every executable scenario into an operator manual
    - Exec capture: after_step
 - Inspect all backend-equivalence spec and manual pairs
-   - Exec capture: after_step
-   - Evidence: execution result verified by 2 expected checks
    - Expected: SPECS.len() equals `MANUALS.len()`
    - Expected: SPECS.len() equals `13`
 
@@ -52,7 +50,7 @@ Reproduction: this block contains the complete executable scenario source.
 step("mirrors every executable scenario into an operator manual")
 step("Inspect all backend-equivalence spec and manual pairs")
 expect(SPECS.len()).to_equal(MANUALS.len())
-expect(SPECS.len()).to_equal(13)
+expect(SPECS.len()).to_equal(13)  # oracle: the renderdoc matrix is exactly these 13 spec/manual pairs
 var index = 0
 while index < SPECS.len():
     expect(file_exists(SPECS[index])).to_be(true)
@@ -71,9 +69,7 @@ while index < SPECS.len():
 - keeps modern steps requirements direct matchers and no fail placeholders
    - Exec capture: after_step
 - Audit scenario source quality
-   - Exec capture: after_step
-   - Evidence: execution result verified by 1 expected check
-   - Expected: source contains `"expect(true`
+   - Expected: spec_text contains `"expect(true`
 
 
 <details>
@@ -87,14 +83,14 @@ Reproduction: this block contains the complete executable scenario source.
 step("keeps modern steps requirements direct matchers and no fail placeholders")
 step("Audit scenario source quality")
 for path in SPECS:
-    val source = file_read(path)
-    expect(source).to_contain("# @req")
-    expect(source).to_contain("step(")
-    expect(source).to_contain("expect(")
+    val spec_text = file_read(path)
+    expect(spec_text).to_contain("# @req")
+    expect(spec_text).to_contain("step(")
+    expect(spec_text).to_contain("expect(")
     if path != "test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl":
-        expect(source.contains("pass_todo")).to_be(false)
-        expect(source.contains("expect(true).to_equal(true)")).to_be(false)
-        expect(source.contains("pending_")).to_be(false)
+        expect(spec_text.contains("pass_todo")).to_be(false)
+        expect(spec_text.contains("expect(true).to_equal(true)")).to_be(false)
+        expect(spec_text.contains("pending_")).to_be(false)
 ```
 
 </details>
@@ -107,8 +103,6 @@ for path in SPECS:
 - rejects executable specs under the generated manual tree
    - Exec capture: after_step
 - Scan doc/06_spec for executable Simple files
-   - Exec capture: after_step
-   - Evidence: execution result verified by 2 expected checks
    - Expected: code equals `0`
    - Expected: out equals ``
 
@@ -125,7 +119,7 @@ step("rejects executable specs under the generated manual tree")
 step("Scan doc/06_spec for executable Simple files")
 val (out, _err, code) = process_run(
     "/bin/sh", ["-c", "find doc/06_spec -name '*_spec.spl' -print"])
-expect(code).to_equal(0)
+expect(code).to_equal(0)  # oracle: find over doc/06_spec succeeds
 expect(out).to_equal("")
 ```
 
@@ -142,7 +136,6 @@ expect(out).to_equal("")
 - requires sidecar merge and highest-capability review ownership
    - Exec capture: after_step
 - Inspect cooperative review completion
-   - Exec capture: after_step
 
 
 <details>
@@ -192,46 +185,33 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ed21af16f464d78129b9f338af765a882010c7ec87f84fafd36ef31e35c57b8b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `81e257d61e469a8bec99c61525ce0a99698d0c410ee0469cfc78a6378cd6bdd2`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ed21af16f464d78129b9f338af765a882010c7ec87f84fafd36ef31e35c57b8b`.
+Source SHA-256: `81e257d61e469a8bec99c61525ce0a99698d0c410ee0469cfc78a6378cd6bdd2`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ed21af16f464d78129b9f338af765a882010c7ec87f84fafd36ef31e35c57b8b`  
+Source SHA-256: `81e257d61e469a8bec99c61525ce0a99698d0c410ee0469cfc78a6378cd6bdd2`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 94/100
 source: test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl
 mirror: doc/06_spec/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=30
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=85 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=78; blocker cap makes effective=49
+doc/06_spec/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
+  why: Retained evidence must be visible or linked from the professional manual.
+  improve: Select a supported evidence display and regenerate.
 doc/06_spec/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mirrors every executable scenario into an operator manual' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps modern steps requirements direct matchers and no fail placeholders' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/check/simple_2d_renderdoc_manual_and_contract_audit_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects executable specs under the generated manual tree' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

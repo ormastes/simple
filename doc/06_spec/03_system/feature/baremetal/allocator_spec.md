@@ -2,29 +2,6 @@
 
 > Tests the bare-metal memory allocator including bump allocation, fixed-size block allocation, and memory pool management. Verifies correct behavior without an OS heap, including alignment, fragmentation handling, and out-of-memory conditions.
 
-<!-- sdn-diagram:id=allocator_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=allocator_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-allocator_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=allocator_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 38 | 38 | 0 | 0 |
@@ -43,7 +20,7 @@ Tests the bare-metal memory allocator including bump allocation, fixed-size bloc
 | Category | Baremetal |
 | Status | In Progress |
 | Source | `test/03_system/feature/baremetal/allocator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -63,13 +40,21 @@ heap, including alignment, fragmentation handling, and out-of-memory conditions.
 
 #### creates allocator with base and size _(slow)_
 
+- creates allocator with base and size
+   - Expected: allocator.base equals `0x20000000`
+   - Expected: allocator.size equals `1024`
+   - Expected: allocator.offset equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates allocator with base and size")
 val allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -93,13 +78,20 @@ expect(allocator.offset).to_equal(0)
 
 #### allocates memory and returns address _(slow)_
 
+- allocates memory and returns address
+   - Expected: addr equals `0x20000000`
+   - Expected: allocator.offset equals `128`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates memory and returns address")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -121,13 +113,21 @@ expect(allocator.offset).to_equal(128)
 
 #### allocates multiple blocks sequentially _(slow)_
 
+- allocates multiple blocks sequentially
+   - Expected: addr1 equals `0x20000000`
+   - Expected: addr2 equals `0x20000040)  # 64 bytes after addr1`
+   - Expected: addr3 equals `0x200000C0)  # 128 bytes after addr2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates multiple blocks sequentially")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -153,13 +153,19 @@ expect(addr3).to_equal(0x200000C0)  # 128 bytes after addr2
 
 #### aligns allocations to 8 bytes _(slow)_
 
+- aligns allocations to 8 bytes
+   - Expected: allocator.offset equals `32)  # 16 + 16`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("aligns allocations to 8 bytes")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -184,13 +190,19 @@ expect(allocator.offset).to_equal(32)  # 16 + 16
 
 #### allocates with custom alignment _(slow)_
 
+- allocates with custom alignment
+   - Expected: addr1 % 64 equals `0)  # Must be 64-byte aligned`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates with custom alignment")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -211,17 +223,19 @@ expect(addr1 % 64).to_equal(0)  # Must be 64-byte aligned
 
 #### adds padding for alignment _(slow)_
 
-1. allocator alloc
+- adds padding for alignment
    - Expected: addr equals `0x20000040)  # Next 64-byte boundary`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds padding for alignment")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -247,17 +261,19 @@ expect(addr).to_equal(0x20000040)  # Next 64-byte boundary
 
 #### returns 0 when out of memory _(slow)_
 
-1. allocator alloc
+- returns 0 when out of memory
    - Expected: addr equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns 0 when out of memory")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 100,
@@ -280,17 +296,19 @@ expect(addr).to_equal(0)
 
 #### tracks remaining space correctly _(slow)_
 
-1. allocator alloc
+- tracks remaining space correctly
    - Expected: allocator.remaining() equals `520`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tracks remaining space correctly")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -313,8 +331,7 @@ expect(allocator.remaining()).to_equal(520)
 
 #### resets allocator to empty state _(slow)_
 
-1. allocator alloc
-2. allocator reset
+- resets allocator to empty state
    - Expected: allocator.offset equals `0`
    - Expected: allocator.allocated equals `0`
    - Expected: allocator.remaining() equals `1024`
@@ -323,10 +340,12 @@ expect(allocator.remaining()).to_equal(520)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resets allocator to empty state")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -351,17 +370,19 @@ expect(allocator.remaining()).to_equal(1024)
 
 #### allows reuse after reset _(slow)_
 
-1. allocator reset
+- allows reuse after reset
    - Expected: addr2 equals `addr1)  # Should reuse same address`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows reuse after reset")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 1024,
@@ -389,7 +410,7 @@ expect(addr2).to_equal(addr1)  # Should reuse same address
 
 #### creates single large free block _(slow)_
 
-1. allocator init
+- creates single large free block
    - Expected: allocator.free_list equals `0x20000000`
    - Expected: allocator.num_blocks equals `1`
 
@@ -397,10 +418,12 @@ expect(addr2).to_equal(addr1)  # Should reuse same address
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates single large free block")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -426,16 +449,18 @@ expect(allocator.num_blocks).to_equal(1)
 
 #### allocates from first suitable block _(slow)_
 
-1. allocator init
+- allocates from first suitable block
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates from first suitable block")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -459,17 +484,18 @@ expect(addr).to_be_greater_than(0)
 
 #### splits large blocks _(slow)_
 
-1. allocator init
-2. allocator alloc
+- splits large blocks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("splits large blocks")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -494,17 +520,19 @@ expect(allocator.num_blocks).to_be_greater_than(1)
 
 #### uses entire block if no room to split _(slow)_
 
-1. allocator init
+- uses entire block if no room to split
    - Expected: allocator.num_blocks equals `1)  # No split`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses entire block if no room to split")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 100,
@@ -530,17 +558,18 @@ expect(allocator.num_blocks).to_equal(1)  # No split
 
 #### marks block as free _(slow)_
 
-1. allocator init
-2. allocator dealloc
+- marks block as free
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("marks block as free")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -567,18 +596,18 @@ expect(allocator.allocated).to_be_less_than(allocated_before)
 
 #### coalesces with next free block _(slow)_
 
-1. allocator init
-2. allocator dealloc
-3. allocator dealloc
+- coalesces with next free block
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("coalesces with next free block")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -610,18 +639,18 @@ expect(allocator.allocated).to_be_less_than(blocks_before * 80)
 
 #### coalesces with previous free block _(slow)_
 
-1. allocator init
-2. allocator dealloc
-3. allocator dealloc
+- coalesces with previous free block
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("coalesces with previous free block")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -654,17 +683,19 @@ expect(free_after).to_be_greater_than(0)
 
 #### resizes in place if possible _(slow)_
 
-1. allocator init
+- resizes in place if possible
    - Expected: new_addr equals `addr)  # Same address`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resizes in place if possible")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -690,16 +721,18 @@ expect(new_addr).to_equal(addr)  # Same address
 
 #### allocates new block if growing _(slow)_
 
-1. allocator init
+- allocates new block if growing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates new block if growing")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -727,18 +760,18 @@ expect(new_addr).to_be_greater_than(0)
 
 #### handles alternating alloc/free pattern _(slow)_
 
-1. allocator init
-2. allocator dealloc
-3. allocator dealloc
+- handles alternating alloc/free pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles alternating alloc/free pattern")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -777,7 +810,7 @@ expect(free_count).to_be_greater_than(1)
 
 #### creates pool with linked free list _(slow)_
 
-1. allocator init
+- creates pool with linked free list
    - Expected: allocator.free_list equals `0x20000000`
    - Expected: allocator.allocated equals `0`
 
@@ -785,10 +818,12 @@ expect(free_count).to_be_greater_than(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates pool with linked free list")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -814,17 +849,19 @@ expect(allocator.allocated).to_equal(0)
 
 #### allocates from front of free list _(slow)_
 
-1. allocator init
+- allocates from front of free list
    - Expected: addr equals `0x20000000`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates from front of free list")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -848,18 +885,19 @@ expect(addr).to_equal(0x20000000)
 
 #### updates free list pointer _(slow)_
 
-1. allocator init
-2. allocator alloc
+- updates free list pointer
    - Expected: allocator.free_list equals `0x20000040)  # Next block`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("updates free list pointer")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -883,10 +921,7 @@ expect(allocator.free_list).to_equal(0x20000040)  # Next block
 
 #### returns 0 when pool exhausted _(slow)_
 
-1. allocator init
-2. allocator alloc
-3. allocator alloc
-4. allocator alloc
+- returns 0 when pool exhausted
    - Expected: addr equals `0`
    - Expected: allocator.is_exhausted() is true
 
@@ -894,10 +929,12 @@ expect(allocator.free_list).to_equal(0x20000040)  # Next block
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns 0 when pool exhausted")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -928,18 +965,19 @@ expect(allocator.is_exhausted()).to_equal(true)
 
 #### returns block to front of free list _(slow)_
 
-1. allocator init
-2. allocator dealloc
+- returns block to front of free list
    - Expected: allocator.free_list equals `addr1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns block to front of free list")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -965,18 +1003,19 @@ expect(allocator.free_list).to_equal(addr1)
 
 #### allows reuse of deallocated blocks _(slow)_
 
-1. allocator init
-2. allocator dealloc
+- allows reuse of deallocated blocks
    - Expected: addr2 equals `addr1)  # Should reuse same block`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows reuse of deallocated blocks")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -1005,10 +1044,7 @@ expect(addr2).to_equal(addr1)  # Should reuse same block
 
 #### tracks allocated count _(slow)_
 
-1. allocator init
-2. allocator alloc
-3. allocator alloc
-4. allocator alloc
+- tracks allocated count
    - Expected: allocator.allocated equals `3`
    - Expected: allocator.available() equals `7`
 
@@ -1016,10 +1052,12 @@ expect(addr2).to_equal(addr1)  # Should reuse same block
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tracks allocated count")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -1051,7 +1089,7 @@ expect(allocator.available()).to_equal(7)
 
 #### creates 8 size classes _(slow)_
 
-1. allocator init
+- creates 8 size classes
    - Expected: allocator.sizes.len() equals `8`
    - Expected: allocator.pools.len() equals `8`
 
@@ -1059,10 +1097,12 @@ expect(allocator.available()).to_equal(7)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates 8 size classes")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1086,17 +1126,19 @@ expect(allocator.pools.len()).to_equal(8)
 
 #### divides heap evenly among pools _(slow)_
 
-1. allocator init
+- divides heap evenly among pools
    - Expected: allocator.pools[1] - allocator.pools[0] equals `pool_size`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides heap evenly among pools")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1123,17 +1165,19 @@ expect(allocator.pools[1] - allocator.pools[0]).to_equal(pool_size)
 
 #### finds correct pool for small allocation _(slow)_
 
-1. allocator init
+- finds correct pool for small allocation
    - Expected: pool_idx equals `1)  # 32-byte pool`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds correct pool for small allocation")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1157,17 +1201,19 @@ expect(pool_idx).to_equal(1)  # 32-byte pool
 
 #### finds correct pool for exact match _(slow)_
 
-1. allocator init
+- finds correct pool for exact match
    - Expected: pool_idx equals `2)  # 64-byte pool`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds correct pool for exact match")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1191,17 +1237,19 @@ expect(pool_idx).to_equal(2)  # 64-byte pool
 
 #### returns 255 for too-large allocation _(slow)_
 
-1. allocator init
+- returns 255 for too-large allocation
    - Expected: pool_idx equals `255`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns 255 for too-large allocation")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1227,16 +1275,18 @@ expect(pool_idx).to_equal(255)
 
 #### allocates from different size classes _(slow)_
 
-1. allocator init
+- allocates from different size classes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allocates from different size classes")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1265,16 +1315,18 @@ expect(addr3).to_be_greater_than(0)
 
 #### handles pool exhaustion gracefully _(slow)_
 
-1. allocator init
+- handles pool exhaustion gracefully
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles pool exhaustion gracefully")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 8 * 1024,
@@ -1308,7 +1360,8 @@ expect(count).to_be_greater_than(0)
 
 #### bump allocator is fastest for temporary allocations _(slow)_
 
-1. allocator reset
+- bump allocator is fastest for temporary allocations
+   - Expected: all_nonzero is true
    - Expected: allocator.offset equals `0`
    - Expected: allocator.remaining() equals `8192`
 
@@ -1316,10 +1369,12 @@ expect(count).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("bump allocator is fastest for temporary allocations")
 var allocator = BumpAllocator(
     base: 0x20000000,
     size: 8192,
@@ -1351,17 +1406,18 @@ expect(allocator.remaining()).to_equal(8192)
 
 #### free list allocator handles general workload _(slow)_
 
-1. allocator init
-2. allocator dealloc
+- free list allocator handles general workload
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("free list allocator handles general workload")
 var allocator = FreeListAllocator(
     base: 0x20000000,
     size: 4096,
@@ -1396,10 +1452,8 @@ expect(a4).to_be_greater_than(0)
 
 #### fixed block allocator is fastest for uniform objects _(slow)_
 
-1. allocator init
-2. allocator alloc
+- fixed block allocator is fastest for uniform objects
    - Expected: allocator.is_exhausted() is true
-3. allocator dealloc
    - Expected: allocator.is_exhausted() is false
    - Expected: reused equals `0x20000000`
 
@@ -1407,10 +1461,12 @@ expect(a4).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fixed block allocator is fastest for uniform objects")
 var allocator = FixedBlockAllocator(
     base: 0x20000000,
     block_size: 64,
@@ -1442,16 +1498,18 @@ expect(reused).to_equal(0x20000000)
 
 #### multi-pool allocator balances speed and flexibility _(slow)_
 
-1. allocator init
+- multi-pool allocator balances speed and flexibility
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multi-pool allocator balances speed and flexibility")
 var allocator = MultiPoolAllocator(
     base: 0x20000000,
     size: 256 * 1024,
@@ -1488,3 +1546,54 @@ expect(large).to_be_greater_than(0)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `79b993d9a64fd6aeb43183ca98fc5c29497c1ffd47f9c26ef3932cb7cad6ce73`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `79b993d9a64fd6aeb43183ca98fc5c29497c1ffd47f9c26ef3932cb7cad6ce73`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `79b993d9a64fd6aeb43183ca98fc5c29497c1ffd47f9c26ef3932cb7cad6ce73`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/baremetal/allocator_spec.spl
+mirror: doc/06_spec/03_system/feature/baremetal/allocator_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/baremetal/allocator_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/baremetal/allocator_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/baremetal/allocator_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/baremetal/allocator_spec.spl:230:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates allocator with base and size' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/baremetal/allocator_spec.spl:244:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allocates memory and returns address' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/baremetal/allocator_spec.spl:257:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allocates multiple blocks sequentially' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

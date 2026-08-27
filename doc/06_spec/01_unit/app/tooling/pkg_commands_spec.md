@@ -1,29 +1,6 @@
-# Package Commands Module Specification
+# Pkg Commands Specification
 
-> Tests for package management command handling, argument parsing, and option detection.
-
-<!-- sdn-diagram:id=pkg_commands_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=pkg_commands_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-pkg_commands_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=pkg_commands_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering pkg_commands module compilation, argument length validation, option flag detection, cache subcommand detection, optional parameter extraction, option parsing patterns, while loop iteration, Result handling, boolean result handling, list operations, string formatting, conditional status suffix, exit code conventions, Option handling, update result checking, counter comparisons.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,22 +9,7 @@ pkg_commands_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Package Commands Module Specification
-
-Tests for package management command handling, argument parsing, and option detection.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #TBD |
-| Category | Tooling |
-| Status | Draft |
-| Source | `test/01_unit/app/tooling/pkg_commands_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-Tests for package management command handling, argument parsing, and option detection.
+# Pkg Commands Specification
 
 ## Scenarios
 
@@ -55,13 +17,22 @@ Tests for package management command handling, argument parsing, and option dete
 
 #### compiles successfully
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- compiles successfully
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compiles successfully")
 expect 1 + 1 == 2
 ```
 
@@ -71,16 +42,18 @@ expect 1 + 1 == 2
 
 #### add requires 2 args minimum
 
-1. expect args len
+- add requires 2 args minimum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("add requires 2 args minimum")
 val args = ["simple", "add", "package"]
 expect args.len() >= 2 == true
 ```
@@ -89,16 +62,18 @@ expect args.len() >= 2 == true
 
 #### remove requires 2 args minimum
 
-1. expect args len
+- remove requires 2 args minimum
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("remove requires 2 args minimum")
 val args = ["simple", "remove", "package"]
 expect args.len() >= 2 == true
 ```
@@ -109,13 +84,18 @@ expect args.len() >= 2 == true
 
 #### detects --dev flag
 
+- detects --dev flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects --dev flag")
 val args = ["simple", "add", "pkg", "--dev"]
 val has_dev = args.any(_1 == "--dev")
 expect has_dev == true
@@ -125,13 +105,18 @@ expect has_dev == true
 
 #### detects --path flag
 
+- detects --path flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects --path flag")
 val args = ["simple", "add", "pkg", "--path", "/tmp"]
 val has_path = args.any(_1 == "--path")
 expect has_path == true
@@ -141,13 +126,18 @@ expect has_path == true
 
 #### detects --git flag
 
+- detects --git flag
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects --git flag")
 val args = ["simple", "add", "pkg", "--git", "https://github.com/foo/bar"]
 val has_git = args.any(_1 == "--git")
 expect has_git == true
@@ -159,13 +149,18 @@ expect has_git == true
 
 #### detects clean subcommand
 
+- detects clean subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects clean subcommand")
 val args = ["simple", "cache", "clean"]
 expect args[1] == "cache"
 expect args[2] == "clean"
@@ -175,13 +170,18 @@ expect args[2] == "clean"
 
 #### detects list subcommand
 
+- detects list subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects list subcommand")
 val args = ["simple", "cache", "list"]
 expect args[1] == "cache"
 expect args[2] == "list"
@@ -191,13 +191,18 @@ expect args[2] == "list"
 
 #### detects info subcommand
 
+- detects info subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects info subcommand")
 val args = ["simple", "cache", "info"]
 expect args[1] == "cache"
 expect args[2] == "info"
@@ -209,16 +214,18 @@ expect args[2] == "info"
 
 #### extracts name when present
 
-1. expect name is some
+- extracts name when present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts name when present")
 val args = ["simple", "init", "myproject"]
 val name = if args.len() > 1: Some(args[1]) else: None
 expect name.is_some() == true
@@ -228,16 +235,18 @@ expect name.is_some() == true
 
 #### no name when absent
 
-1. expect name is none
+- no name when absent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("no name when absent")
 val args = ["simple", "init"]
 val name = if args.len() > 1: Some(args[1]) else: None
 expect name.is_none() == true
@@ -249,13 +258,18 @@ expect name.is_none() == true
 
 #### finds non-flag argument
 
+- finds non-flag argument
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds non-flag argument")
 val arg = "mypackage"
 val is_flag = arg.starts_with("-")
 expect is_flag == false
@@ -265,13 +279,18 @@ expect is_flag == false
 
 #### identifies flag argument
 
+- identifies flag argument
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identifies flag argument")
 val arg = "--dev"
 val is_flag = arg.starts_with("-")
 expect is_flag == true
@@ -283,13 +302,18 @@ expect is_flag == true
 
 #### iterates through arguments
 
+- iterates through arguments
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("iterates through arguments")
 val args = ["simple", "add", "pkg", "--dev"]
 var count = 0
 var i = 0
@@ -303,13 +327,18 @@ expect count == 4
 
 #### skips flag and value
 
+- skips flag and value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("skips flag and value")
 val args = ["--path", "/tmp", "other"]
 var i = 0
 if args[i] == "--path":
@@ -323,16 +352,18 @@ expect i == 2
 
 #### Ok result check
 
-1. expect Ok
+- Ok result check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("Ok result check")
 expect Ok(()).is_ok() == true
 ```
 
@@ -340,16 +371,18 @@ expect Ok(()).is_ok() == true
 
 #### Err result check
 
-1. expect Err
+- Err result check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("Err result check")
 expect Err("error").is_err() == true
 ```
 
@@ -359,13 +392,18 @@ expect Err("error").is_err() == true
 
 #### Ok(true) indicates success
 
+- Ok(true) indicates success
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("Ok(true) indicates success")
 val result = Ok(true)
 val is_success = result.is_ok()
 expect is_success == true
@@ -375,13 +413,18 @@ expect is_success == true
 
 #### Ok(false) handled correctly
 
+- Ok(false) handled correctly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("Ok(false) handled correctly")
 val result = Ok(false)
 val is_ok = result.is_ok()
 expect is_ok == true
@@ -393,17 +436,18 @@ expect is_ok == true
 
 #### join list items
 
-1. expect joined contains
-2. expect joined contains
+- join list items
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("join list items")
 val items = ["pkg1", "pkg2", "pkg3"]
 val joined = items.join(", ")
 expect joined.contains("pkg1") == true
@@ -414,16 +458,18 @@ expect joined.contains(", ") == true
 
 #### list length check
 
-1. expect items len
+- list length check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("list length check")
 val items = ["pkg1", "pkg2"]
 expect items.len() == 2
 ```
@@ -434,16 +480,18 @@ expect items.len() == 2
 
 #### constructs error message
 
-1. expect msg contains
+- constructs error message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("constructs error message")
 val pkg_name = "mypackage"
 val msg = "error: add requires {pkg_name}"
 expect msg.contains("mypackage") == true
@@ -453,16 +501,18 @@ expect msg.contains("mypackage") == true
 
 #### constructs success message
 
-1. expect msg contains
+- constructs success message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("constructs success message")
 val pkg_name = "mypackage"
 val msg = "Added dependency '{pkg_name}'"
 expect msg.contains("mypackage") == true
@@ -474,13 +524,18 @@ expect msg.contains("mypackage") == true
 
 #### empty suffix when linked
 
+- empty suffix when linked
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("empty suffix when linked")
 val is_linked = true
 val status = if is_linked: "" else: " (not linked)"
 expect status == ""
@@ -490,16 +545,18 @@ expect status == ""
 
 #### suffix when not linked
 
-1. expect status == "
+- suffix when not linked
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("suffix when not linked")
 val is_linked = false
 val status = if is_linked: "" else: " (not linked)"
 expect status == " (not linked)"
@@ -511,13 +568,18 @@ expect status == " (not linked)"
 
 #### success returns 0
 
+- success returns 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("success returns 0")
 expect 0 == 0
 ```
 
@@ -525,13 +587,18 @@ expect 0 == 0
 
 #### error returns 1
 
+- error returns 1
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("error returns 1")
 expect 1 == 1
 ```
 
@@ -541,16 +608,18 @@ expect 1 == 1
 
 #### Some has value
 
-1. expect Some
+- Some has value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("Some has value")
 expect Some("value").is_some() == true
 ```
 
@@ -560,16 +629,18 @@ expect Some("value").is_some() == true
 
 #### non-empty updated list
 
-1. expect updated len
+- non-empty updated list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("non-empty updated list")
 val updated = ["pkg1", "pkg2"]
 expect updated.len() == 2
 ```
@@ -578,16 +649,18 @@ expect updated.len() == 2
 
 #### list has count
 
-1. expect items len
+- list has count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("list has count")
 val items = ["a", "b"]
 expect items.len() > 0 == true
 ```
@@ -598,13 +671,18 @@ expect items.len() > 0 == true
 
 #### all counters zero
 
+- all counters zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("all counters zero")
 val installed = 0
 val up_to_date = 0
 val skipped = 0
@@ -616,13 +694,18 @@ expect all_zero == true
 
 #### has non-zero counter
 
+- has non-zero counter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("has non-zero counter")
 val installed = 5
 val up_to_date = 0
 val skipped = 0
@@ -631,6 +714,36 @@ expect has_installed == true
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/tooling/pkg_commands_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering pkg_commands module compilation, argument length validation, option flag detection, cache subcommand detection, optional parameter extraction, option parsing patterns, while loop iteration, Result handling, boolean result handling, list operations, string formatting, conditional status suffix, exit code conventions, Option handling, update result checking, counter comparisons.
+- pkg_commands module compilation
+- argument length validation
+- option flag detection
+- cache subcommand detection
+- optional parameter extraction
+- option parsing patterns
+- while loop iteration
+- Result handling
+- boolean result handling
+- list operations
+- string formatting
+- conditional status suffix
+- exit code conventions
+- Option handling
+- update result checking
+- counter comparisons
 
 ## Scenario Summary
 
@@ -644,3 +757,51 @@ expect has_installed == true
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ce22e51738af0d8fa857a97f8f8357575bd798e61bf6e390256deb5c15af1d27`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ce22e51738af0d8fa857a97f8f8357575bd798e61bf6e390256deb5c15af1d27`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ce22e51738af0d8fa857a97f8f8357575bd798e61bf6e390256deb5c15af1d27`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/pkg_commands_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/pkg_commands_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/pkg_commands_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/pkg_commands_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/pkg_commands_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles successfully' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/pkg_commands_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'add requires 2 args minimum' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/pkg_commands_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'remove requires 2 args minimum' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Helper Functions Specification
 
-> <details>
-
-<!-- sdn-diagram:id=helper_functions_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=helper_functions_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-helper_functions_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=helper_functions_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering create_simple_language_server, Server Creation, Capability Enablement, create_minimal_language_server, Server Creation, Limited Capabilities, Comparison.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,16 +19,18 @@ helper_functions_spec
 
 #### creates new language server
 
-- assert true
+- creates new language server
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates new language server")
 # Branch: val server = WasmLanguageServer.new()
 val server_created = true
 assert_true(server_created)
@@ -61,16 +40,18 @@ assert_true(server_created)
 
 #### returns configured server instance
 
-- assert true
+- returns configured server instance
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns configured server instance")
 # Branch: return server
 val server_returned = true
 assert_true(server_returned)
@@ -82,16 +63,18 @@ assert_true(server_returned)
 
 #### enables completion capability
 
-- assert true
+- enables completion capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables completion capability")
 # Branch: server.capabilities.enable_completion()
 val completion_enabled = true
 assert_true(completion_enabled)
@@ -101,16 +84,18 @@ assert_true(completion_enabled)
 
 #### enables hover capability
 
-- assert true
+- enables hover capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables hover capability")
 # Branch: server.capabilities.enable_hover()
 val hover_enabled = true
 assert_true(hover_enabled)
@@ -120,16 +105,18 @@ assert_true(hover_enabled)
 
 #### enables definition capability
 
-- assert true
+- enables definition capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables definition capability")
 # Branch: server.capabilities.enable_definition()
 val definition_enabled = true
 assert_true(definition_enabled)
@@ -139,16 +126,18 @@ assert_true(definition_enabled)
 
 #### enables references capability
 
-- assert true
+- enables references capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables references capability")
 # Branch: server.capabilities.enable_references()
 val references_enabled = true
 assert_true(references_enabled)
@@ -158,16 +147,18 @@ assert_true(references_enabled)
 
 #### enables symbols capability
 
-- assert true
+- enables symbols capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables symbols capability")
 # Branch: server.capabilities.enable_symbols()
 val symbols_enabled = true
 assert_true(symbols_enabled)
@@ -177,16 +168,18 @@ assert_true(symbols_enabled)
 
 #### enables formatting capability
 
-- assert true
+- enables formatting capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables formatting capability")
 # Branch: server.capabilities.enable_formatting()
 val formatting_enabled = true
 assert_true(formatting_enabled)
@@ -196,16 +189,18 @@ assert_true(formatting_enabled)
 
 #### enables all 6 capabilities
 
-- assert true
+- enables all 6 capabilities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables all 6 capabilities")
 # Branch: all enable_* calls
 val all_enabled = true
 assert_true(all_enabled)
@@ -219,16 +214,18 @@ assert_true(all_enabled)
 
 #### creates new language server
 
-- assert true
+- creates new language server
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates new language server")
 # Branch: val server = WasmLanguageServer.new()
 val server_created = true
 assert_true(server_created)
@@ -238,16 +235,18 @@ assert_true(server_created)
 
 #### returns minimal server instance
 
-- assert true
+- returns minimal server instance
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns minimal server instance")
 # Branch: return server
 val server_returned = true
 assert_true(server_returned)
@@ -259,16 +258,18 @@ assert_true(server_returned)
 
 #### enables completion capability
 
-- assert true
+- enables completion capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables completion capability")
 # Branch: server.capabilities.enable_completion()
 val completion_enabled = true
 assert_true(completion_enabled)
@@ -278,16 +279,18 @@ assert_true(completion_enabled)
 
 #### enables hover capability
 
-- assert true
+- enables hover capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables hover capability")
 # Branch: server.capabilities.enable_hover()
 val hover_enabled = true
 assert_true(hover_enabled)
@@ -297,16 +300,18 @@ assert_true(hover_enabled)
 
 #### enables only 2 capabilities
 
-- assert true
+- enables only 2 capabilities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables only 2 capabilities")
 # Branch: only 2 enable_* calls
 val limited = true
 assert_true(limited)
@@ -318,16 +323,18 @@ assert_true(limited)
 
 #### minimal has fewer capabilities than full
 
-- assert true
+- minimal has fewer capabilities than full
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal has fewer capabilities than full")
 # Branch: comparing 2 vs 6 capabilities
 val fewer_capabilities = 2 < 6
 assert_true(fewer_capabilities)
@@ -337,16 +344,18 @@ assert_true(fewer_capabilities)
 
 #### minimal includes completion
 
-- assert true
+- minimal includes completion
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal includes completion")
 # Branch: both have completion
 val has_completion = true
 assert_true(has_completion)
@@ -356,16 +365,18 @@ assert_true(has_completion)
 
 #### minimal includes hover
 
-- assert true
+- minimal includes hover
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal includes hover")
 # Branch: both have hover
 val has_hover = true
 assert_true(has_hover)
@@ -375,16 +386,18 @@ assert_true(has_hover)
 
 #### minimal excludes definition
 
-- assert true
+- minimal excludes definition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal excludes definition")
 # Branch: only full has definition
 val excludes_definition = true
 assert_true(excludes_definition)
@@ -394,16 +407,18 @@ assert_true(excludes_definition)
 
 #### minimal excludes references
 
-- assert true
+- minimal excludes references
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal excludes references")
 # Branch: only full has references
 val excludes_references = true
 assert_true(excludes_references)
@@ -413,16 +428,18 @@ assert_true(excludes_references)
 
 #### minimal excludes symbols
 
-- assert true
+- minimal excludes symbols
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal excludes symbols")
 # Branch: only full has symbols
 val excludes_symbols = true
 assert_true(excludes_symbols)
@@ -432,16 +449,18 @@ assert_true(excludes_symbols)
 
 #### minimal excludes formatting
 
-- assert true
+- minimal excludes formatting
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("minimal excludes formatting")
 # Branch: only full has formatting
 val excludes_formatting = true
 assert_true(excludes_formatting)
@@ -456,12 +475,12 @@ assert_true(excludes_formatting)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/lsp/helper_functions_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering create_simple_language_server, Server Creation, Capability Enablement, create_minimal_language_server, Server Creation, Limited Capabilities, Comparison.
 - create_simple_language_server
 - Server Creation
 - Capability Enablement
@@ -482,3 +501,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e5074a5e41af46547f1a55a7f8ba9bf8f76ffe90d21cb086ce85ad6404acabf4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e5074a5e41af46547f1a55a7f8ba9bf8f76ffe90d21cb086ce85ad6404acabf4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e5074a5e41af46547f1a55a7f8ba9bf8f76ffe90d21cb086ce85ad6404acabf4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/lsp/helper_functions_spec.spl
+mirror: doc/06_spec/01_unit/app/lsp/helper_functions_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/lsp/helper_functions_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/lsp/helper_functions_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/lsp/helper_functions_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates new language server' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lsp/helper_functions_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns configured server instance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/lsp/helper_functions_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'enables completion capability' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

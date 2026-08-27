@@ -1,40 +1,17 @@
 # CLI Help Text Alignment Specification
 
-> Validates that the CLI help text (`print_cli_help()`) is aligned with the actual dispatch table in `main.spl`. Every command listed in help must exist in dispatch, and no phantom commands should appear.
-
-<!-- sdn-diagram:id=cli_help_alignment_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cli_help_alignment_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cli_help_alignment_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cli_help_alignment_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> The Simple CLI keeps its command list by hand in several places. Only ONE of them actually executes: the `str_eq(first, "...")` chain in `src/app/cli/_CliMain/main_and_help.spl`. The help text (`cli_helpers.spl print_cli_help()`) and the dispatch table (`src/app/cli/dispatch/table.spl`) are separate hand-written lists that drift away from it silently.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # CLI Help Text Alignment Specification
 
-Validates that the CLI help text (`print_cli_help()`) is aligned with the actual dispatch table in `main.spl`. Every command listed in help must exist in dispatch, and no phantom commands should appear.
+The Simple CLI keeps its command list by hand in several places. Only ONE of them actually executes: the `str_eq(first, "...")` chain in `src/app/cli/_CliMain/main_and_help.spl`. The help text (`cli_helpers.spl print_cli_help()`) and the dispatch table (`src/app/cli/dispatch/table.spl`) are separate hand-written lists that drift away from it silently.
 
 ## At a Glance
 
@@ -49,26 +26,35 @@ Validates that the CLI help text (`print_cli_help()`) is aligned with the actual
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/app/cli_help_alignment_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Validates that the CLI help text (`print_cli_help()`) is aligned with the
-actual dispatch table in `main.spl`. Every command listed in help must exist
-in dispatch, and no phantom commands should appear.
+The Simple CLI keeps its command list by hand in several places. Only ONE of
+them actually executes: the `str_eq(first, "...")` chain in
+`src/app/cli/_CliMain/main_and_help.spl`. The help text
+(`cli_helpers.spl print_cli_help()`) and the dispatch table
+(`src/app/cli/dispatch/table.spl`) are separate hand-written lists that drift
+away from it silently.
 
-Commands listed in help are extracted from `src/app/cli/cli_helpers.spl`.
-Commands in dispatch are extracted from `src/app/cli/main.spl` match block.
+This spec READS those three sources and COUNTS. It does not hardcode counts.
+Every number below is derived from the files at run time, so a command added
+to or removed from any of the three lists changes the measurement.
+
+The executing elif chain is the oracle. "Phantom" and "dead entry" are both
+defined relative to it.
 
 ## Key Concepts
 
 | Concept | Description |
 |---------|-------------|
-| Help command | A command string printed by `print_cli_help()` |
-| Dispatch command | A `case` branch in the main match block |
-| Phantom command | Listed in help but has no dispatch handler |
-| Hidden command | Has dispatch handler but not listed in help |
+| Dispatch command | A `str_eq(first, "X")` branch — the only list that runs |
+| Help command | A command printed by `print_cli_help()` |
+| Table command | A `CommandEntry(name: "X"` in `dispatch/table.spl` |
+| Phantom command | Advertised in help but absent from dispatch — user hits an error |
+| Dead table entry | In the table but absent from dispatch — unreachable data |
+| Undocumented command | Dispatchable but never mentioned in help |
 
 ## Related Specifications
 
@@ -77,45 +63,36 @@ Commands in dispatch are extracted from `src/app/cli/main.spl` match block.
 
 ## Scenarios
 
-### CLI Help Text Alignment
+### CLI alignment — extraction is real
 
-#### when checking help lists implemented commands
+#### all three CLI sources exist
 
-#### help lists all core execution commands
+- all three CLI sources exist
+   - Expected: file_exists(DISPATCH_SRC) is true
+   - Expected: file_exists(HELP_SRC) is true
+   - Expected: file_exists(TABLE_SRC) is true
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val help_commands = ["compile", "run", "watch"]
-val dispatch_commands = ["compile", "run", "watch", "watch-daemon"]
-for cmd in help_commands:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
-```
-
-</details>
-
-#### help lists all testing commands
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val help_test_commands = ["test", "test-daemon"]
-val dispatch_commands = ["test", "test-daemon", "spec-coverage"]
-for cmd in help_test_commands:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
+# @req REQ-SSPEC-UNIT
+step("all three CLI sources exist")
+expect(file_exists(DISPATCH_SRC)).to_equal(true)
+expect(file_exists(HELP_SRC)).to_equal(true)
+expect(file_exists(TABLE_SRC)).to_equal(true)
 ```
 
 </details>
 
-#### help lists all code quality commands
+#### each extractor returns a plausibly-sized command set
+
+- each extractor returns a plausibly-sized command set
+
 
 <details>
 <summary>Executable SSpec</summary>
@@ -124,55 +101,56 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val help_quality = ["lex", "lint", "fmt", "check",
-    "duplicate-check", "doc-coverage", "traceability-check", "check-arch",
-    "check-dbs", "fix-dbs"]
-val dispatch_commands = ["lex", "lint", "fix", "fmt", "check",
-    "duplicate-check", "doc-coverage", "traceability-check", "check-arch", "check-dbs",
-    "fix-dbs"]
-for cmd in help_quality:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
+# @req REQ-SSPEC-UNIT
+step("each extractor returns a plausibly-sized command set")
+# Floors are deliberately far below the measured sizes (dispatch 103,
+# table 84, help 58 on 2026-08-11). They catch a broken extractor,
+# not ordinary command churn.
+expect(extract_dispatch_commands().len()).to_be_greater_than(50)
+expect(extract_table_commands().len()).to_be_greater_than(40)
+expect(extract_help_commands().len()).to_be_greater_than(20)
 ```
 
 </details>
 
-#### help lists all LLM tool commands
+#### known-good commands are found in every list that should hold them
+
+- known-good commands are found in every list that should hold them
+   - Expected: extract_dispatch_commands() contains `cmd`
+   - Expected: extract_table_commands() contains `cmd`
+   - Expected: extract_help_commands() contains `cmd`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val help_llm = ["mcp", "diff", "brief", "query"]
-val dispatch_commands = ["mcp", "lsp", "diff", "constr", "query",
-    "info", "brief", "context"]
-for cmd in help_llm:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
+# @req REQ-SSPEC-UNIT
+step("known-good commands are found in every list that should hold them")
+# Anchor probe: these are present in ALL THREE sources (verified by
+# set intersection on 2026-08-11). If the extractors regress to
+# returning junk tokens, these named lookups fail even though the
+# counts might still look plausible.
+# NOTE deliberately excludes `run`: help advertises running a file as
+# `simple <file.spl>`, so `run` is legitimately absent from help.
+for cmd in ["compile", "build", "check"]:
+    expect(extract_dispatch_commands().contains(cmd)).to_equal(true)
+    expect(extract_table_commands().contains(cmd)).to_equal(true)
+    expect(extract_help_commands().contains(cmd)).to_equal(true)
 ```
 
 </details>
 
-#### help lists all build commands
+#### flags and placeholders are not mistaken for commands
 
-<details>
-<summary>Executable SSpec</summary>
+- flags and placeholders are not mistaken for commands
+   - Expected: help does not contain `--notui`
+   - Expected: help does not contain `-c`
+   - Expected: help does not contain `<file.spl>`
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val help_build = ["build", "targets", "linkers"]
-val dispatch_commands = ["build", "native-build", "targets",
-    "linkers"]
-for cmd in help_build:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
-```
-
-</details>
-
-#### help lists package management commands
 
 <details>
 <summary>Executable SSpec</summary>
@@ -181,201 +159,23 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val help_pkg = ["init", "add", "remove", "install", "update",
-    "list", "tree"]
-val dispatch_commands = ["init", "add", "remove", "install",
-    "update", "list", "tree", "cache"]
-for cmd in help_pkg:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
-```
-
-</details>
-
-#### when checking for phantom commands
-
-#### no help command is missing from dispatch
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 33 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# All commands mentioned in print_cli_help() output
-val help_commands = [
-    "compile", "watch", "targets", "linkers",
-    "test", "test-daemon",
-    "lex", "lint", "duplicate-check", "fmt", "check",
-    "check-arch", "check-dbs", "fix-dbs", "doc-coverage", "traceability-check",
-    "mcp", "diff", "brief", "query",
-    "stats",
-    "verify", "gen-lean",
-    "ffi-gen", "wrapper-gen",
-    "build",
-    "init", "add", "remove", "install", "update", "list", "tree"
-]
-# Full dispatch set from main.spl
-val dispatch_commands = [
-    "compile", "run", "watch", "watch-daemon",
-    "test", "test-daemon", "spec-coverage",
-    "lex", "lint", "fix", "fmt", "check", "duplicate-check",
-    "doc-coverage", "traceability-check", "check-arch", "check-dbs", "fix-dbs",
-    "build", "native-build", "targets", "linkers",
-    "mcp", "lsp", "diff", "constr", "query", "info", "brief",
-    "context",
-    "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
-    "feature-doc", "todo-scan", "todo-gen", "grammar-doc",
-    "init", "add", "remove", "install", "update", "list",
-    "tree", "cache",
-    "verify", "gen-lean",
-    "stats", "ffi-gen", "i18n", "migrate", "replay", "web",
-    "diagram", "dashboard", "office", "wrapper-gen", "desugar",
-    "env", "lock", "leak-check"
-]
-for cmd in help_commands:
-    expect(dispatch_commands.contains(cmd)).to_equal(true)
-```
-
-</details>
-
-#### check-capsule from help exists in dispatch
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 22 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# print_cli_help mentions 'check-capsule' but dispatch uses 'check'
-# FAIL-FIRST: check-capsule is in help but not a separate dispatch case
-val dispatch_commands = [
-    "compile", "run", "watch", "watch-daemon",
-    "test", "test-daemon", "spec-coverage",
-    "lex", "lint", "fix", "fmt", "check", "duplicate-check",
-    "doc-coverage", "traceability-check", "check-arch", "check-dbs", "fix-dbs",
-    "build", "native-build", "targets", "linkers",
-    "mcp", "lsp", "diff", "constr", "query", "info", "brief",
-    "context",
-    "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
-    "feature-doc", "todo-scan", "todo-gen", "grammar-doc",
-    "init", "add", "remove", "install", "update", "list",
-    "tree", "cache",
-    "verify", "gen-lean",
-    "stats", "ffi-gen", "i18n", "migrate", "replay", "web",
-    "diagram", "dashboard", "office", "wrapper-gen", "desugar",
-    "env", "lock", "leak-check"
-]
-# check-capsule appears in help text but is a subcommand of check,
-# not its own dispatch case. This test documents the gap.
-expect(dispatch_commands.contains("check-capsule")).to_equal(true)
+# @req REQ-SSPEC-UNIT
+step("flags and placeholders are not mistaken for commands")
+val help = extract_help_commands()
+expect(help.contains("--notui")).to_equal(false)
+expect(help.contains("-c")).to_equal(false)
+expect(help.contains("<file.spl>")).to_equal(false)
 ```
 
 </details>
 
 ### CLI No Phantom Commands
 
-#### when validating help-dispatch parity
+#### every command in help text has a dispatch branch
 
-#### help command count matches dispatch command count for visible commands
+- every command in help text has a dispatch branch
+   - Expected: phantoms equals `[]`
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 13 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# Help shows ~33 commands (some are subcommand variants)
-# Dispatch has ~55+ case branches
-# FAIL-FIRST: These counts should be aligned after cleanup.
-# The visible (non-experimental) help commands:
-val visible_help_count = 33
-# The visible (non-experimental) dispatch commands:
-val visible_dispatch_count = 33
-# After excluding experimental from dispatch:
-val experimental_count = 5
-val total_dispatch = 56
-val visible_from_dispatch = total_dispatch - experimental_count
-# FAIL-FIRST: 56 - 5 = 51, not 33 (many dispatch commands missing from help)
-expect(visible_help_count).to_equal(visible_from_dispatch)
-```
-
-</details>
-
-#### every dispatch command has help text or is tagged experimental
-
-1. missing from help non experimental push
-   - Expected: missing_from_help_non_experimental.len() equals `0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 18 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val dispatch_only = [
-    "watch-daemon", "spec-coverage", "fix", "native-build",
-    "lsp", "constr", "info", "context",
-    "feature-gen", "task-gen", "spec-gen", "spipe-docgen",
-    "feature-doc", "todo-scan", "todo-gen", "grammar-doc",
-    "cache", "i18n", "migrate", "replay", "web", "diagram",
-    "dashboard", "office", "desugar", "env", "lock", "leak-check"
-]
-val experimental = ["verify", "migrate", "constr", "replay",
-    "gen-lean"]
-# FAIL-FIRST: dispatch-only commands that are NOT experimental
-# should be added to help text
-val missing_from_help_non_experimental: [text] = []
-for cmd in dispatch_only:
-    if not experimental.contains(cmd):
-        missing_from_help_non_experimental.push(cmd)
-# After all commands are documented in help, this should be 0
-expect(missing_from_help_non_experimental.len()).to_equal(0)
-```
-
-</details>
-
-### CLI Experimental Commands in Help
-
-#### when checking experimental visibility
-
-#### verify is shown in help with experimental tag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# Help text currently shows: "simple verify <file.spl>    Run formal verification"
-# FAIL-FIRST: No [experimental] tag present
-val verify_help_line = "simple verify <file.spl>    Run formal verification"
-expect(verify_help_line).to_contain("[experimental]")
-```
-
-</details>
-
-#### gen-lean is shown in help with experimental tag
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val gen_lean_help_line = "simple gen-lean generate    Generate Lean verification files"
-expect(gen_lean_help_line).to_contain("[experimental]")
-```
-
-</details>
-
-#### migrate is hidden from default help
 
 <details>
 <summary>Executable SSpec</summary>
@@ -384,60 +184,92 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# migrate should not appear in help at all
-val help_commands_shown = [
-    "compile", "watch", "targets", "linkers", "test",
-    "test-daemon", "lex", "lint", "duplicate-check", "fmt",
-    "check", "doc-coverage", "mcp", "diff", "brief", "query",
-    "stats", "verify", "gen-lean", "ffi-gen", "wrapper-gen",
-    "build", "init", "add", "remove", "install", "update",
-    "list", "tree"
-]
-expect(help_commands_shown.contains("migrate")).to_equal(false)
+# @req REQ-SSPEC-UNIT
+step("every command in help text has a dispatch branch")
+"""MEASURED 2026-08-11: was RED with 1 phantom, `check-capsule`. Fixed
+by wiring the existing `handle_check_capsule` implementation into the
+dispatch chain. See
+doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md.
+Do not delete this assertion to obtain green; fix help or dispatch."""
+val phantoms = missing_from(extract_help_commands(),
+    extract_dispatch_commands())
+expect(phantoms).to_equal([])
 ```
 
 </details>
 
-#### constr is hidden from default help
+### CLI Dispatch Table Reachability
+
+#### every dispatch-table entry has a dispatch branch
+
+- every dispatch-table entry has a dispatch branch
+   - Expected: dead equals `[]`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val help_commands_shown = [
-    "compile", "watch", "targets", "linkers", "test",
-    "test-daemon", "lex", "lint", "duplicate-check", "fmt",
-    "check", "doc-coverage", "mcp", "diff", "brief", "query",
-    "stats", "verify", "gen-lean", "ffi-gen", "wrapper-gen",
-    "build", "init", "add", "remove", "install", "update",
-    "list", "tree"
-]
-expect(help_commands_shown.contains("constr")).to_equal(false)
+# @req REQ-SSPEC-UNIT
+step("every dispatch-table entry has a dispatch branch")
+"""MEASURED 2026-08-11: was RED with 24 unreachable table entries.
+Fixed: 22 were wired into the dispatch chain (every implementation was
+verified present), `bench` was deleted from the table (its app no
+longer exists), and `native-build` was never really dead — it is
+dispatched before the chain and the extractor now sees it. See
+doc/08_tracking/bug/cli_help_dispatch_drift_2026-08-11.md."""
+val dead = missing_from(extract_table_commands(),
+    extract_dispatch_commands())
+expect(dead).to_equal([])
 ```
 
 </details>
 
-#### replay is hidden from default help
+### CLI Help Coverage Ratchet
+
+#### the undocumented-command count does not exceed its baseline
+
+- the undocumented-command count does not exceed its baseline
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val help_commands_shown = [
-    "compile", "watch", "targets", "linkers", "test",
-    "test-daemon", "lex", "lint", "duplicate-check", "fmt",
-    "check", "doc-coverage", "mcp", "diff", "brief", "query",
-    "stats", "verify", "gen-lean", "ffi-gen", "wrapper-gen",
-    "build", "init", "add", "remove", "install", "update",
-    "list", "tree"
-]
-expect(help_commands_shown.contains("replay")).to_equal(false)
+# @req REQ-SSPEC-UNIT
+step("the undocumented-command count does not exceed its baseline")
+val undocumented = missing_from(extract_dispatch_commands(),
+    extract_help_commands())
+expect(undocumented.len()).to_be_less_than(UNDOCUMENTED_BASELINE + 1)
+```
+
+</details>
+
+#### every dispatchable command is advertised in help text
+
+- every dispatchable command is advertised in help text
+   - Expected: undocumented equals `[]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("every dispatchable command is advertised in help text")
+# Exact equality, not a bound: names the offenders when it fails.
+val undocumented = missing_from(extract_dispatch_commands(),
+    extract_help_commands())
+expect(undocumented).to_equal([])
 ```
 
 </details>
@@ -446,11 +278,59 @@ expect(help_commands_shown.contains("replay")).to_equal(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6339c2987d9f248be02589fcd8448cb6957b832ac7d239a36e1245885edcfd86`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6339c2987d9f248be02589fcd8448cb6957b832ac7d239a36e1245885edcfd86`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6339c2987d9f248be02589fcd8448cb6957b832ac7d239a36e1245885edcfd86`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/cli_help_alignment_spec.spl
+mirror: doc/06_spec/01_unit/app/cli_help_alignment_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/cli_help_alignment_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/cli_help_alignment_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/cli_help_alignment_spec.spl:177:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'all three CLI sources exist' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli_help_alignment_spec.spl:184:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'each extractor returns a plausibly-sized command set' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli_help_alignment_spec.spl:194:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'known-good commands are found in every list that should hold them' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

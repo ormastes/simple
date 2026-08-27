@@ -20,7 +20,7 @@ Focused parity for upstream `commands/insights.ts`.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Focused parity for upstream `commands/insights.ts`.
@@ -39,6 +39,49 @@ runtime-blocked tranche.
 ### REQ-LLM-CARET-HIDDEN-008: descriptor and enablement
 
 #### should keep command metadata and source parity floor
+
+- should keep command metadata and source parity floor
+- Check insights command metadata and source parity
+   - Expected: command.typeName equals `local-jsx`
+   - Expected: command.name equals `insights`
+   - Expected: command.argumentHint equals ``
+   - Expected: command.isHidden is false
+   - Expected: command.enabled is true
+   - Expected: command.supportsNonInteractive is false
+   - Expected: insightsCommandName() equals `insights`
+   - Expected: insightsLookbackDays() equals `30`
+   - Expected: insightsCommandSourceLinesModeled() equals `3200`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-LLM-CARET-HIDDEN-008 REQ-SSPEC-SYSTEM
+step("should keep command metadata and source parity floor")
+step("Check insights command metadata and source parity")
+val command = insightsCommand(true)
+expect(command.typeName).to_equal("local-jsx")
+expect(command.name).to_equal("insights")
+expect(command.description).to_contain("usage")
+expect(command.argumentHint).to_equal("")
+expect(command.isHidden).to_equal(false)
+expect(command.enabled).to_equal(true)
+expect(command.supportsNonInteractive).to_equal(false)
+expect(insightsCommandName()).to_equal("insights")
+expect(insightsLookbackDays()).to_equal(30)
+expect(insightsReportPath()).to_contain("report.html")
+
+val source = file_read("src/app/llm_caret/claude_full/commands/insights.spl") ?? ""
+expect(countLines(source)).to_be_greater_than(3199)
+expect(insightsCommandSourceLinesModeled()).to_equal(3200)
+```
+
+</details>
+
 ### Supporting parts-bin summary and report mechanics
 
 #### should summarize only the last thirty days of local sessions
@@ -276,61 +319,54 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `d3acee4e91b6c6b7ab42276a57d487f8f62eada986cc858f8b93c2fbb4b0d047`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `70c527178761162ad574d50a11e66c87178017bf34fd25926369e74251d0c3ae`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `d3acee4e91b6c6b7ab42276a57d487f8f62eada986cc858f8b93c2fbb4b0d047`.
+Source SHA-256: `70c527178761162ad574d50a11e66c87178017bf34fd25926369e74251d0c3ae`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `d3acee4e91b6c6b7ab42276a57d487f8f62eada986cc858f8b93c2fbb4b0d047`  
+Source SHA-256: `70c527178761162ad574d50a11e66c87178017bf34fd25926369e74251d0c3ae`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **83/100**; effective score: **83/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 83/100
 source: test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl
 mirror: doc/06_spec/03_system/tools/llm/claude_full/commands/insights_command_spec.md (current)
-findings: 12 blockers: 1
-  narrative=100 structure=70 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 10 blockers: 0
+  narrative=100 structure=80 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/03_system/tools/llm/claude_full/commands/insights_command_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/tools/llm/claude_full/commands/insights_command_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 40 unexplained numeric expected value(s)
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 42 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:37:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should keep command metadata and source parity floor' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:37:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep command metadata and source parity floor' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:59:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should summarize only the last thirty days of local sessions' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should summarize only the last thirty days of local sessions' has no retained capture or evidence
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep command metadata and source parity floor' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:85:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should generate report HTML and handle browser fallback' describes the test rather than its outcome
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:58:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should summarize only the last thirty days of local sessions' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should generate report HTML and handle browser fallback' has no retained capture or evidence
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should summarize only the last thirty days of local sessions' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject no-data noninteractive and write-failure states' describes the test rather than its outcome
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:84:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should generate report HTML and handle browser fallback' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject no-data noninteractive and write-failure states' has no retained capture or evidence
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should generate report HTML and handle browser fallback' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/commands/insights_command_spec.spl:104:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject no-data noninteractive and write-failure states' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

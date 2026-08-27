@@ -20,7 +20,7 @@ Mission-critical infrastructure V2 pure-policy acceptance flow.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Mission-critical infrastructure V2 pure-policy acceptance flow.
@@ -37,6 +37,32 @@ PASS by this spec.
 ### REQ-MCI-003 and REQ-MCI-004 policy subset: certified SimpleOS evidence
 
 #### should admit a selected certified guest subset
+
+- should admit a selected certified guest subset
+- Exercise the certified SimpleOS platform manifest
+   - Expected: result.status equals `pass`
+   - Expected: result.selected_cell_count equals `2u32`
+   - Expected: result.visible_cell_count equals `24u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-MCI-010 REQ-MCI-003 REQ-MCI-004 REQ-MCI-005 REQ-MCI-007 REQ-MCI-008 REQ-MCI-009 REQ-SSPEC-SYSTEM
+step("should admit a selected certified guest subset")
+step("Exercise the certified SimpleOS platform manifest")
+val result = certified_simpleos_manifest_validate(mci_subset_manifest())
+expect(result.status).to_equal("pass")
+expect(result.selected_cell_count).to_equal(2u32)
+expect(result.visible_cell_count).to_equal(24u32)
+```
+
+</details>
+
 #### should retain unselected platform rows without an umbrella claim
 
 - should retain unselected platform rows without an umbrella claim
@@ -765,27 +791,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `2d958a2561bf965e526c31960f874e22e7bf449eaefdfef64ca6fa52ec2a054d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `d04c77afe3c700a17ae8b10daf9cdc079b2f54cf13fd62c154b9f20fb62a431a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `2d958a2561bf965e526c31960f874e22e7bf449eaefdfef64ca6fa52ec2a054d`.
+Source SHA-256: `d04c77afe3c700a17ae8b10daf9cdc079b2f54cf13fd62c154b9f20fb62a431a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `2d958a2561bf965e526c31960f874e22e7bf449eaefdfef64ca6fa52ec2a054d`  
+Source SHA-256: `d04c77afe3c700a17ae8b10daf9cdc079b2f54cf13fd62c154b9f20fb62a431a`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl
 mirror: doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
 doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -795,37 +820,31 @@ doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md:1:1: war
 test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 13 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 7 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:167:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should admit a selected certified guest subset' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:167:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit a selected certified guest subset' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:185:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain unselected platform rows without an umbrella claim' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:185:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should retain unselected platform rows without an umbrella claim' has no retained capture or evidence
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:167:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should admit a selected certified guest subset' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:193:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject a guest receipt with mismatched host identity' describes the test rather than its outcome
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:176:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain unselected platform rows without an umbrella claim' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:193:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject a guest receipt with mismatched host identity' has no retained capture or evidence
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:176:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should retain unselected platform rows without an umbrella claim' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:207:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit an exactly sized packed generation' describes the test rather than its outcome
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:184:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject a guest receipt with mismatched host identity' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:207:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should admit an exactly sized packed generation' has no retained capture or evidence
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:184:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject a guest receipt with mismatched host identity' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:225:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should seal and retire a published generation' describes the test rather than its outcome
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:198:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should admit an exactly sized packed generation' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:244:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should refuse row overflow before admission' describes the test rather than its outcome
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:216:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should seal and retire a published generation' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl:235:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should refuse row overflow before admission' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

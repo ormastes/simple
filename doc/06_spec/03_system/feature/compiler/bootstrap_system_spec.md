@@ -2,30 +2,6 @@
 
 > Tests the bootstrap system across multiple platforms including Linux, macOS, and Windows. Verifies that the staged bootstrap pipeline correctly produces working compilers on each target platform with platform-specific adjustments.
 
-<!-- sdn-diagram:id=bootstrap_system_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=bootstrap_system_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-bootstrap_system_spec -> nogc_sync_mut
-bootstrap_system_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=bootstrap_system_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 22 | 22 | 0 | 0 |
@@ -44,7 +20,7 @@ Tests the bootstrap system across multiple platforms including Linux, macOS, and
 | Category | Compiler |
 | Status | In Progress |
 | Source | `test/03_system/feature/compiler/bootstrap_system_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -61,16 +37,18 @@ compilers on each target platform with platform-specific adjustments.
 
 #### detects current platform
 
-1. check
+- detects current platform
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects current platform")
 # This test verifies the wrapper can detect the platform
 # The fact that we're running proves detection works
 check(true)
@@ -80,16 +58,18 @@ check(true)
 
 #### normalizes architecture names
 
-1. check
+- normalizes architecture names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("normalizes architecture names")
 # x86_64, amd64 → x86_64
 # aarch64, arm64 → arm64
 # riscv64 → riscv64
@@ -100,16 +80,18 @@ check(true)
 
 #### normalizes OS names
 
-1. check
+- normalizes OS names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("normalizes OS names")
 # Linux → linux
 # Darwin → macos
 # MINGW*/MSYS*/CYGWIN* → windows
@@ -122,16 +104,18 @@ check(true)
 
 #### executes Simple scripts
 
-1. check
+- executes Simple scripts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes Simple scripts")
 # We're running this test, so execution works
 check(true)
 ```
@@ -140,16 +124,18 @@ check(true)
 
 #### loads standard library
 
-1. check
+- loads standard library
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("loads standard library")
 use nogc_sync_mut.platform.{is_linux, is_windows, is_macos}
 check(is_linux() or is_windows() or is_macos())
 ```
@@ -158,16 +144,18 @@ check(is_linux() or is_windows() or is_macos())
 
 #### handles string interpolation
 
-1. check
+- handles string interpolation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles string interpolation")
 val result = "Test: {2 + 2}"
 check(result == "Test: 4")
 ```
@@ -176,17 +164,18 @@ check(result == "Test: 4")
 
 #### supports functions
 
-1. fn test function
-2. check
+- supports functions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports functions")
 fn test_function(x: i64) -> i64:
     x * 2
 
@@ -198,17 +187,18 @@ check(result == 42)
 
 #### supports classes
 
-1. fn get value
-2. check
+- supports classes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports classes")
 class TestClass:
     value: i64
 
@@ -225,16 +215,18 @@ check(obj.get_value() == 42)
 
 #### finds bootstrap binary
 
-1. check
+- finds bootstrap binary
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds bootstrap binary")
 # If we're running, the wrapper found the binary
 check(true)
 ```
@@ -243,16 +235,18 @@ check(true)
 
 #### passes arguments correctly
 
-1. check
+- passes arguments correctly
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes arguments correctly")
 # Test file is being executed with arguments
 check(true)
 ```
@@ -261,16 +255,18 @@ check(true)
 
 #### handles errors gracefully
 
-1. check
+- handles errors gracefully
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles errors gracefully")
 # Wrapper doesn't crash on invalid input
 check(true)
 ```
@@ -281,16 +277,18 @@ check(true)
 
 #### can read files
 
-1. check
+- can read files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("can read files")
 use app.io.file_exists
 # Test that file operations work
 check(true)
@@ -300,16 +298,18 @@ check(true)
 
 #### can write files
 
-1. check
+- can write files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("can write files")
 # File I/O functionality
 check(true)
 ```
@@ -320,27 +320,7 @@ check(true)
 
 #### provides platform information
 
-1. check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# At least one should be true
-val has_platform = is_windows() or is_unix() or is_linux() or is_macos()
-check(has_platform)
-```
-
-</details>
-
-#### provides path separators
-
-1. check
-2. check
+- provides platform information
 
 
 <details>
@@ -350,6 +330,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides platform information")
+# At least one should be true
+val has_platform = is_windows() or is_unix() or is_linux() or is_macos()
+check(has_platform)
+```
+
+</details>
+
+#### provides path separators
+
+- provides path separators
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides path separators")
 # Should have valid separators
 val dir = dir_sep()
 val path = path_sep()
@@ -361,17 +364,18 @@ check(path.len() > 0)
 
 #### provides executable and library extensions
 
-1. check
-2. check
+- provides executable and library extensions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides executable and library extensions")
 # Extensions should be defined (may be empty on Unix)
 val exe = exe_ext()
 val lib = lib_ext()
@@ -388,16 +392,18 @@ check(lib.len() > 0)  # Library extension always has a value
 
 #### can load build modules
 
-1. check
+- can load build modules
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("can load build modules")
 # Build system should be loadable
 check(true)
 ```
@@ -406,16 +412,18 @@ check(true)
 
 #### supports CLI commands
 
-1. check
+- supports CLI commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports CLI commands")
 # CLI functionality works
 check(true)
 ```
@@ -426,16 +434,18 @@ check(true)
 
 #### handles invalid syntax gracefully
 
-1. check
+- handles invalid syntax gracefully
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles invalid syntax gracefully")
 # Parser errors are caught
 check(true)
 ```
@@ -444,16 +454,18 @@ check(true)
 
 #### provides clear error messages
 
-1. check
+- provides clear error messages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides clear error messages")
 # Error reporting works
 check(true)
 ```
@@ -464,16 +476,18 @@ check(true)
 
 #### starts up quickly
 
-1. check
+- starts up quickly
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("starts up quickly")
 # Startup time < 100ms typical
 check(true)
 ```
@@ -482,16 +496,18 @@ check(true)
 
 #### executes efficiently
 
-1. check
+- executes efficiently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes efficiently")
 # Basic operations are fast
 var sum = 0
 for i in 0..100:
@@ -513,3 +529,60 @@ check(sum == 4950)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7c6c32826b6bfad021207edb4fa26b3b09744ee9fc90df51eb704b65d1206ab9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7c6c32826b6bfad021207edb4fa26b3b09744ee9fc90df51eb704b65d1206ab9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7c6c32826b6bfad021207edb4fa26b3b09744ee9fc90df51eb704b65d1206ab9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/feature/compiler/bootstrap_system_spec.spl
+mirror: doc/06_spec/03_system/feature/compiler/bootstrap_system_spec.md (current)
+findings: 8 blockers: 0
+  narrative=100 structure=85 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/compiler/bootstrap_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/compiler/bootstrap_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/compiler/bootstrap_system_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects current platform' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/compiler/bootstrap_system_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes architecture names' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/compiler/bootstrap_system_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes OS names' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/compiler/bootstrap_system_spec.spl:140:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can read files' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/compiler/bootstrap_system_spec.spl:147:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can write files' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/compiler/bootstrap_system_spec.spl:183:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can load build modules' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

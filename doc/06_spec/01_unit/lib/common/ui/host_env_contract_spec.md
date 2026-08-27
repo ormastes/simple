@@ -1,10 +1,10 @@
 # Host Env Contract Specification
 
-> <details>
+> Tests covering host environment evidence contract, render pipeline evidence contract, live framebuffer evidence classification, host evidence classification.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -17,23 +17,26 @@
 
 #### accepts exactly the required capability rows and explicit cross-host blockers
 
-- row
-- row
-- row
-- row
-- row
-- row
-- row
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- accepts exactly the required capability rows and explicit cross-host blockers
+   - Expected: complete_env().validation_reason() equals ``
+   - Expected: complete_env().ready() is false
+   - Expected: TestHostEnv.create([]).ready() is false
    - Expected: ready.ready() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("accepts exactly the required capability rows and explicit cross-host blockers")
 expect(complete_env().validation_reason()).to_equal("")
 expect(complete_env().ready()).to_equal(false)
 expect(TestHostEnv.create([]).ready()).to_equal(false)
@@ -53,13 +56,21 @@ expect(ready.ready()).to_equal(true)
 
 #### rejects missing, duplicate, and unknown capability rows
 
+- rejects missing, duplicate, and unknown capability rows
+   - Expected: TestHostEnv.create([]).validation_reason() equals `missing-x86_simd`
+   - Expected: duplicated.validation_reason() equals `duplicate-vulkan`
+   - Expected: unknown.validation_reason() equals `unknown-cuda`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects missing, duplicate, and unknown capability rows")
 expect(TestHostEnv.create([]).validation_reason()).to_equal("missing-x86_simd")
 val duplicated = complete_env().with_row(row("vulkan", "pass"))
 expect(duplicated.validation_reason()).to_equal("duplicate-vulkan")
@@ -71,13 +82,24 @@ expect(unknown.validation_reason()).to_equal("unknown-cuda")
 
 #### requires actionable evidence for every capability status
 
+- requires actionable evidence for every capability status
+   - Expected: row("vulkan", "maybe").validation_reason() equals `invalid-status`
+   - Expected: row("vulkan", "pass", "unexpected").validation_reason() equals `pass-has-reason`
+   - Expected: HostCapabilityRow.create("vulkan", "pass", "", "", "").validation_reason() equals `missing-evidence-path`
+   - Expected: row("arm_simd", "blocked").validation_reason() equals `blocked-without-reason`
+   - Expected: row("x86_simd", "fail").validation_reason() equals `fail-without-reason`
+   - Expected: row("arm_simd", "blocked", "arm-host-required").validation_reason() equals `blocked-without-resume-command`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires actionable evidence for every capability status")
 expect(row("vulkan", "maybe").validation_reason()).to_equal("invalid-status")
 expect(row("vulkan", "pass", "unexpected").validation_reason()).to_equal("pass-has-reason")
 expect(HostCapabilityRow.create("vulkan", "pass", "", "", "").validation_reason()).to_equal("missing-evidence-path")
@@ -90,13 +112,20 @@ expect(row("arm_simd", "blocked", "arm-host-required").validation_reason()).to_e
 
 #### covers accepted fail rows, nested row errors, and aggregate serialization
 
+- covers accepted fail rows, nested row errors, and aggregate serialization
+   - Expected: row("x86_simd", "fail", "probe-failed").validation_reason() equals ``
+   - Expected: TestHostEnv.create([row("x86_simd", "maybe")]).validation_reason() equals `x86_simd-invalid-status`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("covers accepted fail rows, nested row errors, and aggregate serialization")
 expect(row("x86_simd", "fail", "probe-failed").validation_reason()).to_equal("")
 expect(TestHostEnv.create([row("x86_simd", "maybe")]).validation_reason()).to_equal("x86_simd-invalid-status")
 val json = complete_env().to_json()
@@ -108,13 +137,26 @@ expect(json).to_contain("\"name\":\"framebuffer_readback\"")
 
 #### distinguishes valid invalid and absent retained evidence
 
+- distinguishes valid invalid and absent retained evidence
+   - Expected: passed.status equals `pass`
+   - Expected: passed.reason equals ``
+   - Expected: passed.resume_command equals ``
+   - Expected: failed.status equals `fail`
+   - Expected: failed.validation_reason() equals ``
+   - Expected: blocked.status equals `blocked`
+   - Expected: blocked.validation_reason() equals ``
+   - Expected: missing_despite_valid.status equals `blocked`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("distinguishes valid invalid and absent retained evidence")
 val passed = host_capability_row_from_evidence(
     "renderdoc", true, true, "invalid-renderdoc", "build/renderdoc/evidence.env", "rerun-renderdoc")
 val failed = host_capability_row_from_evidence(
@@ -139,19 +181,9 @@ expect(missing_despite_valid.status).to_equal("blocked")
 
 #### accepts a correlated completed device readback
 
-<details>
-<summary>Executable SSpec</summary>
+- accepts a correlated completed device readback
+   - Expected: receipt().validation_reason() equals ``
 
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect(receipt().validation_reason()).to_equal("")
-```
-
-</details>
-
-#### fails closed on disconnected event, frame, and mutation identities
 
 <details>
 <summary>Executable SSpec</summary>
@@ -160,6 +192,30 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("accepts a correlated completed device readback")
+expect(receipt().validation_reason()).to_equal("")
+```
+
+</details>
+
+#### fails closed on disconnected event, frame, and mutation identities
+
+- fails closed on disconnected event, frame, and mutation identities
+   - Expected: receipt(event_id: 0).validation_reason() equals `missing-event-id`
+   - Expected: receipt(frame_id: 8).validation_reason() equals `event-frame-mismatch`
+   - Expected: RenderPipelineReceipt.create(7, 7, 0, "vulkan", 41, true, "device_readback", 64, 48, 256, "argb8888", 99, 12, false).validation_reason() equals `missing-mutation-revision`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("fails closed on disconnected event, frame, and mutation identities")
 expect(receipt(event_id: 0).validation_reason()).to_equal("missing-event-id")
 expect(receipt(frame_id: 8).validation_reason()).to_equal("event-frame-mismatch")
 expect(RenderPipelineReceipt.create(7, 7, 0, "vulkan", 41, true, "device_readback", 64, 48, 256, "argb8888", 99, 12, false).validation_reason()).to_equal("missing-mutation-revision")
@@ -169,13 +225,23 @@ expect(RenderPipelineReceipt.create(7, 7, 0, "vulkan", 41, true, "device_readbac
 
 #### rejects fallback, synthetic, incomplete, and CPU-mirror backend proof
 
+- rejects fallback, synthetic, incomplete, and CPU-mirror backend proof
+   - Expected: receipt(fallback: true).validation_reason() equals `fallback-used`
+   - Expected: receipt(backend: "cpu").validation_reason() equals `not-vulkan-backend`
+   - Expected: receipt(handle: 0).validation_reason() equals `missing-backend-handle`
+   - Expected: receipt(completed: false).validation_reason() equals `submission-incomplete`
+   - Expected: receipt(source: "cpu_mirror").validation_reason() equals `not-device-readback`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects fallback, synthetic, incomplete, and CPU-mirror backend proof")
 expect(receipt(fallback: true).validation_reason()).to_equal("fallback-used")
 expect(receipt(backend: "cpu").validation_reason()).to_equal("not-vulkan-backend")
 expect(receipt(handle: 0).validation_reason()).to_equal("missing-backend-handle")
@@ -187,13 +253,24 @@ expect(receipt(source: "cpu_mirror").validation_reason()).to_equal("not-device-r
 
 #### rejects malformed or blank framebuffer proof
 
+- rejects malformed or blank framebuffer proof
+   - Expected: receipt(width: 0).validation_reason() equals `invalid-dimensions`
+   - Expected: receipt(height: 0).validation_reason() equals `invalid-dimensions`
+   - Expected: receipt(stride: 64).validation_reason() equals `invalid-stride`
+   - Expected: RenderPipelineReceipt.create(7, 7, 3, "vulkan", 41, true, "device_readback", 64, 48, 256, "rgba8888", 99, 12, false).validation_reason() equals `invalid-format`
+   - Expected: receipt(checksum: 0).validation_reason() equals `missing-checksum`
+   - Expected: receipt(nonblank: 0).validation_reason() equals `blank-frame`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects malformed or blank framebuffer proof")
 expect(receipt(width: 0).validation_reason()).to_equal("invalid-dimensions")
 expect(receipt(height: 0).validation_reason()).to_equal("invalid-dimensions")
 expect(receipt(stride: 64).validation_reason()).to_equal("invalid-stride")
@@ -208,13 +285,23 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 
 #### accepts only a forward Vulkan device frame tied to the screen event receipt
 
+- accepts only a forward Vulkan device frame tied to the screen event receipt
+   - Expected: baseline_path equals `/tmp/baseline.ppm`
+   - Expected: baseline_sha equals `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
+   - Expected: input_path equals `/tmp/input.ppm`
+   - Expected: input_sha equals `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+   - Expected: duplicate_path equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("accepts only a forward Vulkan device frame tied to the screen event receipt")
 val complete = complete_readback_evidence()
 val (baseline_path, baseline_sha, input_path, input_sha) = host_readback_capture_bindings(complete)
 expect(baseline_path).to_equal("/tmp/baseline.ppm")
@@ -263,13 +350,22 @@ expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_i
 
 #### admits only retained native SIMD receipts across coordinator architectures
 
+- admits only retained native SIMD receipts across coordinator architectures
+   - Expected: arm.status equals `pass`
+   - Expected: riscv.status equals `pass`
+   - Expected: emulated.status equals `blocked`
+   - Expected: emulated.reason equals `complete-retained-native-aarch64-simd-frame-evidence-required`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("admits only retained native SIMD receipts across coordinator architectures")
 val arm = host_simd_capability_row(
     "arm_simd", complete_simd_evidence("aarch64", "neon"),
     "aarch64", "neon", "build/evidence/arm.env"
@@ -293,13 +389,18 @@ expect(emulated.reason).to_equal("complete-retained-native-aarch64-simd-frame-ev
 
 #### requires the complete retained x86 SIMD rendering receipt
 
+- requires the complete retained x86 SIMD rendering receipt
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires the complete retained x86 SIMD rendering receipt")
 val complete = complete_simd_evidence()
 expect(host_x86_simd_evidence_passes(complete)).to_be(true)
 expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=sse42"))).to_be(true)
@@ -348,20 +449,70 @@ expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass
 
 #### binds SIMD artifacts and the exact frame receipt payload without duplicate keys
 
-The pure host contract returns the selected compiler path and recorded source and
-compiler hashes only when every key is present exactly once. It reconstructs the
-producer's exact six-line frame receipt payload, including its final newline, and
-fails closed when any bound receipt key is duplicated.
+- binds SIMD artifacts and the exact frame receipt payload without duplicate keys
+   - Expected: compiler_path equals `/tmp/simple-simd-compiler`
+   - Expected: source_sha equals `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`
+   - Expected: compiler_sha equals `bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+   - Expected: receipt_sha equals `cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc`
+   - Expected: duplicate_compiler_path equals ``
+   - Expected: duplicate_source_sha equals ``
+   - Expected: duplicate_compiler_sha equals ``
+   - Expected: duplicate_payload equals ``
+   - Expected: duplicate_receipt_sha equals ``
 
-#### requires complete Vulkan device readback evidence
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("binds SIMD artifacts and the exact frame receipt payload without duplicate keys")
+val complete = complete_simd_evidence()
+val (compiler_path, source_sha, compiler_sha) = host_simd_artifact_bindings(complete)
+val (payload, receipt_sha) = host_simd_frame_receipt_binding(complete)
+expect(compiler_path).to_equal("/tmp/simple-simd-compiler")
+expect(source_sha).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+expect(compiler_sha).to_equal("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+expect(payload).to_equal(
+    "arch=x86_64\n" +
+    "feature=avx2\n" +
+    "execution_environment=native_host\n" +
+    "diagram_actual_checksum=606\n" +
+    "canonical_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+    "compiler_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+)
+expect(receipt_sha).to_equal("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+val duplicate_path = complete + "\ncpu_simd_evidence_simple_bin=/tmp/other-simple"
+val (duplicate_compiler_path, duplicate_source_sha, duplicate_compiler_sha) =
+    host_simd_artifact_bindings(duplicate_path)
+expect(duplicate_compiler_path).to_equal("")
+expect(duplicate_source_sha).to_equal("")
+expect(duplicate_compiler_sha).to_equal("")
+val duplicate_receipt = complete + "\ncpu_simd_evidence_arch=x86_64"
+val (duplicate_payload, duplicate_receipt_sha) = host_simd_frame_receipt_binding(duplicate_receipt)
+expect(duplicate_payload).to_equal("")
+expect(duplicate_receipt_sha).to_equal("")
+```
+
+</details>
+
+#### requires complete Vulkan device readback evidence
+
+- requires complete Vulkan device readback evidence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 61 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("requires complete Vulkan device readback evidence")
 val complete = "vulkan_engine2d_readback_status=pass\n" +
     "vulkan_engine2d_readback_spec_status=pass\n" +
     "vulkan_engine2d_readback_available=true\n" +
@@ -427,17 +578,21 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 
 #### requires browser Vulkan backing and exact three-way ARGB parity
 
-The pure classifier consumes the setup producer's separate browser-backing and
-direct-run receipts, rejects malformed pixel cardinality and nonblank counts,
-and requires all three pairwise comparisons to pass.
+- requires browser Vulkan backing and exact three-way ARGB parity
+- Reject incomplete or non-Vulkan browser receipts
+- Reject unbound, mismatched, or blank ARGB artifacts
+- Reject any missing or nonzero pairwise result and aggregate failure
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 71 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires browser Vulkan backing and exact three-way ARGB parity")
 val browser = complete_browser_vulkan_evidence()
 val run = complete_browser_vulkan_parity_run_evidence()
 expect(host_browser_vulkan_parity_evidence_passes(browser, run)).to_be(true)
@@ -513,13 +668,28 @@ expect(host_browser_vulkan_parity_evidence_passes(browser, run + "\ngui_web_2d_v
 
 #### requires genuine correlated RenderDoc replay evidence
 
+- requires genuine correlated RenderDoc replay evidence
+   - Expected: capture_path equals `/tmp/frame.rdc`
+   - Expected: capture_sha256 equals `eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`
+   - Expected: duplicate_path equals ``
+   - Expected: duplicate_sha256 equals ``
+   - Expected: missing_path equals ``
+   - Expected: missing_sha256 equals ``
+   - Expected: xml_path equals `/tmp/frame.xml`
+   - Expected: xml_sha256 equals `dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd`
+   - Expected: duplicate_xml_path equals ``
+   - Expected: duplicate_xml_sha256 equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("requires genuine correlated RenderDoc replay evidence")
 val complete = complete_renderdoc_gate_evidence()
 val (capture_path, capture_sha256) = host_renderdoc_capture_binding(complete)
 expect(capture_path).to_equal("/tmp/frame.rdc")
@@ -572,10 +742,7 @@ expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_owner_a
 
 #### accepts only a complete screen-to-WM semantic frame receipt
 
-A screen event is evidence only when its WM target names the retained
-compositor window and all later receipts agree. Focus, pointer, keyboard,
-move, maximize, and restore status must each be exactly `pass`.
-
+- accepts only a complete screen-to-WM semantic frame receipt
 - Classify one complete screen-to-WM semantic frame receipt
 - Reject receipts with any missing or inconsistent hop
 
@@ -583,10 +750,14 @@ move, maximize, and restore status must each be exactly `pass`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("accepts only a complete screen-to-WM semantic frame receipt")
+"""A screen event is evidence only when its WM target names the
+retained compositor window and all later receipts agree."""
 step("Classify one complete screen-to-WM semantic frame receipt")
 val complete = complete_display_input_evidence()
 expect(host_display_input_evidence_passes(complete)).to_be(true)
@@ -628,12 +799,12 @@ expect(host_display_input_evidence_passes(complete.replace("frame_correlation_st
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/ui/host_env_contract_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering host environment evidence contract, render pipeline evidence contract, live framebuffer evidence classification, host evidence classification.
 - host environment evidence contract
 - render pipeline evidence contract
 - live framebuffer evidence classification
@@ -651,3 +822,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `466885a17faf9fae6bfea6bb624d0ee749ccd1bdb746cd0fdaf17efc5609e168`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `466885a17faf9fae6bfea6bb624d0ee749ccd1bdb746cd0fdaf17efc5609e168`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `466885a17faf9fae6bfea6bb624d0ee749ccd1bdb746cd0fdaf17efc5609e168`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/lib/common/ui/host_env_contract_spec.spl
+mirror: doc/06_spec/01_unit/lib/common/ui/host_env_contract_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/common/ui/host_env_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/common/ui/host_env_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/common/ui/host_env_contract_spec.spl:272:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts exactly the required capability rows and explicit cross-host blockers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/ui/host_env_contract_spec.spl:289:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects missing, duplicate, and unknown capability rows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/ui/host_env_contract_spec.spl:298:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires actionable evidence for every capability status' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

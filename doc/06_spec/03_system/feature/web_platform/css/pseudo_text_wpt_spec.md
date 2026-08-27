@@ -20,7 +20,7 @@ Proves authored and generated text cross the production HTML/CSS semantic and
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves authored and generated text cross the production HTML/CSS semantic and
@@ -37,19 +37,14 @@ compatibility evidence, not substitutes for the canonical ordering scenario.
 
 #### should order before authored and after text on one exact line
 
+- should order before authored and after text on one exact line
+   - Protocol capture: after_step
 - Resolve generated content in canonical web semantic and layout state
-   - Protocol capture: after_step
-- identify missing features
-   - Protocol capture: after_step
-- "pseudo-elements
    - Protocol capture: after_step
 - Lower three parented text runs in exact CSS generated-content order
    - Protocol capture: after_step
-   - Evidence: protocol response verified by 1 expected check
+   - Evidence: protocol response verified by 16 expected checks
    - Expected: commands.len() equals `3`
-- fail
-   - Protocol capture: after_step
-   - Evidence: protocol response verified by 15 expected checks
    - Expected: before.text_value equals `A`
    - Expected: authored.text_value equals `M`
    - Expected: after.text_value equals `Z`
@@ -77,10 +72,12 @@ compatibility evidence, not substitutes for the canonical ordering scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 100 lines folded for reproduction.
+Runnable source: 102 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should order before authored and after text on one exact line")
 val before_color = 0xFF2563EBu32
 val authored_color = 0xFF16A34Au32
 val after_color = 0xFFDC2626u32
@@ -187,21 +184,17 @@ expect(_last_color_x(
 
 #### should resolve generated attr text and keep a missing attr empty
 
-- Resolve before attr content
+- should resolve generated attr text and keep a missing attr empty
    - Artifact capture: after_step
-- "div::before{content:attr
+- Resolve before attr content
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: before_count equals `96`
 - Resolve after attr content
    - Artifact capture: after_step
-- "div::after{content:attr
-   - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: after_count equals `64`
 - Keep a missing attr empty
-   - Artifact capture: after_step
-- "div::after{content:attr
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: missing_count equals `0`
@@ -210,10 +203,12 @@ expect(_last_color_x(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should resolve generated attr text and keep a missing attr empty")
 step("Resolve before attr content")
 val before_count = _pixel_count(
     "div{color:#2563eb;font-size:8px}" +
@@ -246,6 +241,8 @@ expect(missing_count).to_equal(0)
 
 #### should suppress generated text for hidden host and pseudo boxes
 
+- should suppress generated text for hidden host and pseudo boxes
+   - Artifact capture: after_step
 - Suppress generated text with a hidden host box
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
@@ -263,10 +260,12 @@ expect(missing_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should suppress generated text for hidden host and pseudo boxes")
 step("Suppress generated text with a hidden host box")
 val hidden_host_count = _pixel_count(
     "div{display:none;color:#0891b2}" +
@@ -278,7 +277,7 @@ expect(hidden_host_count).to_equal(0)
 
 step("Suppress generated text with a hidden before box")
 val hidden_before_count = _pixel_count(
-    "div{color:#0891b2}" +
+    "div{{color:#0891b2}}" +
     "div::before{content:'Hidden';display:none}",
     "<div></div>",
     0xFF0891B2u32
@@ -287,7 +286,7 @@ expect(hidden_before_count).to_equal(0)
 
 step("Suppress generated text with a hidden after box")
 val hidden_after_count = _pixel_count(
-    "div{color:#0891b2}" +
+    "div{{color:#0891b2}}" +
     "div::after{content:'Hidden';display:none}",
     "<div></div>",
     0xFF0891B2u32
@@ -299,6 +298,8 @@ expect(hidden_after_count).to_equal(0)
 
 #### should clip a nowrap line with an ellipsis
 
+- should clip a nowrap line with an ellipsis
+   - Artifact capture: after_step
 - Render the bounded ellipsis line
    - Artifact capture: after_step
 - Render the unbounded control line
@@ -310,10 +311,12 @@ expect(hidden_after_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should clip a nowrap line with an ellipsis")
 val body = "<div>ThisIsAVeryLongWordThatOverflows</div>"
 
 step("Render the bounded ellipsis line")
@@ -339,6 +342,8 @@ expect(truncated).to_be_less_than(control)
 
 #### should wrap long words with break-all and break-word
 
+- should wrap long words with break-all and break-word
+   - Artifact capture: after_step
 - Wrap a break-all word onto the second line
    - Artifact capture: after_step
 - Wrap a break-word word onto the second line
@@ -350,10 +355,12 @@ expect(truncated).to_be_less_than(control)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should wrap long words with break-all and break-word")
 val body = "<div>ABCDEFGHIJKLMNOPQRST</div>"
 val second_line_row = 14
 
@@ -392,6 +399,8 @@ expect(break_all_first).to_be(true)
 
 #### should center and right-align short text in an exact block width
 
+- should center and right-align short text in an exact block width
+   - Artifact capture: after_step
 - Center the short line inside forty pixels
    - Artifact capture: after_step
 - Right-align the short line inside forty pixels
@@ -403,10 +412,12 @@ expect(break_all_first).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should center and right-align short text in an exact block width")
 val body = "<div>AB</div>"
 
 step("Center the short line inside forty pixels")
@@ -469,3 +480,79 @@ expect(center_row).to_be(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `351095ed9dd8bc6d99a95725b87a6b61f173369b53029249cb0384f03d371b73`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `351095ed9dd8bc6d99a95725b87a6b61f173369b53029249cb0384f03d371b73`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `351095ed9dd8bc6d99a95725b87a6b61f173369b53029249cb0384f03d371b73`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/pseudo_text_wpt_spec.md (current)
+findings: 13 blockers: 1
+  narrative=100 structure=70 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=76; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/pseudo_text_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/pseudo_text_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 17 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:131:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should order before authored and after text on one exact line' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should order before authored and after text on one exact line' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:238:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve generated attr text and keep a missing attr empty' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:238:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should resolve generated attr text and keep a missing attr empty' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:271:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should suppress generated text for hidden host and pseudo boxes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:271:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should suppress generated text for hidden host and pseudo boxes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:304:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should clip a nowrap line with an ellipsis' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:330:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should wrap long words with break-all and break-word' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/pseudo_text_wpt_spec.spl:369:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should center and right-align short text in an exact block width' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

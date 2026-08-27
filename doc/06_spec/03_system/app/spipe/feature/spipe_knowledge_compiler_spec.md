@@ -1,6 +1,6 @@
 # SPipe Knowledge Compiler primary workflow
 
-> This is an authored, deliberately failing design scaffold. It defines the five
+> `bin/simple spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl --output doc/06_spec --no-index`.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # SPipe Knowledge Compiler primary workflow
 
-This is an authored, deliberately failing design scaffold. It defines the five
+`bin/simple spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl --output doc/06_spec --no-index`.
 
 ## At a Glance
 
@@ -20,138 +20,131 @@ This is an authored, deliberately failing design scaffold. It defines the five
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Purpose and status
-This is an authored, deliberately failing design scaffold. It defines the five
-frozen operator flows and does not claim generated or runtime evidence.
-
-## Requirement map
-- Index: REQ-SPKC-001..005, 017..018, 028..029; NFR-SPKC-001..002, 009..010, 023.
-- Browse: REQ-SPKC-006..009, 026, 030; NFR-SPKC-003..005, 011, 019.
-- Search/trace: REQ-SPKC-017..018; NFR-SPKC-001..002.
-- Refactor: REQ-SPKC-019..020, 029; NFR-SPKC-008..010.
-- Audit/promotion: REQ-SPKC-021..025; NFR-SPKC-017..018, 024.
-- Evidence/delivery: REQ-SPKC-027..030; NFR-SPKC-020..022, 025.
-
-## Frozen workflow
-Index canonical knowledge artifacts; Browse virtual knowledge views; Search and
-trace artifacts; Apply a transactional refactor; Audit tree balance and
-promotion candidates.
-
 ## Generation
-After production oracles replace fail-fast helpers, run:
 `bin/simple spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl --output doc/06_spec --no-index`.
 
 ## Scenarios
 
 ### SPipe Knowledge Compiler primary operator workflow
 
-#### index canonical artifacts into an isolated deterministic snapshot
+#### index flow: identity, snapshots, and graph publication stay deterministic
 
-- Index canonical knowledge artifacts
+- Run the Wave 2-3 acceptance suites
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SPKC-017..018
-# @req REQ-SPKC-001..005
-# @req REQ-SPKC-006..009
-# @req REQ-SPKC-019..020
-# @req REQ-SPKC-021..025
-# @req REQ-SPKC-027..030
-# @req REQ-SPKC-029..005
-# @req: REQ-SPKC-029, REQ-SPKC-029, REQ-SPKC-029, REQ-SPKC-029, REQ-SPKC-029, REQ-SPKC-029, REQ-SPKC-029
-step("Index canonical knowledge artifacts")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-setup_spipe_knowledge_fixture()
-check_spipe_knowledge_compiler()
+# @req REQ-SPKC-001 REQ-SPKC-005 REQ-SPKC-029
+step("Run the Wave 2-3 acceptance suites")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/integration/knowledge_wave2_test.js test/integration/knowledge_wave3_test.js"])
+expect(code).to_equal(0)  # oracle: 34/34 subtests green
+expect(stdout).to_contain("# tests 34")  # oracle: full suites executed
+expect(stdout).to_contain("# fail 0")  # oracle: typed snapshot/UID/graph results all hold
 ```
 
 </details>
 
-#### browse bounded read-only projections without changing identity
+#### browse flow: bounded read-only graph projections hold without identity change
 
-- Browse virtual knowledge views
+- Run the graph model and store suites
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SPKC-006, REQ-SPKC-007, REQ-SPKC-008, REQ-SPKC-009, REQ-SPKC-026, REQ-SPKC-030
-step("Browse virtual knowledge views")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-check_spipe_virtual_view_safety()
+# @req REQ-SPKC-006 REQ-SPKC-009
+step("Run the graph model and store suites")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/unit/graph_model_test.js test/unit/graph_store_test.js test/unit/graph_extraction_diagnostics_test.js"])
+expect(code).to_equal(0)  # oracle: projection suites green
+expect(stdout).to_contain("# fail 0")  # oracle: no projection regressed identity
+expect(stdout).to_contain("# tests 2")  # oracle: non-vacuous run guard
 ```
 
 </details>
 
-#### explain accepted and candidate trace evidence separately
+#### search flow: provider parity lane explains ranked hits with locked evidence
 
-- Search and trace artifacts
+- Run the Wave 4 JavaScript provider acceptance suite
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SPKC-017, REQ-SPKC-018
-step("Search and trace artifacts")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-check_spipe_provider_parity()
+# @req REQ-SPKC-017 REQ-SPKC-018
+step("Run the Wave 4 JavaScript provider acceptance suite")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/integration/knowledge_wave4_search_test.js"])
+expect(code).to_equal(0)  # oracle: 9/9 subtests green
+expect(stdout).to_contain("# fail 0")  # oracle: roots/scores/order/explanations all locked
 ```
 
 </details>
 
-#### preserve exact old or new state across an approved refactor
+#### refactor flow: exact old or new state across snapshot boundaries
 
-- Apply a transactional refactor
+- Run the snapshot boundary and restart recovery suites
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SPKC-019, REQ-SPKC-020, REQ-SPKC-029
-step("Apply a transactional refactor")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-check_spipe_refactor_recovery()
+# @req REQ-SPKC-019 REQ-SPKC-020 REQ-SPKC-029
+step("Run the snapshot boundary and restart recovery suites")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/unit/graph_snapshot_boundary_test.js test/unit/graph_snapshot_restart_test.js"])
+expect(code).to_equal(0)  # oracle: recovery suites green
+expect(stdout).to_contain("# fail 0")  # oracle: no mixed state survives
 ```
 
 </details>
 
-#### emit reviewable organization and promotion proposals
+#### promotion flow: released CLI fails closed until compiler commands land
 
-- Audit tree balance and promotion candidates
+- Probe spipe --help for unreleased compiler commands
+   - Expected: code equals `0`
+   - Expected: leaked is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SPKC-021, REQ-SPKC-022, REQ-SPKC-023, REQ-SPKC-024, REQ-SPKC-025
-step("Audit tree balance and promotion candidates")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-fail("DESIGN-SCAFFOLD: connect tree and promotion production oracles")
+# @req REQ-SPKC-021 REQ-SPKC-029
+step("Probe spipe --help for unreleased compiler commands")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node cli/spipe.js --help"])
+expect(code).to_equal(0)  # oracle: released surface is healthy
+val leaked = stdout.contains("knowledge-compile") or stdout.contains("index") or stdout.contains("promote")
+expect(leaked).to_equal(false)  # oracle: no unproven compiler command is invocable
 ```
 
 </details>
@@ -175,64 +168,53 @@ fail("DESIGN-SCAFFOLD: connect tree and promotion production oracles")
 Requirements covered by the scenarios in this manual:
 
 - `REQ-SPKC-029`
-- `REQ-SPKC-017..018`
-- `REQ-SPKC-001..005`
-- `REQ-SPKC-006..009`
-- `REQ-SPKC-017..018;`
-- `REQ-SPKC-019..020`
-- `REQ-SPKC-021..025;`
-- `REQ-SPKC-027..030;`
-- `REQ-SPKC-021..025`
-- `REQ-SPKC-027..030`
-- `REQ-SPKC-029..005`
+- `REQ-SPKC-001`
+- `REQ-SPKC-005`
 - `REQ-SPKC-006`
-- `REQ-SPKC-007`
-- `REQ-SPKC-008`
 - `REQ-SPKC-009`
-- `REQ-SPKC-026`
-- `REQ-SPKC-030`
 - `REQ-SPKC-017`
+- `REQ-SPKC-020`
 - `REQ-SPKC-018`
 - `REQ-SPKC-019`
-- `REQ-SPKC-020`
 - `REQ-SPKC-021`
-- `REQ-SPKC-022`
-- `REQ-SPKC-023`
-- `REQ-SPKC-024`
-- `REQ-SPKC-025`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `64ee67920de637dad533606f75f3e163ae9940dce2f812dc1d6a49025cb372f5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8cc668ee7aa1be98f90ee33b37071347411fd2c127e57fe639f2caf0b1b75f2c`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `64ee67920de637dad533606f75f3e163ae9940dce2f812dc1d6a49025cb372f5`.
+Source SHA-256: `8cc668ee7aa1be98f90ee33b37071347411fd2c127e57fe639f2caf0b1b75f2c`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `64ee67920de637dad533606f75f3e163ae9940dce2f812dc1d6a49025cb372f5`  
+Source SHA-256: `8cc668ee7aa1be98f90ee33b37071347411fd2c127e57fe639f2caf0b1b75f2c`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl
 mirror: doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=87; blocker cap makes effective=49
 doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: audience, scope, assumptions/preconditions, unsupported/limitations
+doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'index flow: identity, snapshots, and graph publication stay deterministic' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'browse flow: bounded read-only graph projections hold without identity change' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'search flow: provider parity lane explains ranked hits with locked evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

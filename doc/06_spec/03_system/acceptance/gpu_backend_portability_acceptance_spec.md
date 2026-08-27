@@ -20,7 +20,7 @@ Purpose: prove that a single GPU program in Simple runs unchanged on CUDA,
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Purpose: prove that a single GPU program in Simple runs unchanged on CUDA,
@@ -271,3 +271,65 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-GPU-PORT-002`
+- `REQ-GPU-PORT-003`
+- `REQ-GPU-PORT-004`
+- `REQ-GPU-PORT-005`
+- `REQ-GPU-PORT-001`
+- `REQ-GPU-PORT-006`
+- `REQ-GPU-PORT-007`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f4a97452a36c6b54a12d97b1c0e19f7cefb202cefc00e995e5d4334c3f321983`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f4a97452a36c6b54a12d97b1c0e19f7cefb202cefc00e995e5d4334c3f321983`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f4a97452a36c6b54a12d97b1c0e19f7cefb202cefc00e995e5d4334c3f321983`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl
+mirror: doc/06_spec/03_system/acceptance/gpu_backend_portability_acceptance_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/03_system/acceptance/gpu_backend_portability_acceptance_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/acceptance/gpu_backend_portability_acceptance_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'picks the backend from simple.sdn alone, so the three example directories differ only in configuration' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'falls back to auto-probing when a project says nothing about GPUs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/acceptance/gpu_backend_portability_acceptance_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs the shared program on a live CUDA device, or names the reason it cannot' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

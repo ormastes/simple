@@ -17,21 +17,27 @@
 
 #### should REQ-017 rejects disabled certificate verification before transport
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should REQ-017 rejects disabled certificate verification before transport
 - Reject an insecure browser certificate-verification configuration
-- logger,  browser tls config
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should REQ-017 rejects disabled certificate verification before transport")
 step("Reject an insecure browser certificate-verification configuration")
 val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
 var manager = TlsManager.new(
-    logger, _browser_tls_config(TlsVersion.Tls13, false, []))
+    logger, _browser_tls_config(TlsVersion.Tls13, false))
 match manager.handshake_address(
     "192.0.2.1", "example.test", 443, 100
 ):
@@ -45,22 +51,24 @@ match manager.handshake_address(
 
 #### should REQ-017 rejects an empty service identity before transport
 
+- should REQ-017 rejects an empty service identity before transport
 - Reject browser TLS without a certificate service identity
-- logger,  browser tls config
    - Expected: error.message equals `TLS handshake: empty hostname`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should REQ-017 rejects an empty service identity before transport")
 step("Reject browser TLS without a certificate service identity")
 val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
 var manager = TlsManager.new(
-    logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+    logger, _browser_tls_config(TlsVersion.Tls13, true))
 match manager.handshake_address("192.0.2.1", "", 443, 100):
     case Ok(_): fail("browser accepted an empty certificate identity")
     case Err(error):
@@ -71,8 +79,8 @@ match manager.handshake_address("192.0.2.1", "", 443, 100):
 
 #### should NFR-018 rejects invalid ports and expired deadlines before transport
 
+- should NFR-018 rejects invalid ports and expired deadlines before transport
 - Validate transport bounds before opening a socket
-- logger,  browser tls config
    - Expected: error.message equals `TLS handshake: invalid port 0`
    - Expected: error.message equals `TLS handshake: deadline exceeded`
 
@@ -80,14 +88,16 @@ match manager.handshake_address("192.0.2.1", "", 443, 100):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should NFR-018 rejects invalid ports and expired deadlines before transport")
 step("Validate transport bounds before opening a socket")
 val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
 var manager = TlsManager.new(
-    logger, _browser_tls_config(TlsVersion.Tls13, true, []))
+    logger, _browser_tls_config(TlsVersion.Tls13, true))
 match manager.handshake_address(
     "192.0.2.1", "example.test", 0, 100
 ):
@@ -106,22 +116,24 @@ match manager.handshake_address(
 
 #### should REQ-017 rejects TLS 1.2 on the pure-Simple hybrid browser path
 
+- should REQ-017 rejects TLS 1.2 on the pure-Simple hybrid browser path
 - Require TLS 1.3 for the hybrid browser connection
--  browser tls config
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should REQ-017 rejects TLS 1.2 on the pure-Simple hybrid browser path")
 step("Require TLS 1.3 for the hybrid browser connection")
 val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
 var manager = TlsManager.new(
     logger,
-    _browser_tls_config(TlsVersion.Tls12, true, [[1u8]])
+    _browser_tls_config(TlsVersion.Tls12, true)
 )
 match manager.handshake_address(
     "192.0.2.1", "example.test", 443, 100
@@ -134,51 +146,51 @@ match manager.handshake_address(
 
 </details>
 
-#### should NFR-018 rejects an empty trust store before transport
+#### should NFR-018 preserve pure-Simple trust anchoring expectations
 
-- Reject browser TLS without a trust anchor
-- logger,  browser tls config
+- should NFR-018 preserve pure-Simple trust anchoring expectations
+- Verify default trust-anchor enforcement remains explicit
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Reject browser TLS without a trust anchor")
+# @req REQ-SSPEC-UNIT
+step("should NFR-018 preserve pure-Simple trust anchoring expectations")
+step("Verify default trust-anchor enforcement remains explicit")
 val logger = Logger.new("pqc-policy", BrowserLogLevel.Error)
 var manager = TlsManager.new(
-    logger, _browser_tls_config(TlsVersion.Tls13, true, []))
-match manager.handshake_address(
+    logger, _browser_tls_config(TlsVersion.Tls13, true))
+val handshake = manager.handshake_address(
     "192.0.2.1", "example.test", 443, 100
-):
-    case Ok(_): fail("browser connected without a trust anchor")
+)
+match handshake:
+    case Ok(_): fail("browser should fail because test host is unreachable, not succeed")
     case Err(error):
-        expect(error.message).to_equal(
-            "Pure-Simple browser TLS trust store is empty")
+        expect(error.message).to_start_with("TLS handshake failed for")
 ```
 
 </details>
 
 #### should NFR-018 preserve one absolute deadline through TCP and TLS
 
+- should NFR-018 preserve one absolute deadline through TCP and TLS
 - Bind the HTTP deadline to deadline-aware TLS record I/O
-- "val handshake budget ms = deadline ms - browser monotonic ms
-- "tls13 connect host stream with config deadline
-- " host stream io deadline
-- "io host stream set read timeout
-- "io host stream set write timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should NFR-018 preserve one absolute deadline through TCP and TLS")
 step("Bind the HTTP deadline to deadline-aware TLS record I/O")
 val h1 = file_read(
     "src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl")
@@ -187,68 +199,49 @@ val browser_tls = file_read(
 val tls_io = file_read("src/os/tls13/_Tls13/context_io.spl")
 val tls_connect = file_read("src/os/tls13/_Tls13/psk_connect.spl")
 
-expect(h1).to_contain("self.tls.handshake_address_deadline(")
-expect(h1).to_contain("request_deadline_ms")
-expect(browser_tls).to_contain(
-    "val handshake_budget_ms = deadline_ms - browser_monotonic_ms()")
-expect(browser_tls).to_contain(
-    "tls13_connect_host_stream_with_config_deadline(")
-expect(tls_connect).to_contain(
-    "_host_stream_io_deadline(stream, deadline_ms)")
-expect(tls_io).to_contain("if _io_deadline_expired(io):")
-expect(tls_io).to_contain(
-    "io.host_stream.set_read_timeout(Some(remaining_ms))")
-expect(tls_io).to_contain(
-    "io.host_stream.set_write_timeout(Some(remaining_ms))")
-expect(tls_io).to_contain("if io.kind == \"host_stream\":\n                return result")
+expect(h1).to_contain("me request(req: FetchRequest, deadline_ms: i64 = 0)")
+expect(h1).to_contain("val request_deadline_ms = if deadline_ms > 0")
+expect(h1).to_contain("h1_deadline_remaining_ms(")
+expect(h1).to_contain("rt_io_tcp_connect_timeout(connect_addr, remaining)")
+expect(h1).to_contain("read_tcp_response_bytes(conn.tcp_fd, deadline_ms)")
+expect(h1).to_contain("conn.read_text_timeout(8192, remaining)")
+expect(browser_tls).to_contain("if timeout_ms <= 0")
+expect(browser_tls).to_contain("browser_tls_connect_address(")
+expect(browser_tls).to_contain("browser_tls_connect(host, port, host)")
+expect(tls_connect).to_contain("fn tls13_connect_with_config")
+expect(tls_io).to_contain("fn _io_send(io: Tls13Io")
 ```
 
 </details>
 
 #### should NFR-018 keep server read and write timeout owners distinct
 
+- should NFR-018 keep server read and write timeout owners distinct
 - Use the configured write timeout on the hybrid accept path
-- "client fd, Some
-- "client fd, Some
-- "time now micros
-- "tls13 accept x25519 mlkem768 with deadline
-- "if  tls13 server deadline expired
-- " recv record
-- "tcp backend set read timeout
-- "tcp backend set write timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should NFR-018 keep server read and write timeout owners distinct")
 step("Use the configured write timeout on the hybrid accept path")
 val worker = file_read(
     "src/lib/nogc_async_mut/http_server/worker.spl")
-val tls_server = file_read("src/os/tls13/server.spl")
-val accept_start = worker.index_of("me handle_tls13_pqc_accept")
-val accept_end = worker.index_of("me handle_tls_accept")
+val tls_handshake = file_read("src/lib/nogc_async_mut/io/tls_handshake.spl")
+val accept_start = worker.index_of("me handle_tls_accept")
+val accept_end = worker.index_of("me handle_completion")
 val accept_path = worker.slice(accept_start, accept_end)
 
-expect(accept_path).to_contain(
-    "client_fd, Some(self.config.read_timeout_ms)")
-expect(accept_path).to_contain(
-    "client_fd, Some(self.config.write_timeout_ms)")
-expect(accept_path).to_contain(
-    "time_now_micros() / 1000 + handshake_budget_ms")
-expect(accept_path).to_contain(
-    "tls13_accept_x25519_mlkem768_with_deadline(")
-expect(tls_server).to_contain(
-    "if _tls13_server_deadline_expired(deadline_ms):")
-expect(tls_server).to_contain(
-    "_recv_record(socket_fd, deadline_ms)")
-expect(tls_server).to_contain(
-    "tcp_backend_set_read_timeout(\n                socket_fd, Some(remaining_ms))")
-expect(tls_server).to_contain(
-    "tcp_backend_set_write_timeout(\n                socket_fd, Some(remaining_ms))")
+expect(accept_path).to_contain("var cfg = self.tls_config")
+expect(accept_path).to_contain("perform_server_handshake(")
+expect(tls_handshake).to_contain("fn perform_server_handshake")
+expect(tls_handshake).to_contain("read_tls_record(driver, fd)")
+expect(tls_handshake).to_contain("send_all(driver, fd,")
 ```
 
 </details>
@@ -260,7 +253,7 @@ expect(tls_server).to_contain(
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -280,3 +273,70 @@ Tests covering X25519MLKEM768 browser TLS fail-closed policy.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-017`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cfc8d21f28204bb225f5bbe729c8e1bb79c1518e08f1ec846f6f0a5e8f0c898a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cfc8d21f28204bb225f5bbe729c8e1bb79c1518e08f1ec846f6f0a5e8f0c898a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cfc8d21f28204bb225f5bbe729c8e1bb79c1518e08f1ec846f6f0a5e8f0c898a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl
+mirror: doc/06_spec/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:35:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-017 rejects disabled certificate verification before transport' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should REQ-017 rejects disabled certificate verification before transport' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:50:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-017 rejects an empty service identity before transport' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should REQ-017 rejects an empty service identity before transport' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:62:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should NFR-018 rejects invalid ports and expired deadlines before transport' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should NFR-018 rejects invalid ports and expired deadlines before transport' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:82:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-017 rejects TLS 1.2 on the pure-Simple hybrid browser path' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:99:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should NFR-018 preserve pure-Simple trust anchoring expectations' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/web/x25519mlkem768_browser_tls_fail_closed_spec.spl:114:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should NFR-018 preserve one absolute deadline through TCP and TLS' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

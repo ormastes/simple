@@ -1,29 +1,6 @@
 # Graphics 3d Session Managed Backend Specification
 
-> <details>
-
-<!-- sdn-diagram:id=graphics_3d_session_managed_backend_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=graphics_3d_session_managed_backend_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-graphics_3d_session_managed_backend_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=graphics_3d_session_managed_backend_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Graphics 3D Session Managed Backend, REQ-GFX-001: common backend capability model, REQ-GFX-002: legacy no-session preservation, REQ-GFX-003: managed and perf isolation, REQ-GFX-004: common policy across surfaces, REQ-GFX-005: persistent optimization provider state, REQ-GFX-006: Pure Simple API and C ABI native boundary, REQ-GFX-007: multi-arch capability records.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,30 +18,21 @@ graphics_3d_session_managed_backend_spec -> std
 ### REQ-GFX-001: common backend capability model
 
 #### should report backend kind and target architecture
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val caps = GraphicsBackendSpec.fake_caps("Vulkan", "riscv64")
-expect(caps.backend_kind).to_equal("Vulkan")
-expect(caps.target_arch).to_equal("riscv64")
-```
-
-</details>
-
 #### should reject an unknown backend kind
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject an unknown backend kind
+   - Expected: result.is_err() is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject an unknown backend kind")
 val result = GraphicsBackendSpec.validate_backend("UnknownGpu")
 expect(result.is_err()).to_equal(true)
 ```
@@ -75,13 +43,19 @@ expect(result.is_err()).to_equal(true)
 
 #### should map old constructors to LegacyNoSession
 
-<details>
-<summary>Executable SPipe</summary>
+- should map old constructors to LegacyNoSession
+   - Expected: session.mode equals `LegacyNoSession`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should map old constructors to LegacyNoSession")
 val session = GraphicsBackendSpec.create_legacy_3d_session()
 expect(session.mode).to_equal("LegacyNoSession")
 ```
@@ -90,13 +64,19 @@ expect(session.mode).to_equal("LegacyNoSession")
 
 #### should not enable managed caches for legacy constructors
 
-<details>
-<summary>Executable SPipe</summary>
+- should not enable managed caches for legacy constructors
+   - Expected: session.managed_cache_enabled is false
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should not enable managed caches for legacy constructors")
 val session = GraphicsBackendSpec.create_legacy_2d_session()
 expect(session.managed_cache_enabled).to_equal(false)
 ```
@@ -107,13 +87,19 @@ expect(session.managed_cache_enabled).to_equal(false)
 
 #### should reject mutable resource sharing across modes
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject mutable resource sharing across modes
+   - Expected: result.is_err() is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject mutable resource sharing across modes")
 val result = GraphicsBackendSpec.share_mutable_queue("ManagedShared", "PerfExclusive")
 expect(result.is_err()).to_equal(true)
 ```
@@ -122,13 +108,19 @@ expect(result.is_err()).to_equal(true)
 
 #### should allow immutable capability table sharing
 
-<details>
-<summary>Executable SPipe</summary>
+- should allow immutable capability table sharing
+   - Expected: result.is_err() is false
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should allow immutable capability table sharing")
 val result = GraphicsBackendSpec.share_capability_table("ManagedShared", "PerfExclusive")
 expect(result.is_err()).to_equal(false)
 ```
@@ -139,13 +131,18 @@ expect(result.is_err()).to_equal(false)
 
 #### should pass one policy to 2D, 2D game, 3D, web, GUI, and WM
 
-<details>
-<summary>Executable SPipe</summary>
+- should pass one policy to 2D, 2D game, 3D, web, GUI, and WM
 
-Runnable source: 7 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should pass one policy to 2D, 2D game, 3D, web, GUI, and WM")
 val surfaces = GraphicsBackendSpec.bind_policy_to_all_surfaces("ManagedShared")
 expect(surfaces).to_contain("engine2d")
 expect(surfaces).to_contain("game2d")
@@ -161,13 +158,19 @@ expect(surfaces).to_contain("wm")
 
 #### should key provider facts by backend and policy hash
 
-<details>
-<summary>Executable SPipe</summary>
+- should key provider facts by backend and policy hash
+   - Expected: key equals `simple.opt.graphics.pipeline_cache:Metal:abc123`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should key provider facts by backend and policy hash")
 val key = GraphicsBackendSpec.provider_key("simple.opt.graphics.pipeline_cache", "Metal", "abc123")
 expect(key).to_equal("simple.opt.graphics.pipeline_cache:Metal:abc123")
 ```
@@ -176,13 +179,19 @@ expect(key).to_equal("simple.opt.graphics.pipeline_cache:Metal:abc123")
 
 #### should isolate perf provider state from managed provider state
 
-<details>
-<summary>Executable SPipe</summary>
+- should isolate perf provider state from managed provider state
+   - Expected: result is false
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should isolate perf provider state from managed provider state")
 val result = GraphicsBackendSpec.provider_state_aliases("ManagedShared", "PerfExclusive")
 expect(result).to_equal(false)
 ```
@@ -193,13 +202,19 @@ expect(result).to_equal(false)
 
 #### should expose a Pure Simple public API marker
 
-<details>
-<summary>Executable SPipe</summary>
+- should expose a Pure Simple public API marker
+   - Expected: api.language equals `Simple`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should expose a Pure Simple public API marker")
 val api = GraphicsBackendSpec.public_api_contract()
 expect(api.language).to_equal("Simple")
 ```
@@ -208,13 +223,19 @@ expect(api.language).to_equal("Simple")
 
 #### should reject Rust as the required runtime backend boundary
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject Rust as the required runtime backend boundary
+   - Expected: result.is_err() is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject Rust as the required runtime backend boundary")
 val result = GraphicsBackendSpec.validate_native_boundary("rust-runtime-lib")
 expect(result.is_err()).to_equal(true)
 ```
@@ -225,13 +246,18 @@ expect(result.is_err()).to_equal(true)
 
 #### should include ARM and RISC-V 32/64 targets
 
-<details>
-<summary>Executable SPipe</summary>
+- should include ARM and RISC-V 32/64 targets
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should include ARM and RISC-V 32/64 targets")
 val targets = GraphicsBackendSpec.supported_arch_records()
 expect(targets).to_contain("arm32")
 expect(targets).to_contain("arm64")
@@ -248,12 +274,12 @@ expect(targets).to_contain("riscv64")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Graphics 3D Session Managed Backend, REQ-GFX-001: common backend capability model, REQ-GFX-002: legacy no-session preservation, REQ-GFX-003: managed and perf isolation, REQ-GFX-004: common policy across surfaces, REQ-GFX-005: persistent optimization provider state, REQ-GFX-006: Pure Simple API and C ABI native boundary, REQ-GFX-007: multi-arch capability records.
 - Graphics 3D Session Managed Backend
 - REQ-GFX-001: common backend capability model
 - REQ-GFX-002: legacy no-session preservation
@@ -275,3 +301,83 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-GFX-001`
+- `REQ-GFX-002`
+- `REQ-GFX-003`
+- `REQ-GFX-004`
+- `REQ-GFX-005`
+- `REQ-GFX-006`
+- `REQ-GFX-007`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `75f49f4047a2ad5f90ff343e76b137be2c58eb0ddb1c4cd299ced0457416881c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `75f49f4047a2ad5f90ff343e76b137be2c58eb0ddb1c4cd299ced0457416881c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `75f49f4047a2ad5f90ff343e76b137be2c58eb0ddb1c4cd299ced0457416881c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl
+mirror: doc/06_spec/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.md (current)
+findings: 13 blockers: 1
+  narrative=100 structure=60 oracle=100
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 7 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:64:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should report backend kind and target architecture' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:64:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should report backend kind and target architecture' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:79:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject an unknown backend kind' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject an unknown backend kind' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:86:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should map old constructors to LegacyNoSession' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should map old constructors to LegacyNoSession' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:92:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should not enable managed caches for legacy constructors' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should not enable managed caches for legacy constructors' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:99:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject mutable resource sharing across modes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/graphics_backend/feature/graphics_3d_session_managed_backend_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should allow immutable capability table sharing' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Arch Specification
 
-> <details>
-
-<!-- sdn-diagram:id=arch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=arch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-arch_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=arch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Architecture Testing.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +19,18 @@ arch_spec
 
 #### creates a layer with name and patterns
 
+- creates a layer with name and patterns
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a layer with name and patterns")
 val layer = MockLayer.create(name="domain", pattern="src/domain/")
 expect layer.name == "domain"
 expect layer.pattern == "src/domain/"
@@ -58,20 +40,8 @@ expect layer.pattern == "src/domain/"
 
 #### checks if module matches layer patterns
 
-<details>
-<summary>Executable SSpec</summary>
+- checks if module matches layer patterns
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val layer = MockLayer.create(name="domain", pattern="src/domain/")
-expect layer.name == "domain"
-```
-
-</details>
-
-#### supports multiple glob patterns
 
 <details>
 <summary>Executable SSpec</summary>
@@ -80,6 +50,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks if module matches layer patterns")
+val layer = MockLayer.create(name="domain", pattern="src/domain/")
+expect layer.name == "domain"
+```
+
+</details>
+
+#### supports multiple glob patterns
+
+- supports multiple glob patterns
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("supports multiple glob patterns")
 val layer1 = MockLayer.create(name="core", pattern="src/compiler/10.frontend/core/")
 val layer2 = MockLayer.create(name="shared", pattern="src/shared/")
 expect layer1.name == "core"
@@ -92,60 +84,7 @@ expect layer2.name == "shared"
 
 #### creates a layer reference for rule building
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ref = MockLayerRef.from_name("api")
-expect ref.layer_name == "api"
-```
-
-</details>
-
-#### supports chaining may_only_access
-
-1. ref may only access
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ref = MockLayerRef.from_name("api")
-ref.may_only_access("domain,infra")
-expect ref.allowed == "domain,infra"
-```
-
-</details>
-
-#### supports chaining may_not_access
-
-1. ref may not access
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ref = MockLayerRef.from_name("domain")
-ref.may_not_access("api,infra")
-expect ref.forbidden == "api,infra"
-```
-
-</details>
-
-#### supports chaining multiple rules
-
-1. ref may only access
+- creates a layer reference for rule building
 
 
 <details>
@@ -155,6 +94,70 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates a layer reference for rule building")
+val ref = MockLayerRef.from_name("api")
+expect ref.layer_name == "api"
+```
+
+</details>
+
+#### supports chaining may_only_access
+
+- supports chaining may_only_access
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("supports chaining may_only_access")
+val ref = MockLayerRef.from_name("api")
+ref.may_only_access("domain,infra")
+expect ref.allowed == "domain,infra"
+```
+
+</details>
+
+#### supports chaining may_not_access
+
+- supports chaining may_not_access
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("supports chaining may_not_access")
+val ref = MockLayerRef.from_name("domain")
+ref.may_not_access("api,infra")
+expect ref.forbidden == "api,infra"
+```
+
+</details>
+
+#### supports chaining multiple rules
+
+- supports chaining multiple rules
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("supports chaining multiple rules")
 val ref = MockLayerRef.from_name("service")
 ref.may_only_access("domain").may_not_access("api")
 expect ref.allowed == "domain"
@@ -167,23 +170,7 @@ expect ref.forbidden == "api"
 
 #### creates an empty architecture
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val arch = MockArchitecture.empty()
-expect arch.layer_count == 0
-```
-
-</details>
-
-#### defines layers fluently
-
-1. arch define layer
-2. arch define layer
+- creates an empty architecture
 
 
 <details>
@@ -193,6 +180,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates an empty architecture")
+val arch = MockArchitecture.empty()
+expect arch.layer_count == 0
+```
+
+</details>
+
+#### defines layers fluently
+
+- defines layers fluently
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("defines layers fluently")
 val arch = MockArchitecture.empty()
 arch.define_layer(name="api", pattern="src/api/")
 arch.define_layer(name="domain", pattern="src/domain/")
@@ -203,16 +212,18 @@ expect arch.layer_count == 2
 
 #### finds layer containing a module
 
-1. arch define layer
+- finds layer containing a module
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds layer containing a module")
 val arch = MockArchitecture.empty()
 arch.define_layer(name="api", pattern="src/api/")
 expect arch.layer_count == 1
@@ -224,16 +235,18 @@ expect arch.layer_count == 1
 
 #### passes when layer only accesses allowed layers
 
-1. expect result is ok
+- passes when layer only accesses allowed layers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes when layer only accesses allowed layers")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -242,16 +255,18 @@ expect result.is_ok() == true
 
 #### fails when layer accesses forbidden layer
 
-1. expect result is ok
+- fails when layer accesses forbidden layer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails when layer accesses forbidden layer")
 val result = MockArchCheckResult.fail_result()
 expect result.is_ok() == false
 ```
@@ -262,16 +277,18 @@ expect result.is_ok() == false
 
 #### passes when layer does not access forbidden layers
 
-1. expect result is ok
+- passes when layer does not access forbidden layers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes when layer does not access forbidden layers")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -280,16 +297,18 @@ expect result.is_ok() == true
 
 #### fails when layer accesses forbidden layer
 
-1. expect result is ok
+- fails when layer accesses forbidden layer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails when layer accesses forbidden layer")
 val result = MockArchCheckResult.fail_result()
 expect result.is_ok() == false
 ```
@@ -300,16 +319,18 @@ expect result.is_ok() == false
 
 #### passes when forbidden layers do not access target
 
-1. expect result is ok
+- passes when forbidden layers do not access target
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes when forbidden layers do not access target")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -318,16 +339,18 @@ expect result.is_ok() == true
 
 #### fails when forbidden layer accesses target
 
-1. expect result is ok
+- fails when forbidden layer accesses target
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails when forbidden layer accesses target")
 val result = MockArchCheckResult.fail_result()
 expect result.is_ok() == false
 ```
@@ -338,16 +361,18 @@ expect result.is_ok() == false
 
 #### passes when no mocks in production code
 
-1. expect result is ok
+- passes when no mocks in production code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes when no mocks in production code")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -356,16 +381,18 @@ expect result.is_ok() == true
 
 #### fails when mock annotation in production code
 
-1. expect result is ok
+- fails when mock annotation in production code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails when mock annotation in production code")
 val result = MockArchCheckResult.fail_result()
 expect result.is_ok() == false
 ```
@@ -374,16 +401,18 @@ expect result.is_ok() == false
 
 #### ignores mocks in test code
 
-1. expect result is ok
+- ignores mocks in test code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ignores mocks in test code")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -394,16 +423,18 @@ expect result.is_ok() == true
 
 #### passes when layers are accessed in order
 
-1. expect result is ok
+- passes when layers are accessed in order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes when layers are accessed in order")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -412,16 +443,18 @@ expect result.is_ok() == true
 
 #### fails when layer is skipped
 
-1. expect result is ok
+- fails when layer is skipped
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails when layer is skipped")
 val result = MockArchCheckResult.fail_result()
 expect result.is_ok() == false
 ```
@@ -432,16 +465,18 @@ expect result.is_ok() == false
 
 #### is_ok returns true for Pass
 
-1. expect result is ok
+- is_ok returns true for Pass
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is_ok returns true for Pass")
 val result = MockArchCheckResult.pass_result()
 expect result.is_ok() == true
 ```
@@ -450,16 +485,18 @@ expect result.is_ok() == true
 
 #### is_ok returns false for Fail
 
-1. expect result is ok
+- is_ok returns false for Fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is_ok returns false for Fail")
 val result = MockArchCheckResult.fail_result()
 expect result.is_ok() == false
 ```
@@ -468,16 +505,18 @@ expect result.is_ok() == false
 
 #### violations returns empty list for Pass
 
-1. expect result has violations
+- violations returns empty list for Pass
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("violations returns empty list for Pass")
 val result = MockArchCheckResult.pass_result()
 expect result.has_violations() == false
 ```
@@ -486,16 +525,18 @@ expect result.has_violations() == false
 
 #### violations returns list for Fail
 
-1. expect result has violations
+- violations returns list for Fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("violations returns list for Fail")
 val result = MockArchCheckResult.fail_result()
 expect result.has_violations() == true
 ```
@@ -506,13 +547,18 @@ expect result.has_violations() == true
 
 #### formats violation message
 
+- formats violation message
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats violation message")
 val v = MockViolation(source_layer: "api", target_layer: "domain")
 val msg = v.format_message()
 expect msg == "api -> domain"
@@ -524,19 +570,18 @@ expect msg == "api -> domain"
 
 #### validates a typical layered architecture
 
-1. arch define layer
-2. arch define layer
-3. arch define layer
-4. arch define layer
+- validates a typical layered architecture
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates a typical layered architecture")
 val arch = MockArchitecture.empty()
 arch.define_layer(name="api", pattern="src/api/")
 arch.define_layer(name="service", pattern="src/service/")
@@ -554,12 +599,12 @@ expect arch.layer_count == 4
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/arch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Architecture Testing.
 - Architecture Testing
 
 ## Scenario Summary
@@ -574,3 +619,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `eb50c439d14e42f7b7350f22412da81052f5e29c68a1d87fa9adcb8fc800b072`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `eb50c439d14e42f7b7350f22412da81052f5e29c68a1d87fa9adcb8fc800b072`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `eb50c439d14e42f7b7350f22412da81052f5e29c68a1d87fa9adcb8fc800b072`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/arch_spec.spl
+mirror: doc/06_spec/01_unit/std/arch_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/arch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/arch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/arch_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a layer with name and patterns' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/arch_spec.spl:92:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'checks if module matches layer patterns' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/arch_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports multiple glob patterns' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Test Db Concurrency Specification
 
-> 1. print "Concurrent writes test
-
-<!-- sdn-diagram:id=test_db_concurrency_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_db_concurrency_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_db_concurrency_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_db_concurrency_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Test Database Concurrency, Concurrent Writes - Same Database, Concurrent Reads, Lock Timeout Handling, Stale Lock Detection, Race Condition Prevention, Backup Integrity, Atomic Write Guarantees, High Contention Stress Test.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,16 +19,18 @@ test_db_concurrency_spec -> app
 
 #### handles 5 parallel writers without corruption
 
-1. print "Concurrent writes test
+- handles 5 parallel writers without corruption
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles 5 parallel writers without corruption")
 # Requires process spawning FFI not yet implemented
 # TODO: Implement after process spawning FFI is verified
 print "Concurrent writes test (5 workers) - implementation pending"
@@ -61,13 +40,18 @@ print "Concurrent writes test (5 workers) - implementation pending"
 
 #### serializes writes correctly with file locking
 
+- serializes writes correctly with file locking
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("serializes writes correctly with file locking")
 # Requires isolated database path; db.save() uses global DB_PATH
 # TODO: Implement after isolated DB path support
 print "Serialized writes test - implementation pending"
@@ -79,13 +63,18 @@ print "Serialized writes test - implementation pending"
 
 #### allows multiple simultaneous readers
 
+- allows multiple simultaneous readers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows multiple simultaneous readers")
 # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
 # TODO: Implement after isolated DB path support
 print "Concurrent reads test - implementation pending"
@@ -95,13 +84,18 @@ print "Concurrent reads test - implementation pending"
 
 #### readers see consistent state during concurrent writes
 
+- readers see consistent state during concurrent writes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("readers see consistent state during concurrent writes")
 # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
 # TODO: Implement after isolated DB path support
 print "Read-write consistency test - implementation pending"
@@ -113,13 +107,18 @@ print "Read-write consistency test - implementation pending"
 
 #### respects lock timeout of 10 seconds
 
+- respects lock timeout of 10 seconds
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("respects lock timeout of 10 seconds")
 # Requires FileLock contention behavior verification
 # TODO: Implement after FileLock API is verified
 print "Lock timeout test - implementation pending"
@@ -129,13 +128,18 @@ print "Lock timeout test - implementation pending"
 
 #### second process fails gracefully on lock timeout
 
+- second process fails gracefully on lock timeout
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("second process fails gracefully on lock timeout")
 # Requires FileLock contention behavior verification
 # TODO: Implement after FileLock API is verified
 print "Lock contention test - implementation pending"
@@ -147,19 +151,19 @@ print "Lock contention test - implementation pending"
 
 #### detects and cleans stale lock files
 
-1. cleanup temp db
-2. file write
+- detects and cleans stale lock files
    - Expected: file_exists(lock_file) is true
-3. cleanup temp db
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects and cleans stale lock files")
 val test_name = "stale_lock"
 cleanup_temp_db(test_name)
 
@@ -181,13 +185,18 @@ cleanup_temp_db(test_name)
 
 #### prevents duplicate test records from simultaneous creation
 
+- prevents duplicate test records from simultaneous creation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("prevents duplicate test records from simultaneous creation")
 # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
 # TODO: Implement after isolated DB path support
 print "Race condition prevention test - implementation pending"
@@ -199,13 +208,18 @@ print "Race condition prevention test - implementation pending"
 
 #### creates backup before overwriting database
 
+- creates backup before overwriting database
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates backup before overwriting database")
 # Requires isolated database path; db.save() uses global DB_PATH
 # TODO: Implement after isolated DB path support
 print "Backup creation test - implementation pending"
@@ -215,13 +229,18 @@ print "Backup creation test - implementation pending"
 
 #### preserves backup on write failure
 
+- preserves backup on write failure
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("preserves backup on write failure")
 # Requires simulated write failure (disk full) not yet available
 # TODO: Simulate write failure
 print "Backup preservation test - implementation pending"
@@ -233,13 +252,18 @@ print "Backup preservation test - implementation pending"
 
 #### ensures all-or-nothing writes
 
+- ensures all-or-nothing writes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ensures all-or-nothing writes")
 # Requires isolated database path; db.save()/TestDatabase.load() use global DB_PATH
 # TODO: Implement after isolated DB path support
 print "Atomic write test - implementation pending"
@@ -251,13 +275,18 @@ print "Atomic write test - implementation pending"
 
 #### survives 10 parallel writers with high frequency
 
+- survives 10 parallel writers with high frequency
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("survives 10 parallel writers with high frequency")
 # Requires process spawning FFI not yet implemented
 # TODO: Implement after process spawning is verified
 print "High contention stress test - implementation pending"
@@ -272,12 +301,12 @@ print "High contention stress test - implementation pending"
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/test_db_concurrency_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Test Database Concurrency, Concurrent Writes - Same Database, Concurrent Reads, Lock Timeout Handling, Stale Lock Detection, Race Condition Prevention, Backup Integrity, Atomic Write Guarantees, High Contention Stress Test.
 - Test Database Concurrency
 - Concurrent Writes - Same Database
 - Concurrent Reads
@@ -300,3 +329,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1ffe9af551a0d1b4595b56f8927e4c45a2fd6e8d188a670ab7748c82ba309907`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1ffe9af551a0d1b4595b56f8927e4c45a2fd6e8d188a670ab7748c82ba309907`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1ffe9af551a0d1b4595b56f8927e4c45a2fd6e8d188a670ab7748c82ba309907`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/test_db_concurrency_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/test_db_concurrency_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/test_db_concurrency_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/test_db_concurrency_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/test_db_concurrency_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles 5 parallel writers without corruption' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_concurrency_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'serializes writes correctly with file locking' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_concurrency_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows multiple simultaneous readers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

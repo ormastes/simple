@@ -24,7 +24,7 @@ Validates the retained GUI showcase performance wrapper without requiring a live
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/widget_showcase_perf_wrapper_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -205,19 +205,25 @@ preexisting hardlinked retained artifacts.
 
 #### selects the 4K 200fps probe contract
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- selects the 4K 200fps probe contract
 - Run the wrapper in 4K plan-only mode
    - Expected: code equals `0`
 - Assert 4K evidence and generated native alias select the 4K probe
--  expect showcase revision files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects the 4K 200fps probe contract")
 step("Run the wrapper in 4K plan-only mode")
 val command = "rm -rf build/test-widget-showcase-perf-wrapper-4k && PLAN_ONLY=1 RESOLUTION=4k BUILD_DIR=build/test-widget-showcase-perf-wrapper-4k sh scripts/check/check-widget-showcase-4k-200fps.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -283,19 +289,21 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 
 #### selects the 8K retained perf probe contract
 
+- selects the 8K retained perf probe contract
 - Run the wrapper in 8K plan-only mode
    - Expected: code equals `0`
 - Assert 8K evidence and generated native alias select the 8K probe
--  expect showcase revision files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 59 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("selects the 8K retained perf probe contract")
 step("Run the wrapper in 8K plan-only mode")
 val command = "rm -rf build/test-widget-showcase-perf-wrapper-8k && PLAN_ONLY=1 RESOLUTION=8k BUILD_DIR=build/test-widget-showcase-perf-wrapper-8k sh scripts/check/check-widget-showcase-4k-200fps.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -361,21 +369,27 @@ expect(alias_src).to_contain("run_8k_perf_probe()")
 
 #### measures retained frame p50 and p95 from post warmup samples
 
-- Read the producer, wrapper, and aggregate sources
+- measures retained frame p50 and p95 from post warmup samples
+- Read the producer and wrapper sources
 - Assert the producer records each post-warmup frame
 - Assert the wrapper consumes measured distribution fields
    - Expected: script does not contain `frame_p50_ns=$frame_avg_ns`
    - Expected: script does not contain `frame_p95_ns=$frame_avg_ns`
-- Reject measured p95 above the target-derived frame budget in both consumers
+   - Expected: aggregate does not contain `showcase_4k_frame_p50_ns = showcase_4k_frame_avg_ns`
+   - Expected: aggregate does not contain `showcase_4k_frame_p95_ns = showcase_4k_frame_avg_ns`
+   - Expected: aggregate does not contain `showcase_8k_frame_p50_ns = showcase_8k_frame_avg_ns`
+   - Expected: aggregate does not contain `showcase_8k_frame_p95_ns = showcase_8k_frame_avg_ns`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("measures retained frame p50 and p95 from post warmup samples")
 step("Read the producer and wrapper sources")
 val showcase = file_read("examples/06_io/ui/widget_showcase_gui.spl")
 val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
@@ -425,6 +439,7 @@ expect(aggregate).to_contain("to_int(showcase_8k_frame_p95_ns) > to_int(showcase
 
 #### resolves repo simple launcher before legacy cargo target
 
+- resolves repo simple launcher before legacy cargo target
 - Read the wrapper source
 - Assert resolver order and provenance evidence
 
@@ -432,10 +447,12 @@ expect(aggregate).to_contain("to_int(showcase_8k_frame_p95_ns) > to_int(showcase
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves repo simple launcher before legacy cargo target")
 step("Read the wrapper source")
 val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
 
@@ -452,6 +469,7 @@ expect(script).to_contain("_simple_bin_status=$SIMPLE_BIN_STATUS")
 
 #### marks explicit missing Simple binary as missing in plan-only evidence
 
+- marks explicit missing Simple binary as missing in plan-only evidence
 - Run the wrapper in plan-only mode with an explicit missing Simple binary
    - Expected: code equals `0`
 - Assert routing evidence does not overstate binary validity
@@ -464,10 +482,12 @@ expect(script).to_contain("_simple_bin_status=$SIMPLE_BIN_STATUS")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("marks explicit missing Simple binary as missing in plan-only evidence")
 step("Run the wrapper in plan-only mode with an explicit missing Simple binary")
 val command = "rm -rf build/test-widget-showcase-plan-only-missing-simple && PLAN_ONLY=1 RESOLUTION=4k SIMPLE_BIN=build/test-widget-showcase-plan-only-missing-simple/no-simple BUILD_DIR=build/test-widget-showcase-plan-only-missing-simple sh scripts/check/check-widget-showcase-4k-200fps.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -485,6 +505,7 @@ expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal
 
 #### emits hardlink artifact statuses in plan-only producer evidence
 
+- emits hardlink artifact statuses in plan-only producer evidence
 - Create hardlinked retained artifact paths before plan-only routing
    - Expected: code equals `0`
 - Assert linked artifacts are not reported as pass
@@ -499,10 +520,12 @@ expect(_value_of(evidence, "gui_showcase_4k_200fps_simple_bin_status")).to_equal
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("emits hardlink artifact statuses in plan-only producer evidence")
 step("Create hardlinked retained artifact paths before plan-only routing")
 val command = "rm -rf build/test-widget-showcase-plan-only-hardlinks && mkdir -p build/test-widget-showcase-plan-only-hardlinks && printf '\\177ELFfake-native\\n' > build/test-widget-showcase-plan-only-hardlinks/native-original && chmod +x build/test-widget-showcase-plan-only-hardlinks/native-original && ln build/test-widget-showcase-plan-only-hardlinks/native-original build/test-widget-showcase-plan-only-hardlinks/widget_showcase_gui_perf && printf 'native build log\\n' > build/test-widget-showcase-plan-only-hardlinks/native-build-original.log && ln build/test-widget-showcase-plan-only-hardlinks/native-build-original.log build/test-widget-showcase-plan-only-hardlinks/native-build.log && printf 'showcase log\\n' > build/test-widget-showcase-plan-only-hardlinks/showcase-original.log && ln build/test-widget-showcase-plan-only-hardlinks/showcase-original.log build/test-widget-showcase-plan-only-hardlinks/showcase.log && printf 'time log\\n' > build/test-widget-showcase-plan-only-hardlinks/time-original.log && ln build/test-widget-showcase-plan-only-hardlinks/time-original.log build/test-widget-showcase-plan-only-hardlinks/time.log && PLAN_ONLY=1 RESOLUTION=4k BUILD_DIR=build/test-widget-showcase-plan-only-hardlinks sh scripts/check/check-widget-showcase-4k-200fps.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -522,6 +545,7 @@ expect(_value_of(evidence, "gui_showcase_4k_200fps_time_log_file_status")).to_eq
 
 #### does not let impossible producer timing pass a slow retained probe
 
+- does not let impossible producer timing pass a slow retained probe
 - Run a fake native probe that sleeps but claims a one-nanosecond frame window
    - Expected: code equals `1`
 - Assert the wrapper rejects the impossible producer timing and uses measured elapsed time
@@ -529,16 +553,17 @@ expect(_value_of(evidence, "gui_showcase_4k_200fps_time_log_file_status")).to_eq
    - Expected: _value_of(evidence, "gui_showcase_4k_200fps_reason") equals `below-200fps`
    - Expected: _value_of(evidence, "gui_showcase_4k_200fps_frame_elapsed_ns") equals `1`
    - Expected: _value_of(evidence, "gui_showcase_4k_200fps_frame_elapsed_ns_status") equals `fail`
-- assert not equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("does not let impossible producer timing pass a slow retained probe")
 step("Run a fake native probe that sleeps but claims a one-nanosecond frame window")
 val command = "rm -rf build/test-widget-showcase-impossible-frame-timing && mkdir -p build/test-widget-showcase-impossible-frame-timing && printf '%s\\n' '#!/bin/sh' 'sleep 2' 'echo gui_showcase_4k_perf_width=3840' 'echo gui_showcase_4k_perf_height=2160' 'echo gui_showcase_4k_perf_frame_elapsed_ns=1' 'echo gui_showcase_4k_perf_warmup_frames=12' 'echo gui_showcase_4k_perf_frame_sample_count=200' 'echo gui_showcase_4k_perf_frame_p50_ns=1' 'echo gui_showcase_4k_perf_frame_p95_ns=1' 'echo gui_showcase_4k_perf_pixels=8294400' 'echo gui_showcase_4k_perf_nonzero_pixels=100' 'echo gui_showcase_4k_perf_checksum=123456' 'echo gui_showcase_4k_perf_render_mode=retained-static-frame' 'echo gui_showcase_4k_perf_redraw_frames=1' > build/test-widget-showcase-impossible-frame-timing/fake-native && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-native && printf '%s\\n' '#!/bin/sh' 'out=' 'while [ $# -gt 0 ]; do' 'if [ $1 = --output ]; then' 'shift' 'out=$1' 'fi' 'shift || true' 'done' 'cp build/test-widget-showcase-impossible-frame-timing/fake-native $out' 'chmod +x $out' > build/test-widget-showcase-impossible-frame-timing/fake-simple && chmod +x build/test-widget-showcase-impossible-frame-timing/fake-simple && SIMPLE_BIN=build/test-widget-showcase-impossible-frame-timing/fake-simple SIMPLE_BIN_SOURCE=self-hosted-release BUILD_DIR=build/test-widget-showcase-impossible-frame-timing RESOLUTION=4k TIMEOUT_SECS=5 sh scripts/check/check-widget-showcase-4k-200fps.shs > build/test-widget-showcase-impossible-frame-timing/stdout.txt 2> build/test-widget-showcase-impossible-frame-timing/stderr.txt"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -557,6 +582,7 @@ assert_not_equal(_value_of(evidence, "gui_showcase_4k_200fps_fps_elapsed_ns"), "
 
 #### rejects nonnumeric retained readback checksums at the producer
 
+- rejects nonnumeric retained readback checksums at the producer
 - Read the wrapper source
 - Assert checksum_status fails empty or nonnumeric values
 
@@ -564,10 +590,12 @@ assert_not_equal(_value_of(evidence, "gui_showcase_4k_200fps_fps_elapsed_ns"), "
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects nonnumeric retained readback checksums at the producer")
 step("Read the wrapper source")
 val script = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
 
@@ -584,6 +612,7 @@ expect(script).to_contain("_readback_mode=$readback_mode")
 
 #### keeps the GUI showcase 8K env flag wired through the facade
 
+- keeps the GUI showcase 8K env flag wired through the facade
 - Read the GUI showcase source
 - Assert 8K dispatch uses env_ops and enters the retained 8K probe
 - Assert raw runtime env access stays out of the app
@@ -594,10 +623,12 @@ expect(script).to_contain("_readback_mode=$readback_mode")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the GUI showcase 8K env flag wired through the facade")
 step("Read the GUI showcase source")
 val showcase = file_read("examples/06_io/ui/widget_showcase_gui.spl")
 
@@ -635,3 +666,54 @@ expect(showcase.contains("rt_env_get(")).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ffaf8c02ddc02b6c0fae01ba7bc12a48411e85fbb88a0198d6bcf6c0cd729a34`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ffaf8c02ddc02b6c0fae01ba7bc12a48411e85fbb88a0198d6bcf6c0cd729a34`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ffaf8c02ddc02b6c0fae01ba7bc12a48411e85fbb88a0198d6bcf6c0cd729a34`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/check/widget_showcase_perf_wrapper_spec.spl
+mirror: doc/06_spec/03_system/check/widget_showcase_perf_wrapper_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/widget_showcase_perf_wrapper_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/widget_showcase_perf_wrapper_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/widget_showcase_perf_wrapper_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/widget_showcase_perf_wrapper_spec.spl:208:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'selects the 4K 200fps probe contract' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/widget_showcase_perf_wrapper_spec.spl:271:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'selects the 8K retained perf probe contract' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/widget_showcase_perf_wrapper_spec.spl:334:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'measures retained frame p50 and p95 from post warmup samples' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

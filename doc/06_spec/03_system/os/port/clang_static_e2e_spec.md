@@ -1,35 +1,150 @@
-# Clang from the SimpleOS filesystem
+# clang_static_e2e_spec
 
-Source: `test/03_system/os/port/clang_static_e2e_spec.spl`
-Requirement: REQ-003
-Status: active, fail-closed; source flow implemented, live proof blocked before QEMU.
+> Live fail-closed QEMU proof. The Clang ELF must be read from FAT32, emit a
 
-## Primary flow
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-1. Require `SIMPLEOS_CLANG_FS_E2E=1`, the guest-native Clang payload, and the
-   canonical `scripts/os/build_clang_disk.shs` QEMU wrapper.
-   `SIMPLE_BUILD_COMPILER` must name a functional self-hosted compiler; Rust
-   seeds and candidates that fail the exact `-c` output `2` smoke are rejected.
-2. Run the wrapper and require exit code 0 plus SHA-256 identities for the
-   current kernel and filesystem images. Skip modes, native-build failure,
-   timeout, and unexpected QEMU exit codes fail.
-3. Require its validated guest-produced ELF64 x86-64 relocatable object with
-   an exact `main` symbol.
-4. Require in-guest `/hello.elf` linking.
-5. Require the resulting filesystem ELF to run in ring 3, emit the exact
-   `hello-from-simpleos-clang` line, and exit with status 42. The shared
-   production runner must report PASS before the Clang wrapper may report PASS.
+<details>
+<summary>Full Scenario Manual</summary>
 
-## Evidence contract
+# clang_static_e2e_spec
 
-```text
-[clang-disk] PASS guest_exit=0 ... format=ELF64 type=REL machine=x86-64 symbol=main
-[clang-disk] PASS guest_link=/hello.elf
-hello-from-simpleos-clang
-[syscall] exit status=42
-[prod-ring3] PASS filesystem Simple ELF executed
-[clang-disk] PASS guest_exec=/hello.elf output=hello-from-simpleos-clang
+Live fail-closed QEMU proof. The Clang ELF must be read from FAT32, emit a
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Source | `test/03_system/os/port/clang_static_e2e_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Live fail-closed QEMU proof. The Clang ELF must be read from FAT32, emit a
+    real object, link hello.elf in-guest, then load that filesystem ELF in ring
+    3 and independently report its output.
+
+## Scenarios
+
+### Clang compiles links and executes from the SimpleOS filesystem
+
+#### runs Clang from FAT32 through guest object link and execution
+
+- runs Clang from FAT32 through guest object link and execution
+- Require SIMPLEOS_CLANG_FS_E2E=1
+   - Expected: env_get("SIMPLEOS_CLANG_FS_E2E") equals `1`
+- Require the guest-native Clang payload and QEMU wrapper
+- Run the Clang filesystem QEMU wrapper
+   - Expected: exit_code equals `0`
+- Require hashed kernel and filesystem artifacts
+- Require a guest-produced x86-64 ELF object
+- Require in-guest linking of the hello executable
+- Require filesystem loading and independent hello execution
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("runs Clang from FAT32 through guest object link and execution")
+step("Require SIMPLEOS_CLANG_FS_E2E=1")
+expect(env_get("SIMPLEOS_CLANG_FS_E2E")).to_equal("1")
+step("Require the guest-native Clang payload and QEMU wrapper")
+expect(file_exists(CLANG_GUEST_BINARY)).to_be(true)
+expect(file_exists(CLANG_DISK_SCRIPT)).to_be(true)
+
+step("Run the Clang filesystem QEMU wrapper")
+val (stdout, stderr, exit_code) = process_run("/bin/sh", [CLANG_DISK_SCRIPT])
+val output = stdout + stderr
+expect(exit_code).to_equal(0)
+
+step("Require hashed kernel and filesystem artifacts")
+expect(output).to_contain("[clang-disk] artifact kernel=")
+expect(output).to_contain("sha256=")
+expect(output).to_contain("[clang-disk] artifact image=")
+
+step("Require a guest-produced x86-64 ELF object")
+expect(output).to_contain("[clang-disk] PASS guest_exit=0")
+expect(output).to_contain("format=ELF64 type=REL machine=x86-64 symbol=main")
+
+step("Require in-guest linking of the hello executable")
+expect(output).to_contain("[clang-disk] PASS guest_link=/hello.elf")
+
+step("Require filesystem loading and independent hello execution")
+expect(output).to_contain("hello-from-simpleos-clang")
+expect(output).to_contain("[syscall] exit status=42")
+expect(output).to_contain("[prod-ring3] PASS filesystem Simple ELF executed")
+expect(output).to_contain("[clang-disk] PASS guest_exec=/hello.elf output=hello-from-simpleos-clang")
 ```
 
-Historical LLVM bitcode, host-produced objects, marker-only output, missing
-live prerequisites, and object-only runs fail this scenario.
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-003`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4e4e26e0b28614b987f06a6c116a665af5b433dd3e4c0392e2307821e680c929`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4e4e26e0b28614b987f06a6c116a665af5b433dd3e4c0392e2307821e680c929`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4e4e26e0b28614b987f06a6c116a665af5b433dd3e4c0392e2307821e680c929`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/os/port/clang_static_e2e_spec.spl
+mirror: doc/06_spec/03_system/os/port/clang_static_e2e_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=100 oracle=90
+  traceability=60 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=87; blocker cap makes effective=49
+doc/06_spec/03_system/os/port/clang_static_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/port/clang_static_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/port/clang_static_e2e_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/port/clang_static_e2e_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/os/port/clang_static_e2e_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs Clang from FAT32 through guest object link and execution' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

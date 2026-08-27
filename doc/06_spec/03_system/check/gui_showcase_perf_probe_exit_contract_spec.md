@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,7 +20,7 @@ Prevents partial 4K/8K benchmark output from becoming retained performance evide
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -42,13 +42,12 @@ does not launch a renderer and cannot prove the 200 FPS target.
 - rejects every nonzero producer exit before parsing partial rows
 - Run the zero, failure, and timeout exit classifier
    - Expected: code equals `0`
-- Verify the producer gate uses the checked classifier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -59,11 +58,33 @@ val (stdout, _stderr, code) = process_run(
     "/bin/sh", ["scripts/check/check-widget-showcase-4k-200fps.shs", "--self-test"])
 expect(code).to_equal(0)
 expect(stdout).to_contain("widget_showcase_perf_probe_exit_self_test_status=pass")
+```
 
-step("Verify the producer gate uses the checked classifier")
-val source = file_read("scripts/check/check-widget-showcase-4k-200fps.shs")
-expect(source).to_contain("if ! probe_exit_passes \"$probe_rc\"; then")
-expect(source.contains("[ \"$probe_rc\" -ne 0 ] && ! grep")).to_be(false)
+</details>
+
+#### fails closed on a forbidden or misconfigured producer
+
+- fails closed on a forbidden or misconfigured producer
+- Run the producer gate without a valid self-test lane
+   - Expected: code != 0 is true
+   - Expected: refused is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails closed on a forbidden or misconfigured producer")
+step("Run the producer gate without a valid self-test lane")
+val (stdout, _stderr, code) = process_run(
+    "/bin/sh", ["scripts/check/check-widget-showcase-4k-200fps.shs"])
+expect(code != 0).to_equal(true)
+val refused = stdout.contains("forbidden") or stdout.contains("FAIL")
+expect(refused).to_equal(true)
 ```
 
 </details>
@@ -72,8 +93,8 @@ expect(source.contains("[ \"$probe_rc\" -ne 0 ] && ! grep")).to_be(false)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -92,40 +113,39 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3585d4dd4be368317a22a0550ba6233f428011935fb8bde3b1c90d0431f703e9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `4c29fc763f4fb9f5c96dfc70958bddbc23bd39a71ea935b789c2a1b85c740f25`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3585d4dd4be368317a22a0550ba6233f428011935fb8bde3b1c90d0431f703e9`.
+Source SHA-256: `4c29fc763f4fb9f5c96dfc70958bddbc23bd39a71ea935b789c2a1b85c740f25`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3585d4dd4be368317a22a0550ba6233f428011935fb8bde3b1c90d0431f703e9`  
+Source SHA-256: `4c29fc763f4fb9f5c96dfc70958bddbc23bd39a71ea935b789c2a1b85c740f25`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **83/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl
 mirror: doc/06_spec/03_system/check/gui_showcase_perf_probe_exit_contract_spec.md (current)
-findings: 5 blockers: 1
-  narrative=100 structure=100 oracle=40
-  traceability=100 evidence=90 coverage=100 maintainability=70
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=80 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=83; blocker cap makes effective=49
 doc/06_spec/03_system/check/gui_showcase_perf_probe_exit_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/check/gui_showcase_perf_probe_exit_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
 test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
 test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects every nonzero producer exit before parsing partial rows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed on a forbidden or misconfigured producer' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

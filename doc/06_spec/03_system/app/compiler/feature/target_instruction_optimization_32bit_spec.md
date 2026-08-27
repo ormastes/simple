@@ -1,29 +1,6 @@
 # Target Instruction Optimization 32bit Specification
 
-> <details>
-
-<!-- sdn-diagram:id=target_instruction_optimization_32bit_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=target_instruction_optimization_32bit_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-target_instruction_optimization_32bit_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=target_instruction_optimization_32bit_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Target instruction optimization and 32-bit support, REQ-TGT-001: target families, REQ-TGT-001b: target family enum and feature set, REQ-TGT-002: instruction family enable matrix, REQ-X86-001: x86_64 32-bit-form legality, REQ-TGT-003: optimization planner, REQ-TGT-004: unsupported feature rejection, REQ-PERF-001: x86_64 optimization non-regression, REQ-TGT-005: profitability rewrite gate.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,29 +18,21 @@ target_instruction_optimization_32bit_spec -> std
 ### REQ-TGT-001: target families
 
 #### should classify x86_64 triple
-
-<details>
-<summary>Executable SPipe</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val f = target_family_from_triple("x86_64-unknown-linux-gnu")
-expect(f).to_equal("X86_64")
-```
-
-</details>
-
 #### should classify x86_32 triple via i686
 
-<details>
-<summary>Executable SPipe</summary>
+- should classify x86_32 triple via i686
+   - Expected: f equals `X86_32`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should classify x86_32 triple via i686")
 val f = target_family_from_triple("i686-unknown-linux-gnu")
 expect(f).to_equal("X86_32")
 ```
@@ -72,13 +41,19 @@ expect(f).to_equal("X86_32")
 
 #### should classify aarch64 triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should classify aarch64 triple
+   - Expected: f equals `Aarch64`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should classify aarch64 triple")
 val f = target_family_from_triple("aarch64-unknown-linux-gnu")
 expect(f).to_equal("Aarch64")
 ```
@@ -87,13 +62,19 @@ expect(f).to_equal("Aarch64")
 
 #### should classify arm32 triple via armv7
 
-<details>
-<summary>Executable SPipe</summary>
+- should classify arm32 triple via armv7
+   - Expected: f equals `Arm32`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should classify arm32 triple via armv7")
 val f = target_family_from_triple("armv7-unknown-linux-gnueabi")
 expect(f).to_equal("Arm32")
 ```
@@ -102,13 +83,19 @@ expect(f).to_equal("Arm32")
 
 #### should classify rv64 triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should classify rv64 triple
+   - Expected: f equals `Rv64`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should classify rv64 triple")
 val f = target_family_from_triple("riscv64gc-unknown-linux-gnu")
 expect(f).to_equal("Rv64")
 ```
@@ -117,13 +104,19 @@ expect(f).to_equal("Rv64")
 
 #### should classify rv32 triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should classify rv32 triple
+   - Expected: f equals `Rv32`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should classify rv32 triple")
 val f = target_family_from_triple("riscv32imac-unknown-none-elf")
 expect(f).to_equal("Rv32")
 ```
@@ -132,13 +125,19 @@ expect(f).to_equal("Rv32")
 
 #### should return Unknown for malformed triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should return Unknown for malformed triple
+   - Expected: f equals `Unknown`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should return Unknown for malformed triple")
 val f = target_family_from_triple("garbage-not-a-triple")
 expect(f).to_equal("Unknown")
 ```
@@ -147,13 +146,19 @@ expect(f).to_equal("Unknown")
 
 #### should return Unknown for empty triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should return Unknown for empty triple
+   - Expected: f equals `Unknown`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should return Unknown for empty triple")
 val f = target_family_from_triple("")
 expect(f).to_equal("Unknown")
 ```
@@ -164,13 +169,19 @@ expect(f).to_equal("Unknown")
 
 #### should produce TargetFamily enum from triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should produce TargetFamily enum from triple
+   - Expected: nm equals `X86_64`
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should produce TargetFamily enum from triple")
 val fam = target_family_enum_from_triple("x86_64-unknown-linux-gnu")
 val nm = target_family_name(fam)
 expect(nm).to_equal("X86_64")
@@ -180,13 +191,19 @@ expect(nm).to_equal("X86_64")
 
 #### should build a TargetFeatureSet from triple and flags
 
-<details>
-<summary>Executable SPipe</summary>
+- should build a TargetFeatureSet from triple and flags
+   - Expected: fs.triple equals `x86_64-unknown-linux-gnu`
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should build a TargetFeatureSet from triple and flags")
 var flags = ["avx2", "bmi2"]
 val fs = target_feature_set_new("x86_64-unknown-linux-gnu", flags)
 expect(fs.triple).to_equal("x86_64-unknown-linux-gnu")
@@ -196,13 +213,19 @@ expect(fs.triple).to_equal("x86_64-unknown-linux-gnu")
 
 #### should build a TargetFeatureSet with empty flags
 
-<details>
-<summary>Executable SPipe</summary>
+- should build a TargetFeatureSet with empty flags
+   - Expected: fs.triple equals `aarch64-unknown-linux-gnu`
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should build a TargetFeatureSet with empty flags")
 var empty_flags: [text] = []
 val fs = target_feature_set_new("aarch64-unknown-linux-gnu", empty_flags)
 expect(fs.triple).to_equal("aarch64-unknown-linux-gnu")
@@ -214,13 +237,19 @@ expect(fs.triple).to_equal("aarch64-unknown-linux-gnu")
 
 #### should enable x86 narrow-form family on x86_64
 
-<details>
-<summary>Executable SPipe</summary>
+- should enable x86 narrow-form family on x86_64
+   - Expected: d.enabled is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should enable x86 narrow-form family on x86_64")
 var flags: [text] = []
 val m = target_enable_matrix("x86_64-unknown-linux-gnu", flags)
 val d = matrix_decision(m, "x86.narrow_form")
@@ -231,13 +260,19 @@ expect(d.enabled).to_equal(true)
 
 #### should disable unsupported rv vector family on rv32 without V extension
 
-<details>
-<summary>Executable SPipe</summary>
+- should disable unsupported rv vector family on rv32 without V extension
+   - Expected: d.enabled is false
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should disable unsupported rv vector family on rv32 without V extension")
 var flags: [text] = []
 val m = target_enable_matrix("riscv32imac-unknown-none-elf", flags)
 val d = matrix_decision(m, "riscv.vector.v")
@@ -249,13 +284,19 @@ expect(d.reason).to_contain("missing feature")
 
 #### should disable x86-only families on aarch64
 
-<details>
-<summary>Executable SPipe</summary>
+- should disable x86-only families on aarch64
+   - Expected: d.enabled is false
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should disable x86-only families on aarch64")
 var flags: [text] = []
 val m = target_enable_matrix("aarch64-unknown-linux-gnu", flags)
 val d = matrix_decision(m, "x86.narrow_form")
@@ -267,13 +308,19 @@ expect(d.reason).to_contain("target")
 
 #### should disable x86-only families on arm32
 
-<details>
-<summary>Executable SPipe</summary>
+- should disable x86-only families on arm32
+   - Expected: d.enabled is false
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should disable x86-only families on arm32")
 var flags: [text] = []
 val m = target_enable_matrix("armv7-unknown-linux-gnueabi", flags)
 val d = matrix_decision(m, "x86.narrow_form")
@@ -286,13 +333,19 @@ expect(d.enabled).to_equal(false)
 
 #### should allow 32-bit forms for proven narrow u32 values
 
-<details>
-<summary>Executable SPipe</summary>
+- should allow 32-bit forms for proven narrow u32 values
+   - Expected: p.result equals `legal`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should allow 32-bit forms for proven narrow u32 values")
 val p = prove_x86_64_narrow_form("u32_add_zero_extended")
 expect(p.result).to_equal("legal")
 ```
@@ -301,13 +354,19 @@ expect(p.result).to_equal("legal")
 
 #### should allow 32-bit forms for proven narrow i32 values
 
-<details>
-<summary>Executable SPipe</summary>
+- should allow 32-bit forms for proven narrow i32 values
+   - Expected: p.result equals `legal`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should allow 32-bit forms for proven narrow i32 values")
 val p = prove_x86_64_narrow_form("i32_mul_sign_extended")
 expect(p.result).to_equal("legal")
 ```
@@ -316,13 +375,19 @@ expect(p.result).to_equal("legal")
 
 #### should reject 32-bit forms for LP64 pointers
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject 32-bit forms for LP64 pointers
+   - Expected: p.result equals `rejected`
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject 32-bit forms for LP64 pointers")
 val p = prove_x86_64_narrow_form("lp64_pointer_add")
 expect(p.result).to_equal("rejected")
 expect(p.reason).to_contain("pointer")
@@ -332,13 +397,19 @@ expect(p.reason).to_contain("pointer")
 
 #### should reject 32-bit forms for unknown-width operands
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject 32-bit forms for unknown-width operands
+   - Expected: p.result equals `rejected`
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject 32-bit forms for unknown-width operands")
 val p = prove_x86_64_narrow_form("unknown_width_op")
 expect(p.result).to_equal("rejected")
 expect(p.reason).to_contain("unknown")
@@ -350,13 +421,18 @@ expect(p.reason).to_contain("unknown")
 
 #### should produce a non-empty plan for x86_64
 
-<details>
-<summary>Executable SPipe</summary>
+- should produce a non-empty plan for x86_64
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should produce a non-empty plan for x86_64")
 var flags: [text] = []
 val fs = target_feature_set_new("x86_64-unknown-linux-gnu", flags)
 val m = target_enable_matrix("x86_64-unknown-linux-gnu", flags)
@@ -368,13 +444,19 @@ expect(plan.len()).to_be_greater_than(0)
 
 #### should produce an empty plan for unknown triple
 
-<details>
-<summary>Executable SPipe</summary>
+- should produce an empty plan for unknown triple
+   - Expected: plan.len() equals `0`
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should produce an empty plan for unknown triple")
 var flags: [text] = []
 val fs = target_feature_set_new("garbage-not-a-triple", flags)
 val m = target_enable_matrix("garbage-not-a-triple", flags)
@@ -386,13 +468,19 @@ expect(plan.len()).to_equal(0)
 
 #### should include narrow_form in x86_64 plan
 
-<details>
-<summary>Executable SPipe</summary>
+- should include narrow_form in x86_64 plan
+   - Expected: found is true
 
-Runnable source: 11 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should include narrow_form in x86_64 plan")
 var flags: [text] = []
 val fs = target_feature_set_new("x86_64-unknown-linux-gnu", flags)
 val m = target_enable_matrix("x86_64-unknown-linux-gnu", flags)
@@ -412,13 +500,19 @@ expect(found).to_equal(true)
 
 #### should reject x86 narrow-form on aarch64
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject x86 narrow-form on aarch64
+   - Expected: d.enabled is false
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject x86 narrow-form on aarch64")
 var flags: [text] = []
 val m = target_enable_matrix("aarch64-unknown-linux-gnu", flags)
 val d = matrix_decision(m, "x86.narrow_form")
@@ -429,13 +523,19 @@ expect(d.enabled).to_equal(false)
 
 #### should reject x86 narrow-form on rv64
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject x86 narrow-form on rv64
+   - Expected: d.enabled is false
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject x86 narrow-form on rv64")
 var flags: [text] = []
 val m = target_enable_matrix("riscv64gc-unknown-linux-gnu", flags)
 val d = matrix_decision(m, "x86.narrow_form")
@@ -446,13 +546,19 @@ expect(d.enabled).to_equal(false)
 
 #### should reject x86 narrow-form on rv32
 
-<details>
-<summary>Executable SPipe</summary>
+- should reject x86 narrow-form on rv32
+   - Expected: d.enabled is false
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject x86 narrow-form on rv32")
 var flags: [text] = []
 val m = target_enable_matrix("riscv32imac-unknown-none-elf", flags)
 val d = matrix_decision(m, "x86.narrow_form")
@@ -465,13 +571,18 @@ expect(d.enabled).to_equal(false)
 
 #### should record baseline and optimized benchmark runs
 
-<details>
-<summary>Executable SPipe</summary>
+- should record baseline and optimized benchmark runs
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should record baseline and optimized benchmark runs")
 val r = compare_target_optimization_benchmark("x86_64", "integer_loop")
 expect(r.baseline_runs).to_be_greater_than(0)
 expect(r.optimized_runs).to_be_greater_than(0)
@@ -481,13 +592,18 @@ expect(r.optimized_runs).to_be_greater_than(0)
 
 #### should record benchmark for narrow-form kernel
 
-<details>
-<summary>Executable SPipe</summary>
+- should record benchmark for narrow-form kernel
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should record benchmark for narrow-form kernel")
 val r = compare_target_optimization_benchmark("x86_64", "narrow_form_arithmetic")
 expect(r.baseline_runs).to_be_greater_than(0)
 expect(r.optimized_runs).to_be_greater_than(0)
@@ -499,13 +615,19 @@ expect(r.optimized_runs).to_be_greater_than(0)
 
 #### should indicate rewrite is profitable for positive score
 
-<details>
-<summary>Executable SPipe</summary>
+- should indicate rewrite is profitable for positive score
+   - Expected: ok is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should indicate rewrite is profitable for positive score")
 val ok = should_rewrite(10)
 expect(ok).to_equal(true)
 ```
@@ -514,13 +636,19 @@ expect(ok).to_equal(true)
 
 #### should indicate rewrite is not profitable for non-positive score
 
-<details>
-<summary>Executable SPipe</summary>
+- should indicate rewrite is not profitable for non-positive score
+   - Expected: ok is false
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should indicate rewrite is not profitable for non-positive score")
 val ok = should_rewrite(0)
 expect(ok).to_equal(false)
 ```
@@ -534,12 +662,12 @@ expect(ok).to_equal(false)
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Target instruction optimization and 32-bit support, REQ-TGT-001: target families, REQ-TGT-001b: target family enum and feature set, REQ-TGT-002: instruction family enable matrix, REQ-X86-001: x86_64 32-bit-form legality, REQ-TGT-003: optimization planner, REQ-TGT-004: unsupported feature rejection, REQ-PERF-001: x86_64 optimization non-regression, REQ-TGT-005: profitability rewrite gate.
 - Target instruction optimization and 32-bit support
 - REQ-TGT-001: target families
 - REQ-TGT-001b: target family enum and feature set
@@ -562,3 +690,87 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-TGT-001`
+- `REQ-TGT-001b`
+- `REQ-TGT-002`
+- `REQ-X86-001`
+- `REQ-TGT-003`
+- `REQ-TGT-004`
+- `REQ-PERF-001`
+- `REQ-TGT-005`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0d3348def5d36990be52c3e685ae0de10f831bcceb825b7493b2537e685373b2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0d3348def5d36990be52c3e685ae0de10f831bcceb825b7493b2537e685373b2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0d3348def5d36990be52c3e685ae0de10f831bcceb825b7493b2537e685373b2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **78/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl
+mirror: doc/06_spec/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.md (current)
+findings: 14 blockers: 1
+  narrative=100 structure=60 oracle=90
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=78; blocker cap makes effective=49
+doc/06_spec/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 8 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:105:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should classify x86_64 triple' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify x86_64 triple' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:120:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify x86_32 triple via i686' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:120:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify x86_32 triple via i686' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:126:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify aarch64 triple' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:126:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify aarch64 triple' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:132:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify arm32 triple via armv7' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:132:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should classify arm32 triple via armv7' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:138:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify rv64 triple' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/target_instruction_optimization_32bit_spec.spl:144:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should classify rv32 triple' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Toolchain Detection Specification
 
-> <details>
-
-<!-- sdn-diagram:id=toolchain_detection_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=toolchain_detection_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-toolchain_detection_spec -> std
-toolchain_detection_spec -> verification
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=toolchain_detection_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Toolchain Detection.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,22 @@ toolchain_detection_spec -> verification
 
 #### detects whether Lean is available
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- detects whether Lean is available
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("detects whether Lean is available")
 val info = toolchain.ToolchainInfo.detect()
 val status = info.format_status()
 expect(status).to_contain("Lean Toolchain Status:")
@@ -59,13 +44,19 @@ expect(status).to_contain("Lake:")
 
 #### reports version_match true when no lean-toolchain file and lean is available
 
+- reports version_match true when no lean-toolchain file and lean is available
+   - Expected: info.version_match is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("reports version_match true when no lean-toolchain file and lean is available")
 val info = toolchain.ToolchainInfo.detect()
 # If lean is available but no lean-toolchain, version_match should be true
 if info.lean_available and not info.expected_version.?:
@@ -76,13 +67,18 @@ if info.lean_available and not info.expected_version.?:
 
 #### produces a non-empty format_status
 
+- produces a non-empty format_status
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("produces a non-empty format_status")
 val info = toolchain.ToolchainInfo.detect()
 val status = info.format_status()
 expect(status.len()).to_be_greater_than(0)
@@ -95,13 +91,18 @@ expect(status).to_contain("Lean Toolchain Status:")
 
 #### LeanNotFound message is human-readable
 
+- LeanNotFound message is human-readable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("LeanNotFound message is human-readable")
 val err = toolchain.ToolchainError.LeanNotFound
 val msg = err.to_string()
 expect(msg).to_contain("Lean 4 not found")
@@ -112,13 +113,18 @@ expect(msg).to_contain("https://leanprover.github.io/lean4/")
 
 #### LakeNotFound message mentions Lake
 
+- LakeNotFound message mentions Lake
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("LakeNotFound message mentions Lake")
 val err = toolchain.ToolchainError.LakeNotFound
 expect(err.to_string()).to_contain("Lake not found")
 ```
@@ -127,13 +133,18 @@ expect(err.to_string()).to_contain("Lake not found")
 
 #### VersionMismatch message is descriptive
 
+- VersionMismatch message is descriptive
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("VersionMismatch message is descriptive")
 val err = toolchain.ToolchainError.VersionMismatch
 expect(err.to_string()).to_contain("does not match")
 ```
@@ -142,13 +153,18 @@ expect(err.to_string()).to_contain("does not match")
 
 #### ProjectInvalid message mentions lakefile
 
+- ProjectInvalid message mentions lakefile
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("ProjectInvalid message mentions lakefile")
 val err = toolchain.ToolchainError.ProjectInvalid
 expect(err.to_string()).to_contain("lakefile.lean")
 ```
@@ -157,13 +173,18 @@ expect(err.to_string()).to_contain("lakefile.lean")
 
 #### DependencyError message mentions dependency
 
+- DependencyError message mentions dependency
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("DependencyError message mentions dependency")
 val err = toolchain.ToolchainError.DependencyError
 expect(err.to_string()).to_contain("dependency")
 ```
@@ -174,18 +195,20 @@ expect(err.to_string()).to_contain("dependency")
 
 #### returns ProjectInvalid for nonexistent directory
 
-1. or msg contains
-2. or msg contains
+- returns ProjectInvalid for nonexistent directory
+   - Expected: "validate_toolchain unexpectedly accepted a nonexistent project" equals ``
    - Expected: is_known is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-FORMALVERIFI
+step("returns ProjectInvalid for nonexistent directory")
 val result = toolchain.validate_toolchain("/nonexistent/path/no_project_here")
 # If lean+lake are installed, we get ProjectInvalid.
 # If lean is not installed, we get LeanNotFound.
@@ -211,12 +234,12 @@ match result:
 | Category | Compiler |
 | Status | Active |
 | Source | `test/00_formal_verification/compiler/toolchain_detection_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Toolchain Detection.
 - Toolchain Detection
 
 ## Scenario Summary
@@ -231,3 +254,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-FORMALVERIFI`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c729732eb09fa7518b9da72cd32207bf03b1d0fe4f65ef09551627ed94544e3e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c729732eb09fa7518b9da72cd32207bf03b1d0fe4f65ef09551627ed94544e3e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c729732eb09fa7518b9da72cd32207bf03b1d0fe4f65ef09551627ed94544e3e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/00_formal_verification/compiler/toolchain_detection_spec.spl
+mirror: doc/06_spec/00_formal_verification/compiler/toolchain_detection_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/00_formal_verification/compiler/toolchain_detection_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/00_formal_verification/compiler/toolchain_detection_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/00_formal_verification/compiler/toolchain_detection_spec.spl:16:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects whether Lean is available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/00_formal_verification/compiler/toolchain_detection_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports version_match true when no lean-toolchain file and lean is available' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/00_formal_verification/compiler/toolchain_detection_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces a non-empty format_status' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Try Operator Specification
 
-> 1. expect result is ok
-
-<!-- sdn-diagram:id=try_operator_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=try_operator_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-try_operator_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=try_operator_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Try operator (?).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,17 +19,18 @@ try_operator_spec
 
 #### unwraps Ok values
 
-1. expect result is ok
-2. expect result unwrap
+- unwraps Ok values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("unwraps Ok values")
 val result = divide(a=10, b=2)
 expect result.is_ok() == true
 expect result.unwrap() == 5
@@ -62,26 +40,7 @@ expect result.unwrap() == 5
 
 #### propagates Err on failure
 
-1. expect result is err
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = compute_ratio(a=100, b=0, c=5)
-expect result.is_err() == true
-```
-
-</details>
-
-#### chains multiple ? operations
-
-1. expect result is ok
-2. expect result unwrap
+- propagates Err on failure
 
 
 <details>
@@ -91,6 +50,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("propagates Err on failure")
+val result = compute_ratio(a=100, b=0, c=5)
+expect result.is_err() == true
+```
+
+</details>
+
+#### chains multiple ? operations
+
+- chains multiple ? operations
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SHARED
+step("chains multiple ? operations")
 val result = compute_ratio(a=100, b=5, c=2)
 # 100 / 5 = 20, 20 / 2 = 10
 expect result.is_ok() == true
@@ -101,16 +82,18 @@ expect result.unwrap() == 10
 
 #### stops at first error in chain
 
-1. expect result is err
+- stops at first error in chain
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("stops at first error in chain")
 val result = safe_sqrt_ratio(a=10, b=0)
 # First division fails
 expect result.is_err() == true
@@ -120,16 +103,18 @@ expect result.is_err() == true
 
 #### handles negative sqrt error
 
-1. expect result is err
+- handles negative sqrt error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("handles negative sqrt error")
 val result = safe_sqrt_ratio(a=-100, b=10)
 # -100 / 10 = -10, sqrt(-10) fails
 expect result.is_err() == true
@@ -139,17 +124,18 @@ expect result.is_err() == true
 
 #### completes successfully when all succeed
 
-1. expect result is ok
-2. expect result unwrap
+- completes successfully when all succeed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("completes successfully when all succeed")
 val result = safe_sqrt_ratio(a=100, b=4)
 # 100 / 4 = 25, sqrt(25) = 5
 expect result.is_ok() == true
@@ -162,13 +148,20 @@ expect result.unwrap() == 5
 
 #### unwraps Some values
 
+- unwraps Some values
+   - Expected: is_some is true
+   - Expected: unwrapped equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("unwraps Some values")
 val arr = [10, 20, 30]
 val result = find_value(arr, 20)
 val is_some = result.is_some()
@@ -181,13 +174,19 @@ expect(unwrapped).to_equal(1)
 
 #### propagates None on not found
 
+- propagates None on not found
+   - Expected: is_none is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("propagates None on not found")
 val arr = [10, 20, 30]
 val result = get_element(arr, 99)
 val is_none = result.is_none()
@@ -198,13 +197,20 @@ expect(is_none).to_equal(true)
 
 #### returns value when found
 
+- returns value when found
+   - Expected: is_some is true
+   - Expected: unwrapped equals `20`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns value when found")
 val arr = [10, 20, 30]
 val result = get_element(arr, 20)
 val is_some = result.is_some()
@@ -219,17 +225,18 @@ expect(unwrapped).to_equal(20)
 
 #### returns immediately on Err
 
-1. fn test early return
-2. expect result is err
+- returns immediately on Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("returns immediately on Err")
 # This tests that code after ? doesn't execute on error
 fn test_early_return(x: i64) -> Result<i64, text>:
     val result_val = divide(a=10, b=x)?
@@ -244,18 +251,18 @@ expect result.is_err() == true
 
 #### continues execution on Ok
 
-1. fn test continue
-2. expect result is ok
-3. expect result unwrap
+- continues execution on Ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("continues execution on Ok")
 fn test_continue(x: i64) -> Result<i64, text>:
     val result_val = divide(a=10, b=x)?
     return Ok(result_val * 1000)
@@ -271,21 +278,19 @@ expect result.unwrap() == 5000
 
 #### propagates through call stack
 
-1. fn inner
-2. fn middle
-3. fn outer
-4. expect result is ok
-5. expect result unwrap
+- propagates through call stack
    - Expected: is_err2 is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("propagates through call stack")
 fn inner(x: i64) -> Result<i64, text>:
     return divide(a=100, b=x)
 
@@ -317,12 +322,12 @@ expect(is_err2).to_equal(true)
 | Category | Other |
 | Status | Active |
 | Source | `test/shared/types/try_operator_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Try operator (?).
 - Try operator (?)
 
 ## Scenario Summary
@@ -337,3 +342,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SHARED`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `51923ee5e5a5cdd9277aaaab0a667c598eaf6d0c2954e1723fa29c4f98fce27d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `51923ee5e5a5cdd9277aaaab0a667c598eaf6d0c2954e1723fa29c4f98fce27d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `51923ee5e5a5cdd9277aaaab0a667c598eaf6d0c2954e1723fa29c4f98fce27d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/shared/types/try_operator_spec.spl
+mirror: doc/06_spec/shared/types/try_operator_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/shared/types/try_operator_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/shared/types/try_operator_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/shared/types/try_operator_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/shared/types/try_operator_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unwraps Ok values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/types/try_operator_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'propagates Err on failure' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/types/try_operator_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'chains multiple ? operations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Database Atomic Specification
 
-> <details>
-
-<!-- sdn-diagram:id=database_atomic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=database_atomic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-database_atomic_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=database_atomic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Atomic File Operations, Concurrent File Access, Lock File Format.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,23 +20,23 @@ database_atomic_spec -> std
 
 #### writes file atomically _(slow)_
 
-1. file delete
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. check
 
-3. check
+- writes file atomically
    - Expected: content equals `test content`
-
-4. file delete
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("writes file atomically")
 val tmp = get_temp_dir()
 val path = "{tmp}/test_atomic_write.txt"
 
@@ -90,20 +67,20 @@ file_delete(path)
 
 #### reads file atomically _(slow)_
 
-1. atomic write
-   - Expected: content.? is true
+- reads file atomically
+   - Expected: content == nil is false
    - Expected: content? equals `atomic read test`
-
-2. file delete
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("reads file atomically")
 val tmp = get_temp_dir()
 val path = "{tmp}/test_atomic_read.txt"
 
@@ -112,7 +89,7 @@ atomic_write(path, "atomic read test")
 
 # Read atomically
 val content = atomic_read(path)
-expect(content.?).to_equal(true)
+expect(content == nil).to_equal(false)
 expect(content?).to_equal("atomic read test")
 
 # Cleanup
@@ -129,24 +106,18 @@ file_delete(path)
 
 #### appends to file atomically _(slow)_
 
-1. atomic write
-
-2. check
-
-3. check
-
-4. check
-
-5. file delete
+- appends to file atomically
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("appends to file atomically")
 val tmp = get_temp_dir()
 val path = "{tmp}/test_atomic_append.txt"
 
@@ -176,15 +147,21 @@ file_delete(path)
 
 #### handles missing file on read _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- handles missing file on read
+   - Expected: content == nil is true
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles missing file on read")
 val content = atomic_read("/nonexistent/file.txt")
-expect(content.?).to_equal(false)
+expect(content == nil).to_equal(true)
 ```
 
 </details>
@@ -197,26 +174,18 @@ expect(content.?).to_equal(false)
 
 #### creates lock file _(slow)_
 
-1. file delete
-
-2. var lock = FileLock for file
-
-3. check
-
-4. check
-
-5. lock release
-
-6. check
+- creates lock file
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("creates lock file")
 val tmp = get_temp_dir()
 val resource = "{tmp}/test_lock_resource.txt"
 val lock_path = "{resource}.lock"
@@ -246,22 +215,18 @@ check(not file_exists(lock_path))
 
 #### detects stale locks _(slow)_
 
-1. atomic write
-
-2. var lock = FileLock for file
-
-3. check
-
-4. lock release
+- detects stale locks
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("detects stale locks")
 val tmp = get_temp_dir()
 val resource = "{tmp}/test_stale_lock.txt"
 val lock_path = "{resource}.lock"
@@ -291,13 +256,18 @@ lock.release()
 
 #### respects fresh locks _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- respects fresh locks
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("respects fresh locks")
 # SKIP: FileLock contention with try_acquire causes timeout in interpreter mode
 print "SKIP: FileLock contention test times out in interpreter mode"
 ```
@@ -314,19 +284,19 @@ print "SKIP: FileLock contention test times out in interpreter mode"
 
 #### prevents data corruption with atomic writes _(slow)_
 
-1. atomic write
+- prevents data corruption with atomic writes
    - Expected: content equals `write_9`
-
-2. file delete
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("prevents data corruption with atomic writes")
 val tmp = get_temp_dir()
 val path = "{tmp}/test_concurrent_writes.txt"
 
@@ -352,20 +322,20 @@ file_delete(path)
 
 #### allows multiple readers _(slow)_
 
-1. atomic write
-   - Expected: content.? is true
+- allows multiple readers
+   - Expected: content == nil is false
    - Expected: content? equals `shared content`
-
-2. file delete
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("allows multiple readers")
 val tmp = get_temp_dir()
 val path = "{tmp}/test_multiple_readers.txt"
 
@@ -375,7 +345,7 @@ atomic_write(path, "shared content")
 # Multiple reads should all succeed
 for i in 0..5:
     val content = atomic_read(path)
-    expect(content.?).to_equal(true)
+    expect(content == nil).to_equal(false)
     expect(content?).to_equal("shared content")
 
 # Cleanup
@@ -394,24 +364,18 @@ file_delete(path)
 
 #### stores timestamp in lock file _(slow)_
 
-1. file delete
-
-2. var lock = FileLock for file
-
-3. lock acquire
-
-4. check
-
-5. lock release
+- stores timestamp in lock file
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stores timestamp in lock file")
 val tmp = get_temp_dir()
 val resource = "{tmp}/test_lock_format.txt"
 val lock_path = "{resource}.lock"
@@ -444,26 +408,18 @@ lock.release()
 
 #### overwrites stale lock _(slow)_
 
-1. atomic write
-
-2. var lock = FileLock for file
-
-3. lock acquire
-
-4. check
-
-5. check
-
-6. lock release
+- overwrites stale lock
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("overwrites stale lock")
 val tmp = get_temp_dir()
 val resource = "{tmp}/test_overwrite_lock.txt"
 val lock_path = "{resource}.lock"
@@ -499,12 +455,12 @@ lock.release()
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/database_atomic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Atomic File Operations, Concurrent File Access, Lock File Format.
 - Atomic File Operations
 - Concurrent File Access
 - Lock File Format
@@ -521,3 +477,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cd97bce33ef9145110894efce792ca9ac723c387d106f9c873eb8810debb58df`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cd97bce33ef9145110894efce792ca9ac723c387d106f9c873eb8810debb58df`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cd97bce33ef9145110894efce792ca9ac723c387d106f9c873eb8810debb58df`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/lib/database_atomic_spec.spl
+mirror: doc/06_spec/02_integration/lib/database_atomic_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/database_atomic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/database_atomic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/database_atomic_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'writes file atomically' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_atomic_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reads file atomically' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_atomic_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'appends to file atomically' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

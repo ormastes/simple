@@ -1,29 +1,6 @@
 # Pipeline Components Specification
 
-> val pipeline = source
-
-<!-- sdn-diagram:id=pipeline_components_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=pipeline_components_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-pipeline_components_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=pipeline_components_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ pipeline_components_spec
 
 # Pipeline Components Specification
 
-val pipeline = source
+use std.spec.step
 
 ## At a Glance
 
@@ -44,12 +21,14 @@ val pipeline = source
 | Category | Infrastructure |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/pipeline_components_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
 
 ```simple
+use std.spec.step
+
 val pipeline = source
 | filter(\x: x > 0)
 | map(\x: x * 2)
@@ -73,16 +52,18 @@ val pipeline = source
 
 #### creates pipeline with single stage
 
-1. expect result len
+- creates pipeline with single stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates pipeline with single stage")
 val data = [1, 2, 3]
 val result = data
 expect result.len() == 3
@@ -92,17 +73,18 @@ expect result.len() == 3
 
 #### transforms data through pipeline
 
-1.  map
-2. expect result len
+- transforms data through pipeline
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("transforms data through pipeline")
 val data = [1, 2, 3]
 val result = data
     .map(_1 * 2)
@@ -118,18 +100,18 @@ expect result[2] == 6
 
 #### chains multiple transformations
 
-1.  filter
-2.  map
-3. expect result len
+- chains multiple transformations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains multiple transformations")
 val data = [1, 2, 3, 4, 5]
 val result = data
     .filter(_1 > 2)
@@ -144,19 +126,18 @@ expect result[2] == 50
 
 #### chains filter then map then filter
 
-1.  filter
-2.  map
-3.  filter
-4. expect result len
+- chains filter then map then filter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains filter then map then filter")
 val data = [1, 2, 3, 4, 5, 6]
 val result = data
     .filter(_1 > 1)
@@ -173,21 +154,18 @@ expect result.len() == 3
 
 #### propagates errors through stages
 
-1. fn safe divide
-2. Err
-3. Ok
-4. Ok
-5. Err
-6. fail
+- propagates errors through stages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("propagates errors through stages")
 fn safe_divide(x: i64) -> Result<i64, text>:
     if x == 0:
         Err("division by zero")
@@ -206,22 +184,18 @@ match result1:
 
 #### stops processing on error
 
-1. fn validate
-2. Err
-3. Ok
-4. Ok
-5. results push
-6. Err
-7. expect results len
+- stops processing on error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("stops processing on error")
 fn validate(x: i64) -> Result<i64, text>:
     if x < 0:
         Err("negative")
@@ -246,22 +220,18 @@ expect results.len() == 2
 
 #### provides default on error
 
-1. fn risky
-2. Err
-3. Ok
-4. Ok
-5. Err
-6. Ok
-7. Err
+- provides default on error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides default on error")
 fn risky(x: i64) -> Result<i64, text>:
     if x == 0:
         Err("zero not allowed")
@@ -293,17 +263,18 @@ expect value2 == -1
 
 #### collects data in buffer
 
-1. buffer push
-2. expect buffer len
+- collects data in buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("collects data in buffer")
 var buffer: List<i64> = []
 val data = [1, 2, 3]
 for item in data:
@@ -315,17 +286,18 @@ expect buffer.len() == 3
 
 #### respects buffer limits
 
-1. buffer push
-2. expect buffer len
+- respects buffer limits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("respects buffer limits")
 val max_size = 5
 var buffer: List<i64> = []
 val data = [1, 2, 3, 4, 5, 6, 7]
@@ -341,17 +313,18 @@ expect buffer.len() == 5
 
 #### drains buffer completely
 
-1. drain result push
-2. expect drain result len
+- drains buffer completely
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("drains buffer completely")
 var buffer: List<i64> = [1, 2, 3]
 var drain_result = []
 while buffer.?:
@@ -369,16 +342,18 @@ expect drain_result.len() == 3
 
 #### maintains running total through stages
 
-1. fn sum values
+- maintains running total through stages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maintains running total through stages")
 fn sum_values(items: List<i64>) -> i64:
     var total = 0
     for item in items:
@@ -394,13 +369,18 @@ expect result == 15
 
 #### accumulates with filter
 
+- accumulates with filter
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accumulates with filter")
 var count = 0
 val data = [1, 2, 3, 4, 5]
 for item in data:
@@ -415,16 +395,18 @@ expect count == 3
 
 #### keeps separate accumulators
 
-1. fn process list
+- keeps separate accumulators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps separate accumulators")
 fn process_list(items: List<i64>, threshold: i64) -> i64:
     var result = 0
     for item in items:
@@ -448,16 +430,18 @@ expect r2 == 50
 
 #### evaluates immediately
 
-1.  map
+- evaluates immediately
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("evaluates immediately")
 val data = [1, 2, 3]
 val result = data
     .map(_1 * 2)
@@ -469,13 +453,18 @@ expect result[1] == 4
 
 #### evaluates each transformation
 
+- evaluates each transformation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("evaluates each transformation")
 var eval_count = 0
 val data = [1, 2, 3]
 for x in data:
@@ -489,18 +478,18 @@ expect eval_count == 3
 
 #### collects results from pipeline
 
-1.  filter
-2.  map
-3. expect result len
+- collects results from pipeline
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("collects results from pipeline")
 val data = [1, 2, 3, 4, 5]
 val result = data
     .filter(_1 > 2)
@@ -512,17 +501,18 @@ expect result.len() == 3
 
 #### counts items in pipeline
 
-1.  filter
-2. expect filtered len
+- counts items in pipeline
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("counts items in pipeline")
 val data = [1, 2, 3, 4, 5]
 val filtered = data
     .filter(_1 > 2)
@@ -543,3 +533,51 @@ expect filtered.len() == 3
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6bc801cb66b7b0e975ee66f528aaa7c42eab27c3de87b2146d865063fba2ea2c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6bc801cb66b7b0e975ee66f528aaa7c42eab27c3de87b2146d865063fba2ea2c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6bc801cb66b7b0e975ee66f528aaa7c42eab27c3de87b2146d865063fba2ea2c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/pipeline_components_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/pipeline_components_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/pipeline_components_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/pipeline_components_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/pipeline_components_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates pipeline with single stage' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/pipeline_components_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transforms data through pipeline' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/pipeline_components_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'chains multiple transformations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

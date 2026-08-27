@@ -2,29 +2,6 @@
 
 > Integer literals in Simple support multiple base formats (decimal, hexadecimal, binary, octal), underscore separators for readability, type suffixes for explicit sizing, and user-defined unit suffixes for semantic meaning. All integers default to 64-bit signed (`i64`) unless explicitly typed with a suffix.
 
-<!-- sdn-diagram:id=basic_types_integer_literals_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=basic_types_integer_literals_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-basic_types_integer_literals_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=basic_types_integer_literals_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 49 | 49 | 0 | 0 |
@@ -45,7 +22,7 @@ Integer literals in Simple support multiple base formats (decimal, hexadecimal, 
 | Difficulty | 1/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/basic_types_integer_literals_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,6 +37,8 @@ typed with a suffix.
 ### Base Formats
 
 ```simple
+use std.spec.step
+
 val decimal = 42                # Decimal (base 10)
 val hex = 0xFF                  # Hexadecimal (base 16)
 val binary = 0b1010             # Binary (base 2)
@@ -168,13 +147,19 @@ val size = 1024_bytes
 
 #### parses single digit
 
+- parses single digit
+   - Expected: x equals `5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses single digit")
 val x = 5
 expect(x).to_equal(5)
 ```
@@ -183,28 +168,40 @@ expect(x).to_equal(5)
 
 #### parses zero
 
+- parses zero
+   - Expected: x equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses zero")
 val x = 0
-expect(x == 0).to_equal(true)
+expect(x).to_equal(0)
 ```
 
 </details>
 
 #### parses multi-digit
 
+- parses multi-digit
+   - Expected: x equals `123456`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses multi-digit")
 val x = 123456
 expect(x).to_equal(123456)
 ```
@@ -213,13 +210,19 @@ expect(x).to_equal(123456)
 
 #### parses large number
 
+- parses large number
+   - Expected: x equals `999999999`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses large number")
 val x = 999999999
 expect(x).to_equal(999999999)
 ```
@@ -230,13 +233,19 @@ expect(x).to_equal(999999999)
 
 #### parses with single underscore
 
+- parses with single underscore
+   - Expected: x equals `1000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses with single underscore")
 val x = 1_000
 expect(x).to_equal(1000)
 ```
@@ -245,13 +254,19 @@ expect(x).to_equal(1000)
 
 #### parses with multiple underscores
 
+- parses with multiple underscores
+   - Expected: x equals `1000000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses with multiple underscores")
 val x = 1_000_000
 expect(x).to_equal(1000000)
 ```
@@ -260,13 +275,19 @@ expect(x).to_equal(1000000)
 
 #### parses with arbitrary grouping
 
+- parses with arbitrary grouping
+   - Expected: x equals `123456`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses with arbitrary grouping")
 val x = 12_34_56
 expect(x).to_equal(123456)
 ```
@@ -279,13 +300,19 @@ expect(x).to_equal(123456)
 
 #### parses lowercase hex
 
+- parses lowercase hex
+   - Expected: x equals `255`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses lowercase hex")
 val x = 0xff
 expect(x).to_equal(255)
 ```
@@ -294,13 +321,19 @@ expect(x).to_equal(255)
 
 #### parses uppercase hex
 
+- parses uppercase hex
+   - Expected: x equals `255`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses uppercase hex")
 val x = 0xFF
 expect(x).to_equal(255)
 ```
@@ -309,13 +342,19 @@ expect(x).to_equal(255)
 
 #### parses mixed case
 
+- parses mixed case
+   - Expected: x equals `171`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses mixed case")
 val x = 0xAb
 expect(x).to_equal(171)
 ```
@@ -324,13 +363,19 @@ expect(x).to_equal(171)
 
 #### parses single hex digit
 
+- parses single hex digit
+   - Expected: x equals `15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses single hex digit")
 val x = 0xF
 expect(x).to_equal(15)
 ```
@@ -339,13 +384,19 @@ expect(x).to_equal(15)
 
 #### parses multi-digit hex
 
+- parses multi-digit hex
+   - Expected: x equals `6699`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses multi-digit hex")
 val x = 0x1A2B
 expect(x).to_equal(6699)
 ```
@@ -356,13 +407,19 @@ expect(x).to_equal(6699)
 
 #### parses hex with underscores
 
+- parses hex with underscores
+   - Expected: x equals `65280`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses hex with underscores")
 val x = 0xFF_00
 expect(x).to_equal(65280)
 ```
@@ -371,13 +428,19 @@ expect(x).to_equal(65280)
 
 #### parses byte grouping
 
+- parses byte grouping
+   - Expected: x equals `4294967295`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses byte grouping")
 val x = 0xFF_FF_FF_FF
 expect(x).to_equal(4294967295)
 ```
@@ -390,13 +453,19 @@ expect(x).to_equal(4294967295)
 
 #### parses simple binary
 
+- parses simple binary
+   - Expected: x equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses simple binary")
 val x = 0b1010
 expect(x).to_equal(10)
 ```
@@ -405,13 +474,19 @@ expect(x).to_equal(10)
 
 #### parses all ones
 
+- parses all ones
+   - Expected: x equals `15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses all ones")
 val x = 0b1111
 expect(x).to_equal(15)
 ```
@@ -420,28 +495,40 @@ expect(x).to_equal(15)
 
 #### parses all zeros
 
+- parses all zeros
+   - Expected: x equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses all zeros")
 val x = 0b0000
-expect(x == 0).to_equal(true)
+expect(x).to_equal(0)
 ```
 
 </details>
 
 #### parses single bit
 
+- parses single bit
+   - Expected: x equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses single bit")
 val x = 0b1
 expect(x).to_equal(1)
 ```
@@ -450,13 +537,19 @@ expect(x).to_equal(1)
 
 #### parses byte value
 
+- parses byte value
+   - Expected: x equals `255`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses byte value")
 val x = 0b11111111
 expect(x).to_equal(255)
 ```
@@ -467,13 +560,19 @@ expect(x).to_equal(255)
 
 #### parses nibble grouping
 
+- parses nibble grouping
+   - Expected: x equals `240`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses nibble grouping")
 val x = 0b1111_0000
 expect(x).to_equal(240)
 ```
@@ -482,13 +581,19 @@ expect(x).to_equal(240)
 
 #### parses byte pairs
 
+- parses byte pairs
+   - Expected: x equals `170`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses byte pairs")
 val x = 0b1010_1010
 expect(x).to_equal(170)
 ```
@@ -501,13 +606,19 @@ expect(x).to_equal(170)
 
 #### parses simple octal
 
+- parses simple octal
+   - Expected: x equals `8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses simple octal")
 val x = 0o10
 expect(x).to_equal(8)
 ```
@@ -516,13 +627,19 @@ expect(x).to_equal(8)
 
 #### parses unix permissions
 
+- parses unix permissions
+   - Expected: x equals `493`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses unix permissions")
 val x = 0o755
 expect(x).to_equal(493)
 ```
@@ -531,13 +648,19 @@ expect(x).to_equal(493)
 
 #### parses all sevens
 
+- parses all sevens
+   - Expected: x equals `511`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses all sevens")
 val x = 0o777
 expect(x).to_equal(511)
 ```
@@ -546,13 +669,19 @@ expect(x).to_equal(511)
 
 #### parses single octal digit
 
+- parses single octal digit
+   - Expected: x equals `7`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses single octal digit")
 val x = 0o7
 expect(x).to_equal(7)
 ```
@@ -565,13 +694,19 @@ expect(x).to_equal(7)
 
 #### parses i32 suffix
 
+- parses i32 suffix
+   - Expected: x equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses i32 suffix")
 val x = 42i32
 expect(x).to_equal(42)
 ```
@@ -580,13 +715,19 @@ expect(x).to_equal(42)
 
 #### parses i64 suffix
 
+- parses i64 suffix
+   - Expected: x equals `1000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses i64 suffix")
 val x = 1000i64
 expect(x).to_equal(1000)
 ```
@@ -597,13 +738,19 @@ expect(x).to_equal(1000)
 
 #### parses u8 suffix
 
+- parses u8 suffix
+   - Expected: x equals `255`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses u8 suffix")
 val x = 255u8
 expect(x).to_equal(255)
 ```
@@ -612,13 +759,19 @@ expect(x).to_equal(255)
 
 #### parses u16 suffix
 
+- parses u16 suffix
+   - Expected: x equals `1000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses u16 suffix")
 val x = 1000u16
 expect(x).to_equal(1000)
 ```
@@ -627,13 +780,19 @@ expect(x).to_equal(1000)
 
 #### parses u32 suffix
 
+- parses u32 suffix
+   - Expected: x equals `12345`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses u32 suffix")
 val x = 12345u32
 expect(x).to_equal(12345)
 ```
@@ -646,13 +805,19 @@ expect(x).to_equal(12345)
 
 #### combines decimal and hex
 
+- combines decimal and hex
+   - Expected: result equals `20`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines decimal and hex")
 val result = 10 + 0xA
 expect(result).to_equal(20)
 ```
@@ -661,13 +826,19 @@ expect(result).to_equal(20)
 
 #### combines decimal and binary
 
+- combines decimal and binary
+   - Expected: result equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines decimal and binary")
 val result = 5 + 0b101
 expect(result).to_equal(10)
 ```
@@ -676,13 +847,19 @@ expect(result).to_equal(10)
 
 #### combines all formats
 
+- combines all formats
+   - Expected: result equals `46`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines all formats")
 val result = 1 + 0xF + 0b1111 + 0o17
 expect(result).to_equal(46)
 ```
@@ -695,60 +872,84 @@ expect(result).to_equal(46)
 
 #### parses decimal zero
 
+- parses decimal zero
+   - Expected: x equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses decimal zero")
 val x = 0
-expect(x == 0).to_equal(true)
+expect(x).to_equal(0)
 ```
 
 </details>
 
 #### parses hex zero
 
+- parses hex zero
+   - Expected: x equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses hex zero")
 val x = 0x0
-expect(x == 0).to_equal(true)
+expect(x).to_equal(0)
 ```
 
 </details>
 
 #### parses binary zero
 
+- parses binary zero
+   - Expected: x equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses binary zero")
 val x = 0b0
-expect(x == 0).to_equal(true)
+expect(x).to_equal(0)
 ```
 
 </details>
 
 #### parses octal zero
 
+- parses octal zero
+   - Expected: x equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses octal zero")
 val x = 0o0
-expect(x == 0).to_equal(true)
+expect(x).to_equal(0)
 ```
 
 </details>
@@ -757,13 +958,19 @@ expect(x == 0).to_equal(true)
 
 #### parses decimal one
 
+- parses decimal one
+   - Expected: x equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses decimal one")
 val x = 1
 expect(x).to_equal(1)
 ```
@@ -772,13 +979,19 @@ expect(x).to_equal(1)
 
 #### parses hex one
 
+- parses hex one
+   - Expected: x equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses hex one")
 val x = 0x1
 expect(x).to_equal(1)
 ```
@@ -787,13 +1000,19 @@ expect(x).to_equal(1)
 
 #### parses binary one
 
+- parses binary one
+   - Expected: x equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses binary one")
 val x = 0b1
 expect(x).to_equal(1)
 ```
@@ -802,13 +1021,19 @@ expect(x).to_equal(1)
 
 #### parses octal one
 
+- parses octal one
+   - Expected: x equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses octal one")
 val x = 0o1
 expect(x).to_equal(1)
 ```
@@ -819,13 +1044,19 @@ expect(x).to_equal(1)
 
 #### parses large decimal
 
+- parses large decimal
+   - Expected: x equals `2147483647`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses large decimal")
 val x = 2147483647
 expect(x).to_equal(2147483647)
 ```
@@ -834,13 +1065,19 @@ expect(x).to_equal(2147483647)
 
 #### parses large hex
 
+- parses large hex
+   - Expected: x equals `2147483647`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses large hex")
 val x = 0x7FFFFFFF
 expect(x).to_equal(2147483647)
 ```
@@ -853,13 +1090,19 @@ expect(x).to_equal(2147483647)
 
 #### accepts lowercase 0x
 
+- accepts lowercase 0x
+   - Expected: x equals `255`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts lowercase 0x")
 val x = 0xff
 expect(x).to_equal(255)
 ```
@@ -868,13 +1111,19 @@ expect(x).to_equal(255)
 
 #### accepts uppercase 0X
 
+- accepts uppercase 0X
+   - Expected: x equals `255`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts uppercase 0X")
 val x = 0XFF
 expect(x).to_equal(255)
 ```
@@ -885,13 +1134,19 @@ expect(x).to_equal(255)
 
 #### accepts lowercase 0b
 
+- accepts lowercase 0b
+   - Expected: x equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts lowercase 0b")
 val x = 0b1010
 expect(x).to_equal(10)
 ```
@@ -900,13 +1155,19 @@ expect(x).to_equal(10)
 
 #### accepts uppercase 0B
 
+- accepts uppercase 0B
+   - Expected: x equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts uppercase 0B")
 val x = 0B1010
 expect(x).to_equal(10)
 ```
@@ -917,13 +1178,19 @@ expect(x).to_equal(10)
 
 #### accepts lowercase 0o
 
+- accepts lowercase 0o
+   - Expected: x equals `63`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts lowercase 0o")
 val x = 0o77
 expect(x).to_equal(63)
 ```
@@ -932,13 +1199,19 @@ expect(x).to_equal(63)
 
 #### accepts uppercase 0O
 
+- accepts uppercase 0O
+   - Expected: x equals `63`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accepts uppercase 0O")
 val x = 0O77
 expect(x).to_equal(63)
 ```
@@ -957,3 +1230,54 @@ expect(x).to_equal(63)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bb14e3191aa5dba14dcb21aeba470cdb569e37d5670acf4e1d7b8a57c4aef66b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bb14e3191aa5dba14dcb21aeba470cdb569e37d5670acf4e1d7b8a57c4aef66b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bb14e3191aa5dba14dcb21aeba470cdb569e37d5670acf4e1d7b8a57c4aef66b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/usage/basic_types_integer_literals_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/basic_types_integer_literals_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/basic_types_integer_literals_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/basic_types_integer_literals_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/basic_types_integer_literals_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 49 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/usage/basic_types_integer_literals_spec.spl:152:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses single digit' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/basic_types_integer_literals_spec.spl:158:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/basic_types_integer_literals_spec.spl:164:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses multi-digit' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

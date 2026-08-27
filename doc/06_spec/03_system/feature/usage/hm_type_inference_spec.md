@@ -2,29 +2,6 @@
 
 > Tests core Hindley-Milner type inference with level-based generalization. Implements simplified type variables, substitution, and unification with occurs check to verify polymorphic functions, let-polymorphism with independent instantiations, function type unification, and Algorithm W core steps for identity and application type inference.
 
-<!-- sdn-diagram:id=hm_type_inference_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=hm_type_inference_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-hm_type_inference_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=hm_type_inference_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 15 | 15 | 0 | 0 |
@@ -48,7 +25,7 @@ Tests core Hindley-Milner type inference with level-based generalization. Implem
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/feature/usage/hm_type_inference_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -62,6 +39,8 @@ identity and application type inference.
 ## Syntax
 
 ```simple
+use std.spec.step
+
 val v = ty_var(0)
 val fn_ty = ty_fn(v, v)  # a -> a
 var result = unify(empty_subst(), v, ty_int())
@@ -90,22 +69,18 @@ NOTE: Full tests require self-hosting compiler modules (simple/compiler/*).
 
 #### creates unique type variable IDs
 
-1. reset vars
-
-2. check
-
-3. check
-
-4. check
+- creates unique type variable IDs
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates unique type variable IDs")
 reset_vars()
 val v1 = fresh_var()
 val v2 = fresh_var()
@@ -120,24 +95,18 @@ check(v3 == 2, "third var should be 2")
 
 #### creates type variables with levels
 
-1. reset vars
-
-2. check
-
-3. check
-
-4. check
-
-5. check
+- creates type variables with levels
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates type variables with levels")
 reset_vars()
 val t1 = ty_var(0)
 val t2 = ty_var(1)
@@ -154,20 +123,18 @@ check(get_var_level(t2) == 1, "t2 at level 1")
 
 #### unifies same primitive types
 
-1. check
-
-2. check
-
-3. check
+- unifies same primitive types
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unifies same primitive types")
 check(unify_ok(ty_int(), ty_int()), "int=int should unify")
 check(unify_ok(ty_bool(), ty_bool()), "bool=bool should unify")
 check(unify_ok(ty_str(), ty_str()), "str=str should unify")
@@ -177,20 +144,18 @@ check(unify_ok(ty_str(), ty_str()), "str=str should unify")
 
 #### fails to unify different primitive types
 
-1. check
-
-2. check
-
-3. check
+- fails to unify different primitive types
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails to unify different primitive types")
 check(unify_err(ty_int(), ty_bool()), "int != bool should fail")
 check(unify_err(ty_str(), ty_int()), "str != int should fail")
 check(unify_err(ty_bool(), ty_str()), "bool != str should fail")
@@ -200,20 +165,18 @@ check(unify_err(ty_bool(), ty_str()), "bool != str should fail")
 
 #### unifies type variable with concrete type
 
-1. reset vars
-
-2. check
-
-3. check
+- unifies type variable with concrete type
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unifies type variable with concrete type")
 reset_vars()
 val v = ty_var(0)
 
@@ -233,22 +196,18 @@ match unify(empty_subst(), v, ty_int()):
 
 #### unifies two type variables
 
-1. reset vars
-
-2. check
-
-3. check
-
-4. check
+- unifies two type variables
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unifies two type variables")
 reset_vars()
 val v1 = ty_var(0)
 val v2 = ty_var(0)
@@ -277,16 +236,18 @@ match unify(empty_subst(), v1, v2):
 
 #### detects occurs check violation
 
-1. reset vars
+- detects occurs check violation
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects occurs check violation")
 reset_vars()
 val v = ty_var(0)
 val fn_of_v = ty_fn(v, ty_int())  # v -> int
@@ -302,16 +263,18 @@ match r:
 
 #### unifies function types
 
-1. reset vars
+- unifies function types
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unifies function types")
 reset_vars()
 val f1 = ty_fn(ty_int(), ty_bool())
 val f2 = ty_fn(ty_int(), ty_bool())
@@ -326,20 +289,18 @@ match r:
 
 #### unifies function types with variables
 
-1. reset vars
-
-2. check
-
-3. check
+- unifies function types with variables
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unifies function types with variables")
 reset_vars()
 val v = ty_var(0)
 val f1 = ty_fn(v, ty_bool())        # a -> bool
@@ -363,18 +324,18 @@ match unify(empty_subst(), f1, f2):
 
 #### identifies variables at higher level as generalizable
 
-1. reset vars
-
-2. check
+- identifies variables at higher level as generalizable
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("identifies variables at higher level as generalizable")
 reset_vars()
 # Simulate entering a let-binding (level 1)
 val v = ty_var(1)  # Created at level 1
@@ -389,18 +350,18 @@ check(free_vars.len() == 1, "should have one generalizable var")
 
 #### does not generalize variables at same level
 
-1. reset vars
-
-2. check
+- does not generalize variables at same level
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("does not generalize variables at same level")
 reset_vars()
 # Variable created at level 0
 val v = ty_var(0)
@@ -415,20 +376,18 @@ check(free_vars.len() == 0, "should have no generalizable vars")
 
 #### generalizes only higher-level vars in mixed type
 
-1. reset vars
-
-2. check
-
-3. check
+- generalizes only higher-level vars in mixed type
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generalizes only higher-level vars in mixed type")
 reset_vars()
 val v0 = ty_var(0)  # At level 0 (bound in env)
 val v1 = ty_var(1)  # At level 1 (free)
@@ -446,26 +405,18 @@ check(free_vars.len() == 1, "should have one generalizable var")
 
 #### demonstrates identity can be used at multiple types
 
-1. reset vars
-
-2. check
-
-3. check
-
-4. reset vars
-
-5. check
-
-6. check
+- demonstrates identity can be used at multiple types
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("demonstrates identity can be used at multiple types")
 # Simulates: let id = \x: x in (id 1, id true)
 # The key insight: after generalizing id's type (forall a. a -> a),
 # each use gets fresh instantiation
@@ -518,22 +469,18 @@ match unify(empty_subst(), inst2_param, use2_arg):
 
 #### infers identity function type
 
-1. reset vars
-
-2. check
-
-3. check
-
-4. check
+- infers identity function type
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("infers identity function type")
 # Simulate: fn identity(x): x
 # 1. Create fresh var for param: a
 # 2. Return type = param type (since body is just x)
@@ -555,22 +502,18 @@ match fn_ty:
 
 #### infers application type
 
-1. reset vars
-
-2. var result = subst apply
-
-3. check
-
-4. check
+- infers application type
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("infers application type")
 # Simulate: f(x) where f: a -> b, x: a
 # Result type should be b
 reset_vars()
@@ -604,3 +547,51 @@ match unify(empty_subst(), a, x_ty):
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f47434437b9288794187f1bf1e66c704d56be24f38f0132bf24036451e4e0dce`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f47434437b9288794187f1bf1e66c704d56be24f38f0132bf24036451e4e0dce`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f47434437b9288794187f1bf1e66c704d56be24f38f0132bf24036451e4e0dce`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/hm_type_inference_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/hm_type_inference_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/hm_type_inference_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/hm_type_inference_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/hm_type_inference_spec.spl:289:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates unique type variable IDs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/hm_type_inference_spec.spl:301:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates type variables with levels' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/hm_type_inference_spec.spl:314:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unifies same primitive types' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

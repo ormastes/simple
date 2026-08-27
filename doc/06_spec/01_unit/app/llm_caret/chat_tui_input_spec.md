@@ -1,23 +1,43 @@
-# LLM Caret Raw TUI Input Unit Spec
+# Chat Tui Input Specification
 
-> Source-synchronized unit manual. The current self-hosted SSpec runner is
-> blocked before trustworthy scenario execution, so this document records
-> 22 active scenarios and 0 executed scenarios.
+> Tests covering ANSI raw-key decoding, UTF-8 raw-key decoding, Raw-line control reduction.
 
-| Tests | Active | Skipped | Pending | Executed |
-|------:|-------:|--------:|--------:|---------:|
-| 22 | 22 | 0 | 0 | 0 |
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 22 | 22 | 0 | 0 |
 
-**Executable source:** `test/01_unit/app/llm_caret/chat_tui_input_spec.spl`
+<details>
+<summary>Full Scenario Manual</summary>
 
-## should decode CSI and SS3 arrows without leaking printable bytes
+# Chat Tui Input Specification
 
-**Group:** ANSI raw-key decoding
+## Scenarios
+
+### ANSI raw-key decoding
+
+#### should decode CSI and SS3 arrows without leaking printable bytes
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should decode CSI and SS3 arrows without leaking printable bytes
+   - Expected: _decode_raw_bytes([27, 91, 65]) equals `("up", "")`
+   - Expected: _decode_raw_bytes([27, 91, 66]) equals `("down", "")`
+   - Expected: _decode_raw_bytes([27, 91, 67]) equals `("right", "")`
+   - Expected: _decode_raw_bytes([27, 91, 68]) equals `("left", "")`
+   - Expected: _decode_raw_bytes([27, 79, 67]) equals `("right", "")`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should decode CSI and SS3 arrows without leaking printable bytes")
 expect(_decode_raw_bytes([27, 91, 65])).to_equal(("up", ""))
 expect(_decode_raw_bytes([27, 91, 66])).to_equal(("down", ""))
 expect(_decode_raw_bytes([27, 91, 67])).to_equal(("right", ""))
@@ -27,14 +47,26 @@ expect(_decode_raw_bytes([27, 79, 67])).to_equal(("right", ""))
 
 </details>
 
-## should decode direct and numeric home and end sequences
+#### should decode direct and numeric home and end sequences
 
-**Group:** ANSI raw-key decoding
+- should decode direct and numeric home and end sequences
+   - Expected: _decode_raw_bytes([27, 91, 72]) equals `("home", "")`
+   - Expected: _decode_raw_bytes([27, 91, 70]) equals `("end", "")`
+   - Expected: _decode_raw_bytes([27, 91, 49, 126]) equals `("home", "")`
+   - Expected: _decode_raw_bytes([27, 91, 52, 126]) equals `("end", "")`
+   - Expected: _decode_raw_bytes([27, 91, 55, 126]) equals `("home", "")`
+   - Expected: _decode_raw_bytes([27, 91, 56, 126]) equals `("end", "")`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should decode direct and numeric home and end sequences")
 expect(_decode_raw_bytes([27, 91, 72])).to_equal(("home", ""))
 expect(_decode_raw_bytes([27, 91, 70])).to_equal(("end", ""))
 expect(_decode_raw_bytes([27, 91, 49, 126])).to_equal(("home", ""))
@@ -45,14 +77,26 @@ expect(_decode_raw_bytes([27, 91, 56, 126])).to_equal(("end", ""))
 
 </details>
 
-## should decode every supported SS3 navigation key
+#### should decode every supported SS3 navigation key
 
-**Group:** ANSI raw-key decoding
+- should decode every supported SS3 navigation key
+   - Expected: _decode_raw_bytes([27, 79, 65]) equals `("up", "")`
+   - Expected: _decode_raw_bytes([27, 79, 66]) equals `("down", "")`
+   - Expected: _decode_raw_bytes([27, 79, 67]) equals `("right", "")`
+   - Expected: _decode_raw_bytes([27, 79, 68]) equals `("left", "")`
+   - Expected: _decode_raw_bytes([27, 79, 70]) equals `("end", "")`
+   - Expected: _decode_raw_bytes([27, 79, 72]) equals `("home", "")`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should decode every supported SS3 navigation key")
 expect(_decode_raw_bytes([27, 79, 65])).to_equal(("up", ""))
 expect(_decode_raw_bytes([27, 79, 66])).to_equal(("down", ""))
 expect(_decode_raw_bytes([27, 79, 67])).to_equal(("right", ""))
@@ -63,14 +107,22 @@ expect(_decode_raw_bytes([27, 79, 72])).to_equal(("home", ""))
 
 </details>
 
-## should swallow modified and unknown ANSI sequences
+#### should swallow modified and unknown ANSI sequences
 
-**Group:** ANSI raw-key decoding
+- should swallow modified and unknown ANSI sequences
+   - Expected: _decode_raw_bytes([27, 91, 51, 126]) equals `("", "")`
+   - Expected: _decode_raw_bytes([27, 120]) equals `("", "")`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should swallow modified and unknown ANSI sequences")
 expect(_decode_raw_bytes([27, 91, 49, 59, 53, 68])).to_equal(
     ("left", "")
 )
@@ -80,27 +132,40 @@ expect(_decode_raw_bytes([27, 120])).to_equal(("", ""))
 
 </details>
 
-## should preserve ordinary printable input after a completed sequence
+#### should preserve ordinary printable input after a completed sequence
 
-**Group:** ANSI raw-key decoding
+- should preserve ordinary printable input after a completed sequence
+   - Expected: _decode_raw_bytes([27, 91, 67, 120]) equals `("right", "x")`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should preserve ordinary printable input after a completed sequence")
 expect(_decode_raw_bytes([27, 91, 67, 120])).to_equal(("right", "x"))
 ```
 
 </details>
 
-## should recover after abandoned and unknown escape sequences
+#### should recover after abandoned and unknown escape sequences
 
-**Group:** ANSI raw-key decoding
+- should recover after abandoned and unknown escape sequences
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should recover after abandoned and unknown escape sequences")
 expect(_decode_raw_bytes(
     [27, 91, 27, 91, 68, 120]
 )).to_equal(("left", "x"))
@@ -111,14 +176,21 @@ expect(_decode_raw_bytes(
 
 </details>
 
-## should apply decoded cursor keys without inserting escape bytes
+#### should apply decoded cursor keys without inserting escape bytes
 
-**Group:** ANSI raw-key decoding
+- should apply decoded cursor keys without inserting escape bytes
+   - Expected: edited equals `(">abXc!", 6)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should apply decoded cursor keys without inserting escape bytes")
 val edited = _apply_raw_bytes([
     97, 98, 99,
     27, 91, 68, 88,
@@ -130,14 +202,23 @@ expect(edited).to_equal((">abXc!", 6))
 
 </details>
 
-## should insert valid two three and four byte code points
+### UTF-8 raw-key decoding
 
-**Group:** UTF-8 raw-key decoding
+#### should insert valid two three and four byte code points
+
+- should insert valid two three and four byte code points
+   - Expected: edited equals `("¢한😀", 3)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should insert valid two three and four byte code points")
 val edited = _apply_raw_bytes([
     0xC2, 0xA2,
     0xED, 0x95, 0x9C,
@@ -148,14 +229,21 @@ expect(edited).to_equal(("¢한😀", 3))
 
 </details>
 
-## should accept the valid Unicode scalar boundary sequences
+#### should accept the valid Unicode scalar boundary sequences
 
-**Group:** UTF-8 raw-key decoding
+- should accept the valid Unicode scalar boundary sequences
+   - Expected: edited equals `(expected, 7)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should accept the valid Unicode scalar boundary sequences")
 val edited = _apply_raw_bytes([
     0xC2, 0x80,
     0xDF, 0xBF,
@@ -176,14 +264,21 @@ expect(edited).to_equal((expected, 7))
 
 </details>
 
-## should insert a decoded Unicode code point at the widget cursor
+#### should insert a decoded Unicode code point at the widget cursor
 
-**Group:** UTF-8 raw-key decoding
+- should insert a decoded Unicode code point at the widget cursor
+   - Expected: edited equals `("A한B", 2)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should insert a decoded Unicode code point at the widget cursor")
 val edited = _apply_raw_bytes([
     65, 66,
     27, 91, 68,
@@ -194,14 +289,21 @@ expect(edited).to_equal(("A한B", 2))
 
 </details>
 
-## should preserve ANSI navigation around decoded Unicode input
+#### should preserve ANSI navigation around decoded Unicode input
 
-**Group:** UTF-8 raw-key decoding
+- should preserve ANSI navigation around decoded Unicode input
+   - Expected: edited equals `(">¢😀!", 4)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should preserve ANSI navigation around decoded Unicode input")
 val edited = _apply_raw_bytes([
     0xC2, 0xA2,
     0xF0, 0x9F, 0x98, 0x80,
@@ -213,14 +315,21 @@ expect(edited).to_equal((">¢😀!", 4))
 
 </details>
 
-## should reject invalid leads and stray continuation bytes
+#### should reject invalid leads and stray continuation bytes
 
-**Group:** UTF-8 raw-key decoding
+- should reject invalid leads and stray continuation bytes
+   - Expected: edited equals `("abcd", 4)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should reject invalid leads and stray continuation bytes")
 val edited = _apply_raw_bytes([
     0xC0, 0x80, 97,
     0xC1, 0xBF, 98,
@@ -232,14 +341,21 @@ expect(edited).to_equal(("abcd", 4))
 
 </details>
 
-## should reject overlong surrogate and out of range sequences
+#### should reject overlong surrogate and out of range sequences
 
-**Group:** UTF-8 raw-key decoding
+- should reject overlong surrogate and out of range sequences
+   - Expected: edited equals `("abcd", 4)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should reject overlong surrogate and out of range sequences")
 val edited = _apply_raw_bytes([
     0xE0, 0x80, 0xAF, 97,
     0xF0, 0x80, 0x80, 0xAF, 98,
@@ -251,14 +367,21 @@ expect(edited).to_equal(("abcd", 4))
 
 </details>
 
-## should fail closed when a sequence has an invalid continuation
+#### should fail closed when a sequence has an invalid continuation
 
-**Group:** UTF-8 raw-key decoding
+- should fail closed when a sequence has an invalid continuation
+   - Expected: edited equals `("BD", 2)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should fail closed when a sequence has an invalid continuation")
 val edited = _apply_raw_bytes([
     0xE2, 65, 0x82, 0xAC, 66,
     0xF0, 0x9F, 67, 0x98, 0x80, 68
@@ -268,14 +391,23 @@ expect(edited).to_equal(("BD", 2))
 
 </details>
 
-## should retain incomplete sequences without inserting partial text
+#### should retain incomplete sequences without inserting partial text
 
-**Group:** UTF-8 raw-key decoding
+- should retain incomplete sequences without inserting partial text
+   - Expected: _apply_raw_bytes([0xC2]) equals `("", 0)`
+   - Expected: _apply_raw_bytes([0xE0, 0xA0]) equals `("", 0)`
+   - Expected: _apply_raw_bytes([0xF0, 0x90, 0x80]) equals `("", 0)`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should retain incomplete sequences without inserting partial text")
 expect(_apply_raw_bytes([0xC2])).to_equal(("", 0))
 expect(_apply_raw_bytes([0xE0, 0xA0])).to_equal(("", 0))
 expect(_apply_raw_bytes([0xF0, 0x90, 0x80])).to_equal(("", 0))
@@ -283,14 +415,26 @@ expect(_apply_raw_bytes([0xF0, 0x90, 0x80])).to_equal(("", 0))
 
 </details>
 
-## should submit the exact input on CR and LF in ordinary state
+### Raw-line control reduction
 
-**Group:** Raw-line control reduction
+#### should submit the exact input on CR and LF in ordinary state
+
+- should submit the exact input on CR and LF in ordinary state
+   - Expected: cr.action equals `RAW_LINE_SUBMIT`
+   - Expected: cr.submitted equals `ab`
+   - Expected: lf.action equals `RAW_LINE_SUBMIT`
+   - Expected: lf.submitted equals `ab`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should submit the exact input on CR and LF in ordinary state")
 var state = make_raw_line_state(make_chat_tui("raw line").input)
 state = step_raw_line_byte(state, 97).state
 state = step_raw_line_byte(state, 98).state
@@ -304,14 +448,23 @@ expect(lf.submitted).to_equal("ab")
 
 </details>
 
-## should delete before the cursor for DEL and BS
+#### should delete before the cursor for DEL and BS
 
-**Group:** Raw-line control reduction
+- should delete before the cursor for DEL and BS
+   - Expected: state.input.value equals `a`
+   - Expected: state.input.value equals ``
+   - Expected: state.input.value equals ``
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should delete before the cursor for DEL and BS")
 var state = make_raw_line_state(make_chat_tui("raw line").input)
 state = step_raw_line_byte(state, 97).state
 state = step_raw_line_byte(state, 98).state
@@ -325,14 +478,24 @@ expect(state.input.value).to_equal("")
 
 </details>
 
-## should emit paging actions only in ordinary state
+#### should emit paging actions only in ordinary state
 
-**Group:** Raw-line control reduction
+- should emit paging actions only in ordinary state
+   - Expected: older.action equals `RAW_LINE_PAGE_UP`
+   - Expected: newer.action equals `RAW_LINE_PAGE_DOWN`
+   - Expected: older.state.input.value equals ``
+   - Expected: newer.state.input.value equals ``
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should emit paging actions only in ordinary state")
 val state = make_raw_line_state(make_chat_tui("raw line").input)
 val older = step_raw_line_byte(state, 16)
 val newer = step_raw_line_byte(state, 14)
@@ -344,14 +507,23 @@ expect(newer.state.input.value).to_equal("")
 
 </details>
 
-## should exit on Ctrl-C Ctrl-D and EOF from every decoder state
+#### should exit on Ctrl-C Ctrl-D and EOF from every decoder state
 
-**Group:** Raw-line control reduction
+- should exit on Ctrl-C Ctrl-D and EOF from every decoder state
+   - Expected: step_raw_line_byte(ordinary, 3).action equals `RAW_LINE_EXIT`
+   - Expected: step_raw_line_byte(escape, 4).action equals `RAW_LINE_EXIT`
+   - Expected: step_raw_line_byte(utf8, -1).action equals `RAW_LINE_EXIT`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should exit on Ctrl-C Ctrl-D and EOF from every decoder state")
 val ordinary = make_raw_line_state(make_chat_tui("raw line").input)
 val escape = step_raw_line_byte(ordinary, 27).state
 val utf8 = step_raw_line_byte(ordinary, 0xE0).state
@@ -362,14 +534,22 @@ expect(step_raw_line_byte(utf8, -1).action).to_equal(RAW_LINE_EXIT)
 
 </details>
 
-## should give exit precedence over incomplete input sequences
+#### should give exit precedence over incomplete input sequences
 
-**Group:** Raw-line control reduction
+- should give exit precedence over incomplete input sequences
+   - Expected: step_raw_line_byte(escape, 3).action equals `RAW_LINE_EXIT`
+   - Expected: step_raw_line_byte(utf8, 4).action equals `RAW_LINE_EXIT`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should give exit precedence over incomplete input sequences")
 val ordinary = make_raw_line_state(make_chat_tui("raw line").input)
 val escape = step_raw_line_byte(ordinary, 27).state
 val utf8 = step_raw_line_byte(ordinary, 0xF0).state
@@ -379,14 +559,23 @@ expect(step_raw_line_byte(utf8, 4).action).to_equal(RAW_LINE_EXIT)
 
 </details>
 
-## should swallow line controls inside an incomplete ANSI sequence
+#### should swallow line controls inside an incomplete ANSI sequence
 
-**Group:** Raw-line control reduction
+- should swallow line controls inside an incomplete ANSI sequence
+   - Expected: result.action equals `RAW_LINE_CONTINUE`
+   - Expected: result.submitted equals ``
+   - Expected: result.state.input.value equals ``
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should swallow line controls inside an incomplete ANSI sequence")
 val ordinary = make_raw_line_state(make_chat_tui("raw line").input)
 for b in [13, 127, 16, 14]:
     val escape = step_raw_line_byte(ordinary, 27).state
@@ -398,14 +587,23 @@ for b in [13, 127, 16, 14]:
 
 </details>
 
-## should preserve input while exiting or paging
+#### should preserve input while exiting or paging
 
-**Group:** Raw-line control reduction
+- should preserve input while exiting or paging
+   - Expected: step_raw_line_byte(state, 16).state.input.value equals `x`
+   - Expected: step_raw_line_byte(state, 14).state.input.value equals `x`
+   - Expected: step_raw_line_byte(state, 3).state.input.value equals `x`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-APP
+step("should preserve input while exiting or paging")
 var state = make_raw_line_state(make_chat_tui("raw line").input)
 state = step_raw_line_byte(state, 120).state
 expect(step_raw_line_byte(state, 16).state.input.value).to_equal("x")
@@ -415,12 +613,98 @@ expect(step_raw_line_byte(state, 3).state.input.value).to_equal("x")
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/llm_caret/chat_tui_input_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering ANSI raw-key decoding, UTF-8 raw-key decoding, Raw-line control reduction.
+- ANSI raw-key decoding
+- UTF-8 raw-key decoding
+- Raw-line control reduction
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 22 |
 | Active scenarios | 22 |
+| Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
-| Executed scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2fbfcf54b72f8ce153390f45a2f04c255c5ce02163e5525c7a6cb72f729a9bbd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2fbfcf54b72f8ce153390f45a2f04c255c5ce02163e5525c7a6cb72f729a9bbd`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2fbfcf54b72f8ce153390f45a2f04c255c5ce02163e5525c7a6cb72f729a9bbd`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/llm_caret/chat_tui_input_spec.spl
+mirror: doc/06_spec/01_unit/app/llm_caret/chat_tui_input_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/llm_caret/chat_tui_input_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/llm_caret/chat_tui_input_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:54:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should decode CSI and SS3 arrows without leaking printable bytes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should decode CSI and SS3 arrows without leaking printable bytes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:63:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should decode direct and numeric home and end sequences' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should decode direct and numeric home and end sequences' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:73:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should decode every supported SS3 navigation key' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should decode every supported SS3 navigation key' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:83:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should swallow modified and unknown ANSI sequences' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:92:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve ordinary printable input after a completed sequence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/llm_caret/chat_tui_input_spec.spl:97:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should recover after abandoned and unknown escape sequences' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,31 +1,6 @@
 # Async Tui Specification
 
-> 1. ch send
-
-<!-- sdn-diagram:id=async_tui_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=async_tui_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-async_tui_spec -> std
-async_tui_spec -> common
-async_tui_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=async_tui_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering event channel, input parser channel integration, file change detection, state change detection, channel close.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,193 +17,11 @@ async_tui_spec -> app
 
 #### receives events pushed via send
 
-1. ch send
-   - Expected: received != nil is true
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-ch.send(UIEvent.FocusNext)
-val received = ch.try_recv()
-expect(received != nil).to_equal(true)
-```
-
-</details>
-
-#### try_recv returns nil on empty channel
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-val received = ch.try_recv()
-expect(received == nil).to_equal(true)
-```
-
-</details>
-
-#### preserves FIFO ordering
-
-1. ch send
-2. ch send
-3. ch send
-   - Expected: first != nil is true
-   - Expected: second != nil is true
-   - Expected: third != nil is true
-   - Expected: fourth == nil is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 14 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-ch.send(UIEvent.FocusNext)
-ch.send(UIEvent.FocusPrev)
-ch.send(UIEvent.Quit)
-val first = ch.try_recv()
-val second = ch.try_recv()
-val third = ch.try_recv()
-# All three should be non-nil
-expect(first != nil).to_equal(true)
-expect(second != nil).to_equal(true)
-expect(third != nil).to_equal(true)
-# Fourth should be nil (empty)
-val fourth = ch.try_recv()
-expect(fourth == nil).to_equal(true)
-```
-
-</details>
-
-#### is_closed returns false before close
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-expect(ch.is_closed()).to_equal(false)
-```
-
-</details>
-
-#### is_closed returns true after close
-
-1. ch close
-   - Expected: ch.is_closed() is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-ch.close()
-expect(ch.is_closed()).to_equal(true)
-```
-
-</details>
-
-#### buffered messages survive close
-
-1. ch send
-2. ch close
-   - Expected: received != nil is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-ch.send(UIEvent.Quit)
-ch.close()
-val received = ch.try_recv()
-expect(received != nil).to_equal(true)
-```
-
-</details>
-
-### input parser channel integration
-
-#### quit command produces Quit event
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val event = parse_input_line("quit")
-expect(is_quit_event(event)).to_equal(true)
-```
-
-</details>
-
-#### j key produces FocusNext when sent through channel
-
-1. ch send
-   - Expected: received != nil is true
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val ch = channel_new()
-val event = parse_input_line("j")
-ch.send(event)
-val received = ch.try_recv()
-expect(received != nil).to_equal(true)
-```
-
-</details>
-
-#### :q command produces Quit event
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val event = parse_input_line(":q")
-expect(is_quit_event(event)).to_equal(true)
-```
-
-</details>
-
-#### empty line produces KeyPress enter
-
-1. ch send
-   - Expected: received != nil is true
+- receives events pushed via send
 
 
 <details>
@@ -238,22 +31,75 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val event = parse_input_line("")
-# parse_input_line("") returns KeyPress(key: "enter")
+# @req REQ-SSPEC-UNIT
+step("receives events pushed via send")
 val ch = channel_new()
-ch.send(event)
+ch.send(UIEvent.FocusNext)
 val received = ch.try_recv()
-expect(received != nil).to_equal(true)
+assert_not_equal(received, nil)
 ```
 
 </details>
 
-### file change detection
+#### try_recv returns nil on empty channel
 
-#### FileChanged event can be sent and received on channel
+- try_recv returns nil on empty channel
+   - Expected: received equals `nil`
 
-1. ch send
-   - Expected: received != nil is true
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("try_recv returns nil on empty channel")
+val ch = channel_new()
+val received = ch.try_recv()
+expect(received).to_equal(nil)
+```
+
+</details>
+
+#### preserves FIFO ordering
+
+- preserves FIFO ordering
+   - Expected: fourth equals `nil`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("preserves FIFO ordering")
+val ch = channel_new()
+ch.send(UIEvent.FocusNext)
+ch.send(UIEvent.FocusPrev)
+ch.send(UIEvent.Quit)
+val first = ch.try_recv()
+val second = ch.try_recv()
+val third = ch.try_recv()
+# All three should be non-nil
+assert_not_equal(first, nil)
+assert_not_equal(second, nil)
+assert_not_equal(third, nil)
+# Fourth should be nil (empty)
+val fourth = ch.try_recv()
+expect(fourth).to_equal(nil)
+```
+
+</details>
+
+#### is_closed returns false before close
+
+- is_closed returns false before close
+   - Expected: ch.is_closed() is false
 
 
 <details>
@@ -263,27 +109,189 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is_closed returns false before close")
+val ch = channel_new()
+expect(ch.is_closed()).to_equal(false)
+```
+
+</details>
+
+#### is_closed returns true after close
+
+- is_closed returns true after close
+   - Expected: ch.is_closed() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("is_closed returns true after close")
+val ch = channel_new()
+ch.close()
+expect(ch.is_closed()).to_equal(true)
+```
+
+</details>
+
+#### buffered messages survive close
+
+- buffered messages survive close
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("buffered messages survive close")
+val ch = channel_new()
+ch.send(UIEvent.Quit)
+ch.close()
+val received = ch.try_recv()
+assert_not_equal(received, nil)
+```
+
+</details>
+
+### input parser channel integration
+
+#### quit command produces Quit event
+
+- quit command produces Quit event
+   - Expected: is_quit_event(event) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("quit command produces Quit event")
+val event = parse_input_line("quit")
+expect(is_quit_event(event)).to_equal(true)
+```
+
+</details>
+
+#### j key produces FocusNext when sent through channel
+
+- j key produces FocusNext when sent through channel
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("j key produces FocusNext when sent through channel")
+val ch = channel_new()
+val event = parse_input_line("j")
+ch.send(event)
+val received = ch.try_recv()
+assert_not_equal(received, nil)
+```
+
+</details>
+
+#### :q command produces Quit event
+
+- :q command produces Quit event
+   - Expected: is_quit_event(event) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step(":q command produces Quit event")
+val event = parse_input_line(":q")
+expect(is_quit_event(event)).to_equal(true)
+```
+
+</details>
+
+#### empty line produces KeyPress enter
+
+- empty line produces KeyPress enter
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("empty line produces KeyPress enter")
+val event = parse_input_line("")
+# parse_input_line("") returns KeyPress(key: "enter")
+val ch = channel_new()
+ch.send(event)
+val received = ch.try_recv()
+assert_not_equal(received, nil)
+```
+
+</details>
+
+### file change detection
+
+#### FileChanged event can be sent and received on channel
+
+- FileChanged event can be sent and received on channel
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("FileChanged event can be sent and received on channel")
 val ch = channel_new()
 ch.send(UIEvent.FileChanged)
 val received = ch.try_recv()
-expect(received != nil).to_equal(true)
+assert_not_equal(received, nil)
 ```
 
 </details>
 
 #### update_tree replaces the tree in state
 
-1. text widget
+- update_tree replaces the tree in state
    - Expected: state2.tree.root_id equals `async_root2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("update_tree replaces the tree in state")
 val tree1 = make_async_test_tree()
 val state1 = init_state(tree1)
 # Build a different tree
@@ -299,17 +307,19 @@ expect(state2.tree.root_id).to_equal("async_root2")
 
 #### update_tree preserves mode and focus
 
-1. text widget
+- update_tree preserves mode and focus
    - Expected: state2.mode_name() equals `NORMAL`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("update_tree preserves mode and focus")
 val tree1 = make_async_test_tree()
 val state1 = init_state(tree1)
 val focused = update_state(state1, UIEvent.FocusNext)
@@ -328,49 +338,67 @@ expect(state2.mode_name()).to_equal("NORMAL")
 
 #### FocusNext changes focused_id
 
+- FocusNext changes focused_id
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("FocusNext changes focused_id")
 val tree = make_async_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
 val new_state = update_state(state, UIEvent.FocusNext)
-expect(new_state.focused_id != state.focused_id).to_equal(true)
+assert_not_equal(new_state.focused_id, state.focused_id)
 ```
 
 </details>
 
 #### CommandMode changes mode name
 
+- CommandMode changes mode name
+   - Expected: new_state.mode_name() equals `COMMAND`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("CommandMode changes mode name")
 val tree = make_async_test_tree()
 val state = init_state(tree)
 val new_state = update_state(state, UIEvent.CommandMode)
 expect(new_state.mode_name()).to_equal("COMMAND")
-expect(new_state.mode_name() != state.mode_name()).to_equal(true)
+assert_not_equal(new_state.mode_name(), state.mode_name())
 ```
 
 </details>
 
 #### duplicate normal key does not change state
 
+- duplicate normal key does not change state
+   - Expected: new_state.focused_id equals `state.focused_id`
+   - Expected: new_state.mode_name() equals `state.mode_name()`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("duplicate normal key does not change state")
 val tree = make_async_test_tree()
 val state = init_state(tree)
 # An unknown key in Normal mode should not change state
@@ -385,43 +413,45 @@ expect(new_state.mode_name()).to_equal(state.mode_name())
 
 #### closed channel rejects new sends gracefully
 
-1. ch close
-2. ch send
-   - Expected: received == nil is true
+- closed channel rejects new sends gracefully
+   - Expected: received equals `nil`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("closed channel rejects new sends gracefully")
 val ch = channel_new()
 ch.close()
 # send on closed channel is a no-op
 ch.send(UIEvent.Quit)
 # try_recv should return nil (nothing delivered)
 val received = ch.try_recv()
-expect(received == nil).to_equal(true)
+expect(received).to_equal(nil)
 ```
 
 </details>
 
 #### multiple close calls are safe
 
-1. ch close
-2. ch close
+- multiple close calls are safe
    - Expected: ch.is_closed() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("multiple close calls are safe")
 val ch = channel_new()
 ch.close()
 ch.close()
@@ -437,12 +467,12 @@ expect(ch.is_closed()).to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/async_tui_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering event channel, input parser channel integration, file change detection, state change detection, channel close.
 - event channel
 - input parser channel integration
 - file change detection
@@ -461,3 +491,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `75e58335f7aa1c8ea161e9947fb23a5ed7cc716b06b95678b471aa973142ef4f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `75e58335f7aa1c8ea161e9947fb23a5ed7cc716b06b95678b471aa973142ef4f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `75e58335f7aa1c8ea161e9947fb23a5ed7cc716b06b95678b471aa973142ef4f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/async_tui_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/async_tui_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/async_tui_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/async_tui_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/async_tui_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'receives events pushed via send' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/async_tui_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'try_recv returns nil on empty channel' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/async_tui_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'preserves FIFO ordering' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

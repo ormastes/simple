@@ -1,30 +1,6 @@
 # Electron Geometry Compare Specification
 
-> <details>
-
-<!-- sdn-diagram:id=electron_geometry_compare_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=electron_geometry_compare_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-electron_geometry_compare_spec -> std
-electron_geometry_compare_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=electron_geometry_compare_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering wm_compare electron geometry compare.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,6 +17,11 @@ electron_geometry_compare_spec -> app
 
 #### converts Electron geometry JSON into structural layout boxes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- converts Electron geometry JSON into structural layout boxes
 - Parse Electron Chromium geometry JSON
 - Check exact labeled border-box geometry
    - Expected: boxes.len() equals `2`
@@ -54,10 +35,12 @@ electron_geometry_compare_spec -> app
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("converts Electron geometry JSON into structural layout boxes")
 step("Parse Electron Chromium geometry JSON")
 val geometry_json = "{\"producer\":\"electron-chromium-geometry\",\"viewport\":{\"width\":320,\"height\":240},\"items\":[{\"label\":\"header\",\"tag\":\"div\",\"x\":8,\"y\":8,\"width\":120,\"height\":20,\"text\":\"\"},{\"label\":\"footer\",\"tag\":\"div\",\"x\":8,\"y\":68,\"width\":120,\"height\":20,\"text\":\"\"}]}"
 val boxes = electron_geometry_json_to_boxes(geometry_json)
@@ -74,6 +57,7 @@ expect(boxes[1].y).to_equal(68)
 
 #### converts Chrome live geometry JSON using the same structural schema
 
+- converts Chrome live geometry JSON using the same structural schema
 - Parse Chrome headless geometry with computed style box fields
 - Check exact border-box, padding, border, background, and text fields
    - Expected: boxes.len() equals `2`
@@ -109,10 +93,12 @@ expect(boxes[1].y).to_equal(68)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("converts Chrome live geometry JSON using the same structural schema")
 step("Parse Chrome headless geometry with computed style box fields")
 val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"box\",\"tag\":\"div\",\"x\":7,\"y\":9,\"width\":33,\"height\":17,\"rectLeft\":\"7.125\",\"rectTop\":\"9.500\",\"rectWidth\":\"33.250\",\"rectHeight\":\"17.750\",\"paddingLeft\":4,\"paddingTop\":5,\"paddingRight\":6,\"paddingBottom\":7,\"borderLeft\":1,\"borderTop\":2,\"borderRight\":3,\"borderBottom\":4,\"backgroundColor\":\"rgb(10, 20, 30)\",\"color\":\"rgb(0, 0, 0)\",\"display\":\"flex\",\"alignItems\":\"baseline\",\"fontSize\":\"32px\",\"lineHeight\":\"32px\",\"fontFamily\":\"Times New Roman\",\"fontWeight\":\"400\",\"text\":\"Hello\"},{\"index\":1,\"label\":\"transparent\",\"tag\":\"div\",\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"backgroundColor\":\"rgba(0, 0, 0, 0)\",\"text\":\"\"}]}"
 val boxes = electron_geometry_json_to_boxes(geometry_json)
@@ -151,9 +137,8 @@ expect(boxes[1].background_color).to_equal("")
 
 #### compares Electron geometry JSON against Simple-side boxes
 
+- compares Electron geometry JSON against Simple-side boxes
 - Build Electron geometry and Simple structural boxes with a y mismatch
-- structural layout box
-- structural layout box
 - Compare exact structural geometry without pixel tolerance
    - Expected: report.status equals `layout_mismatch`
    - Expected: report.mismatch_count equals `1`
@@ -162,10 +147,12 @@ expect(boxes[1].background_color).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("compares Electron geometry JSON against Simple-side boxes")
 step("Build Electron geometry and Simple structural boxes with a y mismatch")
 val geometry_json = "{\"producer\":\"electron-chromium-geometry\",\"viewport\":{\"width\":320,\"height\":240},\"items\":[{\"label\":\"header\",\"tag\":\"div\",\"x\":8,\"y\":8,\"width\":120,\"height\":20,\"text\":\"\"},{\"label\":\"footer\",\"tag\":\"div\",\"x\":8,\"y\":68,\"width\":120,\"height\":20,\"text\":\"\"}]}"
 val simple_boxes = [
@@ -192,8 +179,8 @@ expect(sdn).to_contain("y: 72")
 
 #### compares Chromium style box fields without pixel tolerance
 
+- compares Chromium style box fields without pixel tolerance
 - Build Chrome geometry with padding, border, and background style fields
-- structural layout style box
 - Fail closed on an exact border-width mismatch
    - Expected: report.status equals `layout_mismatch`
    - Expected: report.mismatch_count equals `1`
@@ -202,10 +189,12 @@ expect(sdn).to_contain("y: 72")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("compares Chromium style box fields without pixel tolerance")
 step("Build Chrome geometry with padding, border, and background style fields")
 val geometry_json = "{\"producer\":\"chrome-headless-geometry\",\"viewport\":{\"width\":80,\"height\":50},\"items\":[{\"index\":0,\"label\":\"panel\",\"tag\":\"div\",\"x\":4,\"y\":6,\"width\":40,\"height\":20,\"paddingLeft\":8,\"paddingTop\":6,\"paddingRight\":8,\"paddingBottom\":6,\"borderLeft\":2,\"borderTop\":2,\"borderRight\":2,\"borderBottom\":2,\"backgroundColor\":\"rgb(40, 50, 60)\",\"text\":\"\"}]}"
 val simple_boxes = [
@@ -227,6 +216,7 @@ expect(report.mismatch_count).to_equal(1)
 
 #### fails closed for malformed geometry JSON
 
+- fails closed for malformed geometry JSON
 - Parse malformed geometry JSON
 - Confirm malformed geometry produces no structural boxes
    - Expected: boxes.len() equals `0`
@@ -235,10 +225,12 @@ expect(report.mismatch_count).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails closed for malformed geometry JSON")
 step("Parse malformed geometry JSON")
 val boxes = electron_geometry_json_to_boxes("{\"items\": [}")
 step("Confirm malformed geometry produces no structural boxes")
@@ -254,12 +246,12 @@ expect(boxes.len()).to_equal(0)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering wm_compare electron geometry compare.
 - wm_compare electron geometry compare
 
 ## Scenario Summary
@@ -274,3 +266,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `375aeed0f8fccf49900710f9c01412e4fcb47d1650ee7fff9682bf134dc38ebe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `375aeed0f8fccf49900710f9c01412e4fcb47d1650ee7fff9682bf134dc38ebe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `375aeed0f8fccf49900710f9c01412e4fcb47d1650ee7fff9682bf134dc38ebe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl
+mirror: doc/06_spec/03_system/gui/wm_compare/electron_geometry_compare_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/gui/wm_compare/electron_geometry_compare_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/gui/wm_compare/electron_geometry_compare_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 20 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts Electron geometry JSON into structural layout boxes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts Chrome live geometry JSON using the same structural schema' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/wm_compare/electron_geometry_compare_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares Electron geometry JSON against Simple-side boxes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

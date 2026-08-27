@@ -2,29 +2,6 @@
 
 > Simple uses a Hindley-Milner-style type inference system that automatically deduces types for expressions, variables, and functions without requiring explicit type annotations.
 
-<!-- sdn-diagram:id=type_inference_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=type_inference_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-type_inference_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=type_inference_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 16 | 16 | 0 | 0 |
@@ -46,7 +23,7 @@ Simple uses a Hindley-Milner-style type inference system that automatically dedu
 | Type | Extracted Examples (Category B) |
 | Reference | type_inference.md |
 | Source | `test/03_system/feature/language/type_inference_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -149,13 +126,26 @@ Closure return type inferred from body:
 
 #### inference rules - literals
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- inference rules - literals
+   - Expected: x equals `42`
+   - Expected: y equals `3.14`
+   - Expected: s equals `hello`
+   - Expected: b is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - literals")
 # Integer, float, string, boolean literals infer their types
 val x = 42
 val y = 3.14
@@ -171,13 +161,19 @@ expect(b).to_equal(true)
 
 #### inference rules - arithmetic
 
+- inference rules - arithmetic
+   - Expected: a equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - arithmetic")
 # Operators infer types from operands
 val a = 1 + 2
 val b = 3.0 * 1.5
@@ -188,13 +184,19 @@ expect(a).to_equal(3)
 
 #### inference rules - comparison
 
+- inference rules - comparison
+   - Expected: cmp is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - comparison")
 # Comparison operators return bool
 val cmp = 1 < 2
 expect(cmp).to_equal(true)
@@ -204,13 +206,19 @@ expect(cmp).to_equal(true)
 
 #### inference rules - logical
 
+- inference rules - logical
+   - Expected: logic is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - logical")
 # Logical operators return bool
 val logic = true and false
 expect(logic).to_equal(false)
@@ -220,13 +228,19 @@ expect(logic).to_equal(false)
 
 #### inference rules - bitwise
 
+- inference rules - bitwise
+   - Expected: bits equals `20`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - bitwise")
 # Bitwise operators work on integers
 val bits = 5 << 2
 expect(bits).to_equal(20)
@@ -236,13 +250,19 @@ expect(bits).to_equal(20)
 
 #### inference rules - arrays
 
+- inference rules - arrays
+   - Expected: arr[0] equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - arrays")
 # Arrays infer element type from literals
 val arr = [1, 2, 3]
 expect(arr[0]).to_equal(1)
@@ -252,13 +272,21 @@ expect(arr[0]).to_equal(1)
 
 #### inference rules - tuples
 
+- inference rules - tuples
+   - Expected: t.0 equals `1`
+   - Expected: t.1 equals `hi`
+   - Expected: t.2 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - tuples")
 # Tuples can have mixed types
 val t = (1, "hi", true)
 expect(t.0).to_equal(1)
@@ -270,13 +298,20 @@ expect(t.2).to_equal(true)
 
 #### inference rules - dictionaries
 
+- inference rules - dictionaries
+   - Expected: dict["a"] equals `1`
+   - Expected: dict["b"] equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - dictionaries")
 # Dictionaries infer key/value types
 val dict = {"a": 1, "b": 2}
 expect(dict["a"]).to_equal(1)
@@ -287,17 +322,19 @@ expect(dict["b"]).to_equal(2)
 
 #### inference rules - functions with explicit types
 
-1. fn add
+- inference rules - functions with explicit types
    - Expected: result equals `7`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - functions with explicit types")
 # Functions can have explicit return types
 fn add(a: i64, b: i64) -> i64:
     a + b
@@ -309,13 +346,19 @@ expect(result).to_equal(7)
 
 #### inference rules - lambda types
 
+- inference rules - lambda types
+   - Expected: result equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - lambda types")
 # Lambda expressions infer from context
 val double = _1 * 2
 val result = double(5)
@@ -326,18 +369,19 @@ expect(result).to_equal(10)
 
 #### inference rules - higher-order functions
 
-1. fn apply
-2. f
+- inference rules - higher-order functions
    - Expected: result equals `25`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - higher-order functions")
 # Functions can take functions as arguments
 fn apply(f: fn(i64) -> i64, x: i64) -> i64:
     f(x)
@@ -351,13 +395,19 @@ expect(result).to_equal(25)
 
 #### inference rules - if expressions
 
+- inference rules - if expressions
+   - Expected: v equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - if expressions")
 # If-else expressions infer unified type
 val x = 1
 val v = if x > 0:
@@ -374,13 +424,19 @@ expect(v).to_equal(1)
 
 #### inference rules - loops
 
+- inference rules - loops
+   - Expected: i equals `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inference rules - loops")
 # Loops with type-stable variables
 # Note: Closure variable capture has known limitations
 var i = 0
@@ -396,13 +452,19 @@ expect(i).to_equal(3)
 
 #### examples - basic iteration
 
+- examples - basic iteration
+   - Expected: sum equals `15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("examples - basic iteration")
 # For loop with array inference
 val numbers = [1, 2, 3, 4, 5]
 var sum = 0
@@ -415,8 +477,7 @@ expect(sum).to_equal(15)
 
 #### examples - map function
 
-1. fn map simple
-2. result = result + [f
+- examples - map function
    - Expected: doubled[0] equals `2`
    - Expected: doubled[1] equals `4`
    - Expected: doubled[2] equals `6`
@@ -425,10 +486,12 @@ expect(sum).to_equal(15)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("examples - map function")
 # Higher-order function with generics
 fn map_simple(arr: [i64], f: fn(i64) -> i64) -> [i64]:
     var result = []
@@ -447,7 +510,7 @@ expect(doubled[2]).to_equal(6)
 
 #### examples - option type with match
 
-1. fn find first
+- examples - option type with match
    - Expected: found equals `20`
    - Expected: not_found equals `-1`
 
@@ -455,10 +518,12 @@ expect(doubled[2]).to_equal(6)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("examples - option type with match")
 # Option type with pattern matching
 fn find_first(arr: [i64], target: i64) -> i64:
     for x in arr:
@@ -488,3 +553,54 @@ expect(not_found).to_equal(-1)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8c8011b94ac533552a204825d1b8efa3d231016077439c3e95a0adb9a5289849`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8c8011b94ac533552a204825d1b8efa3d231016077439c3e95a0adb9a5289849`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8c8011b94ac533552a204825d1b8efa3d231016077439c3e95a0adb9a5289849`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/language/type_inference_spec.spl
+mirror: doc/06_spec/03_system/feature/language/type_inference_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/language/type_inference_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/language/type_inference_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/language/type_inference_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 19 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/language/type_inference_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inference rules - literals' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/type_inference_spec.spl:130:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inference rules - arithmetic' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/type_inference_spec.spl:138:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'inference rules - comparison' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

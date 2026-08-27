@@ -2,29 +2,6 @@
 
 > pc{ selector(pattern) }
 
-<!-- sdn-diagram:id=aop_pointcut_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=aop_pointcut_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-aop_pointcut_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=aop_pointcut_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -44,7 +21,7 @@ pc{ selector(pattern) }
 | Category | Language |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/aop_pointcut_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -77,21 +54,18 @@ pc{ !selector(...) }                   # NOT
 
 #### matches any return type with wildcard
 
-1. fn marker
-2. fn returns int
-3. fn returns text
-4. on pc{ execution
-5. returns int
-6. returns text
+- matches any return type with wildcard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches any return type with wildcard")
 var matched = false
 
 fn marker():
@@ -119,20 +93,18 @@ expect matched == true
 
 #### matches exact function name
 
-1. fn marker
-2. fn exact name
-3. fn other name
-4. on pc{ execution
-5. exact name
+- matches exact function name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches exact function name")
 var called = false
 
 fn marker():
@@ -154,23 +126,18 @@ expect called == true
 
 #### matches prefix wildcard
 
-1. fn counter
-2. fn handle request
-3. fn handle response
-4. fn process data
-5. on pc{ execution
-6. handle request
-7. handle response
-8. process data
+- matches prefix wildcard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches prefix wildcard")
 var count = 0
 
 fn counter():
@@ -197,23 +164,18 @@ expect count == 2
 
 #### matches suffix wildcard
 
-1. fn counter
-2. fn get user
-3. fn get order
-4. fn set user
-5. on pc{ execution
-6. get user
-7. get order
-8. set user
+- matches suffix wildcard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches suffix wildcard")
 var count = 0
 
 fn counter():
@@ -242,23 +204,18 @@ expect count == 2
 
 #### matches any parameters with (..)
 
-1. fn marker
-2. fn no params
-3. fn one param
-4. fn two params
-5. on pc{ execution
-6. no params
-7. one param
-8. two params
+- matches any parameters with (..)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches any parameters with (..)")
 var called = false
 
 fn marker():
@@ -295,21 +252,18 @@ expect called == true
 
 #### matches function with attribute
 
-1. fn logger
-2. fn traced operation
-3. fn untraced operation
-4. on pc{ attr
-5. traced operation
-6. untraced operation
+- matches function with attribute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches function with attribute")
 var logged = false
 
 fn logger():
@@ -336,21 +290,18 @@ expect logged == false
 
 #### matches multiple attributes
 
-1. fn counter
-2. fn important
-3. fn regular
-4. on pc{ attr
-5. important
-6. regular
+- matches multiple attributes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches multiple attributes")
 var count = 0
 
 fn counter():
@@ -382,23 +333,18 @@ expect count == 1  # Still 1, regular doesn't have @critical
 
 #### requires both conditions
 
-1. fn marker
-2. fn important calc
-3. fn regular calc
-4. fn important other
-5. on pc{ execution
-6. important calc
-7. regular calc
-8. important other
+- requires both conditions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires both conditions")
 var called = false
 
 fn marker():
@@ -435,23 +381,18 @@ expect called == false  # Not *_calc
 
 #### matches either condition
 
-1. fn counter
-2. fn option a
-3. fn option b
-4. fn option c
-5. on pc{ execution
-6. option a
-7. option b
-8. option c
+- matches either condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches either condition")
 var count = 0
 
 fn counter():
@@ -480,21 +421,18 @@ expect count == 2
 
 #### excludes matching pointcuts
 
-1. fn counter
-2. fn included
-3. fn excluded
-4. on pc{ execution
-5. included
-6. excluded
+- excludes matching pointcuts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("excludes matching pointcuts")
 var count = 0
 
 fn counter():
@@ -521,23 +459,18 @@ expect count == 1
 
 #### matches prefix with name*
 
-1. fn counter
-2. fn get user
-3. fn get order
-4. fn set user
-5. on pc{ execution
-6. get user
-7. get order
-8. set user
+- matches prefix with name*
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches prefix with name*")
 var count = 0
 
 fn counter():
@@ -564,23 +497,18 @@ expect count == 2
 
 #### matches suffix with *name
 
-1. fn counter
-2. fn user service
-3. fn order service
-4. fn user controller
-5. on pc{ execution
-6. User service
-7. order service
-8. User controller
+- matches suffix with *name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches suffix with *name")
 var count = 0
 
 fn counter():
@@ -617,3 +545,51 @@ expect count == 2
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8536876ea6ac845a5d37bccd39490a742dd7332ba844f8d94d6dec554ccf0fed`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8536876ea6ac845a5d37bccd39490a742dd7332ba844f8d94d6dec554ccf0fed`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8536876ea6ac845a5d37bccd39490a742dd7332ba844f8d94d6dec554ccf0fed`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/aop_pointcut_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/aop_pointcut_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/aop_pointcut_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/aop_pointcut_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/aop_pointcut_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches any return type with wildcard' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/aop_pointcut_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches exact function name' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/aop_pointcut_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches prefix wildcard' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

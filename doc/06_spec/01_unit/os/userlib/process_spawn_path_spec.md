@@ -1,34 +1,10 @@
 # Process Spawn Path Specification
 
-> _Verify sosix_marshal_string_vector produces correct byte layouts._
-
-<!-- sdn-diagram:id=process_spawn_path_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=process_spawn_path_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-process_spawn_path_spec -> std
-process_spawn_path_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=process_spawn_path_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering spawn_path marshaling, spawn_path API.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,20 +14,21 @@ process_spawn_path_spec -> os
 ## Scenarios
 
 ### spawn_path marshaling
-_Verify sosix_marshal_string_vector produces correct byte layouts._
 
 #### returns empty buffer for empty input
 
-1. expect buf len
+- returns empty buffer for empty input
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns empty buffer for empty input")
 val buf = _make_empty_buf()
 expect buf.len() == 0
 ```
@@ -60,16 +37,18 @@ expect buf.len() == 0
 
 #### marshals single string with correct total size
 
-1. expect buf len
+- marshals single string with correct total size
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("marshals single string with correct total size")
 val buf = _make_single_string_buf()
 # "hello" = 5 bytes + 1 NUL + 1 offset (8 bytes) + NULL terminator (8 bytes)
 # = 6 + 16 = 22
@@ -82,13 +61,18 @@ expect buf.len().to_u64() == expected
 
 #### places NUL terminator after string bytes
 
+- places NUL terminator after string bytes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("places NUL terminator after string bytes")
 val buf = _make_single_string_buf()
 # buf[0..4] = "hello", buf[5] = 0x00
 expect buf[0] == 0x68u8  # 'h'
@@ -103,13 +87,18 @@ expect buf[5] == 0x00u8  # NUL
 
 #### encodes offset 0 for first string in pointer table
 
+- encodes offset 0 for first string in pointer table
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes offset 0 for first string in pointer table")
 val buf = _make_single_string_buf()
 # Offset table starts at byte 6 (after "hello\0")
 # First offset = 0, little-endian u64
@@ -127,13 +116,18 @@ expect buf[13] == 0x00u8
 
 #### ends with 8-byte NULL terminator pointer
 
+- ends with 8-byte NULL terminator pointer
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ends with 8-byte NULL terminator pointer")
 val buf = _make_single_string_buf()
 val n = buf.len()
 # Last 8 bytes should all be zero
@@ -151,16 +145,18 @@ expect buf[n - 8] == 0x00u8
 
 #### marshals two strings with correct total size
 
-1. expect buf len
+- marshals two strings with correct total size
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("marshals two strings with correct total size")
 val buf = _make_two_string_buf()
 # "ab" (2+1) + "cde" (3+1) = 7 string bytes
 # + 2 offsets (16) + NULL ptr (8) = 31
@@ -173,13 +169,18 @@ expect buf.len().to_u64() == expected
 
 #### encodes second string offset correctly
 
+- encodes second string offset correctly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("encodes second string offset correctly")
 val buf = _make_two_string_buf()
 # String data: "ab\0cde\0" = 7 bytes
 # Offset table starts at byte 7
@@ -193,13 +194,18 @@ expect buf[16] == 0x00u8
 
 #### preserves string content for two-element vector
 
+- preserves string content for two-element vector
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("preserves string content for two-element vector")
 val buf = _make_two_string_buf()
 # "ab" at offset 0
 expect buf[0] == 0x61u8  # 'a'
@@ -219,17 +225,18 @@ _Verify spawn_path error handling, argv defaults, and type signatures._
 
 #### returns Err(EINVAL) for empty path
 
-1. expect result is err
-2. expect result unwrap err
+- returns Err(EINVAL) for empty path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns Err(EINVAL) for empty path")
 val result = spawn_path("", [], [])
 expect result.is_err() == true
 expect result.unwrap_err() == 22
@@ -239,17 +246,18 @@ expect result.unwrap_err() == 22
 
 #### returns Err(EINVAL) for empty path with argv
 
-1. expect result is err
-2. expect result unwrap err
+- returns Err(EINVAL) for empty path with argv
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns Err(EINVAL) for empty path with argv")
 val result = spawn_path("", ["arg0"], ["HOME=/home"])
 expect result.is_err() == true
 expect result.unwrap_err() == 22
@@ -259,16 +267,18 @@ expect result.unwrap_err() == 22
 
 #### sosix_marshal_string_vector accepts [text] and returns [u8]
 
-1. expect result len
+- sosix_marshal_string_vector accepts [text] and returns [u8]
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sosix_marshal_string_vector accepts [text] and returns [u8]")
 val input: [text] = ["test"]
 val result: [u8] = sosix_marshal_string_vector(input)
 expect result.len() > 0
@@ -278,16 +288,48 @@ expect result.len() > 0
 
 #### sosix_marshal_string_vector_size returns u64
 
+- sosix_marshal_string_vector_size returns u64
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sosix_marshal_string_vector_size returns u64")
 val size: u64 = sosix_marshal_string_vector_size(2, 10)
 # total_bytes(10) + count(2) + (count+1)*8 = 10 + 2 + 24 = 36
 expect size == 36
+```
+
+</details>
+
+#### reports packed vector table offset for syscall handoff
+
+- reports packed vector table offset for syscall handoff
+   - Expected: table equals `7u64`
+   - Expected: _u64_le_at(result, table) equals `0u64`
+   - Expected: _u64_le_at(result, table + 8) equals `3u64`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("reports packed vector table offset for syscall handoff")
+val input: [text] = ["ab", "cde"]
+val result = sosix_marshal_string_vector(input)
+val table = sosix_string_vector_table_offset(input)
+expect(table).to_equal(7u64)
+expect(_u64_le_at(result, table)).to_equal(0u64)
+expect(_u64_le_at(result, table + 8)).to_equal(3u64)
 ```
 
 </details>
@@ -299,12 +341,12 @@ expect size == 36
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/userlib/process_spawn_path_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering spawn_path marshaling, spawn_path API.
 - spawn_path marshaling
 - spawn_path API
 
@@ -312,11 +354,59 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `29e3677830036e49af454ecf83f16a00672c344c0c60438955b6c0f54356436e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `29e3677830036e49af454ecf83f16a00672c344c0c60438955b6c0f54356436e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `29e3677830036e49af454ecf83f16a00672c344c0c60438955b6c0f54356436e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/userlib/process_spawn_path_spec.spl
+mirror: doc/06_spec/01_unit/os/userlib/process_spawn_path_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/userlib/process_spawn_path_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/userlib/process_spawn_path_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/userlib/process_spawn_path_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns empty buffer for empty input' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/userlib/process_spawn_path_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'marshals single string with correct total size' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/userlib/process_spawn_path_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'places NUL terminator after string bytes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

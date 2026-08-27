@@ -1,29 +1,6 @@
 # T32 Gdb Bridge Specification
 
-> <details>
-
-<!-- sdn-diagram:id=t32_gdb_bridge_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=t32_gdb_bridge_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-t32_gdb_bridge_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=t32_gdb_bridge_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32GdbBridgeConfig creation, T32 PRACTICE command formatting.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,23 @@ t32_gdb_bridge_spec
 
 #### T32 target config has correct T32 port
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- T32 target config has correct T32 port
+   - Expected: cfg.t32_port equals `20000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("T32 target config has correct T32 port")
 val cfg = T32GdbBridgeConfig.for_t32_target()
 expect(cfg.t32_port).to_equal(20000)
 ```
@@ -55,13 +42,19 @@ expect(cfg.t32_port).to_equal(20000)
 
 #### T32 target config has correct GDB port
 
+- T32 target config has correct GDB port
+   - Expected: cfg.gdb_port equals `2331`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("T32 target config has correct GDB port")
 val cfg = T32GdbBridgeConfig.for_t32_target()
 expect(cfg.gdb_port).to_equal(2331)
 ```
@@ -70,13 +63,19 @@ expect(cfg.gdb_port).to_equal(2331)
 
 #### T32 target config has correct name
 
+- T32 target config has correct name
+   - Expected: cfg.target_name equals `T32 Power Debug`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("T32 target config has correct name")
 val cfg = T32GdbBridgeConfig.for_t32_target()
 expect(cfg.target_name).to_equal("T32 Power Debug")
 ```
@@ -87,13 +86,19 @@ expect(cfg.target_name).to_equal("T32 Power Debug")
 
 #### GDB server enable command
 
+- GDB server enable command
+   - Expected: cfg.gdb_server_enable_cmd() equals `System.Option GDBSERVER ON`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("GDB server enable command")
 val cfg = T32GdbBridgeConfig.for_t32_target()
 expect(cfg.gdb_server_enable_cmd()).to_equal("System.Option GDBSERVER ON")
 ```
@@ -102,13 +107,19 @@ expect(cfg.gdb_server_enable_cmd()).to_equal("System.Option GDBSERVER ON")
 
 #### GDB server port command
 
+- GDB server port command
+   - Expected: cfg.gdb_server_port_cmd() equals `GDBSERVER.PORT 2331`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("GDB server port command")
 val cfg = T32GdbBridgeConfig.for_t32_target()
 expect(cfg.gdb_server_port_cmd()).to_equal("GDBSERVER.PORT 2331")
 ```
@@ -117,13 +128,19 @@ expect(cfg.gdb_server_port_cmd()).to_equal("GDBSERVER.PORT 2331")
 
 #### GDB server disable command
 
+- GDB server disable command
+   - Expected: cfg.gdb_server_disable_cmd() equals `System.Option GDBSERVER OFF`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("GDB server disable command")
 val cfg = T32GdbBridgeConfig.for_t32_target()
 expect(cfg.gdb_server_disable_cmd()).to_equal("System.Option GDBSERVER OFF")
 ```
@@ -132,13 +149,19 @@ expect(cfg.gdb_server_disable_cmd()).to_equal("System.Option GDBSERVER OFF")
 
 #### PRACTICE DO command
 
+- PRACTICE DO command
+   - Expected: cmd equals `DO t32_startup.cmm`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("PRACTICE DO command")
 val cmd = format_practice_do("t32_startup.cmm")
 expect(cmd).to_equal("DO t32_startup.cmm")
 ```
@@ -152,12 +175,12 @@ expect(cmd).to_equal("DO t32_startup.cmm")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/debug/remote/t32_gdb_bridge_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering T32GdbBridgeConfig creation, T32 PRACTICE command formatting.
 - T32GdbBridgeConfig creation
 - T32 PRACTICE command formatting
 
@@ -173,3 +196,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `31fdcd48f2344795d4132b105c4703585e2f3f6631e0117fe3894d9f2ce759be`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `31fdcd48f2344795d4132b105c4703585e2f3f6631e0117fe3894d9f2ce759be`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `31fdcd48f2344795d4132b105c4703585e2f3f6631e0117fe3894d9f2ce759be`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/debug/remote/t32_gdb_bridge_spec.spl
+mirror: doc/06_spec/01_unit/app/debug/remote/t32_gdb_bridge_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/debug/remote/t32_gdb_bridge_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/debug/remote/t32_gdb_bridge_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/debug/remote/t32_gdb_bridge_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/debug/remote/t32_gdb_bridge_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'T32 target config has correct T32 port' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/debug/remote/t32_gdb_bridge_spec.spl:58:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'T32 target config has correct GDB port' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/debug/remote/t32_gdb_bridge_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'T32 target config has correct name' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

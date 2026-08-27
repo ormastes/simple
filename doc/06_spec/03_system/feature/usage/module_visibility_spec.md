@@ -2,29 +2,6 @@
 
 > Module visibility system with filename-based auto-public rule. Types matching the filename are automatically public; all other declarations are private by default unless explicitly marked with `public`.
 
-<!-- sdn-diagram:id=module_visibility_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=module_visibility_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-module_visibility_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=module_visibility_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 26 | 26 | 0 | 0 |
@@ -45,7 +22,7 @@ Module visibility system with filename-based auto-public rule. Types matching th
 | Difficulty | 3/5 |
 | Status | In Progress (Core Complete, Integration Pending) |
 | Source | `test/03_system/feature/usage/module_visibility_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -75,6 +52,8 @@ public class PublicHelper:
 data: i32
 
 # Top-level val (private by default)
+use std.spec.step
+
 val CONSTANT: i32 = 42
 
 # Explicit public constant
@@ -119,13 +98,23 @@ public fn public_fn(): pass
 
 #### auto-publics class matching filename
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- auto-publics class matching filename
+   - Expected: is_public is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("auto-publics class matching filename")
 # TestCase in test_case.spl is auto-public via filename match
 val is_public = effective_visibility("TestCase", "test_case.spl", false)
 expect(is_public).to_equal(true)
@@ -135,13 +124,21 @@ expect(is_public).to_equal(true)
 
 #### converts snake_case filename to PascalCase
 
+- converts snake_case filename to PascalCase
+   - Expected: filename_to_type_name("string_interner.spl") equals `StringInterner`
+   - Expected: filename_to_type_name("http_client.spl") equals `HttpClient`
+   - Expected: filename_to_type_name("io.spl") equals `Io`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("converts snake_case filename to PascalCase")
 expect(filename_to_type_name("string_interner.spl")).to_equal("StringInterner")
 expect(filename_to_type_name("http_client.spl")).to_equal("HttpClient")
 expect(filename_to_type_name("io.spl")).to_equal("Io")
@@ -151,13 +148,19 @@ expect(filename_to_type_name("io.spl")).to_equal("Io")
 
 #### makes non-matching types private by default
 
+- makes non-matching types private by default
+   - Expected: is_public is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("makes non-matching types private by default")
 val is_public = effective_visibility("Helper", "test_case.spl", false)
 expect(is_public).to_equal(false)
 ```
@@ -168,13 +171,19 @@ expect(is_public).to_equal(false)
 
 #### supports public keyword for classes
 
+- supports public keyword for classes
+   - Expected: is_public is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports public keyword for classes")
 # Explicitly public class, even if name doesn't match filename
 val is_public = effective_visibility("ExplicitPublic", "test_case.spl", true)
 expect(is_public).to_equal(true)
@@ -184,13 +193,19 @@ expect(is_public).to_equal(true)
 
 #### supports public keyword for functions
 
+- supports public keyword for functions
+   - Expected: is_public is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports public keyword for functions")
 val is_public = effective_visibility("exported_function", "test_case.spl", true)
 expect(is_public).to_equal(true)
 ```
@@ -199,13 +214,19 @@ expect(is_public).to_equal(true)
 
 #### supports private keyword (explicit)
 
+- supports private keyword (explicit)
+   - Expected: is_public is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports private keyword (explicit)")
 # private keyword => is_explicitly_public=false, name doesn't match
 val is_public = effective_visibility("ExplicitPrivate", "test_case.spl", false)
 expect(is_public).to_equal(false)
@@ -215,13 +236,19 @@ expect(is_public).to_equal(false)
 
 #### allows redundant private on non-matching types
 
+- allows redundant private on non-matching types
+   - Expected: is_public is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows redundant private on non-matching types")
 # private class Helper is same as default (private)
 val is_public = effective_visibility("Helper", "test_case.spl", false)
 expect(is_public).to_equal(false)
@@ -233,13 +260,19 @@ expect(is_public).to_equal(false)
 
 #### allows private top-level val
 
+- allows private top-level val
+   - Expected: is_public is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows private top-level val")
 # val PRIVATE_CONST without pub => private
 val is_public = effective_visibility("PRIVATE_CONST", "test_case.spl", false)
 expect(is_public).to_equal(false)
@@ -249,13 +282,19 @@ expect(is_public).to_equal(false)
 
 #### allows public top-level val
 
+- allows public top-level val
+   - Expected: is_public is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows public top-level val")
 # public val PUBLIC_CONST => public
 val is_public = effective_visibility("PUBLIC_CONST", "test_case.spl", true)
 expect(is_public).to_equal(true)
@@ -265,13 +304,20 @@ expect(is_public).to_equal(true)
 
 #### allows top-level val in expressions
 
+- allows top-level val in expressions
+   - Expected: a_public is false
+   - Expected: b_public is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows top-level val in expressions")
 # Two vals where second references first — both have valid visibility
 val a_public = effective_visibility("A", "test_case.spl", false)
 val b_public = effective_visibility("B", "test_case.spl", false)
@@ -284,13 +330,19 @@ expect(b_public).to_equal(false)
 
 #### rejects mutable top-level var without explicit public
 
+- rejects mutable top-level var without explicit public
+   - Expected: is_public is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects mutable top-level var without explicit public")
 # var counter without pub => private
 val is_public = effective_visibility("counter", "test_case.spl", false)
 expect(is_public).to_equal(false)
@@ -302,13 +354,18 @@ expect(is_public).to_equal(false)
 
 #### methods on public type are public by default
 
+- methods on public type are public by default
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("methods on public type are public by default")
 # Accessing a public symbol from another module should produce no warning
 val warning = check_symbol_access("get_id", true, "test_case.spl", "other.spl")
 expect(warning).to_be_nil()
@@ -318,13 +375,19 @@ expect(warning).to_be_nil()
 
 #### methods on private type are private
 
+- methods on private type are private
+   - Expected: has_warning is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("methods on private type are private")
 # Accessing a private symbol from another module should produce a warning
 val warning = check_symbol_access("process", false, "test_case.spl", "other.spl")
 val has_warning = warning != nil
@@ -335,13 +398,19 @@ expect(has_warning).to_equal(true)
 
 #### allows private methods on public type
 
+- allows private methods on public type
+   - Expected: cross_has is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows private methods on public type")
 # Private method: warning from other module, no warning from same module
 # Cross-module access: warning
 val cross_warning = check_symbol_access("internal_validate", false, "test_case.spl", "other.spl")
@@ -358,13 +427,20 @@ expect(same_warning).to_be_nil()
 
 #### warns on implicitly public non-matching type (phase 1)
 
+- warns on implicitly public non-matching type (phase 1)
+   - Expected: has_warning is true
+   - Expected: warning.code equals `W0401`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("warns on implicitly public non-matching type (phase 1)")
 # W0401 for private symbol accessed cross-module
 val warning = check_symbol_access("Helper", false, "test_case.spl", "other.spl")
 val has_warning = warning != nil
@@ -376,13 +452,20 @@ expect(warning.code).to_equal("W0401")
 
 #### warns on implicitly public function (phase 1)
 
+- warns on implicitly public function (phase 1)
+   - Expected: has_warning is true
+   - Expected: warning.code equals `W0401`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("warns on implicitly public function (phase 1)")
 val warning = check_symbol_access("helper_fn", false, "test_case.spl", "other.spl")
 val has_warning = warning != nil
 expect(has_warning).to_equal(true)
@@ -393,13 +476,19 @@ expect(warning.code).to_equal("W0401")
 
 #### errors on accessing private type (phase 2)
 
+- errors on accessing private type (phase 2)
+   - Expected: has_warning is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("errors on accessing private type (phase 2)")
 # Phase 1 = warning; future phase 2 will be E0403 error
 val warning = check_symbol_access("Helper", false, "test_case.spl", "other.spl")
 # Currently a warning (W0401), will become error (E0403) in phase 2
@@ -411,13 +500,19 @@ expect(has_warning).to_equal(true)
 
 #### suggests adding public modifier in warning
 
+- suggests adding public modifier in warning
+   - Expected: has_pub is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("suggests adding public modifier in warning")
 val w = make_warning("Helper", "other.spl", "test_case.spl")
 val formatted = format_warning(w)
 val has_pub = formatted.contains("pub")
@@ -430,13 +525,20 @@ expect(has_pub).to_equal(true)
 
 #### mod.spl has no auto-public type
 
+- mod.spl has no auto-public type
+   - Expected: type_matches_filename("Mod", "mod.spl") is true
+   - Expected: filename_to_type_name("mod.spl") equals `Mod`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mod.spl has no auto-public type")
 # No type named "Mod" should get auto-public in mod.spl
 expect(type_matches_filename("Mod", "mod.spl")).to_equal(true)
 # But effective_visibility should not be public because "Mod" matches filename
@@ -454,20 +556,8 @@ expect(filename_to_type_name("mod.spl")).to_equal("Mod")
 
 #### allows importing public items
 
-<details>
-<summary>Executable SSpec</summary>
+- allows importing public items
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val warning = check_symbol_access("PublicType", true, "provider.spl", "consumer.spl")
-expect(warning).to_be_nil()
-```
-
-</details>
-
-#### rejects importing private items
 
 <details>
 <summary>Executable SSpec</summary>
@@ -476,6 +566,30 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows importing public items")
+val warning = check_symbol_access("PublicType", true, "provider.spl", "consumer.spl")
+expect(warning).to_be_nil()
+```
+
+</details>
+
+#### rejects importing private items
+
+- rejects importing private items
+   - Expected: has_warning is true
+   - Expected: warning.code equals `W0401`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects importing private items")
 val warning = check_symbol_access("PrivateHelper", false, "provider.spl", "consumer.spl")
 val has_warning = warning != nil
 expect(has_warning).to_equal(true)
@@ -486,13 +600,18 @@ expect(warning.code).to_equal("W0401")
 
 #### allows qualified access to public items
 
+- allows qualified access to public items
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows qualified access to public items")
 val warning = check_symbol_access("PublicAPI", true, "provider.spl", "consumer.spl")
 expect(warning).to_be_nil()
 ```
@@ -503,13 +622,20 @@ expect(warning).to_be_nil()
 
 #### handles multiple types with same prefix
 
+- handles multiple types with same prefix
+   - Expected: type_matches_filename("TestCase", "test_case.spl") is true
+   - Expected: type_matches_filename("TestCaseBuilder", "test_case.spl") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles multiple types with same prefix")
 # TestCase matches test_case.spl, TestCaseBuilder does not
 expect(type_matches_filename("TestCase", "test_case.spl")).to_equal(true)
 expect(type_matches_filename("TestCaseBuilder", "test_case.spl")).to_equal(false)
@@ -519,13 +645,19 @@ expect(type_matches_filename("TestCaseBuilder", "test_case.spl")).to_equal(false
 
 #### handles single-word filenames
 
+- handles single-word filenames
+   - Expected: type_matches_filename("Io", "io.spl") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single-word filenames")
 expect(type_matches_filename("Io", "io.spl")).to_equal(true)
 ```
 
@@ -533,13 +665,19 @@ expect(type_matches_filename("Io", "io.spl")).to_equal(true)
 
 #### handles acronyms in filenames
 
+- handles acronyms in filenames
+   - Expected: filename_to_type_name("http_api.spl") equals `HttpApi`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles acronyms in filenames")
 expect(filename_to_type_name("http_api.spl")).to_equal("HttpApi")
 ```
 
@@ -547,13 +685,18 @@ expect(filename_to_type_name("http_api.spl")).to_equal("HttpApi")
 
 #### handles nested types visibility
 
+- handles nested types visibility
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles nested types visibility")
 # Public symbols accessible from other module
 val parent_warning = check_symbol_access("Outer", true, "outer.spl", "other.spl")
 val inner_warning = check_symbol_access("Inner", true, "outer.spl", "other.spl")
@@ -575,3 +718,51 @@ expect(inner_warning).to_be_nil()
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e60f29889580e3429283cc30cd5e12f8a6fba10672a04622c5617ff6771ddc61`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e60f29889580e3429283cc30cd5e12f8a6fba10672a04622c5617ff6771ddc61`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e60f29889580e3429283cc30cd5e12f8a6fba10672a04622c5617ff6771ddc61`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/module_visibility_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/module_visibility_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/module_visibility_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/module_visibility_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/module_visibility_spec.spl:162:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'auto-publics class matching filename' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/module_visibility_spec.spl:169:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts snake_case filename to PascalCase' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/module_visibility_spec.spl:176:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'makes non-matching types private by default' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

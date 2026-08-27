@@ -2,30 +2,6 @@
 
 > Tests cross-platform compatibility including OS detection, path separator handling, and platform-specific API abstractions. Verifies that Simple programs behave consistently across Linux, macOS, Windows, and FreeBSD.
 
-<!-- sdn-diagram:id=cross_platform_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cross_platform_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cross_platform_spec -> nogc_sync_mut
-cross_platform_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cross_platform_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 12 | 12 | 0 | 0 |
@@ -44,7 +20,7 @@ Tests cross-platform compatibility including OS detection, path separator handli
 | Category | Platform |
 | Status | In Progress |
 | Source | `test/03_system/feature/platform/cross_platform_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -59,26 +35,11 @@ consistently across Linux, macOS, Windows, and FreeBSD.
 
 #### detects current operating system
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val detected = is_windows() or is_unix() or is_linux() or is_macos()
-check(detected)
-```
-
-</details>
-
-#### is_unix returns true on Unix-like systems
-
-1. check
-2. check
+- detects current operating system
 
 
 <details>
@@ -88,6 +49,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects current operating system")
+val detected = is_windows() or is_unix() or is_linux() or is_macos()
+check(detected)
+```
+
+</details>
+
+#### is_unix returns true on Unix-like systems
+
+- is_unix returns true on Unix-like systems
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("is_unix returns true on Unix-like systems")
 if is_linux() or is_macos():
     check(is_unix())
 else:
@@ -98,16 +81,18 @@ else:
 
 #### is_windows and is_unix are mutually exclusive
 
-1. check
+- is_windows and is_unix are mutually exclusive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is_windows and is_unix are mutually exclusive")
 val both = is_windows() and is_unix()
 check(not both)
 ```
@@ -118,16 +103,18 @@ check(not both)
 
 #### dir_sep returns platform-specific directory separator
 
-1. check
+- dir_sep returns platform-specific directory separator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dir_sep returns platform-specific directory separator")
 val sep = dir_sep()
 val valid = sep == "/" or sep == "\\"
 check(valid)
@@ -137,16 +124,18 @@ check(valid)
 
 #### path_sep returns platform-specific PATH separator
 
-1. check
+- path_sep returns platform-specific PATH separator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("path_sep returns platform-specific PATH separator")
 val sep = path_sep()
 val valid = sep == ":" or sep == ";"
 check(valid)
@@ -156,16 +145,18 @@ check(valid)
 
 #### exe_ext returns correct executable extension
 
-1. check
+- exe_ext returns correct executable extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exe_ext returns correct executable extension")
 val ext = exe_ext()
 val valid = ext == ".exe" or ext == ""
 check(valid)
@@ -175,16 +166,18 @@ check(valid)
 
 #### lib_ext returns correct library extension
 
-1. check
+- lib_ext returns correct library extension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lib_ext returns correct library extension")
 val ext = lib_ext()
 val valid = ext == ".dll" or ext == ".so" or ext == ".dylib"
 check(valid)
@@ -196,16 +189,18 @@ check(valid)
 
 #### join_path combines path components
 
-1. check
+- join_path combines path components
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("join_path combines path components")
 val joined = join_path("foo", "bar")
 val has_foo = joined.contains("foo")
 val has_bar = joined.contains("bar")
@@ -216,16 +211,18 @@ check(has_foo and has_bar)
 
 #### normalize_path handles forward slashes
 
-1. check
+- normalize_path handles forward slashes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("normalize_path handles forward slashes")
 val normalized = normalize_path("foo/bar")
 check(normalized.len() > 0)
 ```
@@ -234,18 +231,18 @@ check(normalized.len() > 0)
 
 #### is_absolute_path detects absolute paths
 
-1. check
-2. check
-3. check
+- is_absolute_path detects absolute paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is_absolute_path detects absolute paths")
 val unix_abs = is_absolute_path("/usr/bin")
 val relative = is_absolute_path("foo/bar")
 if not is_windows():
@@ -261,7 +258,7 @@ else:
 
 #### shell executes simple commands
 
-1. check
+- shell executes simple commands
    - Expected: code equals `0`
    - Expected: has_hello is true
 
@@ -269,10 +266,12 @@ else:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shell executes simple commands")
 if is_windows():
     # /bin/sh not available on Windows
     check(true)
@@ -292,17 +291,18 @@ else:
 
 #### detects system linker and provides info
 
-1. check
-2. check
+- detects system linker and provides info
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects system linker and provides info")
 check(test_auto_detect_linker())
 check(test_get_linker_info())
 ```
@@ -321,3 +321,54 @@ check(test_get_linker_info())
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f5cdf414b3302614f9f4a04dad4af63151da97f3be75a6c7e1a071e6131dd1fe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f5cdf414b3302614f9f4a04dad4af63151da97f3be75a6c7e1a071e6131dd1fe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f5cdf414b3302614f9f4a04dad4af63151da97f3be75a6c7e1a071e6131dd1fe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/feature/platform/cross_platform_spec.spl
+mirror: doc/06_spec/03_system/feature/platform/cross_platform_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/platform/cross_platform_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/platform/cross_platform_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/platform/cross_platform_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/platform/cross_platform_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects current operating system' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/platform/cross_platform_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is_unix returns true on Unix-like systems' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/platform/cross_platform_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is_windows and is_unix are mutually exclusive' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

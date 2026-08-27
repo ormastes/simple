@@ -1,29 +1,6 @@
 # Simpleos Wine Process Tls Dispatch Specification
 
-> <details>
-
-<!-- sdn-diagram:id=simpleos_wine_process_tls_dispatch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_wine_process_tls_dispatch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_wine_process_tls_dispatch_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_wine_process_tls_dispatch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SimpleOS Wine TLS callback dispatch, REQ-037: loader-owned TLS callback dispatch record.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,21 +17,33 @@ simpleos_wine_process_tls_dispatch_spec -> common
 
 ### REQ-037: loader-owned TLS callback dispatch record
 
-#### should record a mapped TLS callback dispatch after relocation without executing PE code
+#### record a mapped TLS callback dispatch after relocation without executing PE code
+
+- record a mapped TLS callback dispatch after relocation without executing PE code
+   - Expected: result.ok is true
+   - Expected: result.callback_count equals `1`
+   - Expected: result.first_callback_rva equals `0x2000`
+   - Expected: result.dispatch_count equals `1`
+   - Expected: result.status equals `tls-callback-dispatch-recorded`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-037
+# @req REQ-SSPEC-SYSTEM
+step("record a mapped TLS callback dispatch after relocation without executing PE code")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
 val result = wine_process_record_tls_callback_dispatch(plan, _known_hello_with_tls_callback(), 0x400000, 0x400000, "native-module-open tls-callback")
 expect(result.ok).to_equal(true)
-expect(result.callback_count).to_equal(1)
-expect(result.first_callback_rva).to_equal(0x2000)
-expect(result.dispatch_count).to_equal(1)
+expect(result.callback_count).to_equal(1)  # oracle: result.callback_count must equal 1 — authoritative contract constant
+expect(result.first_callback_rva).to_equal(0x2000)  # oracle: result.first_callback_rva must equal 0x2000 — authoritative contract constant
+expect(result.dispatch_count).to_equal(1)  # oracle: result.dispatch_count must equal 1 — authoritative contract constant
 expect(result.evidence).to_contain("tls-callback-target-mapped")
 expect(result.evidence).to_contain("loader-tls-callback-dispatch-owned")
 expect(result.evidence).to_contain("no-arbitrary-execution")
@@ -63,15 +52,23 @@ expect(result.status).to_equal("tls-callback-dispatch-recorded")
 
 </details>
 
-#### should require PEB/TEB VM byte-write readback before TLS callback dispatch record
+#### require PEB/TEB VM byte-write readback before TLS callback dispatch record
+
+- require PEB/TEB VM byte-write readback before TLS callback dispatch record
+   - Expected: result.ok is true
+   - Expected: result.status equals `tls-callback-dispatch-recorded`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("require PEB/TEB VM byte-write readback before TLS callback dispatch record")
+# evidence(protocol_json): asserted result fields below are the complete typed oracle
 val plan = wine_process_session_plan(wine_process_session_request_new("game.exe", [], "C:\\Games"), _full_gates())
 val init = wine_peb_teb_init_default()
 val writes = wine_peb_teb_memory_write_gate(init, _startup_write_space())
@@ -96,12 +93,12 @@ expect(result.evidence).to_contain("no-arbitrary-execution")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS Wine TLS callback dispatch, REQ-037: loader-owned TLS callback dispatch record.
 - SimpleOS Wine TLS callback dispatch
 - REQ-037: loader-owned TLS callback dispatch record
 
@@ -117,3 +114,43 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-037`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1e938def4cc6469b19ce9209519be465c1d76380d1a8675414ac6effcf0f05e0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1e938def4cc6469b19ce9209519be465c1d76380d1a8675414ac6effcf0f05e0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1e938def4cc6469b19ce9209519be465c1d76380d1a8675414ac6effcf0f05e0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
+
+SSpec documentization score: 97/100
+source: test/03_system/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.spl
+mirror: doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.md (current)
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/simpleos/feature/simpleos_wine_process_tls_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+<!-- sspec-maintain:scorecard:end -->

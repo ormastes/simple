@@ -1,29 +1,6 @@
 # Qemu Runner Desktop Extended Specification
 
-> <details>
-
-<!-- sdn-diagram:id=qemu_runner_desktop_extended_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=qemu_runner_desktop_extended_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-qemu_runner_desktop_extended_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=qemu_runner_desktop_extended_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Qemu runner desktop UEFI tool app validator.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,22 @@ qemu_runner_desktop_extended_spec -> os
 
 #### requires clang in the x64 desktop live acceptance marker set
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- requires clang in the x64 desktop live acceptance marker set
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires clang in the x64 desktop live acceptance marker set")
 val markers = desktop_uefi_required_marker_fragments()
 expect(markers).to_contain("[desktop-e2e] process-backed:ok app=clang pid=")
 expect(markers).to_contain("[desktop-e2e] native-toolchain-launch:ok app=clang lane=x86_64-uefi-hardware mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
@@ -59,13 +45,19 @@ expect(markers).to_contain("[desktop-e2e] native-capability:ok app=clang capabil
 
 #### requires validated container namespace and rootfs markers in x64 desktop acceptance
 
+- requires validated container namespace and rootfs markers in x64 desktop acceptance
+   - Expected: container_markers equals `["[desktop-e2e] container-namespace:ok", "[desktop-e2e] container-rootfs:ok"]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires validated container namespace and rootfs markers in x64 desktop acceptance")
 val container_markers = desktop_container_marker_fragments()
 val uefi_markers = desktop_uefi_required_marker_fragments()
 expect(container_markers).to_equal(["[desktop-e2e] container-namespace:ok", "[desktop-e2e] container-rootfs:ok"])
@@ -77,13 +69,18 @@ expect(uefi_markers).to_contain("[desktop-e2e] container-rootfs:ok")
 
 #### requires Wine hello to be VFS-backed and spawned in x64 desktop acceptance
 
+- requires Wine hello to be VFS-backed and spawned in x64 desktop acceptance
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires Wine hello to be VFS-backed and spawned in x64 desktop acceptance")
 val markers = desktop_uefi_required_marker_fragments()
 expect(markers).to_contain("[desktop-e2e] vfs-app-read:ok source=generic-vfs path=/sys/apps/wine_hello bytes=")
 expect(markers).to_contain("[fs-exec] spawn:image path=/sys/apps/wine_hello")
@@ -94,13 +91,20 @@ expect(markers).to_contain("[desktop-e2e] process-backed:ok app=wine_hello pid="
 
 #### defines the extra Wine executable-environment markers needed before readiness claims
 
+- defines the extra Wine executable-environment markers needed before readiness claims
+   - Expected: desktop_wine_exec_env_marker_contract_accepts(serial) is true
+   - Expected: desktop_wine_exec_env_marker_contract_accepts(serial.replace("[desktop-e2e] container-rootfs:ok", "[desktop-e2e] container-rootfs:missing")) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("defines the extra Wine executable-environment markers needed before readiness claims")
 val markers = desktop_wine_exec_env_required_marker_fragments()
 expect(markers).to_contain("[fs-exec] spawn:image path=/sys/apps/wine_hello")
 expect(markers).to_contain("[desktop-e2e] process-backed:ok app=wine_hello pid=")
@@ -131,13 +135,20 @@ expect(desktop_wine_exec_env_marker_contract_accepts(serial.replace("[desktop-e2
 
 #### captures the x64 desktop disk probe terminal serial pass marker
 
+- captures the x64 desktop disk probe terminal serial pass marker
+   - Expected: rt_dir_create_all(root) is true
+   - Expected: exit_code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("captures the x64 desktop disk probe terminal serial pass marker")
 val root = "build/test-x64-desktop-disk-probe"
 val serial = root + "/serial.log"
 expect(rt_dir_create_all(root)).to_equal(true)
@@ -153,16 +164,19 @@ expect(stdout).to_contain("TEST PASSED")
 
 #### requires clang in the riscv64 hosted acceptance marker set
 
-1. fail
+- requires clang in the riscv64 hosted acceptance marker set
+   - Expected: markers equals `resolved_lane.required_serial_markers`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires clang in the riscv64 hosted acceptance marker set")
 val markers = riscv64_hosted_required_marker_fragments()
 expect(markers).to_contain("[desktop-e2e] process-backed:ok app=clang pid=")
 expect(markers).to_contain("[desktop-e2e] native-toolchain-launch:ok app=clang lane=riscv64-hosted mode=native-filesystem-app status=standalone-required tool=/sys/apps/clang manifest=/SYS/CLANGMAN.TXT")
@@ -183,12 +197,12 @@ else:
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/qemu_runner_desktop_extended_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Qemu runner desktop UEFI tool app validator.
 - Qemu runner desktop UEFI tool app validator
 
 ## Scenario Summary
@@ -203,3 +217,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6ccbd52fb989ffe7b640118caf85efb2a87932049fc4eb4df857a16434325104`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6ccbd52fb989ffe7b640118caf85efb2a87932049fc4eb4df857a16434325104`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6ccbd52fb989ffe7b640118caf85efb2a87932049fc4eb4df857a16434325104`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/os/qemu_runner_desktop_extended_spec.spl
+mirror: doc/06_spec/01_unit/os/qemu_runner_desktop_extended_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/qemu_runner_desktop_extended_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/qemu_runner_desktop_extended_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/qemu_runner_desktop_extended_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/qemu_runner_desktop_extended_spec.spl:207:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires clang in the x64 desktop live acceptance marker set' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/qemu_runner_desktop_extended_spec.spl:217:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires validated container namespace and rootfs markers in x64 desktop acceptance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/qemu_runner_desktop_extended_spec.spl:226:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requires Wine hello to be VFS-backed and spawned in x64 desktop acceptance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

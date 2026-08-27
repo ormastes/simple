@@ -24,7 +24,7 @@ As an Office operator, I run one unique evidence campaign against `OFFICE_BINARY
 | Design | doc/05_design/office_cli_tui_ui_access.md |
 | Research | doc/01_research/local/office_cli_tui_ui_access.md |
 | Source | `test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl` |
-| Updated | 2026-08-11 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -188,10 +188,14 @@ that does not answer the public protocol, or stale evidence is a failure.
 
 #### should launch Calc and complete the live semantic formula workflow
 
+- should create one fresh deployed Office evidence run
+   - Artifact capture: after_step
 - Create one unique deployed Office evidence run
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should launch Calc and complete the live semantic formula workflow
+   - Artifact capture: after_step
 - Launch Calc through the standalone Office artifact
    - Artifact capture: after_step
 - List active Office windows
@@ -221,15 +225,19 @@ that does not answer the public protocol, or stale evidence is a failure.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should launch Calc and complete the live semantic formula workflow")
 step("Launch Calc through the standalone Office artifact")
 val root = check_office_gate()
 step("List active Office windows")
@@ -291,10 +299,14 @@ expect(c1).to_contain("7")
 
 #### should fail closed for invalid commands, stale targets, and unsupported actions
 
+- should create one fresh deployed Office evidence run
+   - Protocol capture: after_step
 - Create one unique deployed Office evidence run
    - Protocol capture: after_step
    - Evidence: protocol response verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should fail closed for invalid commands, stale targets, and unsupported actions
+   - Protocol capture: after_step
 - Inspect deployed command and runtime provenance
    - Protocol capture: after_step
 - Review stale, missing, and unsupported action rejection
@@ -312,15 +324,19 @@ expect(c1).to_contain("7")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed for invalid commands, stale targets, and unsupported actions")
 step("Inspect deployed command and runtime provenance")
 val root = check_office_gate()
 val provenance = file_read(root + "/exec/runtime-provenance.txt")
@@ -374,10 +390,14 @@ expect(_gate_state_count()).to_equal(1)
 
 #### should retain bounded N1 performance and deterministic evidence
 
+- should create one fresh deployed Office evidence run
+   - Artifact capture: after_step
 - Create one unique deployed Office evidence run
    - Artifact capture: after_step
    - Evidence: artifact verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should retain bounded N1 performance and deterministic evidence
+   - Artifact capture: after_step
 - Retain measured warm public-CLI NFR evidence
    - Artifact capture: after_step
 - Verify bounded history and deterministic TUI evidence
@@ -390,15 +410,19 @@ expect(_gate_state_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should retain bounded N1 performance and deterministic evidence")
 step("Retain measured warm public-CLI NFR evidence")
 val root = check_office_gate()
 expect(file_exists(root + "/perf/warm-protocol.txt")).to_be(true)
@@ -433,10 +457,14 @@ expect(_gate_state_count()).to_equal(1)
 
 #### should launch the real Calc HTML grid on the shared UI access session
 
+- should create one fresh deployed Office evidence run
+   - Protocol capture: after_step
 - Create one unique deployed Office evidence run
    - Protocol capture: after_step
    - Evidence: protocol response verified by 1 expected check
    - Expected: _gate_state_count() equals `1`
+- should launch the real Calc HTML grid on the shared UI access session
+   - Protocol capture: after_step
 - Launch GUI
    - Protocol capture: after_step
 - Open rendered Calc HTML
@@ -452,15 +480,19 @@ expect(_gate_state_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create one fresh deployed Office evidence run")
 step("Create one unique deployed Office evidence run")
 val root = setup_office_cli_tui_ui_access()
 expect(file_exists(root + "/suite.txt")).to_be(true)
 expect(_gate_state_count()).to_equal(1)
 
+# @req REQ-SSPEC-SYSTEM
+step("should launch the real Calc HTML grid on the shared UI access session")
 step("Launch GUI")
 val root = check_office_gate()
 step("Open rendered Calc HTML")
@@ -518,3 +550,69 @@ expect(_gate_state_count()).to_equal(1)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e1a7fee48edfdde1603d0ceb2ef2c30f8001c87bb48b01c7c41c6d571baec90c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e1a7fee48edfdde1603d0ceb2ef2c30f8001c87bb48b01c7c41c6d571baec90c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e1a7fee48edfdde1603d0ceb2ef2c30f8001c87bb48b01c7c41c6d571baec90c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl
+mirror: doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=75 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:246:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should create one fresh deployed Office evidence run' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:246:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should create one fresh deployed Office evidence run' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:271:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should launch Calc and complete the live semantic formula workflow' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:337:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for invalid commands, stale targets, and unsupported actions' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:337:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should fail closed for invalid commands, stale targets, and unsupported actions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:395:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain bounded N1 performance and deterministic evidence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:430:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should launch the real Calc HTML grid on the shared UI access session' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl:430:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should launch the real Calc HTML grid on the shared UI access session' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

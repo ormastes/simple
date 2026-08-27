@@ -1,29 +1,6 @@
 # Mode Filter Specification
 
-> <details>
-
-<!-- sdn-diagram:id=mode_filter_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mode_filter_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mode_filter_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mode_filter_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering extract_mode_tags, file_mode_matches, file_get_mode_tags.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,75 +17,109 @@ mode_filter_spec
 
 #### returns empty for no annotations
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- returns empty for no annotations
+   - Expected: extract_mode_tags(content) equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-TEST_RUNNER
+step("returns empty for no annotations")
 val content = "# just a comment\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
-expect(_extract_mode_tags(content)).to_equal("")
+expect(extract_mode_tags(content)).to_equal("")
 ```
 
 </details>
 
 #### extracts single mode tag
 
+- extracts single mode tag
+   - Expected: extract_mode_tags(content) equals `interpreter`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-TEST_RUNNER
+step("extracts single mode tag")
 val content = "# @mode: interpreter\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
-expect(_extract_mode_tags(content)).to_equal("interpreter")
+expect(extract_mode_tags(content)).to_equal("interpreter")
 ```
 
 </details>
 
 #### extracts multi-mode tag
 
+- extracts multi-mode tag
+   - Expected: extract_mode_tags(content) equals `interpreter,native`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-TEST_RUNNER
+step("extracts multi-mode tag")
 val content = "# @mode: interpreter, native\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
-expect(_extract_mode_tags(content)).to_equal("interpreter,native")
+expect(extract_mode_tags(content)).to_equal("interpreter,native")
 ```
 
 </details>
 
 #### extracts skip_mode as negated
 
+- extracts skip_mode as negated
+   - Expected: extract_mode_tags(content) equals `!native`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val content = "# skip-marker-removed_mode: native\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
-expect(_extract_mode_tags(content)).to_equal("!native")
+# @req REQ-SSPEC-TEST_RUNNER
+step("extracts skip_mode as negated")
+val content = "# @skip_mode: native\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
+expect(extract_mode_tags(content)).to_equal("!native")
 ```
 
 </details>
 
 #### extracts skip_mode with multiple modes
 
+- extracts skip_mode with multiple modes
+   - Expected: extract_mode_tags(content) equals `!native,!smf`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val content = "# skip-marker-removed_mode: native, smf\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
-expect(_extract_mode_tags(content)).to_equal("!native,!smf")
+# @req REQ-SSPEC-TEST_RUNNER
+step("extracts skip_mode with multiple modes")
+val content = "# @skip_mode: native, smf\ndescribe \"foo\":\n    it \"runs\":\n        expect(1).to_equal(1)\n"
+expect(extract_mode_tags(content)).to_equal("!native,!smf")
 ```
 
 </details>
@@ -117,94 +128,140 @@ expect(_extract_mode_tags(content)).to_equal("!native,!smf")
 
 #### empty tags match everything
 
+- empty tags match everything
+   - Expected: file_mode_matches("", "interpreter") is true
+   - Expected: file_mode_matches("", "native") is true
+   - Expected: file_mode_matches("", "smf") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_file_mode_matches("", "interpreter")).to_equal(true)
-expect(_file_mode_matches("", "native")).to_equal(true)
-expect(_file_mode_matches("", "smf")).to_equal(true)
+# @req REQ-SSPEC-TEST_RUNNER
+step("empty tags match everything")
+expect(file_mode_matches("", "interpreter")).to_equal(true)
+expect(file_mode_matches("", "native")).to_equal(true)
+expect(file_mode_matches("", "smf")).to_equal(true)
 ```
 
 </details>
 
 #### AllModes always matches
 
+- AllModes always matches
+   - Expected: file_mode_matches("interpreter", "all-modes") is true
+   - Expected: file_mode_matches("!native", "all-modes") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_file_mode_matches("interpreter", "all-modes")).to_equal(true)
-expect(_file_mode_matches("!native", "all-modes")).to_equal(true)
+# @req REQ-SSPEC-TEST_RUNNER
+step("AllModes always matches")
+expect(file_mode_matches("interpreter", "all-modes")).to_equal(true)
+expect(file_mode_matches("!native", "all-modes")).to_equal(true)
 ```
 
 </details>
 
 #### positive tag matches correct mode
 
+- positive tag matches correct mode
+   - Expected: file_mode_matches("interpreter", "interpreter") is true
+   - Expected: file_mode_matches("interpreter", "native") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_file_mode_matches("interpreter", "interpreter")).to_equal(true)
-expect(_file_mode_matches("interpreter", "native")).to_equal(false)
+# @req REQ-SSPEC-TEST_RUNNER
+step("positive tag matches correct mode")
+expect(file_mode_matches("interpreter", "interpreter")).to_equal(true)
+expect(file_mode_matches("interpreter", "native")).to_equal(false)
 ```
 
 </details>
 
 #### multi-positive tags match any listed mode
 
+- multi-positive tags match any listed mode
+   - Expected: file_mode_matches("interpreter,native", "interpreter") is true
+   - Expected: file_mode_matches("interpreter,native", "native") is true
+   - Expected: file_mode_matches("interpreter,native", "smf") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_file_mode_matches("interpreter,native", "interpreter")).to_equal(true)
-expect(_file_mode_matches("interpreter,native", "native")).to_equal(true)
-expect(_file_mode_matches("interpreter,native", "smf")).to_equal(false)
+# @req REQ-SSPEC-TEST_RUNNER
+step("multi-positive tags match any listed mode")
+expect(file_mode_matches("interpreter,native", "interpreter")).to_equal(true)
+expect(file_mode_matches("interpreter,native", "native")).to_equal(true)
+expect(file_mode_matches("interpreter,native", "smf")).to_equal(false)
 ```
 
 </details>
 
 #### skip tag excludes matching mode
 
+- skip tag excludes matching mode
+   - Expected: file_mode_matches("!native", "native") is false
+   - Expected: file_mode_matches("!native", "interpreter") is true
+   - Expected: file_mode_matches("!native", "smf") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_file_mode_matches("!native", "native")).to_equal(false)
-expect(_file_mode_matches("!native", "interpreter")).to_equal(true)
-expect(_file_mode_matches("!native", "smf")).to_equal(true)
+# @req REQ-SSPEC-TEST_RUNNER
+step("skip tag excludes matching mode")
+expect(file_mode_matches("!native", "native")).to_equal(false)
+expect(file_mode_matches("!native", "interpreter")).to_equal(true)
+expect(file_mode_matches("!native", "smf")).to_equal(true)
 ```
 
 </details>
 
 #### multiple skip tags exclude all listed
 
+- multiple skip tags exclude all listed
+   - Expected: file_mode_matches("!native,!smf", "native") is false
+   - Expected: file_mode_matches("!native,!smf", "smf") is false
+   - Expected: file_mode_matches("!native,!smf", "interpreter") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(_file_mode_matches("!native,!smf", "native")).to_equal(false)
-expect(_file_mode_matches("!native,!smf", "smf")).to_equal(false)
-expect(_file_mode_matches("!native,!smf", "interpreter")).to_equal(true)
+# @req REQ-SSPEC-TEST_RUNNER
+step("multiple skip tags exclude all listed")
+expect(file_mode_matches("!native,!smf", "native")).to_equal(false)
+expect(file_mode_matches("!native,!smf", "smf")).to_equal(false)
+expect(file_mode_matches("!native,!smf", "interpreter")).to_equal(true)
 ```
 
 </details>
@@ -213,15 +270,21 @@ expect(_file_mode_matches("!native,!smf", "interpreter")).to_equal(true)
 
 #### returns empty list for no annotations
 
+- returns empty list for no annotations
+   - Expected: tags.len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-TEST_RUNNER
+step("returns empty list for no annotations")
 val content = "# nothing here\n"
-val tags = _file_get_mode_tags(content)
+val tags = file_get_mode_tags(content)
 expect(tags.len()).to_equal(0)
 ```
 
@@ -229,15 +292,22 @@ expect(tags.len()).to_equal(0)
 
 #### extracts mode tags as list
 
+- extracts mode tags as list
+   - Expected: tags.len() equals `1`
+   - Expected: tags[0] equals `interpreter`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-TEST_RUNNER
+step("extracts mode tags as list")
 val content = "# @mode: interpreter\n"
-val tags = _file_get_mode_tags(content)
+val tags = file_get_mode_tags(content)
 expect(tags.len()).to_equal(1)
 expect(tags[0]).to_equal("interpreter")
 ```
@@ -246,15 +316,22 @@ expect(tags[0]).to_equal("interpreter")
 
 #### extracts skip_mode tags with ! prefix
 
+- extracts skip_mode tags with ! prefix
+   - Expected: tags.len() equals `1`
+   - Expected: tags[0] equals `!native`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val content = "# skip-marker-removed_mode: native\n"
-val tags = _file_get_mode_tags(content)
+# @req REQ-SSPEC-TEST_RUNNER
+step("extracts skip_mode tags with ! prefix")
+val content = "# @skip_mode: native\n"
+val tags = file_get_mode_tags(content)
 expect(tags.len()).to_equal(1)
 expect(tags[0]).to_equal("!native")
 ```
@@ -268,12 +345,12 @@ expect(tags[0]).to_equal("!native")
 | Category | Other |
 | Status | Active |
 | Source | `test/01_unit/test_runner/mode_filter_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering extract_mode_tags, file_mode_matches, file_get_mode_tags.
 - extract_mode_tags
 - file_mode_matches
 - file_get_mode_tags
@@ -290,3 +367,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-TEST_RUNNER`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0519bbabf0c3c1edee77cdc74589dddcab37982f83b1eeb48044618e3f3e3436`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0519bbabf0c3c1edee77cdc74589dddcab37982f83b1eeb48044618e3f3e3436`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0519bbabf0c3c1edee77cdc74589dddcab37982f83b1eeb48044618e3f3e3436`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/test_runner/mode_filter_spec.spl
+mirror: doc/06_spec/01_unit/test_runner/mode_filter_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/test_runner/mode_filter_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/test_runner/mode_filter_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/test_runner/mode_filter_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/test_runner/mode_filter_spec.spl:15:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns empty for no annotations' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/test_runner/mode_filter_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts single mode tag' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/test_runner/mode_filter_spec.spl:27:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts multi-mode tag' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

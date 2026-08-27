@@ -24,7 +24,7 @@ The CPU SIMD Engine2D wrapper needs a Simple binary that contains the Engine2D S
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -92,13 +92,25 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_engine2d_simple_bin
 
 #### auto selects only self hosted Simple launchers
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- auto selects only self hosted Simple launchers
+   - Expected: script does not contain `|| [ "$SIMPLE_BIN" = "bin/simple" ]`
+   - Expected: script does not contain `rt_engine2d_simd_fill_u32'`
+   - Expected: script does not contain `cat >"$EVIDENCE_SRC"`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("auto selects only self hosted Simple launchers")
 val script = file_read("scripts/check/check-cpu-simd-engine2d-evidence.shs")
 val evidence_src = file_read("scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl")
 expect(script).to_contain("SIMPLE_BIN_SOURCE=")
@@ -159,13 +171,20 @@ expect(no_seed_candidate).to_be(true)
 
 #### rejects explicit Rust seed before copying canonical Engine2D evidence
 
+- rejects explicit Rust seed before copying canonical Engine2D evidence
+   - Expected: code equals `0`
+   - Expected: src_code equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects explicit Rust seed before copying canonical Engine2D evidence")
 val root = "build/test-cpu-simd-engine2d-seed-forbidden"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -189,13 +208,23 @@ expect(src_code).to_equal(0)
 
 #### records independent x86 arm and riscv matrix rows
 
+- records independent x86 arm and riscv matrix rows
+   - Expected: code equals `0`
+   - Expected: strict_code equals `1`
+- Disconnect RVV copy dispatch while retaining its helper and intrinsics
+- Reject the disconnected public RVV copy route
+   - Expected: mutation_code equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 91 lines folded for reproduction.
+Runnable source: 88 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("records independent x86 arm and riscv matrix rows")
 val script = file_read("scripts/check/check-cpu-simd-engine2d-arch-matrix.shs")
 expect(script).to_contain("x86_64 aarch64 riscv64")
 expect(script).to_contain("check-cpu-simd-engine2d-evidence.shs")
@@ -214,7 +243,7 @@ expect(script).to_contain("ENGINE2D_SIMD_C_KERNELS_CFLAGS")
 expect(script).to_contain("ENGINE2D_SIMD_C_KERNELS_RUNNER")
 expect(script).to_contain("engine2d-simd-c-kernels/engine2d_simd_c_test")
 expect(script).to_contain("qemu-aarch64 -L /usr/aarch64-linux-gnu")
-expect(script).to_contain("qemu-riscv64 -L /usr/riscv64-linux-gnu")
+expect(script).to_contain("qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 -L /usr/riscv64-linux-gnu")
 expect(script).to_contain("-march=rv64gcv -mabi=lp64d")
 expect(script).to_contain("strict-requires-all-arches-pass")
 expect(script).to_contain("CPU_SIMD_EXPECTED_ARCH=\"$arch\"")
@@ -308,3 +337,63 @@ expect(mutation_evidence).to_contain("cpu_simd_engine2d_arch_matrix_source_contr
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-001:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-002:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-003:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-004:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-005:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-006:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-007:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-008:`
+- `REQ-CPU-SIMD-ENGINE2D-BIN-009:`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9d8c5f848af3e418086af8c6faca032cd3b7c0291c40f97bba0cd818a10627fb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9d8c5f848af3e418086af8c6faca032cd3b7c0291c40f97bba0cd818a10627fb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9d8c5f848af3e418086af8c6faca032cd3b7c0291c40f97bba0cd818a10627fb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl
+mirror: doc/06_spec/03_system/check/cpu_simd_engine2d_simple_bin_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/cpu_simd_engine2d_simple_bin_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/cpu_simd_engine2d_simple_bin_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'auto selects only self hosted Simple launchers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl:140:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects explicit Rust seed before copying canonical Engine2D evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl:158:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records independent x86 arm and riscv matrix rows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

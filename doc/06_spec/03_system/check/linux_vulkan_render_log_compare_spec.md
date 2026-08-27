@@ -24,7 +24,7 @@ Validates the Linux-first normalized render-log gate for Simple, Chrome, and Ele
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/linux_vulkan_render_log_compare_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -185,6 +185,11 @@ this row with `macos_metal_render_log_compare_*` and
 
 #### rejects matching magic-only RenderDoc fixture evidence
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- rejects matching magic-only RenderDoc fixture evidence
 - Create matching pixel fixtures and magic-only RenderDoc evidence
    - Expected: code equals `1`
 - Read normalized rejection evidence and source logs
@@ -193,10 +198,12 @@ this row with `macos_metal_render_log_compare_*` and
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 68 lines folded for reproduction.
+Runnable source: 74 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects matching magic-only RenderDoc fixture evidence")
 step("Create matching pixel fixtures and magic-only RenderDoc evidence")
 val command = "rm -rf build/test-linux-vulkan-render-log-pass && mkdir -p build/test-linux-vulkan-render-log-pass/rdoc/simple build/test-linux-vulkan-render-log-pass/rdoc/html build/test-linux-vulkan-render-log-pass/rdoc/electron && cat > build/test-linux-vulkan-render-log-pass/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -275,6 +282,7 @@ expect(electron_log).to_contain("simple_render_log_artifact_magic=RDOC")
 
 #### fails closed when Electron Vulkan backing is not proven
 
+- fails closed when Electron Vulkan backing is not proven
 - Create fail fixtures with Electron browser backing disabled
    - Expected: code equals `0`
 - Read fail-closed evidence
@@ -283,10 +291,12 @@ expect(electron_log).to_contain("simple_render_log_artifact_magic=RDOC")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails closed when Electron Vulkan backing is not proven")
 step("Create fail fixtures with Electron browser backing disabled")
 val command = "rm -rf build/test-linux-vulkan-render-log-fail && mkdir -p build/test-linux-vulkan-render-log-fail && cat > build/test-linux-vulkan-render-log-fail/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -332,6 +342,7 @@ expect(evidence).to_contain("browser-backing-fail")
 
 #### uses focused browser backing evidence with direct-run pixel evidence
 
+- uses focused browser backing evidence with direct-run pixel evidence
 - Create direct-run pixel evidence and a separate focused browser-backing env
    - Expected: code equals `0`
 - Assert the Linux compare reason uses focused backing statuses
@@ -342,10 +353,12 @@ expect(evidence).to_contain("browser-backing-fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses focused browser backing evidence with direct-run pixel evidence")
 step("Create direct-run pixel evidence and a separate focused browser-backing env")
 val command = "rm -rf build/test-linux-vulkan-render-log-focused-backing && mkdir -p build/test-linux-vulkan-render-log-focused-backing && cat > build/test-linux-vulkan-render-log-focused-backing/run.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -385,6 +398,7 @@ expect(evidence.contains("chrome-browser-backing-fail")).to_equal(false)
 
 #### prefers current main browser-backing evidence over stale focused evidence
 
+- prefers current main browser-backing evidence over stale focused evidence
 - Create a current main browser-backing env and a stale separate focused env
    - Expected: code equals `0`
 - Assert the current main browser-backing env wins over stale focused evidence
@@ -395,10 +409,12 @@ expect(evidence.contains("chrome-browser-backing-fail")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("prefers current main browser-backing evidence over stale focused evidence")
 step("Create a current main browser-backing env and a stale separate focused env")
 val command = "rm -rf build/test-linux-vulkan-render-log-main-browser-backing && mkdir -p build/test-linux-vulkan-render-log-main-browser-backing && cat > build/test-linux-vulkan-render-log-main-browser-backing/main.env <<'EOF'\n" +
     "gui_web_2d_vulkan_mode=--browser-backing\n" +
@@ -448,6 +464,7 @@ expect(evidence.contains("browser-backing-fail")).to_equal(false)
 
 #### rejects Linux Vulkan pairwise rows without comparable nonblank ARGB viewports
 
+- rejects Linux Vulkan pairwise rows without comparable nonblank ARGB viewports
 - Create pairwise pass evidence with blank Chrome pixels and a mismatched Electron viewport
    - Expected: code equals `0`
 - Assert the Linux gate rejects blank and mismatched ARGB evidence
@@ -456,10 +473,12 @@ expect(evidence.contains("browser-backing-fail")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects Linux Vulkan pairwise rows without comparable nonblank ARGB viewports")
 step("Create pairwise pass evidence with blank Chrome pixels and a mismatched Electron viewport")
 val command = "rm -rf build/test-linux-vulkan-render-log-argb-geometry && mkdir -p build/test-linux-vulkan-render-log-argb-geometry && cat > build/test-linux-vulkan-render-log-argb-geometry/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -506,6 +525,7 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 
 #### preserves RenderDoc failure reasons in Linux source logs
 
+- preserves RenderDoc failure reasons in Linux source logs
 - Create passing pixel evidence with a Chrome RenderDoc crash reason
    - Expected: code equals `0`
 - Assert Chrome RenderDoc failure fails the rollup and is normalized
@@ -514,10 +534,12 @@ expect(chrome_log).to_contain("simple_render_log_nonblank_status=fail")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("preserves RenderDoc failure reasons in Linux source logs")
 step("Create passing pixel evidence with a Chrome RenderDoc crash reason")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-reason && mkdir -p build/test-linux-vulkan-render-log-rdoc-reason/rdoc/simple build/test-linux-vulkan-render-log-rdoc-reason/rdoc/html build/test-linux-vulkan-render-log-rdoc-reason/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-reason/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -575,6 +597,7 @@ expect(chrome_log).to_contain("simple_render_log_reason=chromium-gpu-process-cra
 
 #### allows diagnostic partial logs only when RenderDoc strictness is disabled
 
+- allows diagnostic partial logs only when RenderDoc strictness is disabled
 - Create passing pixel evidence with a Chrome RenderDoc failure and disable strict RenderDoc
    - Expected: code equals `0`
 - Assert diagnostic mode preserves the failed RenderDoc row without failing compare
@@ -583,10 +606,12 @@ expect(chrome_log).to_contain("simple_render_log_reason=chromium-gpu-process-cra
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows diagnostic partial logs only when RenderDoc strictness is disabled")
 step("Create passing pixel evidence with a Chrome RenderDoc failure and disable strict RenderDoc")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-diagnostic && mkdir -p build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/simple build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/html build/test-linux-vulkan-render-log-rdoc-diagnostic/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-diagnostic/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -637,6 +662,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_st
 
 #### rejects RenderDoc pass claims when the referenced capture bytes are not RDOC
 
+- rejects RenderDoc pass claims when the referenced capture bytes are not RDOC
 - Create passing pixel evidence with a spoofed Chrome RenderDoc artifact
    - Expected: code equals `0`
 - Assert claimed RenderDoc pass rows are checked against actual artifact magic
@@ -645,10 +671,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_st
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects RenderDoc pass claims when the referenced capture bytes are not RDOC")
 step("Create passing pixel evidence with a spoofed Chrome RenderDoc artifact")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-spoof && mkdir -p build/test-linux-vulkan-render-log-rdoc-spoof/rdoc/simple build/test-linux-vulkan-render-log-rdoc-spoof/rdoc/html build/test-linux-vulkan-render-log-rdoc-spoof/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-spoof/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -704,6 +732,7 @@ expect(chrome_log).to_contain("simple_render_log_original_native_log_format=rend
 
 #### rejects symlinked RenderDoc capture artifacts
 
+- rejects symlinked RenderDoc capture artifacts
 - Create passing pixel evidence with a symlinked Chrome RenderDoc artifact
    - Expected: code equals `0`
 - Assert symlinked RenderDoc artifacts cannot satisfy strict native capture proof
@@ -712,10 +741,12 @@ expect(chrome_log).to_contain("simple_render_log_original_native_log_format=rend
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects symlinked RenderDoc capture artifacts")
 step("Create passing pixel evidence with a symlinked Chrome RenderDoc artifact")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-symlink build/test-linux-vulkan-render-log-rdoc-symlink-external && mkdir -p build/test-linux-vulkan-render-log-rdoc-symlink/rdoc/simple build/test-linux-vulkan-render-log-rdoc-symlink/rdoc/html build/test-linux-vulkan-render-log-rdoc-symlink/rdoc/electron build/test-linux-vulkan-render-log-rdoc-symlink-external && cat > build/test-linux-vulkan-render-log-rdoc-symlink/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -769,6 +800,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 
 #### rejects hardlinked RenderDoc capture artifacts
 
+- rejects hardlinked RenderDoc capture artifacts
 - Create passing pixel evidence with a hardlinked Chrome RenderDoc artifact
    - Expected: code equals `0`
 - Assert hardlinked RenderDoc artifacts cannot satisfy strict native capture proof
@@ -777,10 +809,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 43 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects hardlinked RenderDoc capture artifacts")
 step("Create passing pixel evidence with a hardlinked Chrome RenderDoc artifact")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-hardlink && mkdir -p build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/simple build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/html build/test-linux-vulkan-render-log-rdoc-hardlink/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-hardlink/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -834,6 +868,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 
 #### resolves bare relative RenderDoc artifacts beside the evidence env
 
+- resolves bare relative RenderDoc artifacts beside the evidence env
 - Create a stale working-directory RDOC and a bare relative Chrome artifact row
    - Expected: code equals `0`
 - Assert the stale repo-root RDOC file is ignored
@@ -842,10 +877,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves bare relative RenderDoc artifacts beside the evidence env")
 step("Create a stale working-directory RDOC and a bare relative Chrome artifact row")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-relative && mkdir -p build/test-linux-vulkan-render-log-rdoc-relative/rdoc/simple build/test-linux-vulkan-render-log-rdoc-relative/rdoc/html build/test-linux-vulkan-render-log-rdoc-relative/rdoc/electron && printf 'RDOC stale repo-root capture\\n' > chrome.rdc && cat > build/test-linux-vulkan-render-log-rdoc-relative/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -897,6 +934,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 
 #### reports missing RenderDoc source envs and artifacts in top-level evidence
 
+- reports missing RenderDoc source envs and artifacts in top-level evidence
 - Create passing pixel evidence while omitting the Electron RenderDoc env
    - Expected: code equals `0`
 - Assert missing Electron RenderDoc source is visible without opening side logs
@@ -905,10 +943,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_chrome_ar
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports missing RenderDoc source envs and artifacts in top-level evidence")
 step("Create passing pixel evidence while omitting the Electron RenderDoc env")
 val command = "rm -rf build/test-linux-vulkan-render-log-rdoc-missing-source && mkdir -p build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/simple build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/html build/test-linux-vulkan-render-log-rdoc-missing-source/rdoc/electron && cat > build/test-linux-vulkan-render-log-rdoc-missing-source/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -966,6 +1006,7 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_host_electron_tool=
 
 #### keeps browser-backed ARGB parity separate from missing Chrome and Electron RenderDoc artifacts
 
+- keeps browser-backed ARGB parity separate from missing Chrome and Electron RenderDoc artifacts
 - Create live-shaped evidence with browser backing and pairwise ARGB pass but missing browser RDOC captures
    - Expected: code equals `0`
 - Assert browser-backed ARGB evidence remains pass but strict RDOC artifacts still block completion
@@ -974,10 +1015,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_host_electron_tool=
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 47 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps browser-backed ARGB parity separate from missing Chrome and Electron RenderDoc artifacts")
 step("Create live-shaped evidence with browser backing and pairwise ARGB pass but missing browser RDOC captures")
 val command = "rm -rf build/test-linux-vulkan-render-log-browser-rdoc-missing && mkdir -p build/test-linux-vulkan-render-log-browser-rdoc-missing/rdoc/simple build/test-linux-vulkan-render-log-browser-rdoc-missing/rdoc/html build/test-linux-vulkan-render-log-browser-rdoc-missing/rdoc/electron && cat > build/test-linux-vulkan-render-log-browser-rdoc-missing/gui.env <<'EOF'\n" +
     "gui_web_2d_vulkan_simple_status=pass\n" +
@@ -1035,13 +1078,74 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 
 #### rejects missing or mismatched ARGB checksums and an explicit Simple failure
 
-- Create one complete diagnostic Vulkan comparison fixture.
-- Remove one checksum, mismatch another, and flip the explicit Simple status.
-- Confirm the checksum/source and Simple Vulkan gates fail with their exact
-  structured blockers.
+- rejects missing or mismatched ARGB checksums and an explicit Simple failure
+- Create one complete diagnostic Vulkan comparison fixture
+   - Expected: code equals `0`
+- Verify checksum and explicit-status mutations fail at their owning gates
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects missing or mismatched ARGB checksums and an explicit Simple failure")
+step("Create one complete diagnostic Vulkan comparison fixture")
+val command = "rm -rf build/test-linux-vulkan-render-log-truth && mkdir -p build/test-linux-vulkan-render-log-truth && cat > build/test-linux-vulkan-render-log-truth/base.env <<'EOF'\n" +
+    "gui_web_2d_vulkan_simple_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_status=pass\n" +
+    "gui_web_2d_vulkan_simple_backend_name=vulkan\n" +
+    "gui_web_2d_vulkan_simple_argb_backend=vulkan\n" +
+    "gui_web_2d_vulkan_electron_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_browser_backing_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_status=pass\n" +
+    "gui_web_2d_vulkan_pixel_comparison_mode=pairwise-argb-diff\n" +
+    "gui_web_2d_vulkan_electron_chrome_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_electron_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_chrome_simple_pairwise_diff_status=pass\n" +
+    "gui_web_2d_vulkan_simple_argb_width=64\n" +
+    "gui_web_2d_vulkan_simple_argb_height=32\n" +
+    "gui_web_2d_vulkan_simple_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_chrome_argb_width=64\n" +
+    "gui_web_2d_vulkan_chrome_argb_height=32\n" +
+    "gui_web_2d_vulkan_chrome_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_electron_argb_width=64\n" +
+    "gui_web_2d_vulkan_electron_argb_height=32\n" +
+    "gui_web_2d_vulkan_electron_argb_nonblank_pixel_count=42\n" +
+    "gui_web_2d_vulkan_simple_argb_checksum=4242\n" +
+    "gui_web_2d_vulkan_chrome_argb_checksum=4242\n" +
+    "gui_web_2d_vulkan_electron_argb_checksum=4242\n" +
+    "EOF\n" +
+    "grep -v '^gui_web_2d_vulkan_simple_argb_checksum=' build/test-linux-vulkan-render-log-truth/base.env > build/test-linux-vulkan-render-log-truth/missing.env\n" +
+    "sed 's/gui_web_2d_vulkan_chrome_argb_checksum=4242/gui_web_2d_vulkan_chrome_argb_checksum=4243/' build/test-linux-vulkan-render-log-truth/base.env > build/test-linux-vulkan-render-log-truth/mismatch.env\n" +
+    "sed 's/gui_web_2d_vulkan_simple_status=pass/gui_web_2d_vulkan_simple_status=fail/' build/test-linux-vulkan-render-log-truth/base.env > build/test-linux-vulkan-render-log-truth/simple-fail.env\n" +
+    "for case_name in missing mismatch simple-fail; do BUILD_DIR=build/test-linux-vulkan-render-log-truth/$case_name GUI_WEB_2D_VULKAN_ENV=build/test-linux-vulkan-render-log-truth/$case_name.env GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/test-linux-vulkan-render-log-truth/$case_name.env LINUX_VULKAN_RENDER_LOG_REQUIRE_RDOC=0 sh scripts/check/check-linux-vulkan-render-log-compare.shs >/dev/null 2>&1 || true; done"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+
+step("Verify checksum and explicit-status mutations fail at their owning gates")
+val missing = file_read("build/test-linux-vulkan-render-log-truth/missing/evidence.env")
+expect(missing).to_contain("linux_vulkan_render_log_compare_argb_checksum_reason=simple-argb-checksum-missing")
+expect(missing).to_contain("linux_vulkan_render_log_compare_argb_source_gate_status=fail")
+expect(missing).to_contain("linux_vulkan_render_log_compare_blocked_gates=argb-source-evidence")
+val mismatch = file_read("build/test-linux-vulkan-render-log-truth/mismatch/evidence.env")
+expect(mismatch).to_contain("linux_vulkan_render_log_compare_argb_checksum_reason=argb-checksum-mismatch")
+expect(mismatch).to_contain("linux_vulkan_render_log_compare_argb_source_gate_status=fail")
+val simple_fail = file_read("build/test-linux-vulkan-render-log-truth/simple-fail/evidence.env")
+expect(simple_fail).to_contain("linux_vulkan_render_log_compare_reason=simple-vulkan-status-fail")
+expect(simple_fail).to_contain("linux_vulkan_render_log_compare_simple_vulkan_gate_status=fail")
+expect(simple_fail).to_contain("linux_vulkan_render_log_compare_blocked_gates=simple-vulkan-backend")
+```
+
+</details>
 
 #### keeps setup and RenderDoc inputs on focused current capture evidence
 
+- keeps setup and RenderDoc inputs on focused current capture evidence
 - Check the Linux render-log wrapper syntax
    - Expected: code equals `0`
 - Read the Linux render-log wrapper defaults
@@ -1051,10 +1155,12 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps setup and RenderDoc inputs on focused current capture evidence")
 step("Check the Linux render-log wrapper syntax")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-n", "scripts/check/check-linux-vulkan-render-log-compare.shs"])
 expect(code).to_equal(0)
@@ -1091,3 +1197,54 @@ expect(script).to_contain("build/renderdoc/electron-implicit-layer-default-autoc
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `61e40dfa8f918d9ee379d5cb043f844d53bafdb98f90f1f587aadc46e2492907`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `61e40dfa8f918d9ee379d5cb043f844d53bafdb98f90f1f587aadc46e2492907`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `61e40dfa8f918d9ee379d5cb043f844d53bafdb98f90f1f587aadc46e2492907`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/check/linux_vulkan_render_log_compare_spec.spl
+mirror: doc/06_spec/03_system/check/linux_vulkan_render_log_compare_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/linux_vulkan_render_log_compare_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/linux_vulkan_render_log_compare_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/linux_vulkan_render_log_compare_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 15 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/linux_vulkan_render_log_compare_spec.spl:247:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed when Electron Vulkan backing is not proven' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/linux_vulkan_render_log_compare_spec.spl:290:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses focused browser backing evidence with direct-run pixel evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/linux_vulkan_render_log_compare_spec.spl:327:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prefers current main browser-backing evidence over stale focused evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

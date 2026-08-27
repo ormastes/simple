@@ -1,30 +1,6 @@
 # Kairos Like Simple Mcp Llm Dashboard Specification
 
-> <details>
-
-<!-- sdn-diagram:id=kairos_like_simple_mcp_llm_dashboard_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=kairos_like_simple_mcp_llm_dashboard_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-kairos_like_simple_mcp_llm_dashboard_spec -> std
-kairos_like_simple_mcp_llm_dashboard_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=kairos_like_simple_mcp_llm_dashboard_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering KAIROS-like simple mcp and llm dashboard, REQ-KAIROS-001: session identity and lifecycle, REQ-KAIROS-002 and REQ-KAIROS-003: ticks and signals, REQ-KAIROS-004: child-agent delegation, REQ-KAIROS-005 and REQ-KAIROS-006: briefs and notifications, REQ-KAIROS-007 and REQ-KAIROS-008: standalone modes, REQ-KAIROS-009 and REQ-KAIROS-010: combined live mode, REQ-KAIROS-011 and REQ-KAIROS-012: recovery and bounded retention, absence-safe web route contract.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,53 +18,23 @@ kairos_like_simple_mcp_llm_dashboard_spec -> app
 ### REQ-KAIROS-001: session identity and lifecycle
 
 #### should create and persist an assistant session with stable identity
-
-- create session
-   - Expected: session.session_id equals `assistant-kairos-identity`
-   - Expected: session.objective equals `coordinate agents`
-- fail
-   - Expected: assistant_store_list_sessions(root).len() equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 11 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val root = test_root("identity")
-create_session(root, "assistant-kairos-identity")
-
-val loaded = assistant_store_load_session(root, "assistant-kairos-identity")
-match loaded:
-    case Some(session):
-        expect(session.session_id).to_equal("assistant-kairos-identity")
-        expect(session.objective).to_equal("coordinate agents")
-    case nil:
-        fail("persisted assistant session should load")
-expect(assistant_store_list_sessions(root).len()).to_equal(1)
-```
-
-</details>
-
 #### should allow a paused session to resume with preserved state
 
-- create session
-- assistant store update state
+- should allow a paused session to resume with preserved state
    - Expected: session.state equals `running`
    - Expected: session.last_signal equals `resume`
    - Expected: session.event_count equals `2`
-- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should allow a paused session to resume with preserved state")
 val root = test_root("resume")
 create_session(root, "assistant-kairos-resume")
 assistant_store_update_state(root, "assistant-kairos-resume", "paused", "pause")
@@ -109,13 +55,21 @@ match resumed:
 
 #### should record a periodic tick wake reason in the session timeline
 
+- should record a periodic tick wake reason in the session timeline
+   - Expected: timeline[0].kind equals `tick`
+   - Expected: timeline[0].signal equals `tick`
+   - Expected: timeline[0].message equals `periodic wake`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should record a periodic tick wake reason in the session timeline")
 val root = populated_root("tick", "assistant-kairos-tick")
 val timeline = assistant_store_collect_timeline(root, "assistant-kairos-tick", 10, 0)
 
@@ -128,13 +82,21 @@ expect(timeline[0].message).to_equal("periodic wake")
 
 #### should record an external signal wakeup with source metadata
 
+- should record an external signal wakeup with source metadata
+   - Expected: timeline[1].kind equals `signal_event`
+   - Expected: timeline[1].signal equals `operator`
+   - Expected: timeline[1].source equals `assistant`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should record an external signal wakeup with source metadata")
 val root = populated_root("signal", "assistant-kairos-signal")
 val timeline = assistant_store_collect_timeline(root, "assistant-kairos-signal", 10, 0)
 
@@ -149,16 +111,22 @@ expect(timeline[1].source).to_equal("assistant")
 
 #### should track a child task with parent linkage and terminal summary
 
-- fail
+- should track a child task with parent linkage and terminal summary
+   - Expected: session.children[0] equals `assistant-child-1`
+   - Expected: session.child_tasks[0].session_id equals `assistant-kairos-child`
+   - Expected: session.child_tasks[0].status equals `completed`
+   - Expected: session.child_tasks[0].result_summary equals `child completed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should track a child task with parent linkage and terminal summary")
 val root = populated_root("child", "assistant-kairos-child")
 val loaded = assistant_store_load_session(root, "assistant-kairos-child")
 
@@ -178,16 +146,18 @@ match loaded:
 
 #### should produce a compact brief from recent session activity
 
-- expect internal absence hidden
+- should produce a compact brief from recent session activity
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should produce a compact brief from recent session activity")
 val root = populated_root("brief", "assistant-kairos-brief")
 val brief = assistant_store_session_brief(root, "assistant-kairos-brief")
 
@@ -201,13 +171,21 @@ expect_internal_absence_hidden(brief)
 
 #### should preserve notification decision and delivery status
 
+- should preserve notification decision and delivery status
+   - Expected: notifications.len() equals `3`
+   - Expected: notifications[2].kind equals `child_task`
+   - Expected: notifications[2].signal equals `completed`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve notification decision and delivery status")
 val root = populated_root("notify", "assistant-kairos-notify")
 val notifications = assistant_store_collect_notifications(root, "assistant-kairos-notify", 10, 0)
 
@@ -222,16 +200,21 @@ expect(notifications[2].signal).to_equal("completed")
 
 #### should support standalone simple mcp control without the dashboard
 
-- fail
+- should support standalone simple mcp control without the dashboard
+   - Expected: session.mode equals `proactive`
+   - Expected: session.policy equals `bounded`
+   - Expected: session.event_count equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should support standalone simple mcp control without the dashboard")
 val root = populated_root("standalone-mcp", "assistant-kairos-mcp")
 val loaded = assistant_store_load_session(root, "assistant-kairos-mcp")
 
@@ -248,13 +231,21 @@ match loaded:
 
 #### should support standalone dashboard replay without live mcp
 
+- should support standalone dashboard replay without live mcp
+   - Expected: snapshot.mode equals `replay`
+   - Expected: view.read_only is true
+   - Expected: view.primary_action.route_target equals `blocked`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should support standalone dashboard replay without live mcp")
 val root = populated_root("standalone-dashboard", "assistant-kairos-replay")
 val snapshot = selected_snapshot(root, "assistant-kairos-replay")
 val view = assistant_dashboard_live_view_from_snapshot(snapshot, assistant_bridge_default_policy(), 2_000_000, 1_000_000, false)
@@ -270,13 +261,21 @@ expect(view.primary_action.route_target).to_equal("blocked")
 
 #### should attach dashboard live state without moving source of truth
 
+- should attach dashboard live state without moving source of truth
+   - Expected: view.mode equals `live`
+   - Expected: view.live_controls_enabled is true
+   - Expected: view.primary_action.route_target equals `assistant_core`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should attach dashboard live state without moving source of truth")
 val root = populated_root("live", "assistant-kairos-live")
 val snapshot = selected_snapshot(root, "assistant-kairos-live")
 val view = assistant_dashboard_live_view_from_snapshot(snapshot, assistant_bridge_default_policy(), 2_000_100, 2_000_000, true)
@@ -290,16 +289,18 @@ expect(view.primary_action.route_target).to_equal("assistant_core")
 
 #### should expose operator-visible task tree and recent events
 
-- expect internal absence hidden
+- should expose operator-visible task tree and recent events
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should expose operator-visible task tree and recent events")
 val root = populated_root("visible", "assistant-kairos-visible")
 val snapshot = selected_snapshot(root, "assistant-kairos-visible")
 val live_lines = assistant_dashboard_render_live_view(assistant_dashboard_live_view_from_snapshot(snapshot, assistant_bridge_default_policy(), 2_000_100, 2_000_000, true))
@@ -316,8 +317,7 @@ expect_internal_absence_hidden((live_lines + digest_lines).join("\n"))
 
 #### should preserve structured failure evidence after a child-task crash
 
-- create session
-- append event
+- should preserve structured failure evidence after a child-task crash
    - Expected: view.failure_state equals `error`
    - Expected: view.failure_detail equals `child crashed`
    - Expected: view.failure_count equals `1`
@@ -326,10 +326,12 @@ expect_internal_absence_hidden((live_lines + digest_lines).join("\n"))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve structured failure evidence after a child-task crash")
 val root = test_root("failure")
 create_session(root, "assistant-kairos-failure")
 append_event(root, "assistant-kairos-failure", "error", "child crashed", "failed", 1000)
@@ -345,22 +347,22 @@ expect(view.failure_count).to_equal(1)
 
 #### should apply bounded retention or coalescing under bursty signals
 
-- create session
-- append event
+- should apply bounded retention or coalescing under bursty signals
    - Expected: durable.status equals `pruned`
    - Expected: durable.dropped_timeline_count equals `3`
    - Expected: projection.backpressure_state equals `backpressure`
    - Expected: projection.coalesced_signal_count equals `1`
-- expect internal absence hidden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should apply bounded retention or coalescing under bursty signals")
 val root = test_root("retention")
 create_session(root, "assistant-kairos-retention")
 var i: i64 = 0
@@ -391,16 +393,18 @@ expect_internal_absence_hidden(projection.notice)
 
 #### should render authenticated /agents without internal absence markers
 
-- expect internal absence hidden
+- should render authenticated /agents without internal absence markers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render authenticated /agents without internal absence markers")
 val server = DashboardServer.new_with_agent_dir(3099, ".build/llm_dashboard/agent-system-empty")
 val response = server.route_http("GET", "/agents", "", "sid")
 
@@ -418,12 +422,12 @@ expect_internal_absence_hidden(response)
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering KAIROS-like simple mcp and llm dashboard, REQ-KAIROS-001: session identity and lifecycle, REQ-KAIROS-002 and REQ-KAIROS-003: ticks and signals, REQ-KAIROS-004: child-agent delegation, REQ-KAIROS-005 and REQ-KAIROS-006: briefs and notifications, REQ-KAIROS-007 and REQ-KAIROS-008: standalone modes, REQ-KAIROS-009 and REQ-KAIROS-010: combined live mode, REQ-KAIROS-011 and REQ-KAIROS-012: recovery and bounded retention, absence-safe web route contract.
 - KAIROS-like simple mcp and llm dashboard
 - REQ-KAIROS-001: session identity and lifecycle
 - REQ-KAIROS-002 and REQ-KAIROS-003: ticks and signals
@@ -446,3 +450,96 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-KAIROS-001`
+- `REQ-KAIROS-002`
+- `REQ-KAIROS-003`
+- `REQ-KAIROS-004`
+- `REQ-KAIROS-005`
+- `REQ-KAIROS-006`
+- `REQ-KAIROS-007`
+- `REQ-KAIROS-008`
+- `REQ-KAIROS-009`
+- `REQ-KAIROS-010`
+- `REQ-KAIROS-011`
+- `REQ-KAIROS-012`
+- `REQ-KAIROS-003:`
+- `REQ-KAIROS-006:`
+- `REQ-KAIROS-008:`
+- `REQ-KAIROS-010:`
+- `REQ-KAIROS-012:`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7411c350bbe746256c15f6670c2840e93c076cde4f1953defb5b223bee6e43a9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7411c350bbe746256c15f6670c2840e93c076cde4f1953defb5b223bee6e43a9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7411c350bbe746256c15f6670c2840e93c076cde4f1953defb5b223bee6e43a9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl
+mirror: doc/06_spec/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.md (current)
+findings: 14 blockers: 1
+  narrative=100 structure=60 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=74; blocker cap makes effective=49
+doc/06_spec/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 12 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:86:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should create and persist an assistant session with stable identity' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:86:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should create and persist an assistant session with stable identity' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:114:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should allow a paused session to resume with preserved state' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:114:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should allow a paused session to resume with preserved state' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:131:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should record a periodic tick wake reason in the session timeline' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should record a periodic tick wake reason in the session timeline' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:141:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should record an external signal wakeup with source metadata' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:141:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should record an external signal wakeup with source metadata' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:152:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should track a child task with parent linkage and terminal summary' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/compiler/feature/kairos_like_simple_mcp_llm_dashboard_spec.spl:168:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should produce a compact brief from recent session activity' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

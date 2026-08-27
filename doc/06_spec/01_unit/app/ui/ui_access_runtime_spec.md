@@ -1,36 +1,10 @@
 # Ui Access Runtime Specification
 
-> 1. rt env set
-
-<!-- sdn-diagram:id=ui_access_runtime_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ui_access_runtime_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ui_access_runtime_spec -> std
-ui_access_runtime_spec -> app
-ui_access_runtime_spec -> common
-ui_access_runtime_spec -> nogc_sync_mut
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ui_access_runtime_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering ui_access runtime attachment.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -43,16 +17,22 @@ ui_access_runtime_spec -> nogc_sync_mut
 
 #### builds a deterministic default runtime path
 
-1. rt env set
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds a deterministic default runtime path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds a deterministic default runtime path")
 rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
 val path = ui_access_store_runtime_path("examples/06_io/ui/hello_web.ui.sdn", "web")
 expect(path).to_contain("ui_access")
@@ -64,18 +44,19 @@ expect(path).to_end_with(".sqlite")
 
 #### prefers explicit runtime config over the environment
 
-1. rt env set
+- prefers explicit runtime config over the environment
    - Expected: path equals `/tmp/ui_access_config_override.sqlite`
-2. rt env set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("prefers explicit runtime config over the environment")
 rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "/tmp/ui_access_env_override.sqlite")
 val path = ui_access_store_runtime_path_with_override(
     "/tmp/ui_access_config_override.sqlite",
@@ -90,22 +71,54 @@ rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", "")
 
 #### auto-attaches a store for AsyncWebServer startup when runtime path is configured
 
-1. rt env set
-2. file delete
-   - Expected: file_exists(db_path) is true
-3. rt env set
-4. file delete
+- auto-attaches a store for AsyncWebServer startup when runtime path is configured
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("auto-attaches a store for AsyncWebServer startup when runtime path is configured")
 val db_path = "/tmp/ui_access_async_web.sqlite"
 rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", db_path)
+if file_exists(db_path):
+    file_delete(db_path)
+```
+
+</details>
+
+#### attaches the explicit store for the synchronous WebServer path
+
+- attaches the explicit store for the synchronous WebServer path
+   - Expected: file_exists(db_path) is true
+   - Expected: file_exists(db_path) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 23 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("attaches the explicit store for the synchronous WebServer path")
+val db_path = "/tmp/ui_access_sync_web.sqlite"
+if file_exists(db_path):
+    file_delete(db_path)
+val server = WebServer.new_with_access_store_path(
+    "test/system/ui_browser/fixtures/hello.ui.sdn",
+    3014,
+    false,
+    db_path
+)?
+val nodes = server.session.access_search_nodes("", "", "", 20)?
+expect(nodes.len()).to_be_greater_than(0)
+expect(file_exists(db_path)).to_equal(true)
 if file_exists(db_path):
     file_delete(db_path)
 val server = AsyncWebServer.new("test/system/ui_browser/fixtures/hello.ui.sdn", 3011)?
@@ -121,24 +134,24 @@ if file_exists(db_path):
 
 #### reuses persisted web history across server restarts with the same DB path
 
-1. file delete
-2. first session dispatch
+- reuses persisted web history across server restarts with the same DB path
    - Expected: first_events[0].surface_id equals `main`
    - Expected: first_events[0].event_kind equals `action`
    - Expected: first_events[0].payload equals `submit`
    - Expected: restarted_events[0].surface_id equals `main`
    - Expected: restarted_events[0].event_kind equals `action`
    - Expected: restarted_events[0].payload equals `submit`
-3. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reuses persisted web history across server restarts with the same DB path")
 val db_path = "/tmp/ui_access_async_web_restart.sqlite"
 if file_exists(db_path):
     file_delete(db_path)
@@ -171,20 +184,19 @@ if file_exists(db_path):
 
 #### auto-attaches a store for TuiWebServer startup when runtime path is configured
 
-1. rt env set
-2. file delete
+- auto-attaches a store for TuiWebServer startup when runtime path is configured
    - Expected: file_exists(db_path) is true
-3. rt env set
-4. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("auto-attaches a store for TuiWebServer startup when runtime path is configured")
 val db_path = "/tmp/ui_access_tui_web.sqlite"
 rt_env_set("SIMPLE_UI_ACCESS_DB_PATH", db_path)
 if file_exists(db_path):
@@ -202,21 +214,21 @@ if file_exists(db_path):
 
 #### auto-attaches a store for BrowserApp when an explicit runtime path is configured
 
-1. file delete
-2. app session dispatch
+- auto-attaches a store for BrowserApp when an explicit runtime path is configured
    - Expected: events[0].surface_id equals `main`
    - Expected: events[0].event_kind equals `action`
    - Expected: file_exists(db_path) is true
-3. file delete
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("auto-attaches a store for BrowserApp when an explicit runtime path is configured")
 val db_path = "/tmp/ui_access_browser.sqlite"
 if file_exists(db_path):
     file_delete(db_path)
@@ -245,23 +257,71 @@ if file_exists(db_path):
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/ui_access_runtime_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering ui_access runtime attachment.
 - ui_access runtime attachment
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7aa359f1dbc77edbd43bddb1711fa737c51e6cca0bf462ba727e5104d59659e4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7aa359f1dbc77edbd43bddb1711fa737c51e6cca0bf462ba727e5104d59659e4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7aa359f1dbc77edbd43bddb1711fa737c51e6cca0bf462ba727e5104d59659e4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/ui_access_runtime_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/ui_access_runtime_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/ui_access_runtime_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/ui_access_runtime_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/ui_access_runtime_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds a deterministic default runtime path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ui_access_runtime_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prefers explicit runtime config over the environment' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ui_access_runtime_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'auto-attaches a store for AsyncWebServer startup when runtime path is configured' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

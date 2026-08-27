@@ -1,30 +1,6 @@
 # Spawn Binary Argv Specification
 
-> 1.  clear synthetic vfs for test
-
-<!-- sdn-diagram:id=spawn_binary_argv_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=spawn_binary_argv_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-spawn_binary_argv_spec -> std
-spawn_binary_argv_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=spawn_binary_argv_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering spawn_binary argv/envp.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,39 +17,24 @@ spawn_binary_argv_spec -> os
 
 #### builds a larger initial user stack when argv and envp are provided
 
-1.  clear synthetic vfs for test
-2.  set synthetic vfs file for test
-3. var default scheduler = Scheduler new
-4. SyscallArgs
-5. IpcManager new
-6. KernelLog new
-   - Expected: default_tcb == nil is false
-   - Expected: argv_alloc == 0 is false
-   - Expected: envp_alloc == 0 is false
-7. rt ptr write i64
-8. rt ptr write i64
-9. rt ptr write i64
-10. rt ptr write i64
-11. rt ptr write i64
-12. var arg scheduler = Scheduler new
-13. SyscallArgs
-14. IpcManager new
-15. KernelLog new
-   - Expected: arg_tcb == nil is false
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- builds a larger initial user stack when argv and envp are provided
    - Expected: default_task.is_user is true
    - Expected: arg_task.is_user is true
-16. rt free
-17. rt free
-18.  clear synthetic vfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("builds a larger initial user stack when argv and envp are provided")
 val path = "/sys/apps/hello_world"
 _clear_synthetic_vfs_for_test()
 _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
@@ -87,12 +48,12 @@ val default_result = syscall_handler(
 )
 expect(default_result.value).to_be_greater_than(0)
 val default_tcb = default_scheduler.get_task(TaskId(id: default_result.value as u64))
-expect(default_tcb == nil).to_equal(false)
+expect(default_tcb).to_not_equal(nil)
 
 val argv_alloc = rt_alloc(24)
 val envp_alloc = rt_alloc(16)
-expect(argv_alloc == 0).to_equal(false)
-expect(envp_alloc == 0).to_equal(false)
+expect(argv_alloc).to_not_equal(0)
+expect(envp_alloc).to_not_equal(0)
 rt_ptr_write_i64(argv_alloc, 0, rt_string_data("hello"))
 rt_ptr_write_i64(argv_alloc, 8, rt_string_data("--flag"))
 rt_ptr_write_i64(argv_alloc, 16, 0)
@@ -108,7 +69,7 @@ val arg_result = syscall_handler(
 )
 expect(arg_result.value).to_be_greater_than(0)
 val arg_tcb = arg_scheduler.get_task(TaskId(id: arg_result.value as u64))
-expect(arg_tcb == nil).to_equal(false)
+expect(arg_tcb).to_not_equal(nil)
 
 if default_tcb != nil and arg_tcb != nil:
     val default_task = default_tcb
@@ -126,28 +87,20 @@ _clear_synthetic_vfs_for_test()
 
 #### rejects invalid argv and envp vector pointers
 
-1.  clear synthetic vfs for test
-2.  set synthetic vfs file for test
-3. var argv scheduler = Scheduler new
-4. SyscallArgs
-5. IpcManager new
-6. KernelLog new
+- rejects invalid argv and envp vector pointers
    - Expected: argv_result.value equals `-14`
-7. var envp scheduler = Scheduler new
-8. SyscallArgs
-9. IpcManager new
-10. KernelLog new
    - Expected: envp_result.value equals `-14`
-11.  clear synthetic vfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects invalid argv and envp vector pointers")
 val path = "/sys/apps/hello_world"
 _clear_synthetic_vfs_for_test()
 _set_synthetic_vfs_file_for_test(path, _make_x86_64_exec())
@@ -181,12 +134,12 @@ _clear_synthetic_vfs_for_test()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/ipc/spawn_binary_argv_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering spawn_binary argv/envp.
 - spawn_binary argv/envp
 
 ## Scenario Summary
@@ -201,3 +154,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0924f26531d377fb09791c261f9f421844d9e60a125851e4ab2b84e50d795972`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0924f26531d377fb09791c261f9f421844d9e60a125851e4ab2b84e50d795972`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0924f26531d377fb09791c261f9f421844d9e60a125851e4ab2b84e50d795972`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/os/kernel/ipc/spawn_binary_argv_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/ipc/spawn_binary_argv_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/ipc/spawn_binary_argv_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/ipc/spawn_binary_argv_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/ipc/spawn_binary_argv_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/ipc/spawn_binary_argv_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds a larger initial user stack when argv and envp are provided' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/ipc/spawn_binary_argv_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects invalid argv and envp vector pointers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
-# Environment Config Unit Tests
+# Env Specification
 
-> @cover src/lib/nogc_sync_mut/env/variables.spl 60%
-
-<!-- sdn-diagram:id=env_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=env_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-env_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=env_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Environment Variables, Platform Detection, Configuration Sources, Build Environment.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,23 +9,7 @@ env_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Environment Config Unit Tests
-
-@cover src/lib/nogc_sync_mut/env/variables.spl 60%
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #APP-ENV-001 |
-| Category | App \| Env |
-| Status | Implemented |
-| Source | `test/01_unit/app/env/env_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-@cover src/lib/nogc_sync_mut/env/variables.spl 60%
-@cover src/lib/nogc_sync_mut/env/platform.spl 40%
+# Env Specification
 
 ## Scenarios
 
@@ -56,13 +17,24 @@ env_spec
 
 #### HOME is set and non-empty
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- HOME is set and non-empty
+   - Expected: home != "" is true
+   - Expected: home.starts_with("/") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("HOME is set and non-empty")
 val home = env_val("HOME")
 expect(home != "").to_equal(true)
 expect(home.starts_with("/")).to_equal(true)
@@ -72,13 +44,20 @@ expect(home.starts_with("/")).to_equal(true)
 
 #### PATH is set and contains separator
 
+- PATH is set and contains separator
+   - Expected: path != "" is true
+   - Expected: path contains `":") or path`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("PATH is set and contains separator")
 val path = env_val("PATH")
 expect(path != "").to_equal(true)
 expect(path.contains(":") or path.contains(";")).to_equal(true)
@@ -88,13 +67,20 @@ expect(path.contains(":") or path.contains(";")).to_equal(true)
 
 #### USER is set
 
+- USER is set
+   - Expected: user != "" is true
+   - Expected: user.len() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("USER is set")
 val user = env_val("USER")
 expect(user != "").to_equal(true)
 expect(user.len() > 0).to_equal(true)
@@ -104,13 +90,19 @@ expect(user.len() > 0).to_equal(true)
 
 #### missing variable returns nil or empty
 
+- missing variable returns nil or empty
+   - Expected: is_empty is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("missing variable returns nil or empty")
 val missing = rt_env_get("__SIMPLE_TEST_NONEXISTENT_VAR_XYZ__")
 val is_empty = missing == nil or missing == ""
 expect(is_empty).to_equal(true)
@@ -120,18 +112,19 @@ expect(is_empty).to_equal(true)
 
 #### set and read back a variable
 
-1. rt env set
+- set and read back a variable
    - Expected: readback equals `hello42`
-2. rt env remove
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("set and read back a variable")
 rt_env_set("__SIMPLE_TEST_ENV_ROUND_TRIP__", "hello42")
 val readback = env_val("__SIMPLE_TEST_ENV_ROUND_TRIP__")
 expect(readback).to_equal("hello42")
@@ -142,18 +135,19 @@ rt_env_remove("__SIMPLE_TEST_ENV_ROUND_TRIP__")
 
 #### remove clears a variable
 
-1. rt env set
-2. rt env remove
+- remove clears a variable
    - Expected: gone is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("remove clears a variable")
 rt_env_set("__SIMPLE_TEST_ENV_REMOVE__", "present")
 rt_env_remove("__SIMPLE_TEST_ENV_REMOVE__")
 val after = rt_env_get("__SIMPLE_TEST_ENV_REMOVE__")
@@ -167,13 +161,20 @@ expect(gone).to_equal(true)
 
 #### uname returns a known OS
 
+- uname returns a known OS
+   - Expected: code equals `0`
+   - Expected: known is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("uname returns a known OS")
 val result = rt_process_run("/bin/sh", ["-c", "uname -s"])
 val os_name = result[0].trim()
 val code = result[2]
@@ -187,13 +188,20 @@ expect(known).to_equal(true)
 
 #### uname -m returns a known architecture
 
+- uname -m returns a known architecture
+   - Expected: code equals `0`
+   - Expected: arch.len() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("uname -m returns a known architecture")
 val result = rt_process_run("/bin/sh", ["-c", "uname -m"])
 val arch = result[0].trim()
 val code = result[2]
@@ -205,13 +213,20 @@ expect(arch.len() > 0).to_equal(true)
 
 #### PWD or working directory is accessible
 
+- PWD or working directory is accessible
+   - Expected: pwd != "" is true
+   - Expected: pwd.starts_with("/") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("PWD or working directory is accessible")
 val pwd = env_val("PWD")
 expect(pwd != "").to_equal(true)
 expect(pwd.starts_with("/")).to_equal(true)
@@ -223,18 +238,19 @@ expect(pwd.starts_with("/")).to_equal(true)
 
 #### env var set takes precedence over missing
 
-1. rt env set
+- env var set takes precedence over missing
    - Expected: value equals `from_env`
-2. rt env remove
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("env var set takes precedence over missing")
 rt_env_set("__SIMPLE_TEST_PRIORITY__", "from_env")
 val value = env_val("__SIMPLE_TEST_PRIORITY__")
 expect(value).to_equal("from_env")
@@ -245,13 +261,20 @@ rt_env_remove("__SIMPLE_TEST_PRIORITY__")
 
 #### missing env var falls back to default
 
+- missing env var falls back to default
+   - Expected: is_empty is true
+   - Expected: fallback equals `default_value`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("missing env var falls back to default")
 val raw = rt_env_get("__SIMPLE_TEST_MISSING_CONFIG__")
 val is_empty = raw == nil or raw == ""
 expect(is_empty).to_equal(true)
@@ -263,19 +286,19 @@ expect(fallback).to_equal("default_value")
 
 #### overwrite replaces previous value
 
-1. rt env set
-2. rt env set
+- overwrite replaces previous value
    - Expected: value equals `second`
-3. rt env remove
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("overwrite replaces previous value")
 rt_env_set("__SIMPLE_TEST_OVERWRITE__", "first")
 rt_env_set("__SIMPLE_TEST_OVERWRITE__", "second")
 val value = env_val("__SIMPLE_TEST_OVERWRITE__")
@@ -289,13 +312,19 @@ rt_env_remove("__SIMPLE_TEST_OVERWRITE__")
 
 #### SHELL is set on unix
 
+- SHELL is set on unix
+   - Expected: has_shell is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("SHELL is set on unix")
 val shell = env_val("SHELL")
 val has_shell = shell != ""
 expect(has_shell).to_equal(true)
@@ -305,13 +334,19 @@ expect(has_shell).to_equal(true)
 
 #### LANG or LC variables exist
 
+- LANG or LC variables exist
+   - Expected: has_locale is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("LANG or LC variables exist")
 val lang = env_val("LANG")
 val lc_all = env_val("LC_ALL")
 val has_locale = lang != "" or lc_all != ""
@@ -322,19 +357,43 @@ expect(has_locale).to_equal(true)
 
 #### TERM is set in interactive sessions
 
+- TERM is set in interactive sessions
+   - Expected: has_term is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("TERM is set in interactive sessions")
 val term = env_val("TERM")
 val has_term = term != ""
 expect(has_term).to_equal(true)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/env/env_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Environment Variables, Platform Detection, Configuration Sources, Build Environment.
+- Environment Variables
+- Platform Detection
+- Configuration Sources
+- Build Environment
 
 ## Scenario Summary
 
@@ -348,3 +407,54 @@ expect(has_term).to_equal(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `018d4f3cbd4f0230d11114ade5378ad1ad52d8916540a2fd1fff025848f6189b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `018d4f3cbd4f0230d11114ade5378ad1ad52d8916540a2fd1fff025848f6189b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `018d4f3cbd4f0230d11114ade5378ad1ad52d8916540a2fd1fff025848f6189b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/env/env_spec.spl
+mirror: doc/06_spec/01_unit/app/env/env_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/env/env_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/env/env_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/env/env_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/env/env_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'HOME is set and non-empty' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/env/env_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'PATH is set and contains separator' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/env/env_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'USER is set' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

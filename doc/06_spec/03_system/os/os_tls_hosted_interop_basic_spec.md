@@ -1,31 +1,6 @@
 # Os Tls Hosted Interop Basic Specification
 
-> <details>
-
-<!-- sdn-diagram:id=os_tls_hosted_interop_basic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=os_tls_hosted_interop_basic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-os_tls_hosted_interop_basic_spec -> std
-os_tls_hosted_interop_basic_spec -> os
-os_tls_hosted_interop_basic_spec -> test
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=os_tls_hosted_interop_basic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Hosted TLS interop basic.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,15 +17,29 @@ os_tls_hosted_interop_basic_spec -> test
 
 #### loads the shared tls test server SDN config
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- loads the shared tls test server SDN config
+   - Expected: result.err == nil is true
+   - Expected: config.listen equals `127.0.0.1:4433`
+   - Expected: config.accept_count equals `1`
+   - Expected: config.require_client_auth is false
+   - Expected: config.fixture_dir equals `build/tls_test_server`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("loads the shared tls test server SDN config")
 val result = load_tls_test_server_config("tools/tls_test_server/server.sdn")
-expect(result.err.?).to_equal(false)
+expect(result.err == nil).to_equal(true)
 val config = result.unwrap()
 expect(config.listen).to_equal("127.0.0.1:4433")
 expect(config.accept_count).to_equal(1)
@@ -62,31 +51,26 @@ expect(config.fixture_dir).to_equal("build/tls_test_server")
 
 #### validates exported fixtures with openssl and completes a hosted Simple client handshake
 
-1. seed fixture dir
-2. cleanup server processes
-3. write server config
-4. write server config
+- validates exported fixtures with openssl and completes a hosted Simple client handshake
+   - Expected: build.2 equals `0`
+   - Expected: file_exists(server_bin()) is true
+   - Expected: file_exists(simple_bin()) is true
    - Expected: openssl_server_pid > 0 is true
-5. sleep ms
-6. kill server
-7. cleanup server processes
    - Expected: simple_server_pid > 0 is true
-8. sleep ms
-9. kill server
-10. cleanup server processes
    - Expected: file_exists(fixture_dir + "/ca.pem") is true
    - Expected: file_exists(fixture_dir + "/server.pem") is true
    - Expected: simple_result.2 equals `0`
-11. cleanup fixture dir
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates exported fixtures with openssl and completes a hosted Simple client handshake")
 val build = ensure_server_bin()
 expect(build.2).to_equal(0)
 expect(file_exists(server_bin())).to_equal(true)
@@ -146,12 +130,12 @@ cleanup_fixture_dir(fixture_dir)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/os_tls_hosted_interop_basic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Hosted TLS interop basic.
 - Hosted TLS interop basic
 
 ## Scenario Summary
@@ -166,3 +150,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `0e78005855b5a503be099833ba6b050892ec731382a3ba92d021a3f71a46cfae`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `0e78005855b5a503be099833ba6b050892ec731382a3ba92d021a3f71a46cfae`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `0e78005855b5a503be099833ba6b050892ec731382a3ba92d021a3f71a46cfae`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/os/os_tls_hosted_interop_basic_spec.spl
+mirror: doc/06_spec/03_system/os/os_tls_hosted_interop_basic_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/os_tls_hosted_interop_basic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/os_tls_hosted_interop_basic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/os_tls_hosted_interop_basic_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/os_tls_hosted_interop_basic_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'loads the shared tls test server SDN config' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/os_tls_hosted_interop_basic_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates exported fixtures with openssl and completes a hosted Simple client handshake' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

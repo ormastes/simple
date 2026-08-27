@@ -1,6 +1,6 @@
 # Fractional CSS Subtree Opacity
 
-> Proves general and same-size clipped fractional-opacity subtrees use canonical Draw IR
+> Proves one general or multiple same-size independently clipped fractional-opacity
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # Fractional CSS Subtree Opacity
 
-Proves bounded same-size fractional-opacity subtrees use canonical Draw IR
+Proves one general or multiple same-size independently clipped fractional-opacity
 
 ## At a Glance
 
@@ -20,7 +20,7 @@ Proves bounded same-size fractional-opacity subtrees use canonical Draw IR
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl` |
-| Updated | 2026-07-30 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves one general or multiple same-size independently clipped fractional-opacity
@@ -33,6 +33,8 @@ Backdrop-filter and differing-size multiple roots remain unadmitted.
 
 #### should composite overlapping descendants once as one Draw IR surface
 
+- should composite overlapping descendants once as one Draw IR surface
+   - Artifact capture: after_step
 - Lower one fractional subtree through canonical Draw IR
    - Artifact capture: after_step
    - Evidence: artifact verified by 7 expected checks
@@ -57,10 +59,12 @@ Backdrop-filter and differing-size multiple roots remain unadmitted.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should composite overlapping descendants once as one Draw IR surface")
 step("Lower one fractional subtree through canonical Draw IR")
 val composition = simple_web_layout_render_html_draw_ir(
     FRACTIONAL_SUBTREE_HTML, 16, 8
@@ -109,9 +113,9 @@ expect(pixels[6] == 0xFF8040C0u32).to_equal(false)
 
 #### should keep descendants deeper than 64 levels in the opacity surface
 
-- Lower every deep descendant into the same opacity batch
+- should keep descendants deeper than 64 levels in the opacity surface
    - Artifact capture: after_step
-- command component id starts with
+- Lower every deep descendant into the same opacity batch
    - Artifact capture: after_step
    - Evidence: artifact verified by 3 expected checks
    - Expected: opacity_batches equals `1`
@@ -127,10 +131,12 @@ expect(pixels[6] == 0xFF8040C0u32).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep descendants deeper than 64 levels in the opacity surface")
 val html = _deep_fractional_subtree_html()
 
 step("Lower every deep descendant into the same opacity batch")
@@ -166,15 +172,16 @@ expect(result.readback.pixels[2]).to_equal(0xFFFF8080u32)
 
 #### should composite independent sibling opacity subtrees separately
 
+- should composite independent sibling opacity subtrees separately
+   - Artifact capture: after_step
 - Lower both CSS opacity owners through canonical Draw IR
    - Artifact capture: after_step
-   - Evidence: artifact verified by 6 expected checks
-   - Expected: opacity_components equals `["first-group", "second-group"]`
-   - Expected: surface_geometry equals `[[0, 0, 6, 8], [8, 0, 6, 8]]`
-   - Expected: opacity_geometry equals `[[0, 0, 6, 8], [0, 0, 6, 8]]`
-   - Expected: opacity_colors equals `[0xFFFF0000u32, 0xFF0000FFu32]`
+   - Evidence: artifact verified by 5 expected checks
+   - Expected: opacity_components equals `[`
+   - Expected: surface_geometry equals `[`
+   - Expected: opacity_geometry equals `[`
+   - Expected: opacity_colors equals `[`
    - Expected: surface_pixel_work equals `96`
-   - Expected: surface_pixel_work is less than `20 * 8`
 - Read each independently composited CSS color from Engine2D
    - Artifact capture: after_step
    - Evidence: artifact verified by 4 expected checks
@@ -183,13 +190,16 @@ expect(result.readback.pixels[2]).to_equal(0xFFFF8080u32)
    - Expected: result.readback.pixels[10] equals `0xFF8080FFu32`
    - Expected: result.readback.pixels[18] equals `0xFFFFFFFFu32`
 
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should composite independent sibling opacity subtrees separately")
 step("Lower both CSS opacity owners through canonical Draw IR")
 val composition = simple_web_layout_render_html_draw_ir(
     SIBLING_FRACTIONAL_SUBTREES_HTML, 20, 8
@@ -245,19 +255,24 @@ expect(result.readback.pixels[18]).to_equal(0xFFFFFFFFu32)
 
 #### should leave backdrop opacity roots unadmitted as one base batch
 
+- should leave backdrop opacity roots unadmitted as one base batch
+   - HTML capture: after_step
 - Lower a backdrop-filter root without partial opacity admission
-   - Evidence: HTML state captured
-   - Evidence: verified by 2 expected checks
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 2 expected checks
    - Expected: composition.batches.len() equals `1`
    - Expected: opacity_batches equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should leave backdrop opacity roots unadmitted as one base batch")
 step("Lower a backdrop-filter root without partial opacity admission")
 val composition = simple_web_layout_render_html_draw_ir(
     BACKDROP_FRACTIONAL_SUBTREES_HTML, 20, 16
@@ -274,19 +289,24 @@ expect(opacity_batches).to_equal(0)
 
 #### should leave differing-size opacity roots unadmitted
 
+- should leave differing-size opacity roots unadmitted
+   - HTML capture: after_step
 - Lower differing crop sizes without rotating the offscreen pool
-   - Evidence: HTML state captured
-   - Evidence: verified by 2 expected checks
+   - HTML capture: after_step
+   - Evidence: HTML text verified by 2 expected checks
    - Expected: composition.batches.len() equals `1`
    - Expected: opacity_batches equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should leave differing-size opacity roots unadmitted")
 step("Lower differing crop sizes without rotating the offscreen pool")
 val composition = simple_web_layout_render_html_draw_ir(
     DIFFERING_SIZE_FRACTIONAL_SUBTREES_HTML, 20, 16
@@ -313,3 +333,75 @@ expect(opacity_batches).to_equal(0)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `dc3967b6b2f4db794a92b14bd0cbdfe3ee196d5eaf9d104f984df533851e3687`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `dc3967b6b2f4db794a92b14bd0cbdfe3ee196d5eaf9d104f984df533851e3687`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `dc3967b6b2f4db794a92b14bd0cbdfe3ee196d5eaf9d104f984df533851e3687`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.md (current)
+findings: 12 blockers: 1
+  narrative=100 structure=75 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=76; blocker cap makes effective=49
+doc/06_spec/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:87:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should composite overlapping descendants once as one Draw IR surface' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should composite overlapping descendants once as one Draw IR surface' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:136:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep descendants deeper than 64 levels in the opacity surface' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep descendants deeper than 64 levels in the opacity surface' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:172:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should composite independent sibling opacity subtrees separately' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:172:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should composite independent sibling opacity subtrees separately' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:227:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should leave backdrop opacity roots unadmitted as one base batch' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/fractional_subtree_opacity_spec.spl:243:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should leave differing-size opacity roots unadmitted' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

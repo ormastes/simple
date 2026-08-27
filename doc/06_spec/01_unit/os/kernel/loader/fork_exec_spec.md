@@ -2,30 +2,6 @@
 
 > Fork/Exec Structural Specification
 
-<!-- sdn-diagram:id=fork_exec_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=fork_exec_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-fork_exec_spec -> std
-fork_exec_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=fork_exec_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -44,7 +20,7 @@ Fork/Exec Structural Specification
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/loader/fork_exec_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Fork/Exec Structural Specification
@@ -64,12 +40,10 @@ Run:
 ## Scenarios
 
 ### exec — argument validation
-_Verify exec rejects invalid arguments at the structural level._
 
 #### exec rejects empty path with EINVAL
 
-1.  clear synthetic initramfs for test
-2.  clear synthetic vfs for test
+- exec rejects empty path with EINVAL
    - Expected: result.is_err() is true
    - Expected: result.err().unwrap().starts_with("EINVAL") is true
 
@@ -77,10 +51,12 @@ _Verify exec rejects invalid arguments at the structural level._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("exec rejects empty path with EINVAL")
 _clear_synthetic_initramfs_for_test()
 _clear_synthetic_vfs_for_test()
 val result = resolve_executable_bytes("", Architecture.X86_64)
@@ -92,8 +68,7 @@ expect(result.err().unwrap().starts_with("EINVAL")).to_equal(true)
 
 #### exec rejects nonexistent path with ENOENT
 
-1.  clear synthetic initramfs for test
-2.  clear synthetic vfs for test
+- exec rejects nonexistent path with ENOENT
    - Expected: result.is_err() is true
    - Expected: result.err().unwrap().starts_with("ENOENT") is true
 
@@ -101,10 +76,12 @@ expect(result.err().unwrap().starts_with("EINVAL")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("exec rejects nonexistent path with ENOENT")
 _clear_synthetic_initramfs_for_test()
 _clear_synthetic_vfs_for_test()
 # Non-absolute path avoids VFS reader (interpreter limitation)
@@ -120,22 +97,21 @@ _Verify exec can load and parse a new image to replace the current one._
 
 #### exec resolves synthetic bytes for a replacement image
 
-1.  clear synthetic initramfs for test
-2.  clear synthetic vfs for test
-3.  set synthetic initramfs for test
+- exec resolves synthetic bytes for a replacement image
    - Expected: bytes_result.is_ok() is true
    - Expected: bytes[0] equals `0x7F.to_u8()`
    - Expected: bytes[1] equals `0x45.to_u8()`
-4.  clear synthetic initramfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("exec resolves synthetic bytes for a replacement image")
 _clear_synthetic_initramfs_for_test()
 _clear_synthetic_vfs_for_test()
 
@@ -156,24 +132,21 @@ _clear_synthetic_initramfs_for_test()
 
 #### exec resolves path bytes via resolve_executable_bytes_from_path_bytes
 
-1.  clear synthetic initramfs for test
-2.  clear synthetic vfs for test
-3. app registry clear
-4. app registry register
-5.  set synthetic initramfs for test
+- exec resolves path bytes via resolve_executable_bytes_from_path_bytes
    - Expected: result.is_ok() is true
    - Expected: bytes[0] equals `0x7F.to_u8()`
    - Expected: bytes[1] equals `0x45.to_u8()`
-6.  clear synthetic initramfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("exec resolves path bytes via resolve_executable_bytes_from_path_bytes")
 _clear_synthetic_initramfs_for_test()
 _clear_synthetic_vfs_for_test()
 app_registry_clear()
@@ -199,25 +172,24 @@ _Verify the complete fork+exec API surface compiles and the pipeline is coherent
 
 #### full lifecycle: resolve -> ELF bytes confirmed
 
-1.  clear synthetic initramfs for test
-2.  clear synthetic vfs for test
-3.  set synthetic initramfs for test
+- full lifecycle: resolve -> ELF bytes confirmed
    - Expected: bytes_result.is_ok() is true
    - Expected: raw_bytes[0] equals `0x7F.to_u8()`
    - Expected: raw_bytes[1] equals `0x45.to_u8()`
    - Expected: raw_bytes[2] equals `0x4C.to_u8()`
    - Expected: raw_bytes[3] equals `0x46.to_u8()`
    - Expected: raw_bytes.len() equals `elf_data.len()`
-4.  clear synthetic initramfs for test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("full lifecycle: resolve -> ELF bytes confirmed")
 _clear_synthetic_initramfs_for_test()
 _clear_synthetic_vfs_for_test()
 
@@ -258,3 +230,51 @@ _clear_synthetic_initramfs_for_test()
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `acf287fa29c23da6116762372749c7fa329681cc53c427dff8d8f6a1fdf26357`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `acf287fa29c23da6116762372749c7fa329681cc53c427dff8d8f6a1fdf26357`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `acf287fa29c23da6116762372749c7fa329681cc53c427dff8d8f6a1fdf26357`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/kernel/loader/fork_exec_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/loader/fork_exec_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/loader/fork_exec_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/loader/fork_exec_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/loader/fork_exec_spec.spl:124:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exec rejects empty path with EINVAL' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/fork_exec_spec.spl:133:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exec rejects nonexistent path with ENOENT' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/loader/fork_exec_spec.spl:146:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exec resolves synthetic bytes for a replacement image' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

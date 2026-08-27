@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ Defines the backend-independent scene and semantic transition consumed by the se
 | Design | doc/05_design/engine2d_four_backend_capture.md |
 | Research | doc/01_research/local/engine2d_four_backend_capture.md |
 | Source | `test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.spl` |
-| Updated | 2026-07-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -64,6 +64,11 @@ claimed by this spec.
 
 #### freezes one backend-neutral composition at 300 DPI
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- freezes one backend-neutral composition at 300 DPI
 - Build the shared backend-neutral 300-DPI fixture
 - Verify frozen Draw IR geometry and command identity
 - Verify vector-text point-to-pixel sizing
@@ -92,10 +97,12 @@ claimed by this spec.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("freezes one backend-neutral composition at 300 DPI")
 step("Build the shared backend-neutral 300-DPI fixture")
 step("Verify frozen Draw IR geometry and command identity")
 step("Verify vector-text point-to-pixel sizing")
@@ -132,6 +139,7 @@ for component_id in [
 
 #### reduces an observed native focus event through canonical UIEvent
 
+- reduces an observed native focus event through canonical UIEvent
 - Supply deterministic synthetic native-focus input
 - Reduce it through the shared canonical semantic fixture
 - Compare the Vulkan and Metal lane expectations
@@ -150,10 +158,12 @@ for component_id in [
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("reduces an observed native focus event through canonical UIEvent")
 step("Supply deterministic synthetic native-focus input")
 step("Reduce it through the shared canonical semantic fixture")
 step("Compare the Vulkan and Metal lane expectations")
@@ -175,8 +185,43 @@ expect(_command_color("macos-gpu-2d-action")).to_equal(MACOS_GPU_2D_ACTIVE_ACCEN
 
 </details>
 
+#### builds each animation frame as shared Draw IR without a private renderer
+
+- builds each animation frame as shared Draw IR without a private renderer
+   - Expected: frame0.backend_target equals `DRAW_IR_BACKEND_GPU`
+   - Expected: frame0.batches[0].commands.len() equals `6`
+   - Expected: frame19.batches[0].commands.len() equals `6`
+   - Expected: frame0.batches[0].commands[5].x equals `300`
+   - Expected: frame19.batches[0].commands[5].x equals `2580`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("builds each animation frame as shared Draw IR without a private renderer")
+val frame0 = macos_gpu_2d_animation_composition(
+    MACOS_GPU_2D_ACTIVE_ACCENT, 0)
+val frame19 = macos_gpu_2d_animation_composition(
+    MACOS_GPU_2D_ACTIVE_ACCENT, 19)
+expect(frame0.composition_id).to_equal(
+    "macos-gpu-2d-animation-composition-v1")
+expect(frame0.backend_target).to_equal(DRAW_IR_BACKEND_GPU)
+expect(frame0.batches[0].commands.len()).to_equal(6)
+expect(frame19.batches[0].commands.len()).to_equal(6)
+expect(frame0.batches[0].commands[5].x).to_equal(300)
+expect(frame19.batches[0].commands[5].x).to_equal(2580)
+```
+
+</details>
+
 #### does not claim reduction or active composition without native focus
 
+- does not claim reduction or active composition without native focus
 - Build the fixture without native-focus input
 - Require the idle focus and accent state to remain unchanged
    - Expected: fixture.mutation.native_focus_observed is false
@@ -189,10 +234,12 @@ expect(_command_color("macos-gpu-2d-action")).to_equal(MACOS_GPU_2D_ACTIVE_ACCEN
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("does not claim reduction or active composition without native focus")
 step("Build the fixture without native-focus input")
 step("Require the idle focus and accent state to remain unchanged")
 val fixture = macos_gpu_2d_draw_ir_event_fixture(
@@ -210,8 +257,8 @@ expect(fixture.mutation.after_accent).to_equal(MACOS_GPU_2D_IDLE_ACCENT)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -226,3 +273,54 @@ expect(fixture.mutation.after_accent).to_equal(MACOS_GPU_2D_IDLE_ACCENT)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1ea311119ada0c6e46478227ad5141505e03d21531c43023f4317b553a34f5af`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1ea311119ada0c6e46478227ad5141505e03d21531c43023f4317b553a34f5af`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1ea311119ada0c6e46478227ad5141505e03d21531c43023f4317b553a34f5af`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.spl
+mirror: doc/06_spec/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 12 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.spl:102:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'freezes one backend-neutral composition at 300 DPI' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.spl:136:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reduces an observed native focus event through canonical UIEvent' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/rendering/macos_gpu_2d_draw_ir_event_fixture_spec.spl:157:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'builds each animation frame as shared Draw IR without a private renderer' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

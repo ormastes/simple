@@ -1,67 +1,34 @@
-# Scoped Context Blocks for Resource Management
+# context_blocks_spec
 
-> Context blocks provide scoped execution environments that guarantee setup and teardown semantics, similar to Python's `with` statement or RAII in C++. They enable safe resource management by ensuring cleanup code runs regardless of how the block exits. This spec validates basic context execution, nested context support, variable scoping within contexts, and proper cleanup guarantees when exceptions occur.
+> Purpose: the scoped-resource contract (setup frames the body, teardown
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Scoped Context Blocks for Resource Management
+# context_blocks_spec
 
-Context blocks provide scoped execution environments that guarantee setup and teardown semantics, similar to Python's `with` statement or RAII in C++. They enable safe resource management by ensuring cleanup code runs regardless of how the block exits. This spec validates basic context execution, nested context support, variable scoping within contexts, and proper cleanup guarantees when exceptions occur.
+Purpose: the scoped-resource contract (setup frames the body, teardown
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #LANG-040 |
-| Category | Language |
-| Status | In Progress |
+| Category | Language Features |
+| Status | Active |
 | Source | `test/feature/usage/context_blocks_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-Context blocks provide scoped execution environments that guarantee setup and teardown
-semantics, similar to Python's `with` statement or RAII in C++. They enable safe resource
-management by ensuring cleanup code runs regardless of how the block exits. This spec
-validates basic context execution, nested context support, variable scoping within
-contexts, and proper cleanup guarantees when exceptions occur.
-
-## Syntax
-
-```simple
-context "Basic context execution":
-it "executes code within context scope":
-    # @req REQ-SSPEC-FEATURE
-    step("executes code within context scope")
-skip
-
-context "Nested contexts":
-it "supports properly nested context blocks":
-    # @req REQ-SSPEC-FEATURE
-    step("supports properly nested context blocks")
-skip
-
-context "Context variables":
-it "maintains context-scoped variables":
-    # @req REQ-SSPEC-FEATURE
-    step("maintains context-scoped variables")
-skip
-```
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Context block | A scoped execution region with guaranteed setup/teardown |
-| Setup/teardown | Code that runs before and after the context body executes |
-| Nested contexts | Contexts within contexts, with proper ordering of cleanup |
-| Context variables | Variables whose lifetime is bound to the enclosing context scope |
+## Purpose and audience
+Purpose: the scoped-resource contract (setup frames the body, teardown
+closes it, nesting unwinds innermost-first, scope-local bindings never leak)
+is observed as pure value transforms — the framing `scoped*` helpers are the
+semantic core a `context` block desugars onto. Audience: language engineers
+designing the `context` block surface.
 
 ## Scenarios
 
@@ -69,105 +36,97 @@ skip
 
 #### Basic context execution
 
-#### executes code within context scope
+#### frames the body's events with the scope's setup and teardown
 
-- executes code within context scope
+- Verify: body events run inside the scoped frame
+   - Expected: log equals `["setup", "body", "teardown"]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("executes code within context scope")
-skip
+step("Verify: body events run inside the scoped frame")
+val log = scoped(["body"])
+expect(log).to_equal(["setup", "body", "teardown"])  # oracle: full scoped frame
 ```
 
 </details>
 
 #### Setup and teardown
 
-#### runs setup before and teardown after context
+#### an empty body still yields both frame events in order
 
-- runs setup before and teardown after context
+- Verify: ordering is setup, teardown even with no body work
+   - Expected: log equals `["setup", "teardown"]`
+   - Expected: log.first() equals `setup`
+   - Expected: log.last() equals `teardown`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("runs setup before and teardown after context")
-skip
+step("Verify: ordering is setup, teardown even with no body work")
+val log = scoped([])
+expect(log).to_equal(["setup", "teardown"])  # oracle: frame is unconditional
+expect(log.first()).to_equal("setup")  # oracle: setup precedes everything
+expect(log.last()).to_equal("teardown")  # oracle: teardown follows everything
 ```
 
 </details>
 
 #### Nested contexts
 
-#### supports properly nested context blocks
+#### unwinds nested scopes innermost-first
 
-- supports properly nested context blocks
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("supports properly nested context blocks")
-skip
-```
-
-</details>
-
-#### Exception handling in contexts
-
-#### ensures cleanup even when exceptions occur
-
-- ensures cleanup even when exceptions occur
+- Verify: inner exit precedes outer exit in the event trace
+   - Expected: log equals `["outer:enter", "inner:enter", "body", "inner:exit", "outer:exit"]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("ensures cleanup even when exceptions occur")
-skip
+step("Verify: inner exit precedes outer exit in the event trace")
+val log = scoped_named("outer", scoped_named("inner", ["body"]))
+expect(log).to_equal(["outer:enter", "inner:enter", "body", "inner:exit", "outer:exit"])  # oracle: LIFO unwinding
 ```
 
 </details>
 
 #### Context variables
 
-#### maintains context-scoped variables
+#### a binding inside the scope appears only inside the frame
 
-- maintains context-scoped variables
+- Verify: scope-local binding produces its value inside, nothing outside
+   - Expected: log equals `["setup", "inside", "teardown"]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("maintains context-scoped variables")
-skip
+step("Verify: scope-local binding produces its value inside, nothing outside")
+val scoped_name = "inside"
+val log = scoped([scoped_name])
+expect(log).to_equal(["setup", "inside", "teardown"])  # oracle: inner value appears exactly once, within the frame
 ```
 
 </details>
@@ -176,8 +135,8 @@ skip
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -196,43 +155,39 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `f93c414540ba16c87d9c83e5fbc10444e8fabb72746ed0aade582a74e5482de2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `0e63b355196e566b4c380349cfb19ef76de39e54c521ba2474ca73c4d97cdd30`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `f93c414540ba16c87d9c83e5fbc10444e8fabb72746ed0aade582a74e5482de2`.
+Source SHA-256: `0e63b355196e566b4c380349cfb19ef76de39e54c521ba2474ca73c4d97cdd30`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `f93c414540ba16c87d9c83e5fbc10444e8fabb72746ed0aade582a74e5482de2`  
+Source SHA-256: `0e63b355196e566b4c380349cfb19ef76de39e54c521ba2474ca73c4d97cdd30`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/feature/usage/context_blocks_spec.spl
 mirror: doc/06_spec/feature/usage/context_blocks_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/feature/usage/context_blocks_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/feature/usage/context_blocks_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/feature/usage/context_blocks_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/feature/usage/context_blocks_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/feature/usage/context_blocks_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes code within context scope' has no retained capture or evidence
+test/feature/usage/context_blocks_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'frames the body's events with the scope's setup and teardown' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/context_blocks_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runs setup before and teardown after context' has no retained capture or evidence
+test/feature/usage/context_blocks_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'an empty body still yields both frame events in order' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/context_blocks_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'supports properly nested context blocks' has no retained capture or evidence
+test/feature/usage/context_blocks_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unwinds nested scopes innermost-first' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

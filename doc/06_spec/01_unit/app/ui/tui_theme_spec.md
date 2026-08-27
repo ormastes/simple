@@ -1,30 +1,6 @@
 # Tui Theme Specification
 
-> 1. expect color len
-
-<!-- sdn-diagram:id=tui_theme_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=tui_theme_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-tui_theme_spec -> app
-tui_theme_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=tui_theme_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering get_theme_color, dark theme, dark vs light theme differences, all widget roles return non-empty, AnsiTheme.from_theme, 256-color and RGB escape helpers, Screen.put_bg, theme switching changes output.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,16 +19,18 @@ tui_theme_spec -> common
 
 #### returns non-empty string for border role
 
-1. expect color len
+- returns non-empty string for border role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for border role")
 val color = get_theme_color("dark", "border")
 expect color.len() > 0 to_equal(true)
 ```
@@ -61,16 +39,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for border_focused role
 
-1. expect color len
+- returns non-empty string for border_focused role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for border_focused role")
 val color = get_theme_color("dark", "border_focused")
 expect color.len() > 0 to_equal(true)
 ```
@@ -79,16 +59,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for button role
 
-1. expect color len
+- returns non-empty string for button role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for button role")
 val color = get_theme_color("dark", "button")
 expect color.len() > 0 to_equal(true)
 ```
@@ -97,16 +79,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for button_focused role
 
-1. expect color len
+- returns non-empty string for button_focused role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for button_focused role")
 val color = get_theme_color("dark", "button_focused")
 expect color.len() > 0 to_equal(true)
 ```
@@ -115,16 +99,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for checkbox role
 
-1. expect color len
+- returns non-empty string for checkbox role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for checkbox role")
 val color = get_theme_color("dark", "checkbox")
 expect color.len() > 0 to_equal(true)
 ```
@@ -133,16 +119,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for checkbox_checked role
 
-1. expect color len
+- returns non-empty string for checkbox_checked role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for checkbox_checked role")
 val color = get_theme_color("dark", "checkbox_checked")
 expect color.len() > 0 to_equal(true)
 ```
@@ -151,16 +139,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for input role
 
-1. expect color len
+- returns non-empty string for input role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for input role")
 val color = get_theme_color("dark", "input")
 expect color.len() > 0 to_equal(true)
 ```
@@ -169,16 +159,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for input_focused role
 
-1. expect color len
+- returns non-empty string for input_focused role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for input_focused role")
 val color = get_theme_color("dark", "input_focused")
 expect color.len() > 0 to_equal(true)
 ```
@@ -187,16 +179,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for progress_fill role
 
-1. expect color len
+- returns non-empty string for progress_fill role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for progress_fill role")
 val color = get_theme_color("dark", "progress_fill")
 expect color.len() > 0 to_equal(true)
 ```
@@ -205,16 +199,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for progress_empty role
 
-1. expect color len
+- returns non-empty string for progress_empty role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for progress_empty role")
 val color = get_theme_color("dark", "progress_empty")
 expect color.len() > 0 to_equal(true)
 ```
@@ -223,16 +219,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for tab_active role
 
-1. expect color len
+- returns non-empty string for tab_active role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for tab_active role")
 val color = get_theme_color("dark", "tab_active")
 expect color.len() > 0 to_equal(true)
 ```
@@ -241,16 +239,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for tab_inactive role
 
-1. expect color len
+- returns non-empty string for tab_inactive role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for tab_inactive role")
 val color = get_theme_color("dark", "tab_inactive")
 expect color.len() > 0 to_equal(true)
 ```
@@ -259,16 +259,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for list_selected role
 
-1. expect color len
+- returns non-empty string for list_selected role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for list_selected role")
 val color = get_theme_color("dark", "list_selected")
 expect color.len() > 0 to_equal(true)
 ```
@@ -277,16 +279,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for list_item role
 
-1. expect color len
+- returns non-empty string for list_item role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for list_item role")
 val color = get_theme_color("dark", "list_item")
 expect color.len() > 0 to_equal(true)
 ```
@@ -295,16 +299,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for dialog_border role
 
-1. expect color len
+- returns non-empty string for dialog_border role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for dialog_border role")
 val color = get_theme_color("dark", "dialog_border")
 expect color.len() > 0 to_equal(true)
 ```
@@ -313,16 +319,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for disabled role
 
-1. expect color len
+- returns non-empty string for disabled role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for disabled role")
 val color = get_theme_color("dark", "disabled")
 expect color.len() > 0 to_equal(true)
 ```
@@ -331,16 +339,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for error_fg role
 
-1. expect color len
+- returns non-empty string for error_fg role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for error_fg role")
 val color = get_theme_color("dark", "error_fg")
 expect color.len() > 0 to_equal(true)
 ```
@@ -349,16 +359,18 @@ expect color.len() > 0 to_equal(true)
 
 #### returns non-empty string for readonly role
 
-1. expect color len
+- returns non-empty string for readonly role
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns non-empty string for readonly role")
 val color = get_theme_color("dark", "readonly")
 expect color.len() > 0 to_equal(true)
 ```
@@ -369,16 +381,18 @@ expect color.len() > 0 to_equal(true)
 
 #### border_focused differs between dark and light
 
-1. expect
+- border_focused differs between dark and light
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("border_focused differs between dark and light")
 val dark_color = get_theme_color("dark", "border_focused")
 val light_color = get_theme_color("light", "border_focused")
 expect (dark_color != light_color) to_equal(true)
@@ -388,16 +402,18 @@ expect (dark_color != light_color) to_equal(true)
 
 #### button differs between dark and light
 
-1. expect
+- button differs between dark and light
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("button differs between dark and light")
 val dark_color = get_theme_color("dark", "button")
 val light_color = get_theme_color("light", "button")
 expect (dark_color != light_color) to_equal(true)
@@ -407,16 +423,18 @@ expect (dark_color != light_color) to_equal(true)
 
 #### list_selected differs between dark and light
 
-1. expect
+- list_selected differs between dark and light
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("list_selected differs between dark and light")
 val dark_color = get_theme_color("dark", "list_selected")
 val light_color = get_theme_color("light", "list_selected")
 expect (dark_color != light_color) to_equal(true)
@@ -426,16 +444,18 @@ expect (dark_color != light_color) to_equal(true)
 
 #### checkbox_checked differs between dark and light
 
-1. expect
+- checkbox_checked differs between dark and light
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checkbox_checked differs between dark and light")
 val dark_color = get_theme_color("dark", "checkbox_checked")
 val light_color = get_theme_color("light", "checkbox_checked")
 expect (dark_color != light_color) to_equal(true)
@@ -447,16 +467,18 @@ expect (dark_color != light_color) to_equal(true)
 
 #### covers all defined roles for dark theme
 
-1. expect all non empty to equal
+- covers all defined roles for dark theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("covers all defined roles for dark theme")
 val roles = ["border", "border_focused", "title", "text", "text_dim",
     "accent", "button", "button_focused", "checkbox", "checkbox_checked",
     "input", "input_focused", "progress_fill", "progress_empty",
@@ -474,16 +496,18 @@ expect all_non_empty to_equal(true)
 
 #### covers all defined roles for light theme
 
-1. expect all non empty to equal
+- covers all defined roles for light theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("covers all defined roles for light theme")
 val roles = ["border", "border_focused", "title", "text", "text_dim",
     "accent", "button", "button_focused", "checkbox", "checkbox_checked",
     "input", "input_focused", "progress_fill", "progress_empty",
@@ -503,23 +527,18 @@ expect all_non_empty to_equal(true)
 
 #### populates all general fields from dark theme
 
-1. expect ansi border len
-2. expect ansi accent len
-3. expect ansi error len
-4. expect ansi warning len
-5. expect ansi success len
-6. expect ansi dim len
-7. expect ansi bold len
-8. expect ansi reset len
+- populates all general fields from dark theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("populates all general fields from dark theme")
 val theme = UITheme.dark()
 val ansi = AnsiTheme.from_theme(theme)
 expect ansi.border.len() > 0 to_equal(true)
@@ -536,31 +555,18 @@ expect ansi.reset.len() > 0 to_equal(true)
 
 #### populates per-widget fields from dark theme
 
-1. expect ansi button len
-2. expect ansi button focused len
-3. expect ansi checkbox len
-4. expect ansi checkbox checked len
-5. expect ansi input len
-6. expect ansi input focused len
-7. expect ansi progress fill len
-8. expect ansi progress empty len
-9. expect ansi tab active len
-10. expect ansi tab inactive len
-11. expect ansi list selected len
-12. expect ansi list item len
-13. expect ansi dialog border len
-14. expect ansi disabled fg len
-15. expect ansi error fg len
-16. expect ansi readonly fg len
+- populates per-widget fields from dark theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("populates per-widget fields from dark theme")
 val theme = UITheme.dark()
 val ansi = AnsiTheme.from_theme(theme)
 expect ansi.button.len() > 0 to_equal(true)
@@ -585,20 +591,18 @@ expect ansi.readonly_fg.len() > 0 to_equal(true)
 
 #### populates all fields from light theme
 
-1. expect ansi border len
-2. expect ansi button len
-3. expect ansi checkbox checked len
-4. expect ansi list selected len
-5. expect ansi dialog border len
+- populates all fields from light theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("populates all fields from light theme")
 val theme = UITheme.light()
 val ansi = AnsiTheme.from_theme(theme)
 expect ansi.border.len() > 0 to_equal(true)
@@ -612,16 +616,18 @@ expect ansi.dialog_border.len() > 0 to_equal(true)
 
 #### produces different accent for dark vs light
 
-1. expect
+- produces different accent for dark vs light
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces different accent for dark vs light")
 val dark_ansi = AnsiTheme.from_theme(UITheme.dark())
 val light_ansi = AnsiTheme.from_theme(UITheme.light())
 expect (dark_ansi.accent != light_ansi.accent) to_equal(true)
@@ -631,16 +637,18 @@ expect (dark_ansi.accent != light_ansi.accent) to_equal(true)
 
 #### produces different button for dark vs light
 
-1. expect
+- produces different button for dark vs light
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces different button for dark vs light")
 val dark_ansi = AnsiTheme.from_theme(UITheme.dark())
 val light_ansi = AnsiTheme.from_theme(UITheme.light())
 expect (dark_ansi.button != light_ansi.button) to_equal(true)
@@ -652,16 +660,18 @@ expect (dark_ansi.button != light_ansi.button) to_equal(true)
 
 #### ansi_fg_256 produces correct escape sequence
 
-1. expect result to contain
+- ansi_fg_256 produces correct escape sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_fg_256 produces correct escape sequence")
 val result = ansi_fg_256(196)
 expect result to_contain("38;5;196")
 ```
@@ -670,16 +680,18 @@ expect result to_contain("38;5;196")
 
 #### ansi_bg_256 produces correct escape sequence
 
-1. expect result to contain
+- ansi_bg_256 produces correct escape sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_bg_256 produces correct escape sequence")
 val result = ansi_bg_256(21)
 expect result to_contain("48;5;21")
 ```
@@ -688,16 +700,18 @@ expect result to_contain("48;5;21")
 
 #### ansi_fg_256 with color 0 works
 
-1. expect result to contain
+- ansi_fg_256 with color 0 works
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_fg_256 with color 0 works")
 val result = ansi_fg_256(0)
 expect result to_contain("38;5;0")
 ```
@@ -706,16 +720,18 @@ expect result to_contain("38;5;0")
 
 #### ansi_fg_256 with color 255 works
 
-1. expect result to contain
+- ansi_fg_256 with color 255 works
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_fg_256 with color 255 works")
 val result = ansi_fg_256(255)
 expect result to_contain("38;5;255")
 ```
@@ -724,16 +740,18 @@ expect result to_contain("38;5;255")
 
 #### ansi_bg_256 with color 232 works
 
-1. expect result to contain
+- ansi_bg_256 with color 232 works
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_bg_256 with color 232 works")
 val result = ansi_bg_256(232)
 expect result to_contain("48;5;232")
 ```
@@ -742,16 +760,18 @@ expect result to_contain("48;5;232")
 
 #### ansi_fg_rgb produces correct escape sequence
 
-1. expect result to contain
+- ansi_fg_rgb produces correct escape sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_fg_rgb produces correct escape sequence")
 val result = ansi_fg_rgb(255, 128, 0)
 expect result to_contain("38;2;255;128;0")
 ```
@@ -760,16 +780,18 @@ expect result to_contain("38;2;255;128;0")
 
 #### ansi_bg_rgb produces correct escape sequence
 
-1. expect result to contain
+- ansi_bg_rgb produces correct escape sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_bg_rgb produces correct escape sequence")
 val result = ansi_bg_rgb(0, 0, 255)
 expect result to_contain("48;2;0;0;255")
 ```
@@ -778,16 +800,18 @@ expect result to_contain("48;2;0;0;255")
 
 #### ansi_fg_rgb with black produces correct sequence
 
-1. expect result to contain
+- ansi_fg_rgb with black produces correct sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_fg_rgb with black produces correct sequence")
 val result = ansi_fg_rgb(0, 0, 0)
 expect result to_contain("38;2;0;0;0")
 ```
@@ -796,16 +820,18 @@ expect result to_contain("38;2;0;0;0")
 
 #### ansi_bg_rgb with white produces correct sequence
 
-1. expect result to contain
+- ansi_bg_rgb with white produces correct sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("ansi_bg_rgb with white produces correct sequence")
 val result = ansi_bg_rgb(255, 255, 255)
 expect result to_contain("48;2;255;255;255")
 ```
@@ -816,16 +842,18 @@ expect result to_contain("48;2;255;255;255")
 
 #### returns screen unchanged for out-of-bounds row
 
-1. expect result height to equal
+- returns screen unchanged for out-of-bounds row
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns screen unchanged for out-of-bounds row")
 val s = Screen.new(20, 5)
 val result = s.put_bg(-1, 0, 10, "\u{001b}[44m")
 expect result.height to_equal(5)
@@ -835,16 +863,18 @@ expect result.height to_equal(5)
 
 #### returns screen unchanged for out-of-bounds col
 
-1. expect result height to equal
+- returns screen unchanged for out-of-bounds col
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns screen unchanged for out-of-bounds col")
 val s = Screen.new(20, 5)
 val result = s.put_bg(0, -1, 10, "\u{001b}[44m")
 expect result.height to_equal(5)
@@ -856,16 +886,18 @@ expect result.height to_equal(5)
 
 #### dark theme button color differs from light theme button color
 
-1. expect
+- dark theme button color differs from light theme button color
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dark theme button color differs from light theme button color")
 val dark_btn = get_theme_color("dark", "button")
 val light_btn = get_theme_color("light", "button")
 expect (dark_btn != light_btn) to_equal(true)
@@ -875,16 +907,18 @@ expect (dark_btn != light_btn) to_equal(true)
 
 #### dark theme input_focused differs from light theme input_focused
 
-1. expect
+- dark theme input_focused differs from light theme input_focused
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dark theme input_focused differs from light theme input_focused")
 val dark_input = get_theme_color("dark", "input_focused")
 val light_input = get_theme_color("light", "input_focused")
 expect (dark_input != light_input) to_equal(true)
@@ -894,16 +928,18 @@ expect (dark_input != light_input) to_equal(true)
 
 #### dark theme checkbox_checked differs from light theme
 
-1. expect
+- dark theme checkbox_checked differs from light theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dark theme checkbox_checked differs from light theme")
 val dark_chk = get_theme_color("dark", "checkbox_checked")
 val light_chk = get_theme_color("light", "checkbox_checked")
 expect (dark_chk != light_chk) to_equal(true)
@@ -913,16 +949,18 @@ expect (dark_chk != light_chk) to_equal(true)
 
 #### dark theme dialog_border differs from light theme
 
-1. expect
+- dark theme dialog_border differs from light theme
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("dark theme dialog_border differs from light theme")
 val dark_dlg = get_theme_color("dark", "dialog_border")
 val light_dlg = get_theme_color("light", "dialog_border")
 expect (dark_dlg != light_dlg) to_equal(true)
@@ -937,12 +975,12 @@ expect (dark_dlg != light_dlg) to_equal(true)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/tui_theme_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering get_theme_color, dark theme, dark vs light theme differences, all widget roles return non-empty, AnsiTheme.from_theme, 256-color and RGB escape helpers, Screen.put_bg, theme switching changes output.
 - get_theme_color
 - dark theme
 - dark vs light theme differences
@@ -964,3 +1002,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e9959cf6a15259af01b5f8f252de2d8efa09e5184b6d7d3471dfd75290ffb2ef`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e9959cf6a15259af01b5f8f252de2d8efa09e5184b6d7d3471dfd75290ffb2ef`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e9959cf6a15259af01b5f8f252de2d8efa09e5184b6d7d3471dfd75290ffb2ef`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/tui_theme_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/tui_theme_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/tui_theme_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/tui_theme_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/tui_theme_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns non-empty string for border role' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/tui_theme_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns non-empty string for border_focused role' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/tui_theme_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns non-empty string for button role' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

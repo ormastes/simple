@@ -1,29 +1,6 @@
 # Parse Utils Specification
 
-> 1. expect mode unwrap
-
-<!-- sdn-diagram:id=parse_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=parse_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-parse_utils_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=parse_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering ParseUtils.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,16 +17,22 @@ parse_utils_spec
 
 #### finds a flag value
 
-1. expect mode unwrap
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- finds a flag value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds a flag value")
 val args = ["--mode", "fast", "--verbose"]
 val mode = _parse_flag_value(args, "--mode")
 expect mode.unwrap() == "fast"
@@ -59,13 +42,18 @@ expect mode.unwrap() == "fast"
 
 #### returns nil for a missing flag value
 
+- returns nil for a missing flag value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for a missing flag value")
 val args = ["--verbose"]
 val mode = _parse_flag_value(args, "--mode")
 expect mode == nil
@@ -75,17 +63,18 @@ expect mode == nil
 
 #### detects boolean flags
 
-1. expect  has flag
-2. expect  has flag
+- detects boolean flags
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects boolean flags")
 val args = ["--mode", "fast", "--verbose"]
 expect _has_flag(args, "--verbose") == true
 expect _has_flag(args, "--quiet") == false
@@ -95,16 +84,18 @@ expect _has_flag(args, "--quiet") == false
 
 #### splits comma separated flags and drops blanks
 
-1. expect flags len
+- splits comma separated flags and drops blanks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("splits comma separated flags and drops blanks")
 val flags = _parse_csv_flags("native, , smf")
 expect flags.len() == 2
 expect flags[0] == "native"
@@ -120,12 +111,12 @@ expect flags[1] == "smf"
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/parse_utils_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering ParseUtils.
 - ParseUtils
 
 ## Scenario Summary
@@ -140,3 +131,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `e7aae5952a92ad4f3e9724b248fbefa41d1dd9b971471190b1f9d973bc5f1094`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `e7aae5952a92ad4f3e9724b248fbefa41d1dd9b971471190b1f9d973bc5f1094`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `e7aae5952a92ad4f3e9724b248fbefa41d1dd9b971471190b1f9d973bc5f1094`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/parse_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/parse_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/parse_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/parse_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/parse_utils_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds a flag value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/parse_utils_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns nil for a missing flag value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/parse_utils_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects boolean flags' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

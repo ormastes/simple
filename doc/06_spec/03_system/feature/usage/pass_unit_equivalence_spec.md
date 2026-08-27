@@ -2,29 +2,6 @@
 
 > In Simple, the `pass` keyword and the unit literal `()` are semantically equivalent -- both represent a deliberate no-operation and compile to the same code. This spec proves their interchangeability in every statement position: standalone expressions, if/else branches, and loop bodies. It also documents the style guideline that `pass` is preferred when the programmer wants to signal explicit "do nothing" intent, while `()` is the underlying unit value.
 
-<!-- sdn-diagram:id=pass_unit_equivalence_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=pass_unit_equivalence_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-pass_unit_equivalence_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=pass_unit_equivalence_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 5 | 5 | 0 | 0 |
@@ -44,7 +21,7 @@ In Simple, the `pass` keyword and the unit literal `()` are semantically equival
 | Category | Language |
 | Status | Active |
 | Source | `test/03_system/feature/usage/pass_unit_equivalence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -96,16 +73,22 @@ count = count + 1
 
 #### both work as standalone statements
 
-1.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- both work as standalone statements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("both work as standalone statements")
 var executed = false
 
 # With pass
@@ -124,16 +107,18 @@ expect executed == true
 
 #### both work in if-else branches
 
-1.
+- both work in if-else branches
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("both work in if-else branches")
 val x = 5
 var branch_taken = ""
 
@@ -164,16 +149,18 @@ expect branch_taken == "other"
 
 #### both work in loops
 
-1.
+- both work in loops
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("both work in loops")
 var count = 0
 
 # With pass
@@ -203,13 +190,18 @@ expect count == 3
 
 #### documents that pass is no-op statement
 
+- documents that pass is no-op statement
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("documents that pass is no-op statement")
 var x = 0
 pass
 x = 1
@@ -222,13 +214,18 @@ expect x == 1
 
 #### recommends pass for explicit no-op intent
 
+- recommends pass for explicit no-op intent
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("recommends pass for explicit no-op intent")
 var logged = false
 if true:
     pass
@@ -250,3 +247,51 @@ expect logged == false
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `13da9aa40bdde35ad949ffaa3285c3ca3493f6b97d0b85b877d1a7d62cb17459`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `13da9aa40bdde35ad949ffaa3285c3ca3493f6b97d0b85b877d1a7d62cb17459`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `13da9aa40bdde35ad949ffaa3285c3ca3493f6b97d0b85b877d1a7d62cb17459`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/pass_unit_equivalence_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/pass_unit_equivalence_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/pass_unit_equivalence_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/pass_unit_equivalence_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/pass_unit_equivalence_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'both work as standalone statements' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/pass_unit_equivalence_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'both work in if-else branches' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/pass_unit_equivalence_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'both work in loops' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

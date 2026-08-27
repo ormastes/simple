@@ -2,29 +2,6 @@
 
 > Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process. It must remain blocked until retry6 has real training, target evaluation, license, safety, deployment, app handoff, and accepted-decision evidence.
 
-<!-- sdn-diagram:id=llm_finetune_retry7_acceptance_gate_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=llm_finetune_retry7_acceptance_gate_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-llm_finetune_retry7_acceptance_gate_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=llm_finetune_retry7_acceptance_gate_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -41,7 +18,6 @@ Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process. I
 | Field | Value |
 |-------|-------|
 | Feature IDs | #SP-FINETUNE-RETRY7-001 |
-| Requirement IDs | REQ-SP-FINETUNE-RETRY7-001 |
 | Category | Tooling |
 | Difficulty | 2/5 |
 | Status | Implemented |
@@ -50,7 +26,7 @@ Retry7 is a normal-review acceptance gate for the SPipe LLM fine-tune process. I
 | Design | doc/05_design/app/spipe/spipe_llm_finetune_process.md |
 | Research | doc/01_research/app/editor/spipe_llm_finetune_process.md |
 | Source | `test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -151,28 +127,30 @@ and decision evidence are missing.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(file_exists(GATE_SCRIPT)).to_equal(true)
-expect(file_exists(".spipe/llm-finetune-process/attempts/{ATTEMPT_ID}.sdn")).to_equal(true)
-
-val (_, _, executable_code) = process_run("test", ["-x", GATE_SCRIPT])
-expect(executable_code).to_equal(0)
+# @req REQ-SP-FINETUNE-RETRY7-001
 ```
 
 </details>
 
 #### reports retry7 as blocked by retry6 training and eval evidence
 
+- reports retry7 as blocked by retry6 training and eval evidence
+   - Expected: output.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports retry7 as blocked by retry6 training and eval evidence")
 val output = run_retry7_gate()
 
 expect(output).to_contain("attempt_id={ATTEMPT_ID}")
@@ -193,13 +171,20 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 #### surfaces retry7 status through the SPipe fine-tune status command
 
+- surfaces retry7 status through the SPipe fine-tune status command
+   - Expected: exit_code equals `0`
+   - Expected: output.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("surfaces retry7 status through the SPipe fine-tune status command")
 val (output, exit_code) = run_spipe_command(["fine-tune-status", ATTEMPT_ID])
 
 expect(exit_code).to_equal(0)
@@ -216,13 +201,20 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 #### keeps fine-tune-ready failed until model eval and decision evidence exist
 
+- keeps fine-tune-ready failed until model eval and decision evidence exist
+   - Expected: exit_code equals `1`
+   - Expected: output.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps fine-tune-ready failed until model eval and decision evidence exist")
 val (output, exit_code) = run_spipe_command(["fine-tune-ready", ATTEMPT_ID])
 
 expect(exit_code).to_equal(1)
@@ -241,13 +233,20 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 #### surfaces license safety and deployment blockers through fine-tune doctor
 
+- surfaces license safety and deployment blockers through fine-tune doctor
+   - Expected: exit_code equals `1`
+   - Expected: output.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("surfaces license safety and deployment blockers through fine-tune doctor")
 val (output, exit_code) = run_spipe_command(["fine-tune-doctor", ATTEMPT_ID])
 
 expect(exit_code).to_equal(1)
@@ -262,13 +261,20 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 #### surfaces retry7 next action with machine-readable WARN status
 
+- surfaces retry7 next action with machine-readable WARN status
+   - Expected: exit_code equals `1`
+   - Expected: output.split(absence_marker()).len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("surfaces retry7 next action with machine-readable WARN status")
 val (output, exit_code) = run_spipe_command(["fine-tune-next", ATTEMPT_ID])
 
 expect(exit_code).to_equal(1)
@@ -295,10 +301,65 @@ expect(output.split(absence_marker()).len()).to_equal(1)
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/language/tools/spipe_llm_finetune_process.md](doc/02_requirements/language/tools/spipe_llm_finetune_process.md)
-- **Plan:** [doc/03_plan/ml/spipe_llm_finetune_process.md](doc/03_plan/ml/spipe_llm_finetune_process.md)
-- **Design:** [doc/05_design/app/spipe/spipe_llm_finetune_process.md](doc/05_design/app/spipe/spipe_llm_finetune_process.md)
-- **Research:** [doc/01_research/app/editor/spipe_llm_finetune_process.md](doc/01_research/app/editor/spipe_llm_finetune_process.md)
+- **Requirements:** `doc/02_requirements/language/tools/spipe_llm_finetune_process.md`
+- **Plan:** `doc/03_plan/ml/spipe_llm_finetune_process.md`
+- **Design:** `doc/05_design/app/spipe/spipe_llm_finetune_process.md`
+- **Research:** `doc/01_research/app/editor/spipe_llm_finetune_process.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-SP-FINETUNE-RETRY7-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `efa0223f9445ec995c831c79201e38337c0229063e3b89b6072298d4fbebf3ca`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `efa0223f9445ec995c831c79201e38337c0229063e3b89b6072298d4fbebf3ca`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `efa0223f9445ec995c831c79201e38337c0229063e3b89b6072298d4fbebf3ca`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **85/100**; effective score: **85/100**; blockers: **0**.
+
+SSpec documentization score: 85/100
+source: test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl
+mirror: doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=90 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl:144:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'has an executable retry7 gate and a concrete attempt record' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl:155:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports retry7 as blocked by retry6 training and eval evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl:173:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'surfaces retry7 status through the SPipe fine-tune status command' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/spipe/llm_finetune_retry7_acceptance_gate_spec.spl:187:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps fine-tune-ready failed until model eval and decision evidence exist' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

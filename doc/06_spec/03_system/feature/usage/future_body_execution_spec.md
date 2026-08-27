@@ -2,29 +2,6 @@
 
 > Futures in Simple wrap deferred computations created with `future(expr)` and forced with `await`. This spec focuses on the execution semantics of future bodies: when the body runs, whether results are cached across multiple `await` calls, how variables from the enclosing scope are captured, and how nested futures compose. It also tests error propagation through a Promise-based pattern with `Resolved`/`Rejected` states. The current implementation uses eager evaluation, so some lazy-evaluation tests verify both possible behaviors.
 
-<!-- sdn-diagram:id=future_body_execution_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=future_body_execution_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-future_body_execution_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=future_body_execution_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 11 | 11 | 0 | 0 |
@@ -44,7 +21,7 @@ Futures in Simple wrap deferred computations created with `future(expr)` and for
 | Category | Runtime |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/future_body_execution_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,6 +37,8 @@ both possible behaviors.
 ## Syntax
 
 ```simple
+use std.spec.step
+
 val f = future(10 + 32)
 val result = await f                # forces evaluation, returns 42
 
@@ -92,13 +71,18 @@ expect await f2 == 20
 
 #### delays execution until forced
 
+- delays execution until forced
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("delays execution until forced")
 # Test with simple expression (futures execute eagerly in current impl)
 val x = 10
 val f = future(x + 32)
@@ -110,13 +94,18 @@ expect result == 42
 
 #### executes body only once
 
+- executes body only once
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes body only once")
 # Test with simple computation
 val base = 21
 val f = future(base * 2)
@@ -132,13 +121,18 @@ expect r2 == 42
 
 #### executes the body and returns result
 
+- executes the body and returns result
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes the body and returns result")
 val f = future(10 + 20 + 30)
 val result = await f
 expect result == 60
@@ -148,13 +142,18 @@ expect result == 60
 
 #### caches result for subsequent forces
 
+- caches result for subsequent forces
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("caches result for subsequent forces")
 # Test result caching with computation
 val f = future(2 * 3 * 7)
 val r1 = await f
@@ -173,13 +172,18 @@ expect r3 == 42
 
 #### captures immutable variables by value
 
+- captures immutable variables by value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures immutable variables by value")
 val x = 10
 val y = 20
 val f = future(x + y)
@@ -190,13 +194,18 @@ expect await f == 30
 
 #### captures mutable references correctly
 
+- captures mutable references correctly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures mutable references correctly")
 # Test variable capture (currently eager evaluation)
 var counter = 5
 val f = future(counter * 2)
@@ -212,13 +221,18 @@ expect result == 10 or result == 20
 
 #### executes side effects when forced
 
+- executes side effects when forced
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes side effects when forced")
 # Test with computation (side effects limited in current impl)
 val base = 42
 val f = future(base)
@@ -230,13 +244,18 @@ expect result == 42
 
 #### side effects do not execute until forced
 
+- side effects do not execute until forced
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("side effects do not execute until forced")
 # Test with simple value
 val value = 100
 val f = future(value)
@@ -250,13 +269,18 @@ expect result == 100
 
 #### propagates exceptions from body execution
 
+- propagates exceptions from body execution
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("propagates exceptions from body execution")
 # Test with promise rejection instead of exceptions
 val p = Promise.new(\resolve, reject: reject("execution error"))
 match p.state:
@@ -270,13 +294,18 @@ match p.state:
 
 #### handles recursive future execution
 
+- handles recursive future execution
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles recursive future execution")
 # Test nested future execution
 val f1 = future(10)
 val f2 = future(await f1 * 2)
@@ -287,13 +316,18 @@ expect await f2 == 20
 
 #### manages execution in concurrent context
 
+- manages execution in concurrent context
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("manages execution in concurrent context")
 # Test multiple independent futures
 val f1 = future(10)
 val f2 = future(20)
@@ -315,3 +349,51 @@ expect await f1 + await f2 + await f3 == 60
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `510df29fe60c2629b893c595176c6e5e7a0edc2fa93bd6a13757d129a9763da4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `510df29fe60c2629b893c595176c6e5e7a0edc2fa93bd6a13757d129a9763da4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `510df29fe60c2629b893c595176c6e5e7a0edc2fa93bd6a13757d129a9763da4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/future_body_execution_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/future_body_execution_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/future_body_execution_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/future_body_execution_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/future_body_execution_spec.spl:103:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'delays execution until forced' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/future_body_execution_spec.spl:112:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes body only once' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/future_body_execution_spec.spl:128:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'executes the body and returns result' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

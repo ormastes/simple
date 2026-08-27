@@ -2,29 +2,6 @@
 
 > let x = 10       # immutable
 
-<!-- sdn-diagram:id=operators_advanced_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=operators_advanced_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-operators_advanced_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=operators_advanced_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 52 | 52 | 0 | 0 |
@@ -44,7 +21,7 @@ let x = 10       # immutable
 | Category | Language \| Operators |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/operators_advanced_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -54,6 +31,8 @@ let x = 10       # immutable
 let x = 10       # immutable
 let mut y = 10   # mutable with let mut
 var z = 10       # mutable with var
+use std.spec.step
+
 const MAX = 100  # constant
 static counter = 0  # static variable
 
@@ -70,13 +49,22 @@ val d = "ell" in "hello"  # in operator
 
 #### let is immutable
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- let is immutable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("let is immutable")
 val x = 10
 # x = 20  # Would be error
 expect x == 10
@@ -86,13 +74,18 @@ expect x == 10
 
 #### var is mutable
 
+- var is mutable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("var is mutable")
 var y = 10
 y = 30
 expect y == 30
@@ -105,13 +98,18 @@ expect y == 30
 
 #### var in loop
 
+- var in loop
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("var in loop")
 var sum = 0
 var i = 0
 while i < 5:
@@ -127,13 +125,18 @@ expect sum == 10  # 0+1+2+3+4
 
 #### const declaration
 
+- const declaration
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("const declaration")
 const MAX = 100
 expect MAX == 100
 ```
@@ -142,13 +145,18 @@ expect MAX == 100
 
 #### const with arithmetic
 
+- const with arithmetic
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("const with arithmetic")
 const BASE = 10
 const MULTIPLIER = 5
 expect BASE * MULTIPLIER == 50
@@ -158,13 +166,18 @@ expect BASE * MULTIPLIER == 50
 
 #### const with type annotation
 
+- const with type annotation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("const with type annotation")
 const SIZE: i64 = 256
 expect SIZE == 256
 ```
@@ -173,13 +186,18 @@ expect SIZE == 256
 
 #### static variable
 
+- static variable
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("static variable")
 static counter = 42
 expect counter == 42
 ```
@@ -190,16 +208,18 @@ expect counter == 42
 
 #### basic lambda
 
-1. expect double
+- basic lambda
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("basic lambda")
 val double = \x: x * 2
 expect double(21) == 42
 ```
@@ -208,16 +228,18 @@ expect double(21) == 42
 
 #### lambda with multiple params
 
-1. expect add
+- lambda with multiple params
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lambda with multiple params")
 val add = \a, b: a + b
 expect add(10, 32) == 42
 ```
@@ -226,18 +248,18 @@ expect add(10, 32) == 42
 
 #### lambda as higher-order
 
-1. fn apply
-2. f
-3. expect apply
+- lambda as higher-order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lambda as higher-order")
 fn apply(f, x):
     f(x)
 
@@ -251,25 +273,7 @@ expect apply(inc, 41) == 42
 
 #### string length
 
-1. expect s len
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val s = "hello"
-expect s.len() == 5
-```
-
-</details>
-
-#### string concatenation
-
-1. expect c len
+- string length
 
 
 <details>
@@ -279,6 +283,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("string length")
+val s = "hello"
+expect s.len() == 5
+```
+
+</details>
+
+#### string concatenation
+
+- string concatenation
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("string concatenation")
 val a = "hello"
 val b = "world"
 val c = a + " " + b
@@ -289,16 +315,18 @@ expect c.len() == 11
 
 #### string interpolation
 
-1. expect s len
+- string interpolation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("string interpolation")
 val x = 42
 val s = "value is {x}"
 expect s.len() == 11
@@ -310,16 +338,18 @@ expect s.len() == 11
 
 #### array length
 
-1. expect arr len
+- array length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("array length")
 val arr = [1, 2, 3, 4, 5]
 expect arr.len() == 5
 ```
@@ -330,16 +360,18 @@ expect arr.len() == 5
 
 #### dict length
 
-1. expect d len
+- dict length
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dict length")
 val d = {"a": 1, "b": 2, "c": 3}
 expect d.len() == 3
 ```
@@ -348,16 +380,18 @@ expect d.len() == 3
 
 #### dict keys
 
-1. expect keys len
+- dict keys
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dict keys")
 val d = {"x": 10, "y": 20}
 val keys = d.keys()
 expect keys.len() == 2
@@ -367,13 +401,18 @@ expect keys.len() == 2
 
 #### dict values
 
+- dict values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dict values")
 val d = {"a": 5, "b": 10}
 val vals = d.values()
 expect vals[0] + vals[1] == 15
@@ -383,16 +422,18 @@ expect vals[0] + vals[1] == 15
 
 #### dict contains_key
 
-1. expect d has
+- dict contains_key
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dict contains_key")
 val d = {"hello": 1}
 expect d.has("hello")
 ```
@@ -403,16 +444,18 @@ expect d.has("hello")
 
 #### bitwise AND
 
-1. expect
+- bitwise AND
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("bitwise AND")
 expect (12 & 10) == 8  # 1100 & 1010 = 1000
 ```
 
@@ -420,16 +463,18 @@ expect (12 & 10) == 8  # 1100 & 1010 = 1000
 
 #### bitwise OR
 
-1. expect
+- bitwise OR
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("bitwise OR")
 expect (12 | 10) == 14  # 1100 | 1010 = 1110
 ```
 
@@ -437,16 +482,18 @@ expect (12 | 10) == 14  # 1100 | 1010 = 1110
 
 #### bitwise XOR
 
-1. expect
+- bitwise XOR
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("bitwise XOR")
 expect (12 xor 10) == 6  # 1100 ^ 1010 = 0110
 ```
 
@@ -454,16 +501,18 @@ expect (12 xor 10) == 6  # 1100 ^ 1010 = 0110
 
 #### left shift
 
-1. expect
+- left shift
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("left shift")
 expect (1 << 4) == 16
 ```
 
@@ -471,16 +520,18 @@ expect (1 << 4) == 16
 
 #### right shift
 
-1. expect
+- right shift
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("right shift")
 expect (16 >> 2) == 4
 ```
 
@@ -488,16 +539,18 @@ expect (16 >> 2) == 4
 
 #### bitwise NOT
 
-1. expect
+- bitwise NOT
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("bitwise NOT")
 expect (~0) == -1
 ```
 
@@ -507,13 +560,18 @@ expect (~0) == -1
 
 #### less than
 
+- less than
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("less than")
 expect 1 < 2
 ```
 
@@ -521,13 +579,18 @@ expect 1 < 2
 
 #### greater than
 
+- greater than
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("greater than")
 expect 2 > 1
 ```
 
@@ -535,13 +598,18 @@ expect 2 > 1
 
 #### less than or equal
 
+- less than or equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("less than or equal")
 expect 2 <= 2
 ```
 
@@ -549,13 +617,18 @@ expect 2 <= 2
 
 #### greater than or equal
 
+- greater than or equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("greater than or equal")
 expect 2 >= 2
 ```
 
@@ -563,13 +636,18 @@ expect 2 >= 2
 
 #### equal
 
+- equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("equal")
 expect 2 == 2
 ```
 
@@ -577,13 +655,18 @@ expect 2 == 2
 
 #### not equal
 
+- not equal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("not equal")
 expect 2 != 3
 ```
 
@@ -593,16 +676,18 @@ expect 2 != 3
 
 #### and operator
 
-1. expect not
+- and operator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("and operator")
 expect true and true
 expect not (true and false)
 ```
@@ -611,16 +696,18 @@ expect not (true and false)
 
 #### or operator
 
-1. expect not
+- or operator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("or operator")
 expect true or false
 expect not (false or false)
 ```
@@ -629,16 +716,18 @@ expect not (false or false)
 
 #### not operator
 
-1. expect not
+- not operator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("not operator")
 expect not false
 expect not (not true)
 ```
@@ -649,16 +738,18 @@ expect not (not true)
 
 #### power of zero
 
-1. expect
+- power of zero
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("power of zero")
 expect (2 ** 0) == 1
 ```
 
@@ -666,16 +757,18 @@ expect (2 ** 0) == 1
 
 #### power of one
 
-1. expect
+- power of one
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("power of one")
 expect (2 ** 1) == 2
 ```
 
@@ -683,16 +776,18 @@ expect (2 ** 1) == 2
 
 #### power of three
 
-1. expect
+- power of three
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("power of three")
 expect (2 ** 3) == 8
 ```
 
@@ -700,16 +795,18 @@ expect (2 ** 3) == 8
 
 #### power of ten
 
-1. expect
+- power of ten
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("power of ten")
 expect (2 ** 10) == 1024
 ```
 
@@ -717,16 +814,18 @@ expect (2 ** 10) == 1024
 
 #### three to fourth
 
-1. expect
+- three to fourth
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("three to fourth")
 expect (3 ** 4) == 81
 ```
 
@@ -736,16 +835,18 @@ expect (3 ** 4) == 81
 
 #### positive floor division
 
-1. expect 7 fdiv
+- positive floor division
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("positive floor division")
 expect 7.fdiv(2) == 3
 ```
 
@@ -753,16 +854,18 @@ expect 7.fdiv(2) == 3
 
 #### another floor division
 
-1. expect 10 fdiv
+- another floor division
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("another floor division")
 expect 10.fdiv(3) == 3
 ```
 
@@ -770,16 +873,18 @@ expect 10.fdiv(3) == 3
 
 #### negative floor division
 
-1. expect
+- negative floor division
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("negative floor division")
 expect (-7).fdiv(2) == -4  # rounds toward negative infinity
 ```
 
@@ -787,16 +892,18 @@ expect (-7).fdiv(2) == -4  # rounds toward negative infinity
 
 #### exact division
 
-1. expect 8 fdiv
+- exact division
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exact division")
 expect 8.fdiv(4) == 2
 ```
 
@@ -806,13 +913,18 @@ expect 8.fdiv(4) == 2
 
 #### in array present
 
+- in array present
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("in array present")
 expect 2 in [1, 2, 3]
 ```
 
@@ -820,16 +932,18 @@ expect 2 in [1, 2, 3]
 
 #### in array absent
 
-1. expect not
+- in array absent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("in array absent")
 expect not (5 in [1, 2, 3])
 ```
 
@@ -837,13 +951,18 @@ expect not (5 in [1, 2, 3])
 
 #### in string present
 
+- in string present
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("in string present")
 expect "ell" in "hello"
 ```
 
@@ -851,16 +970,18 @@ expect "ell" in "hello"
 
 #### in string absent
 
-1. expect not
+- in string absent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("in string absent")
 expect not ("xyz" in "hello")
 ```
 
@@ -870,18 +991,18 @@ expect not ("xyz" in "hello")
 
 #### factorial
 
-1. fn factorial
-2. n * factorial
-3. expect factorial
+- factorial
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("factorial")
 fn factorial(n: i64) -> i64:
     if n <= 1:
         1
@@ -897,13 +1018,18 @@ expect factorial(3) == 6
 
 #### nested arrays
 
+- nested arrays
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("nested arrays")
 val arr = [[1, 2], [3, 4], [5, 6]]
 expect arr[0][0] + arr[1][1] + arr[2][0] == 10
 ```
@@ -912,13 +1038,18 @@ expect arr[0][0] + arr[1][1] + arr[2][0] == 10
 
 #### nested structs
 
+- nested structs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("nested structs")
 struct Inner:
     value: i64
 
@@ -935,17 +1066,18 @@ expect o.inner.value == 42
 
 #### early return based on condition
 
-1. fn verify
-2. expect verify
+- early return based on condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("early return based on condition")
 fn verify(x: i64) -> i64:
     if x > 10:
         return 1
@@ -962,13 +1094,18 @@ expect verify(7) == 2
 
 #### destructures tuple
 
+- destructures tuple
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures tuple")
 val _tuple = (1, 2, 3)
 val a = _tuple[0]
 val b = _tuple[1]
@@ -982,13 +1119,18 @@ expect a + b + c == 6
 
 #### symbol comparison
 
+- symbol comparison
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("symbol comparison")
 val s = :hello
 expect s == :hello
 ```
@@ -1007,3 +1149,51 @@ expect s == :hello
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `244ce4a95574826b2b8090da06ee27d2c9284d08e2d88cfe56ce811fd1a62b99`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `244ce4a95574826b2b8090da06ee27d2c9284d08e2d88cfe56ce811fd1a62b99`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `244ce4a95574826b2b8090da06ee27d2c9284d08e2d88cfe56ce811fd1a62b99`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/operators_advanced_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/operators_advanced_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/operators_advanced_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/operators_advanced_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/operators_advanced_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'let is immutable' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/operators_advanced_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'var is mutable' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/operators_advanced_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'var in loop' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

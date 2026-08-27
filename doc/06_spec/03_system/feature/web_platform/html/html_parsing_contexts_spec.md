@@ -24,7 +24,7 @@ This executable system specification proves that the canonical HTML tokenizer/tr
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -197,11 +197,9 @@ layout, Draw IR, and Engine2D evidence before promotion.
 
 #### should auto-close a paragraph before a block sibling
 
+- should auto-close a paragraph before a block sibling
+   - Protocol capture: after_step
 - Repair paragraph parentage in canonical BeDOM
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
--  expect bedom parent
    - Protocol capture: after_step
 - Preserve sibling geometry in Web layout and Draw IR
    - Protocol capture: after_step
@@ -215,10 +213,12 @@ layout, Draw IR, and Engine2D evidence before promotion.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should auto-close a paragraph before a block sibling")
 val html = (
     "<html><body id='body' style='margin:0'>" +
     "<p id='paragraph' style='margin:0;width:16px;height:8px;" +
@@ -252,15 +252,9 @@ expect(pixels[15 + 8 * 16]).to_equal(0xFF2563EBu32)
 
 #### should foster a nonempty subtree before its table
 
+- should foster a nonempty subtree before its table
+   - Protocol capture: after_step
 - Build canonical BeDOM foster parentage with nested text
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
-- foster path[foster path len
    - Protocol capture: after_step
 - Project the same parentage and geometry into Web layout
    - Protocol capture: after_step
@@ -279,10 +273,12 @@ expect(pixels[15 + 8 * 16]).to_equal(0xFF2563EBu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should foster a nonempty subtree before its table")
 val html = (
     "<html><body id='body' style='margin:0'>" +
     "<table id='table' style='width:32px;height:8px;" +
@@ -329,6 +325,8 @@ expect(pixels[31 + 8 * 32]).to_equal(0xFF2563EBu32)
 
 #### should foster non-whitespace table text in exact source order
 
+- should foster non-whitespace table text in exact source order
+   - Protocol capture: after_step
 - Foster text and element siblings before the canonical table
    - Protocol capture: after_step
    - Evidence: protocol response verified by 5 expected checks
@@ -343,8 +341,6 @@ expect(pixels[31 + 8 * 32]).to_equal(0xFF2563EBu32)
    - Expected: _has_text(result.composition, "FIRST") is true
    - Expected: _has_text(result.composition, "MIDDLE") is true
    - Expected: _has_text(result.composition, "LAST") is true
--  command by id
-   - Protocol capture: after_step
 - Render the fostered element before the table
    - Protocol capture: after_step
    - Evidence: protocol response verified by 2 expected checks
@@ -355,10 +351,12 @@ expect(pixels[31 + 8 * 32]).to_equal(0xFF2563EBu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should foster non-whitespace table text in exact source order")
 val html = (
     "<html><body id='body' style='margin:0'>" +
     "<table id='table' style='width:32px;height:8px;" +
@@ -397,15 +395,9 @@ expect(pixels.contains(0xFF2563EBu32)).to_equal(true)
 
 #### should accept uppercase textarea close and reject a prefix close
 
+- should accept uppercase textarea close and reject a prefix close
+   - Protocol capture: after_step
 - Keep the false closer and markup as canonical textarea text
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
-- editor path[editor path len
-   - Protocol capture: after_step
-- html tree builder build
    - Protocol capture: after_step
 - Resume Web layout only after the exact uppercase closer
    - Protocol capture: after_step
@@ -420,10 +412,12 @@ expect(pixels.contains(0xFF2563EBu32)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should accept uppercase textarea close and reject a prefix close")
 val html = (
     "<html><body id='body' style='margin:0'>" +
     "<textarea id='editor' style='display:block;width:48px;" +
@@ -470,13 +464,12 @@ expect(_pixels(html, 48, 16)[47 + 12 * 48]).to_equal(
 
 #### should synthesize html and body independently
 
+- should synthesize html and body independently
+   - Protocol capture: after_step
 - Build both independently omitted structures in canonical BeDOM
    - Protocol capture: after_step
-   - Evidence: protocol response verified by 1 expected check
+   - Evidence: protocol response verified by 2 expected checks
    - Expected: missing_body_nodes.len() equals `1`
-- missing body main len
-   - Protocol capture: after_step
-   - Evidence: protocol response verified by 1 expected check
    - Expected: missing_html_nodes.len() equals `1`
 - Preserve implicit structure and stable IDs in Web layout
    - Protocol capture: after_step
@@ -489,10 +482,12 @@ expect(_pixels(html, 48, 16)[47 + 12 * 48]).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 57 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should synthesize html and body independently")
 val missing_body = (
     "<html id='document'><main id='main' style='width:16px;" +
     "height:8px;background:#7c3aed'></main></html>"
@@ -554,13 +549,9 @@ expect(_pixels(
 
 #### should keep template content inert despite authored CSS
 
+- should keep template content inert despite authored CSS
+   - Protocol capture: after_step
 - Trace inert HTML through semantic state without Draw IR
-   - Protocol capture: after_step
-- path[path len
-   - Protocol capture: after_step
--  expect bedom parent
-   - Protocol capture: after_step
--  expect bedom parent
    - Protocol capture: after_step
 - Force template inertness after the authored CSS cascade
    - Protocol capture: after_step
@@ -582,10 +573,12 @@ expect(_pixels(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 90 lines folded for reproduction.
+Runnable source: 92 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep template content inert despite authored CSS")
 val html = (
     "<html id='document'><head id='head'>" +
     "<title id='title'>HIDDEN TITLE</title>" +
@@ -682,6 +675,8 @@ expect(pixels.contains(0xFFDC2626u32)).to_equal(false)
 
 #### should preserve resource-safe generic fallback for embedded media tags
 
+- should preserve resource-safe generic fallback for embedded media tags
+   - GUI capture: after_step (HTML preferred when available)
 - Trace HTML elements through Web semantics and Draw IR
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 3 expected checks
@@ -707,13 +702,15 @@ expect(pixels.contains(0xFFDC2626u32)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 88 lines folded for reproduction.
+Runnable source: 96 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve resource-safe generic fallback for embedded media tags")
 step("Trace HTML elements through Web semantics and Draw IR")
 val html = (
-    "<style>html,body{margin:0}.fallback{display:block;width:4px;" +
+    "<style>html,body{{margin:0}}.fallback{display:block;width:4px;" +
     "height:4px;background:#2563eb}</style><body id='body'>" +
     "<map id='map-row' class='fallback'>" +
     "<area id='area-row' class='fallback' " +
@@ -751,7 +748,8 @@ val identity_index = system_dom_identity_index(root)
 var index = 0
 while index < ids.len():
     val path = be_dom_path_for_route(
-        root, identity_index, system_dom_route(identity_index, ids[index])
+        root, identity_index,
+        system_dom_route(identity_index, ids[index])
     )
     val parent_path = be_dom_path_for_route(
         root, identity_index,
@@ -810,34 +808,39 @@ expect(_pixels(
 
 #### should render an admitted video poster without fetching media
 
+- should render an admitted video poster without fetching media
+   - HTML capture: after_step
 - Plan only the poster through the bounded image resource path
    - HTML capture: after_step
+   - Evidence: HTML text verified by 2 expected checks
    - Expected: plan.image_sources.len() equals `1`
    - Expected: plan.image_sources[0].authored_src equals `/poster.png`
-   - Expected: plan.image_sources[0].resolved_url equals `https://safe.test/poster.png`
 - Bind the admitted poster to its video node
    - HTML capture: after_step
+   - Evidence: HTML text verified by 2 expected checks
    - Expected: allowed.image_resources.len() equals `1`
    - Expected: allowed.admitted_image_sources.len() equals `1`
-   - Expected: render HTML contains the admitted poster key while media URLs remain authored
 - Lower the poster through canonical Draw IR and Engine2D
    - HTML capture: after_step
-   - Expected: `stage_image` is an image command with the admitted resource key
-   - Expected: the 4 by 4 Engine2D readback contains the poster color
+   - Evidence: HTML text verified by 3 expected checks
+   - Expected: command.kind equals `image`
+   - Expected: pixels.len() equals `16`
+   - Expected: pixels contains `poster_color`
 - Block the same poster under img-src without painting an alias
    - HTML capture: after_step
+   - Evidence: HTML text verified by 1 expected check
    - Expected: blocked.image_resources.len() equals `0`
-   - Expected: warnings contain the blocked poster URL
-   - Expected: no `stage_image` command or poster-colored pixel survives
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 79 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should render an admitted video poster without fetching media")
 val poster_color = 0xFF14B8A6u32
 val html = (
     "<html><head></head><body style='margin:0'>" +
@@ -916,7 +919,6 @@ expect(_has_command(
 expect(blocked.render_to_pixels(
     4, 4
 ).pixel_data.contains(poster_color)).to_equal(false)
-
 ```
 
 </details>
@@ -926,6 +928,7 @@ expect(blocked.render_to_pixels(
 
 #### should preserve component order and bounded projection caps
 
+- should preserve component order and bounded projection caps
 - Keep legacy-stable generated component IDs after projection
 - Respect the renderer node cap through canonical projection
 
@@ -933,10 +936,12 @@ expect(blocked.render_to_pixels(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve component order and bounded projection caps")
 val html = (
     "<html><body><main style='width:8px;height:4px;" +
     "background:#dc2626'></main><aside style='width:8px;" +
@@ -981,3 +986,75 @@ expect(simple_web_layout_debug_capped_node_count(
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-003`
+- `REQ-WEB-BROWSER-004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `387a9d4ffd12afd0027a9b2f6d3c6542777a214136b311c2fde3503a19f0b59c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `387a9d4ffd12afd0027a9b2f6d3c6542777a214136b311c2fde3503a19f0b59c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `387a9d4ffd12afd0027a9b2f6d3c6542777a214136b311c2fde3503a19f0b59c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/html/html_parsing_contexts_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/html/html_parsing_contexts_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/html/html_parsing_contexts_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 18 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:282:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should auto-close a paragraph before a block sibling' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:282:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should auto-close a paragraph before a block sibling' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:316:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should foster a nonempty subtree before its table' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:316:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should foster a nonempty subtree before its table' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:363:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should foster non-whitespace table text in exact source order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:363:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should foster non-whitespace table text in exact source order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:402:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept uppercase textarea close and reject a prefix close' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:449:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should synthesize html and body independently' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl:511:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep template content inert despite authored CSS' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

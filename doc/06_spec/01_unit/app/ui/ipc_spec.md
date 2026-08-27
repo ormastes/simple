@@ -1,30 +1,6 @@
 # Ipc Specification
 
-> <details>
-
-<!-- sdn-diagram:id=ipc_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ipc_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ipc_spec -> common
-ipc_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ipc_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering extract_json_field, parse_ipc_message, build_ipc_render, escape_ipc_json.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,23 @@ ipc_spec -> app
 
 #### extracts type field from JSON
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- extracts type field from JSON
+   - Expected: result equals `keypress`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts type field from JSON")
 val json = "{\"type\":\"keypress\",\"key\":\"a\"}"
 val result = extract_json_field(json, "type")
 expect(result).to_equal("keypress")
@@ -57,13 +43,19 @@ expect(result).to_equal("keypress")
 
 #### extracts key field from JSON
 
+- extracts key field from JSON
+   - Expected: result equals `a`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts key field from JSON")
 val json = "{\"type\":\"keypress\",\"key\":\"a\"}"
 val result = extract_json_field(json, "key")
 expect(result).to_equal("a")
@@ -73,13 +65,19 @@ expect(result).to_equal("a")
 
 #### returns empty string for missing field
 
+- returns empty string for missing field
+   - Expected: result equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns empty string for missing field")
 val json = "{\"type\":\"keypress\",\"key\":\"a\"}"
 val result = extract_json_field(json, "missing")
 expect(result).to_equal("")
@@ -89,13 +87,19 @@ expect(result).to_equal("")
 
 #### handles JSON with spaces around colon
 
+- handles JSON with spaces around colon
+   - Expected: result equals `save`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles JSON with spaces around colon")
 val json = "{\"type\": \"action\", \"name\": \"save\"}"
 val result = extract_json_field(json, "name")
 expect(result).to_equal("save")
@@ -105,13 +109,19 @@ expect(result).to_equal("save")
 
 #### returns empty string for empty input
 
+- returns empty string for empty input
+   - Expected: result equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns empty string for empty input")
 val result = extract_json_field("", "type")
 expect(result).to_equal("")
 ```
@@ -122,7 +132,8 @@ expect(result).to_equal("")
 
 #### parses keypress message into UIEvent.KeyPress
 
-1. UIEvent KeyPress
+- parses keypress message into UIEvent.KeyPress
+   - Expected: event != nil is true
    - Expected: key equals `q`
    - Expected: false is true
 
@@ -130,10 +141,12 @@ expect(result).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses keypress message into UIEvent.KeyPress")
 val json = "{\"type\":\"keypress\",\"key\":\"q\"}"
 val event = parse_ipc_message(json)
 expect(event != nil).to_equal(true)
@@ -148,13 +161,19 @@ match event:
 
 #### parses quit message into UIEvent.Quit
 
+- parses quit message into UIEvent.Quit
+   - Expected: event != nil is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses quit message into UIEvent.Quit")
 val json = "{\"type\":\"quit\"}"
 val event = parse_ipc_message(json)
 expect(event != nil).to_equal(true)
@@ -164,38 +183,51 @@ expect(event != nil).to_equal(true)
 
 #### returns nil for empty string
 
+- returns nil for empty string
+   - Expected: event equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for empty string")
 val event = parse_ipc_message("")
-expect(event == nil).to_equal(true)
+expect(event).to_equal(nil)
 ```
 
 </details>
 
 #### returns nil for unrecognized message type
 
+- returns nil for unrecognized message type
+   - Expected: event equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns nil for unrecognized message type")
 val json = "{\"type\":\"unknown\",\"data\":\"test\"}"
 val event = parse_ipc_message(json)
-expect(event == nil).to_equal(true)
+expect(event).to_equal(nil)
 ```
 
 </details>
 
 #### parses action message
 
-1. UIEvent Action
+- parses action message
+   - Expected: event != nil is true
    - Expected: name equals `open_file`
    - Expected: false is true
 
@@ -203,10 +235,12 @@ expect(event == nil).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses action message")
 val json = "{\"type\":\"action\",\"name\":\"open_file\"}"
 val event = parse_ipc_message(json)
 expect(event != nil).to_equal(true)
@@ -221,13 +255,19 @@ match event:
 
 #### parses resize message
 
+- parses resize message
+   - Expected: event != nil is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses resize message")
 val json = "{\"type\":\"resize\",\"width\":\"120\",\"height\":\"40\"}"
 val event = parse_ipc_message(json)
 expect(event != nil).to_equal(true)
@@ -239,13 +279,18 @@ expect(event != nil).to_equal(true)
 
 #### wraps html in JSON with type render
 
+- wraps html in JSON with type render
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wraps html in JSON with type render")
 val html = "<div>Hello</div>"
 val result = build_ipc_render(html)
 expect(result).to_contain("\"type\":\"render\"")
@@ -255,13 +300,18 @@ expect(result).to_contain("\"type\":\"render\"")
 
 #### includes html content in output
 
+- includes html content in output
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("includes html content in output")
 val html = "<p>Test</p>"
 val result = build_ipc_render(html)
 expect(result).to_contain("Test")
@@ -271,13 +321,18 @@ expect(result).to_contain("Test")
 
 #### produces valid JSON structure
 
+- produces valid JSON structure
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("produces valid JSON structure")
 val html = "<span>Hi</span>"
 val result = build_ipc_render(html)
 expect(result).to_contain("{")
@@ -290,13 +345,18 @@ expect(result).to_contain("}")
 
 #### escapes double quotes
 
+- escapes double quotes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escapes double quotes")
 val result = escape_ipc_json("say \"hello\"")
 expect(result).to_contain("\\\"")
 ```
@@ -305,13 +365,18 @@ expect(result).to_contain("\\\"")
 
 #### escapes backslashes
 
+- escapes backslashes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escapes backslashes")
 val result = escape_ipc_json("path\\to\\file")
 expect(result).to_contain("\\\\")
 ```
@@ -320,13 +385,18 @@ expect(result).to_contain("\\\\")
 
 #### escapes newlines
 
+- escapes newlines
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escapes newlines")
 val result = escape_ipc_json("line1\nline2")
 expect(result).to_contain("\\n")
 ```
@@ -335,13 +405,19 @@ expect(result).to_contain("\\n")
 
 #### passes plain text unchanged
 
+- passes plain text unchanged
+   - Expected: result equals `hello world`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes plain text unchanged")
 val result = escape_ipc_json("hello world")
 expect(result).to_equal("hello world")
 ```
@@ -350,13 +426,19 @@ expect(result).to_equal("hello world")
 
 #### handles empty string
 
+- handles empty string
+   - Expected: result equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles empty string")
 val result = escape_ipc_json("")
 expect(result).to_equal("")
 ```
@@ -370,12 +452,12 @@ expect(result).to_equal("")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/ipc_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering extract_json_field, parse_ipc_message, build_ipc_render, escape_ipc_json.
 - extract_json_field
 - parse_ipc_message
 - build_ipc_render
@@ -393,3 +475,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3eb3e29ce95fe6268e524069047a53fcc239e182e4a2cedd81507f5dc346ce18`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3eb3e29ce95fe6268e524069047a53fcc239e182e4a2cedd81507f5dc346ce18`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3eb3e29ce95fe6268e524069047a53fcc239e182e4a2cedd81507f5dc346ce18`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/ipc_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/ipc_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/ipc_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/ipc_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/ipc_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts type field from JSON' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ipc_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts key field from JSON' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/ipc_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns empty string for missing field' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

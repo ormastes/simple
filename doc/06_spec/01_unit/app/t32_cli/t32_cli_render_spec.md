@@ -1,29 +1,6 @@
 # T32 Cli Render Specification
 
-> <details>
-
-<!-- sdn-diagram:id=t32_cli_render_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=t32_cli_render_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-t32_cli_render_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=t32_cli_render_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32 CLI Render.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +19,19 @@ t32_cli_render_spec
 
 #### renders scalar value
 
+- renders scalar value
+   - Expected: output equals `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders scalar value")
 val result = make_scalar("42")
 val output = render_result(result)
 expect(output).to_equal("42")
@@ -58,13 +41,19 @@ expect(output).to_equal("42")
 
 #### renders scalar with title
 
+- renders scalar with title
+   - Expected: output equals `Register PC: 0x08001000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders scalar with title")
 val result = make_scalar_titled("Register PC", "0x08001000")
 val output = render_result(result)
 expect(output).to_equal("Register PC: 0x08001000")
@@ -76,13 +65,18 @@ expect(output).to_equal("Register PC: 0x08001000")
 
 #### renders table with header and separator
 
+- renders table with header and separator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders table with header and separator")
 val rows: [[text]] = [["Name", "Value"], ["PC", "0x1000"], ["SP", "0x2000"]]
 val result = make_table("Registers", rows)
 val output = render_result(result)
@@ -99,13 +93,19 @@ expect(output).to_contain("----")
 
 #### renders empty table as (empty)
 
+- renders empty table as (empty)
+   - Expected: output equals `Empty: (empty)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders empty table as (empty)")
 val result = make_table("Empty", [])
 val output = render_result(result)
 expect(output).to_equal("Empty: (empty)")
@@ -117,13 +117,18 @@ expect(output).to_equal("Empty: (empty)")
 
 #### renders aligned key-value pairs
 
+- renders aligned key-value pairs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders aligned key-value pairs")
 val pairs: [[text]] = [["host", "localhost"], ["port", "20000"]]
 val result = make_kv("Session", pairs)
 val output = render_result(result)
@@ -140,13 +145,18 @@ expect(output).to_contain("20000")
 
 #### renders bulleted items
 
+- renders bulleted items
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders bulleted items")
 val items: [text] = ["alpha", "beta", "gamma"]
 val result = make_list("Items", items)
 val output = render_result(result)
@@ -162,13 +172,19 @@ expect(output).to_contain("  - gamma")
 
 #### passes through raw text
 
+- passes through raw text
+   - Expected: output equals `some raw output\nline two`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("passes through raw text")
 val result = make_raw("some raw output\nline two")
 val output = render_result(result)
 expect(output).to_equal("some raw output\nline two")
@@ -180,13 +196,19 @@ expect(output).to_equal("some raw output\nline two")
 
 #### formats error message
 
+- formats error message
+   - Expected: output equals `Error: Connection lost`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats error message")
 val output = render_error("Connection lost")
 expect(output).to_equal("Error: Connection lost")
 ```
@@ -195,13 +217,19 @@ expect(output).to_equal("Error: Connection lost")
 
 #### formats empty error
 
+- formats empty error
+   - Expected: output equals `Error: `
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats empty error")
 val output = render_error("")
 expect(output).to_equal("Error: ")
 ```
@@ -212,16 +240,18 @@ expect(output).to_equal("Error: ")
 
 #### appends gui status footer to scalar
 
-1. var result = make scalar
+- appends gui status footer to scalar
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("appends gui status footer to scalar")
 var result = make_scalar("ok")
 result.gui_status = "{\"cpu_state\":\"stopped\",\"practice_state\":\"idle\"}"
 val output = render_result(result)
@@ -233,17 +263,19 @@ expect(output).to_contain("[CPU: stopped | PRACTICE: idle]")
 
 #### skips empty gui status
 
-1. var result = make scalar
+- skips empty gui status
    - Expected: output equals `ok`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("skips empty gui status")
 var result = make_scalar("ok")
 result.gui_status = ""
 val output = render_result(result)
@@ -254,17 +286,19 @@ expect(output).to_equal("ok")
 
 #### skips empty object gui status
 
-1. var result = make scalar
+- skips empty object gui status
    - Expected: output equals `ok`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("skips empty object gui status")
 var result = make_scalar("ok")
 result.gui_status = "{}"
 val output = render_result(result)
@@ -280,12 +314,12 @@ expect(output).to_equal("ok")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/t32_cli/t32_cli_render_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering T32 CLI Render.
 - T32 CLI Render
 
 ## Scenario Summary
@@ -300,3 +334,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ab1abb73c808baa8c7c007f4ff3402c4e8e1219bee6045dcf9d90941de640fc2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ab1abb73c808baa8c7c007f4ff3402c4e8e1219bee6045dcf9d90941de640fc2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ab1abb73c808baa8c7c007f4ff3402c4e8e1219bee6045dcf9d90941de640fc2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/t32_cli/t32_cli_render_spec.spl
+mirror: doc/06_spec/01_unit/app/t32_cli/t32_cli_render_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/t32_cli/t32_cli_render_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/t32_cli/t32_cli_render_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/t32_cli/t32_cli_render_spec.spl:220:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders scalar value' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/t32_cli/t32_cli_render_spec.spl:227:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders scalar with title' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/t32_cli/t32_cli_render_spec.spl:235:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders table with header and separator' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

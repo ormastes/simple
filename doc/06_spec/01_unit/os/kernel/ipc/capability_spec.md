@@ -2,30 +2,6 @@
 
 > Tests for the capability enforcement manager. Validates grant/revoke lifecycle, pledge() monotonic restriction, unveil() file path restriction, and file access checking with prefix matching.
 
-<!-- sdn-diagram:id=capability_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=capability_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-capability_spec -> std
-capability_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=capability_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 28 | 28 | 0 | 0 |
@@ -50,7 +26,7 @@ Tests for the capability enforcement manager. Validates grant/revoke lifecycle, 
 | Design | N/A |
 | Research | N/A |
 | Source | `test/01_unit/os/kernel/ipc/capability_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -67,13 +43,19 @@ checking with prefix matching.
 
 #### creates with empty records
 
+- creates with empty records
+   - Expected: result is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates with empty records")
 val mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val result = mgr.check(task, CapabilityKind.ProcessSpawn)
@@ -86,18 +68,19 @@ expect(result).to_equal(false)
 
 #### initializes a task with given capabilities
 
-- var mgr = CapabilityManager new
-- mgr init task
+- initializes a task with given capabilities
    - Expected: has is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("initializes a task with given capabilities")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -115,18 +98,19 @@ expect(has).to_equal(true)
 
 #### initializes a task with empty capabilities
 
-- var mgr = CapabilityManager new
-- mgr init task
+- initializes a task with empty capabilities
    - Expected: has is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("initializes a task with empty capabilities")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.empty())
@@ -138,18 +122,19 @@ expect(has).to_equal(false)
 
 #### lowers non-init ambient full sets to deny-all
 
-- var mgr = CapabilityManager new
-- mgr init task
+- lowers non-init ambient full sets to deny-all
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lowers non-init ambient full sets to deny-all")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 2)
 mgr.init_task(task, CapabilitySet.full())
@@ -162,13 +147,19 @@ expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 
 #### returns false for unregistered task
 
+- returns false for unregistered task
+   - Expected: result is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns false for unregistered task")
 val mgr = CapabilityManager.new()
 val result = mgr.check(TaskId(id: 999), CapabilityKind.SystemReboot)
 expect(result).to_equal(false)
@@ -178,18 +169,19 @@ expect(result).to_equal(false)
 
 #### returns true when task has matching capability
 
-- var mgr = CapabilityManager new
-- mgr init task
+- returns true when task has matching capability
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns true when task has matching capability")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -205,18 +197,19 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
 
 #### returns false for non-matching capability kind
 
-- var mgr = CapabilityManager new
-- mgr init task
+- returns false for non-matching capability kind
    - Expected: mgr.check(task, CapabilityKind.SystemReboot) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns false for non-matching capability kind")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -232,9 +225,7 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 
 #### allows dataset rights by object and generation
 
-- var mgr = CapabilityManager new
-- kind: CapabilityKind SharedDataset
-- mgr init task
+- allows dataset rights by object and generation
    - Expected: mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_READ)) is true
    - Expected: mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 3u64, rights: CAP_RIGHT_MAP)) is true
    - Expected: mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation: 4u64, rights: CAP_RIGHT_READ)) is false
@@ -245,10 +236,12 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows dataset rights by object and generation")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -269,9 +262,7 @@ expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation:
 
 #### allows process queue submit and receive rights by generation
 
-- var mgr = CapabilityManager new
-- kind: CapabilityKind ProcessQueue
-- mgr init task
+- allows process queue submit and receive rights by generation
    - Expected: mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_SUBMIT)) is true
    - Expected: mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 5u64, rights: CAP_RIGHT_QUEUE_RECV)) is true
    - Expected: mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 6u64, rights: CAP_RIGHT_QUEUE_RECV)) is false
@@ -282,10 +273,12 @@ expect(mgr.check(task, CapabilityKind.SharedDataset(object_id: 7u64, generation:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows process queue submit and receive rights by generation")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 2)
 val token = CapabilityToken(
@@ -308,9 +301,7 @@ expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 
 
 #### grants capability from source to target
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr init task
+- grants capability from source to target
    - Expected: ok is true
    - Expected: mgr.check(dst, CapabilityKind.ProcessSpawn) is true
 
@@ -318,10 +309,12 @@ expect(mgr.check(task, CapabilityKind.ProcessQueue(queue_id: 11u64, generation: 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("grants capability from source to target")
 var mgr = CapabilityManager.new()
 val src = TaskId(id: 1)
 val dst = TaskId(id: 2)
@@ -345,19 +338,19 @@ expect(mgr.check(dst, CapabilityKind.ProcessSpawn)).to_equal(true)
 
 #### fails to grant if source does not hold capability
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr init task
+- fails to grant if source does not hold capability
    - Expected: ok is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails to grant if source does not hold capability")
 var mgr = CapabilityManager.new()
 val src = TaskId(id: 1)
 val dst = TaskId(id: 2)
@@ -379,8 +372,7 @@ expect(ok).to_equal(false)
 
 #### revokes a capability token
 
-- var mgr = CapabilityManager new
-- mgr init task
+- revokes a capability token
    - Expected: revoked is true
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is false
 
@@ -388,10 +380,12 @@ expect(ok).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("revokes a capability token")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -411,17 +405,19 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
 
 #### revoke returns false for unknown token
 
-- var mgr = CapabilityManager new
+- revoke returns false for unknown token
    - Expected: result is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("revoke returns false for unknown token")
 var mgr = CapabilityManager.new()
 val token = CapabilityToken(
     kind: CapabilityKind.SystemMount,
@@ -438,8 +434,7 @@ expect(result).to_equal(false)
 
 #### restricts capabilities to allowed list
 
-- var mgr = CapabilityManager new
-- mgr pledge
+- restricts capabilities to allowed list
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
    - Expected: mgr.check(task, CapabilityKind.SystemReboot) is false
 
@@ -447,10 +442,12 @@ expect(result).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("restricts capabilities to allowed list")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val spawn_token = CapabilityToken(
@@ -479,19 +476,19 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 
 #### pledge with empty list removes all capabilities
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr pledge
+- pledge with empty list removes all capabilities
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("pledge with empty list removes all capabilities")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -510,21 +507,20 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
 
 #### second pledge is no-op (already pledged)
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr pledge
+- second pledge is no-op (already pledged)
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
-- mgr pledge
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("second pledge is no-op (already pledged)")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -550,18 +546,19 @@ expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(true)
 
 #### before unveil, all paths are allowed
 
-- var mgr = CapabilityManager new
-- mgr init task
+- before unveil, all paths are allowed
    - Expected: allowed is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("before unveil, all paths are allowed")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.full())
@@ -573,18 +570,19 @@ expect(allowed).to_equal(true)
 
 #### before unveil, file access still requires matching capability
 
-- var mgr = CapabilityManager new
-- mgr init task
+- before unveil, file access still requires matching capability
    - Expected: mgr.check_file_access(task, "/any/path", "r") is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("before unveil, file access still requires matching capability")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 2)
 mgr.init_task(task, CapabilitySet.empty())
@@ -595,9 +593,7 @@ expect(mgr.check_file_access(task, "/any/path", "r")).to_equal(false)
 
 #### before unveil, explicit file capability allows matching path
 
-- var mgr = CapabilityManager new
-- kind: CapabilityKind FileRead
-- mgr init task
+- before unveil, explicit file capability allows matching path
    - Expected: mgr.check_file_access(task, "/tmp/data.txt", "r") is true
    - Expected: mgr.check_file_access(task, "/tmp/data.txt", "w") is false
    - Expected: mgr.check_file_access(task, "/tmp/data.txt", "rw") is false
@@ -609,10 +605,12 @@ expect(mgr.check_file_access(task, "/any/path", "r")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("before unveil, explicit file capability allows matching path")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 3)
 val token = CapabilityToken(
@@ -636,9 +634,7 @@ expect(mgr.check_file_access(task, "/etc/passwd", "r")).to_equal(false)
 
 #### after unveil, only unveiled paths are allowed
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+- after unveil, only unveiled paths are allowed
    - Expected: tmp_ok is true
    - Expected: etc_denied is false
 
@@ -646,10 +642,12 @@ expect(mgr.check_file_access(task, "/etc/passwd", "r")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("after unveil, only unveiled paths are allowed")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.full())
@@ -668,19 +666,19 @@ expect(etc_denied).to_equal(false)
 
 #### unveil supports write permission
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+- unveil supports write permission
    - Expected: write_ok is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("unveil supports write permission")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.full())
@@ -695,10 +693,7 @@ expect(write_ok).to_equal(true)
 
 #### multiple unveil calls add entries
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
-- mgr unveil
+- multiple unveil calls add entries
    - Expected: tmp_ok is true
    - Expected: home_ok is true
 
@@ -706,10 +701,12 @@ expect(write_ok).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("multiple unveil calls add entries")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.full())
@@ -728,19 +725,19 @@ expect(home_ok).to_equal(true)
 
 #### unveil denies paths not in the list
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+- unveil denies paths not in the list
    - Expected: unsafe is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("unveil denies paths not in the list")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.full())
@@ -755,9 +752,7 @@ expect(unsafe).to_equal(false)
 
 #### path prefix matching works correctly
 
-- var mgr = CapabilityManager new
-- mgr init task
-- mgr unveil
+- path prefix matching works correctly
    - Expected: sub is true
    - Expected: parent is false
    - Expected: sibling_prefix is false
@@ -766,10 +761,12 @@ expect(unsafe).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("path prefix matching works correctly")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 mgr.init_task(task, CapabilitySet.full())
@@ -794,20 +791,20 @@ expect(sibling_prefix).to_equal(false)
 
 #### removes all records for the destroyed task
 
-- var mgr = CapabilityManager new
-- mgr init task
+- removes all records for the destroyed task
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is true
-- mgr destroy task
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("removes all records for the destroyed task")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 1)
 val token = CapabilityToken(
@@ -828,19 +825,22 @@ expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
 
 #### new tasks get full capability record at spawn
 
-- var mgr = CapabilityManager new
+- new tasks get full capability record at spawn
    - Expected: mgr.check(task, CapabilityKind.ProcessSpawn) is false
-- mgr init task record
    - Expected: result is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("new tasks get full capability record at spawn")
+"""After init_task_record(task, full: true), the record carries
+explicit finite boot capabilities rather than ambient wildcard full."""
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 42)
 
@@ -857,20 +857,22 @@ expect(result).to_equal(true)
 
 #### init_task_record is idempotent
 
-- var mgr = CapabilityManager new
-- mgr init task
+- init_task_record is idempotent
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is true
-- mgr init task record
    - Expected: mgr.check(task, CapabilityKind.NetRaw) is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("init_task_record is idempotent")
+"""Calling init_task_record twice for the same task must not
+overwrite an existing record."""
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 7)
 val token = CapabilityToken(
@@ -891,18 +893,19 @@ expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(true)
 
 #### init_task_record with full=false creates pledged empty record
 
-- var mgr = CapabilityManager new
-- mgr init task record
+- init_task_record with full=false creates pledged empty record
    - Expected: mgr.check(task, CapabilityKind.SystemReboot) is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("init_task_record with full=false creates pledged empty record")
 var mgr = CapabilityManager.new()
 val task = TaskId(id: 99)
 mgr.init_task_record(task, false)
@@ -924,3 +927,51 @@ expect(mgr.check(task, CapabilityKind.SystemReboot)).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `35638398ae293c5626ac943bb964cc4e30da03fe7c19ded143451371ea27f6ab`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `35638398ae293c5626ac943bb964cc4e30da03fe7c19ded143451371ea27f6ab`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `35638398ae293c5626ac943bb964cc4e30da03fe7c19ded143451371ea27f6ab`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/os/kernel/ipc/capability_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/ipc/capability_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/ipc/capability_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/ipc/capability_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/ipc/capability_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates with empty records' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/ipc/capability_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initializes a task with given capabilities' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/ipc/capability_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initializes a task with empty capabilities' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

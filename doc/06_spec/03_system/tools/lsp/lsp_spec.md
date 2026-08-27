@@ -2,29 +2,6 @@
 
 > LSP Server BDD Specification Tests.
 
-<!-- sdn-diagram:id=lsp_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lsp_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lsp_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lsp_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 20 | 20 | 0 | 0 |
@@ -43,7 +20,7 @@ LSP Server BDD Specification Tests.
 | Category | LSP |
 | Status | Active |
 | Source | `test/03_system/tools/lsp/lsp_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 LSP Server BDD Specification Tests.
@@ -56,18 +33,18 @@ positions, ranges, diagnostics, code completion, and document management.
 
 #### should identify message types with pattern matching
 
-1. expect get message type
-2. expect get message type
-3. expect get message type
+- should identify message types with pattern matching
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should identify message types with pattern matching")
 val request = LspMessage.Request(1, "initialize")
 val notification = LspMessage.Notification("initialized")
 val error_msg = LspMessage.Error(404, "Not found")
@@ -81,17 +58,18 @@ expect get_message_type(error_msg) == "error"
 
 #### should detect error messages
 
-1. expect is error message
-2. expect is error message
+- should detect error messages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should detect error messages")
 val request = LspMessage.Request(1, "shutdown")
 val error_msg = LspMessage.Error(500, "Server error")
 
@@ -103,13 +81,18 @@ expect is_error_message(error_msg) == true
 
 #### should extract method from request
 
+- should extract method from request
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should extract method from request")
 val msg = LspMessage.Request(5, "textDocument/completion")
 
 match msg:
@@ -126,13 +109,18 @@ match msg:
 
 #### should create and compare positions
 
+- should create and compare positions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create and compare positions")
 val pos1 = Position { line: 5, character: 10 }
 val pos2 = Position { line: 5, character: 10 }
 
@@ -144,18 +132,18 @@ expect pos1.character == pos2.character
 
 #### should validate positions
 
-1. expect is valid position
-2. expect is valid position
-3. expect is valid position
+- should validate positions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should validate positions")
 val valid_pos = Position { line: 0, character: 0 }
 val invalid_pos1 = Position { line: -1, character: 0 }
 val invalid_pos2 = Position { line: 0, character: -5 }
@@ -169,16 +157,18 @@ expect is_valid_position(invalid_pos2) == false
 
 #### should calculate range length for single line
 
-1. expect range length
+- should calculate range length for single line
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should calculate range length for single line")
 val range = Range {
     start: Position { line: 5, character: 10 },
     end: Position { line: 5, character: 20 }
@@ -191,16 +181,18 @@ expect range_length(range) == 10
 
 #### should detect multi-line ranges
 
-1. expect range length
+- should detect multi-line ranges
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should detect multi-line ranges")
 val range = Range {
     start: Position { line: 5, character: 10 },
     end: Position { line: 10, character: 5 }
@@ -215,16 +207,18 @@ expect range_length(range) == -1
 
 #### should count error diagnostics
 
-1. expect count errors
+- should count error diagnostics
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should count error diagnostics")
 val diagnostics = [
     Diagnostic {
         range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 5 } },
@@ -253,16 +247,18 @@ expect count_errors(diagnostics) == 2
 
 #### should filter error diagnostics
 
-1. expect len
+- should filter error diagnostics
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should filter error diagnostics")
 val diagnostics = [
     Diagnostic {
         range: Range { start: Position { line: 0, character: 0 }, end: Position { line: 0, character: 5 } },
@@ -287,17 +283,18 @@ expect errors[0].severity == DiagnosticSeverity.Error
 
 #### should handle empty diagnostic list
 
-1. expect count errors
-2. expect len
+- should handle empty diagnostic list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle empty diagnostic list")
 val diagnostics = []
 
 expect count_errors(diagnostics) == 0
@@ -310,16 +307,18 @@ expect len(filter_errors(diagnostics)) == 0
 
 #### should create keyword completions
 
-1. expect len
+- should create keyword completions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create keyword completions")
 val keywords = [
     CompletionItem {
         label: "fn",
@@ -350,18 +349,18 @@ expect keywords[0].kind == CompletionItemKind.Keyword
 
 #### should filter completions by kind
 
-1. detail: "fn
-2. functions push
-3. expect len
+- should filter completions by kind
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should filter completions by kind")
 val items = [
     CompletionItem {
         label: "my_function",
@@ -398,13 +397,18 @@ expect functions[0].label == "my_function"
 
 #### should transition from Uninitialized to Initializing
 
+- should transition from Uninitialized to Initializing
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should transition from Uninitialized to Initializing")
 var state = ServerState.Uninitialized
 
 # Simulate state transition
@@ -421,21 +425,18 @@ match state:
 
 #### should track server lifecycle
 
-1. states push
-2. states push
-3. states push
-4. states push
-5. states push
-6. expect len
+- should track server lifecycle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should track server lifecycle")
 var states = []
 
 states.push(ServerState.Uninitialized)
@@ -453,16 +454,18 @@ expect len(states) == 5
 
 #### should create text document
 
-1. text: "fn main
+- should create text document
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should create text document")
 val doc = TextDocument {
     uri: "file:///test.spl",
     language_id: "simple",
@@ -479,17 +482,18 @@ expect doc.version == 1
 
 #### should track document versions
 
-1. text: "fn main
-2. text: "fn main
+- should track document versions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should track document versions")
 val doc_v1 = TextDocument {
     uri: "file:///test.spl",
     language_id: "simple",
@@ -515,13 +519,18 @@ expect doc_v2.version == 2
 
 #### should handle parse errors with enum
 
+- should handle parse errors with enum
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should handle parse errors with enum")
 val error = LspMessage.Error(-32700, "Parse error")
 
 match error:
@@ -536,17 +545,18 @@ match error:
 
 #### should distinguish between error and success
 
-1. expect is error message
-2. expect is error message
+- should distinguish between error and success
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should distinguish between error and success")
 val success = LspMessage.Response(1, "OK")
 val failure = LspMessage.Error(404, "Not found")
 
@@ -560,19 +570,18 @@ expect is_error_message(failure) == true
 
 #### should process array of messages
 
-1. LspMessage Request
-2. LspMessage Request
-3. LspMessage Notification
-4. LspMessage Request
+- should process array of messages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should process array of messages")
 val messages = [
     LspMessage.Request(1, "initialize"),
     LspMessage.Request(2, "shutdown"),
@@ -594,20 +603,18 @@ expect request_count == 2
 
 #### should collect method names from requests
 
-1. LspMessage Request
-2. LspMessage Request
-3. LspMessage Notification
-4. methods push
-5. expect len
+- should collect method names from requests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should collect method names from requests")
 val messages = [
     LspMessage.Request(1, "initialize"),
     LspMessage.Request(2, "textDocument/hover"),
@@ -639,3 +646,69 @@ expect methods[2] == "initialized"
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8dffde7ba7c94702f39110ea9724ccf0061686bb4096a50e86a12243231c750c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8dffde7ba7c94702f39110ea9724ccf0061686bb4096a50e86a12243231c750c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8dffde7ba7c94702f39110ea9724ccf0061686bb4096a50e86a12243231c750c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/tools/lsp/lsp_spec.spl
+mirror: doc/06_spec/03_system/tools/lsp/lsp_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/lsp/lsp_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/lsp/lsp_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/lsp/lsp_spec.spl:184:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should identify message types with pattern matching' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/lsp/lsp_spec.spl:184:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should identify message types with pattern matching' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/lsp/lsp_spec.spl:196:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should detect error messages' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/lsp/lsp_spec.spl:196:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should detect error messages' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/lsp/lsp_spec.spl:206:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should extract method from request' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/lsp/lsp_spec.spl:206:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should extract method from request' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/lsp/lsp_spec.spl:226:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should create and compare positions' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/lsp/lsp_spec.spl:236:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should validate positions' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/lsp/lsp_spec.spl:248:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should calculate range length for single line' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

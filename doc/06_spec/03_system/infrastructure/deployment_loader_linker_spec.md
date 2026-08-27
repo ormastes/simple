@@ -1,31 +1,6 @@
 # Deployment Loader Linker Specification
 
-> <details>
-
-<!-- sdn-diagram:id=deployment_loader_linker_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=deployment_loader_linker_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-deployment_loader_linker_spec -> compiler
-deployment_loader_linker_spec -> app
-deployment_loader_linker_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=deployment_loader_linker_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Loader/Linker deployment coverage.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +17,27 @@ deployment_loader_linker_spec -> std
 
 #### exercises loader and linker wrapper smoke paths
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- exercises loader and linker wrapper smoke paths
+   - Expected: cfg.pie is true
+   - Expected: cfg.verbose is false
+   - Expected: link_to_native([], "out.bin", cfg).is_err() is true
+   - Expected: link_to_native(["module.smf", "native.o"], "out.bin", cfg).is_err() is true
+   - Expected: smf_inputs.len() equals `4`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exercises loader and linker wrapper smoke paths")
 val cfg = NativeLinkConfig.default()
 val smf_inputs = ["module.smf", "archive.lsm", "native.o", "notes.txt"]
 
@@ -63,9 +52,7 @@ expect(smf_inputs.len()).to_equal(4)
 
 #### scans libraries through the shared provider and exposes module data
 
-1.   = shell
-2. delete if exists
-3. var builder = LibSmfBuilder new
+- scans libraries through the shared provider and exposes module data
    - Expected: builder.add_module_data_with_object("pkg/core", [1, 2, 3, 4], [127, 69, 76, 70, 1]).is_ok() is true
    - Expected: builder.add_module_data("pkg/fallback", [9, 8, 7]).is_ok() is true
    - Expected: builder.write(lib_path).is_ok() is true
@@ -78,17 +65,17 @@ expect(smf_inputs.len()).to_equal(4)
    - Expected: provider.get_module_bytes("pkg/core").unwrap() equals `[1, 2, 3, 4]`
    - Expected: provider.get_object("pkg/core").unwrap() equals `[127, 69, 76, 70, 1]`
    - Expected: provider.get_exported_code("pkg/fallback").unwrap()[0].bytes equals `[9, 8, 7]`
-4. delete if exists
-5.   = shell
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("scans libraries through the shared provider and exposes module data")
 val temp_dir = "/tmp/unit_deployment_loader_linker_scan"
 val lib_path = "{temp_dir}/deployment_fixture.lsm"
 _ = shell("mkdir -p '{temp_dir}'")
@@ -127,28 +114,25 @@ _ = shell("rmdir '{temp_dir}' 2>/dev/null || true")
 
 #### extracts object files from resolved modules and code units
 
-1.   = shell
-2. delete if exists
+- extracts object files from resolved modules and code units
    - Expected: extract_result.is_ok() is true
    - Expected: extract_result.unwrap().len() equals `1`
    - Expected: extract_result.unwrap()[0] equals `object_path`
    - Expected: rt_file_exists(object_path) is true
-3. delete if exists
    - Expected: fallback_extract.is_ok() is true
    - Expected: fallback_extract.unwrap()[0] equals `fallback_path`
    - Expected: rt_file_exists(fallback_path) is true
-4. delete if exists
-5. delete if exists
-6.   = shell
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("extracts object files from resolved modules and code units")
 val temp_dir = "/tmp/unit_deployment_loader_linker_extract"
 _ = shell("mkdir -p '{temp_dir}'")
 
@@ -211,12 +195,12 @@ _ = shell("rmdir '{temp_dir}' 2>/dev/null || true")
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/infrastructure/deployment_loader_linker_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Loader/Linker deployment coverage.
 - Loader/Linker deployment coverage
 
 ## Scenario Summary
@@ -231,3 +215,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4cd7376acbdf3cbc5b99106ab70628ed3f7dcbf0ce570586bcb9fb38519adf04`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4cd7376acbdf3cbc5b99106ab70628ed3f7dcbf0ce570586bcb9fb38519adf04`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4cd7376acbdf3cbc5b99106ab70628ed3f7dcbf0ce570586bcb9fb38519adf04`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/infrastructure/deployment_loader_linker_spec.spl
+mirror: doc/06_spec/03_system/infrastructure/deployment_loader_linker_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/infrastructure/deployment_loader_linker_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/infrastructure/deployment_loader_linker_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/infrastructure/deployment_loader_linker_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/infrastructure/deployment_loader_linker_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exercises loader and linker wrapper smoke paths' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/infrastructure/deployment_loader_linker_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'scans libraries through the shared provider and exposes module data' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/infrastructure/deployment_loader_linker_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts object files from resolved modules and code units' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

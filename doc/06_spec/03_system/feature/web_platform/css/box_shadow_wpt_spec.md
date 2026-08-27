@@ -20,7 +20,7 @@ Proves admitted outer, multi-outer, and single-inset box shadows through the
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Proves admitted outer, multi-outer, and single-inset box shadows through the
@@ -34,55 +34,26 @@ blur remain outside this bounded profile.
 
 #### should paint an offset outer shadow behind the border box
 
-- Resolve the shadowed box in canonical web semantic and layout state
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
-- Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
--  draw ir panel
-   - Artifact capture: after_step
-- Read exact outer-shadow ordering pixels through Engine2D
-   - Artifact capture: after_step
-   - Evidence: artifact verified by 3 expected checks
-   - Expected: pixels[10 + 4 * WIDTH] equals `0xFF16A34Au32`
-   - Expected: pixels[2 + 2 * WIDTH] equals `0xFFFFFFFFu32`
-   - Expected: pixels[14 + 2 * WIDTH] equals `0xFFFFFFFFu32`
+**Scenario capture:** artifact after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val shadow = "4px 3px 0 #16a34a"
-val html = _shadow_html(shadow, "#111827")
-
-step("Resolve the shadowed box in canonical web semantic and layout state")
-_expect_web_layout(html)
-
-step("Render HTML and CSS through canonical Draw IR")
-val composition = _shadow_composition(html)
-_draw_ir_panel(composition, shadow, "1")
-
-step("Read exact outer-shadow ordering pixels through Engine2D")
-val pixels = _pixels(html, composition)
-expect(pixels[10 + 4 * WIDTH]).to_equal(0xFF16A34Au32)
-expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
-expect(pixels[14 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
+# @req REQ-WEB-BROWSER-003/004
 ```
 
 </details>
 
 #### should preserve blur and spread length order
 
+- should preserve blur and spread length order
+   - Artifact capture: after_step
 - Resolve blur and spread boxes in canonical web semantic and layout state
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
--  expect web layout
    - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
    - Artifact capture: after_step
@@ -93,10 +64,12 @@ expect(pixels[14 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should preserve blur and spread length order")
 val blur_shadow = "0px 0px 2px #dc2626"
 val spread_shadow = "0px 0px 0px 2px #2563eb"
 val blur_html = _shadow_html(blur_shadow, "#111827")
@@ -135,29 +108,11 @@ expect(_pixels(
 
 #### should resolve admitted shadow color syntaxes before Draw IR
 
+- should resolve admitted shadow color syntaxes before Draw IR
+   - Artifact capture: after_step
 - Resolve color-bearing boxes in canonical web semantic and layout state
    - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
--  draw ir panel
-   - Artifact capture: after_step
--  draw ir panel
-   - Artifact capture: after_step
--  draw ir panel
-   - Artifact capture: after_step
--  draw ir panel
-   - Artifact capture: after_step
--  draw ir panel
    - Artifact capture: after_step
 - Read exact resolved shadow colors through Engine2D
    - Artifact capture: after_step
@@ -166,10 +121,12 @@ expect(_pixels(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should resolve admitted shadow color syntaxes before Draw IR")
 val rgb_shadow = "0px 0px 0px 2px rgb(37, 99, 235)"
 val rgba_shadow = "0px 0px 0px 2px rgba(37, 99, 235, 0.5)"
 val named_shadow = "0px 0px 0px 2px rebeccapurple"
@@ -222,13 +179,11 @@ expect(_pixels(
 
 #### should paint both admitted outer shadow layers
 
+- should paint both admitted outer shadow layers
+   - Artifact capture: after_step
 - Resolve the layered shadow box in canonical web semantic and layout state
    - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
--  draw ir panel
    - Artifact capture: after_step
 - Read one exact pixel from each shadow layer through Engine2D
    - Artifact capture: after_step
@@ -241,10 +196,12 @@ expect(_pixels(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should paint both admitted outer shadow layers")
 val shadow = (
     "4px 0px 0px #dc2626, 0px 4px 0px #2563eb"
 )
@@ -268,13 +225,11 @@ expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
 
 #### should paint a single inset shadow before the center fill
 
+- should paint a single inset shadow before the center fill
+   - Artifact capture: after_step
 - Resolve the inset shadow box in canonical web semantic and layout state
    - Artifact capture: after_step
--  expect web layout
-   - Artifact capture: after_step
 - Render HTML and CSS through canonical Draw IR
-   - Artifact capture: after_step
--  draw ir panel
    - Artifact capture: after_step
 - Read exact inset-edge and center pixels through Engine2D
    - Artifact capture: after_step
@@ -286,10 +241,12 @@ expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should paint a single inset shadow before the center fill")
 val shadow = "inset 0px 0px 0px 2px #16a34a"
 val html = _shadow_html(shadow, "#111827")
 
@@ -320,3 +277,70 @@ expect(pixels[4 + 3 * WIDTH]).to_equal(0xFFFFFFFFu32)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-003/004`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3c5d9bfad0f69065183ef90cdd7fc9c24f5dbedbbd48a4366528c11866352829`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3c5d9bfad0f69065183ef90cdd7fc9c24f5dbedbbd48a4366528c11866352829`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3c5d9bfad0f69065183ef90cdd7fc9c24f5dbedbbd48a4366528c11866352829`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/css/box_shadow_wpt_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=65 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/css/box_shadow_wpt_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/css/box_shadow_wpt_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:115:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should paint an offset outer shadow behind the border box' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:115:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should paint an offset outer shadow behind the border box' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:139:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should preserve blur and spread length order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:139:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should preserve blur and spread length order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:178:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve admitted shadow color syntaxes before Draw IR' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:178:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should resolve admitted shadow color syntaxes before Draw IR' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:231:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should paint both admitted outer shadow layers' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:231:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should paint both admitted outer shadow layers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/css/box_shadow_wpt_spec.spl:255:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should paint a single inset shadow before the center fill' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

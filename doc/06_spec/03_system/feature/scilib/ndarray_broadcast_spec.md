@@ -2,29 +2,6 @@
 
 > NumPy-style broadcasting for binary ufuncs. Broadcasting is the GATING SUBSTRATE for all 9 NumPy ufuncs (per Phase 2 finding) — every elementwise op routes through the same shape-resolution rules.
 
-<!-- sdn-diagram:id=ndarray_broadcast_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=ndarray_broadcast_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-ndarray_broadcast_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=ndarray_broadcast_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 29 | 29 | 0 | 0 |
@@ -48,7 +25,7 @@ NumPy-style broadcasting for binary ufuncs. Broadcasting is the GATING SUBSTRATE
 | Design | doc/05_design/scilib_port_architecture.md |
 | Research | doc/01_research/scilib_fortran_port/02_python_api_surface.md |
 | Source | `test/03_system/feature/scilib/ndarray_broadcast_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -87,64 +64,8 @@ ufunc, not to the shape resolver).
 
 #### (2,1) and (1,3) -> (2,3)
 
-1. Shape new
+- (2,1) and (1,3) -> (2,3)
    - Expected: r.unwrap() equals `Shape.new([Index.new(2), Index.new(3)])`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val r = broadcast_shapes(Shape.new([Index.new(2), Index.new(1)]),
-                         Shape.new([Index.new(1), Index.new(3)]))
-expect(r.unwrap()).to_equal(Shape.new([Index.new(2), Index.new(3)]))
-```
-
-</details>
-
-#### (2,3) and (3,) -> (2,3) (right-align)
-
-1. Shape new
-   - Expected: r.unwrap() equals `Shape.new([Index.new(2), Index.new(3)])`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val r = broadcast_shapes(Shape.new([Index.new(2), Index.new(3)]),
-                         Shape.new([Index.new(3)]))
-expect(r.unwrap()).to_equal(Shape.new([Index.new(2), Index.new(3)]))
-```
-
-</details>
-
-#### (3,) and scalar -> (3,)
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val r = broadcast_shapes(Shape.new([Index.new(3)]), Shape.new([]))
-expect(r.unwrap()).to_equal(Shape.new([Index.new(3)]))
-```
-
-</details>
-
-#### is symmetric: broadcast_shapes(a,b) == broadcast_shapes(b,a)
-
-1. Shape new
-2. Shape new
-   - Expected: ab equals `ba`
 
 
 <details>
@@ -154,6 +75,73 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(2,1) and (1,3) -> (2,3)")
+val r = broadcast_shapes(Shape.new([Index.new(2), Index.new(1)]),
+                         Shape.new([Index.new(1), Index.new(3)]))
+expect(r.unwrap()).to_equal(Shape.new([Index.new(2), Index.new(3)]))
+```
+
+</details>
+
+#### (2,3) and (3,) -> (2,3) (right-align)
+
+- (2,3) and (3,) -> (2,3) (right-align)
+   - Expected: r.unwrap() equals `Shape.new([Index.new(2), Index.new(3)])`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("(2,3) and (3,) -> (2,3) (right-align)")
+val r = broadcast_shapes(Shape.new([Index.new(2), Index.new(3)]),
+                         Shape.new([Index.new(3)]))
+expect(r.unwrap()).to_equal(Shape.new([Index.new(2), Index.new(3)]))
+```
+
+</details>
+
+#### (3,) and scalar -> (3,)
+
+- (3,) and scalar -> (3,)
+   - Expected: r.unwrap() equals `Shape.new([Index.new(3)])`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("(3,) and scalar -> (3,)")
+val r = broadcast_shapes(Shape.new([Index.new(3)]), Shape.new([]))
+expect(r.unwrap()).to_equal(Shape.new([Index.new(3)]))
+```
+
+</details>
+
+#### is symmetric: broadcast_shapes(a,b) == broadcast_shapes(b,a)
+
+- is symmetric: broadcast_shapes(a,b) == broadcast_shapes(b,a)
+   - Expected: ab equals `ba`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("is symmetric: broadcast_shapes(a,b) == broadcast_shapes(b,a)")
 val ab = broadcast_shapes(Shape.new([Index.new(2), Index.new(1)]),
                           Shape.new([Index.new(1), Index.new(3)])).unwrap()
 val ba = broadcast_shapes(Shape.new([Index.new(1), Index.new(3)]),
@@ -167,17 +155,19 @@ expect(ab).to_equal(ba)
 
 #### (2,3) and (2,) -> error (right-align: 3 vs 2 mismatch)
 
-1. Shape new
+- (2,3) and (2,) -> error (right-align: 3 vs 2 mismatch)
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(2,3) and (2,) -> error (right-align: 3 vs 2 mismatch)")
 val r = broadcast_shapes(Shape.new([Index.new(2), Index.new(3)]),
                          Shape.new([Index.new(2)]))
 expect(r.is_err()).to_equal(true)
@@ -187,17 +177,19 @@ expect(r.is_err()).to_equal(true)
 
 #### (4,) and (3,) -> error
 
-1. Shape new
+- (4,) and (3,) -> error
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(4,) and (3,) -> error")
 val r = broadcast_shapes(Shape.new([Index.new(4)]),
                          Shape.new([Index.new(3)]))
 expect(r.is_err()).to_equal(true)
@@ -209,8 +201,7 @@ expect(r.is_err()).to_equal(true)
 
 #### (2,1) + (1,3) produces a (2,3) outer-sum
 
-1. Shape new
-2. Shape new
+- (2,1) + (1,3) produces a (2,3) outer-sum
    - Expected: r.shape equals `Shape.new([Index.new(2), Index.new(3)])`
    - Expected: r.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(11.0)`
    - Expected: r.get_at([Index.new(0), Index.new(2)]) equals `Float64.new(31.0)`
@@ -221,10 +212,12 @@ expect(r.is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(2,1) + (1,3) produces a (2,3) outer-sum")
 # a = [[1],[2]]   b = [[10,20,30]]
 # expected:
 #   [[11,21,31],
@@ -245,7 +238,7 @@ expect(r.get_at([Index.new(1), Index.new(2)])).to_equal(Float64.new(32.0))
 
 #### (2,3) + (3,) broadcasts the vector across rows
 
-1. Float64 new
+- (2,3) + (3,) broadcasts the vector across rows
    - Expected: r.shape equals `Shape.new([Index.new(2), Index.new(3)])`
    - Expected: r.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(11.0)`
    - Expected: r.get_at([Index.new(0), Index.new(2)]) equals `Float64.new(33.0)`
@@ -255,10 +248,12 @@ expect(r.get_at([Index.new(1), Index.new(2)])).to_equal(Float64.new(32.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(2,3) + (3,) broadcasts the vector across rows")
 # a = [[1,2,3],[4,5,6]]    b = [10,20,30]
 # expected:
 #   [[11,22,33],
@@ -278,13 +273,23 @@ expect(r.get_at([Index.new(1), Index.new(2)])).to_equal(Float64.new(36.0))
 
 #### computes exact-shape four-lane F64 add
 
+- computes exact-shape four-lane F64 add
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float64.new(11.0)`
+   - Expected: r.get(Index.new(1)) equals `Float64.new(2.0)`
+   - Expected: r.get(Index.new(2)) equals `Float64.new(2.0)`
+   - Expected: r.get(Index.new(3)) equals `Float64.new(8.25)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F64 add")
 val a = array([Float64.new(1.0), Float64.new(-2.0), Float64.new(3.5), Float64.new(8.0)])
 val b = array([Float64.new(10.0), Float64.new(4.0), Float64.new(-1.5), Float64.new(0.25)])
 val r = a.add(b)
@@ -299,13 +304,23 @@ expect(r.get(Index.new(3))).to_equal(Float64.new(8.25))
 
 #### computes exact-shape four-lane F64 multiply
 
+- computes exact-shape four-lane F64 multiply
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float64.new(8.0)`
+   - Expected: r.get(Index.new(1)) equals `Float64.new(-15.0)`
+   - Expected: r.get(Index.new(2)) equals `Float64.new(-3.0)`
+   - Expected: r.get(Index.new(3)) equals `Float64.new(2.0)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F64 multiply")
 val a = array([Float64.new(2.0), Float64.new(-3.0), Float64.new(0.5), Float64.new(8.0)])
 val b = array([Float64.new(4.0), Float64.new(5.0), Float64.new(-6.0), Float64.new(0.25)])
 val r = a.mul(b)
@@ -320,13 +335,23 @@ expect(r.get(Index.new(3))).to_equal(Float64.new(2.0))
 
 #### computes exact-shape four-lane F64 subtract
 
+- computes exact-shape four-lane F64 subtract
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float64.new(9.0)`
+   - Expected: r.get(Index.new(1)) equals `Float64.new(-6.0)`
+   - Expected: r.get(Index.new(2)) equals `Float64.new(5.0)`
+   - Expected: r.get(Index.new(3)) equals `Float64.new(7.75)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F64 subtract")
 val a = array([Float64.new(10.0), Float64.new(-2.0), Float64.new(3.5), Float64.new(8.0)])
 val b = array([Float64.new(1.0), Float64.new(4.0), Float64.new(-1.5), Float64.new(0.25)])
 val r = a.sub(b)
@@ -341,13 +366,23 @@ expect(r.get(Index.new(3))).to_equal(Float64.new(7.75))
 
 #### computes exact-shape four-lane F64 divide
 
+- computes exact-shape four-lane F64 divide
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float64.new(2.0)`
+   - Expected: r.get(Index.new(1)) equals `Float64.new(-3.0)`
+   - Expected: r.get(Index.new(2)) equals `Float64.new(-0.5)`
+   - Expected: r.get(Index.new(3)) equals `Float64.new(8.0)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F64 divide")
 val a = array([Float64.new(8.0), Float64.new(-15.0), Float64.new(3.0), Float64.new(2.0)])
 val b = array([Float64.new(4.0), Float64.new(5.0), Float64.new(-6.0), Float64.new(0.25)])
 val r = a.div(b)
@@ -362,13 +397,24 @@ expect(r.get(Index.new(3))).to_equal(Float64.new(8.0))
 
 #### computes exact-shape four-lane F32 add
 
+- computes exact-shape four-lane F32 add
+   - Expected: r.dtype equals `DType.F32`
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float32.new(11.0)`
+   - Expected: r.get(Index.new(1)) equals `Float32.new(2.0)`
+   - Expected: r.get(Index.new(2)) equals `Float32.new(2.0)`
+   - Expected: r.get(Index.new(3)) equals `Float32.new(8.25)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F32 add")
 val a = array_f32([Float32.new(1.0), Float32.new(-2.0), Float32.new(3.5), Float32.new(8.0)])
 val b = array_f32([Float32.new(10.0), Float32.new(4.0), Float32.new(-1.5), Float32.new(0.25)])
 val r = a.add(b)
@@ -384,13 +430,24 @@ expect(r.get(Index.new(3))).to_equal(Float32.new(8.25))
 
 #### computes exact-shape four-lane F32 multiply
 
+- computes exact-shape four-lane F32 multiply
+   - Expected: r.dtype equals `DType.F32`
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float32.new(8.0)`
+   - Expected: r.get(Index.new(1)) equals `Float32.new(-15.0)`
+   - Expected: r.get(Index.new(2)) equals `Float32.new(-3.0)`
+   - Expected: r.get(Index.new(3)) equals `Float32.new(2.0)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F32 multiply")
 val a = array_f32([Float32.new(2.0), Float32.new(-3.0), Float32.new(0.5), Float32.new(8.0)])
 val b = array_f32([Float32.new(4.0), Float32.new(5.0), Float32.new(-6.0), Float32.new(0.25)])
 val r = a.mul(b)
@@ -406,13 +463,24 @@ expect(r.get(Index.new(3))).to_equal(Float32.new(2.0))
 
 #### computes exact-shape four-lane F32 subtract
 
+- computes exact-shape four-lane F32 subtract
+   - Expected: r.dtype equals `DType.F32`
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float32.new(9.0)`
+   - Expected: r.get(Index.new(1)) equals `Float32.new(-6.0)`
+   - Expected: r.get(Index.new(2)) equals `Float32.new(5.0)`
+   - Expected: r.get(Index.new(3)) equals `Float32.new(7.75)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F32 subtract")
 val a = array_f32([Float32.new(10.0), Float32.new(-2.0), Float32.new(3.5), Float32.new(8.0)])
 val b = array_f32([Float32.new(1.0), Float32.new(4.0), Float32.new(-1.5), Float32.new(0.25)])
 val r = a.sub(b)
@@ -428,13 +496,24 @@ expect(r.get(Index.new(3))).to_equal(Float32.new(7.75))
 
 #### computes exact-shape four-lane F32 divide
 
+- computes exact-shape four-lane F32 divide
+   - Expected: r.dtype equals `DType.F32`
+   - Expected: r.shape equals `Shape.new([Index.new(4)])`
+   - Expected: r.get(Index.new(0)) equals `Float32.new(2.0)`
+   - Expected: r.get(Index.new(1)) equals `Float32.new(-3.0)`
+   - Expected: r.get(Index.new(2)) equals `Float32.new(-0.5)`
+   - Expected: r.get(Index.new(3)) equals `Float32.new(8.0)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exact-shape four-lane F32 divide")
 val a = array_f32([Float32.new(8.0), Float32.new(-15.0), Float32.new(3.0), Float32.new(2.0)])
 val b = array_f32([Float32.new(4.0), Float32.new(5.0), Float32.new(-6.0), Float32.new(0.25)])
 val r = a.div(b)
@@ -450,7 +529,7 @@ expect(r.get(Index.new(3))).to_equal(Float32.new(8.0))
 
 #### broadcasts F32 vectors through scalar fallback semantics
 
-1. Float32 new
+- broadcasts F32 vectors through scalar fallback semantics
    - Expected: r.dtype equals `DType.F32`
    - Expected: r.shape equals `Shape.new([Index.new(2), Index.new(3)])`
    - Expected: r.get_at([Index.new(0), Index.new(0)]) equals `Float32.new(11.0)`
@@ -461,10 +540,12 @@ expect(r.get(Index.new(3))).to_equal(Float32.new(8.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("broadcasts F32 vectors through scalar fallback semantics")
 val a = array_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0),
                    Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)]
                  ).reshape(Shape.new([Index.new(2), Index.new(3)]))
@@ -481,8 +562,7 @@ expect(r.get_at([Index.new(1), Index.new(2)])).to_equal(Float32.new(36.0))
 
 #### uses SIMD chunking plus scalar tail for longer F64 vectors
 
-1. Float64 new
-2. Float64 new
+- uses SIMD chunking plus scalar tail for longer F64 vectors
    - Expected: r.shape equals `Shape.new([Index.new(6)])`
    - Expected: r.get(Index.new(0)) equals `Float64.new(11.0)`
    - Expected: r.get(Index.new(3)) equals `Float64.new(44.0)`
@@ -493,10 +573,12 @@ expect(r.get_at([Index.new(1), Index.new(2)])).to_equal(Float32.new(36.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunking plus scalar tail for longer F64 vectors")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
                Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)])
 val b = array([Float64.new(10.0), Float64.new(20.0), Float64.new(30.0),
@@ -513,8 +595,7 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(66.0))
 
 #### uses SIMD chunking plus scalar tail for longer F32 vectors
 
-1. Float32 new
-2. Float32 new
+- uses SIMD chunking plus scalar tail for longer F32 vectors
    - Expected: r.dtype equals `DType.F32`
    - Expected: r.shape equals `Shape.new([Index.new(6)])`
    - Expected: r.get(Index.new(0)) equals `Float32.new(11.0)`
@@ -526,10 +607,12 @@ expect(r.get(Index.new(5))).to_equal(Float64.new(66.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunking plus scalar tail for longer F32 vectors")
 val a = array_f32([Float32.new(1.0), Float32.new(2.0), Float32.new(3.0),
                    Float32.new(4.0), Float32.new(5.0), Float32.new(6.0)])
 val b = array_f32([Float32.new(10.0), Float32.new(20.0), Float32.new(30.0),
@@ -549,13 +632,22 @@ expect(r.get(Index.new(5))).to_equal(Float32.new(66.0))
 
 #### (3,) + Float64.new(5.0) adds 5 to each element
 
+- (3,) + Float64.new(5.0) adds 5 to each element
+   - Expected: r.len() equals `Index.new(3)`
+   - Expected: r.get(Index.new(0)) equals `Float64.new(6.0)`
+   - Expected: r.get(Index.new(1)) equals `Float64.new(7.0)`
+   - Expected: r.get(Index.new(2)) equals `Float64.new(8.0)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(3,) + Float64.new(5.0) adds 5 to each element")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])
 val r = a.add_scalar(Float64.new(5.0))
 expect(r.len()).to_equal(Index.new(3))
@@ -568,7 +660,7 @@ expect(r.get(Index.new(2))).to_equal(Float64.new(8.0))
 
 #### (2,2) * Float64.new(2.0) doubles each element
 
-1. Float64 new
+- (2,2) * Float64.new(2.0) doubles each element
    - Expected: r.get_at([Index.new(0), Index.new(0)]) equals `Float64.new(2.0)`
    - Expected: r.get_at([Index.new(1), Index.new(1)]) equals `Float64.new(8.0)`
 
@@ -576,10 +668,12 @@ expect(r.get(Index.new(2))).to_equal(Float64.new(8.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("(2,2) * Float64.new(2.0) doubles each element")
 val a = array([Float64.new(1.0), Float64.new(2.0),
                Float64.new(3.0), Float64.new(4.0)]
              ).reshape(Shape.new([Index.new(2), Index.new(2)]))
@@ -592,13 +686,26 @@ expect(r.get_at([Index.new(1), Index.new(1)])).to_equal(Float64.new(8.0))
 
 #### supports Float64 scalar broadcast through arithmetic operator sugar
 
+- supports Float64 scalar broadcast through arithmetic operator sugar
+   - Expected: added.get(Index.new(0)) equals `Float64.new(3.5)`
+   - Expected: added.get(Index.new(2)) equals `Float64.new(9.5)`
+   - Expected: subbed.get(Index.new(0)) equals `Float64.new(1.0)`
+   - Expected: subbed.get(Index.new(2)) equals `Float64.new(7.0)`
+   - Expected: multiplied.get(Index.new(0)) equals `Float64.new(4.0)`
+   - Expected: multiplied.get(Index.new(2)) equals `Float64.new(16.0)`
+   - Expected: divided.get(Index.new(0)) equals `Float64.new(1.0)`
+   - Expected: divided.get(Index.new(2)) equals `Float64.new(4.0)`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("supports Float64 scalar broadcast through arithmetic operator sugar")
 val a = array([Float64.new(2.0), Float64.new(4.0), Float64.new(8.0)])
 val added = a + Float64.new(1.5)
 val subbed = a - Float64.new(1.0)
@@ -618,12 +725,7 @@ expect(divided.get(Index.new(2))).to_equal(Float64.new(4.0))
 
 #### uses SIMD chunks plus scalar tail for one-dimensional Float64 scalar arithmetic
 
-1. Float64 new
-2. Float64 new
-3. Float64 new
-4. Float64 new
-5. Float64 new
-6. Float64 new
+- uses SIMD chunks plus scalar tail for one-dimensional Float64 scalar arithmetic
    - Expected: added.get(Index.new(0)) equals `Float64.new(3.5)`
    - Expected: added.get(Index.new(5)) equals `Float64.new(13.5)`
    - Expected: subbed.get(Index.new(0)) equals `Float64.new(1.0)`
@@ -637,10 +739,12 @@ expect(divided.get(Index.new(2))).to_equal(Float64.new(4.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunks plus scalar tail for one-dimensional Float64 scalar arithmetic")
 val a = array([
     Float64.new(2.0),
     Float64.new(4.0),
@@ -667,12 +771,7 @@ expect(divided.get(Index.new(5))).to_equal(Float64.new(6.0))
 
 #### uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar add
 
-1. Float32 new
-2. Float32 new
-3. Float32 new
-4. Float32 new
-5. Float32 new
-6. Float32 new
+- uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar add
    - Expected: added.dtype equals `DType.F32`
    - Expected: added.get_f32(Index.new(0)) equals `Float32.new(3.5)`
    - Expected: added.get_f32(Index.new(5)) equals `Float32.new(13.5)`
@@ -681,10 +780,12 @@ expect(divided.get(Index.new(5))).to_equal(Float64.new(6.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar add")
 val a = array_f32([
     Float32.new(2.0),
     Float32.new(4.0),
@@ -703,12 +804,7 @@ expect(added.get_f32(Index.new(5))).to_equal(Float32.new(13.5))
 
 #### uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar sub
 
-1. Float32 new
-2. Float32 new
-3. Float32 new
-4. Float32 new
-5. Float32 new
-6. Float32 new
+- uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar sub
    - Expected: subbed.get_f32(Index.new(0)) equals `Float32.new(1.0)`
    - Expected: subbed.get_f32(Index.new(5)) equals `Float32.new(11.0)`
 
@@ -716,10 +812,12 @@ expect(added.get_f32(Index.new(5))).to_equal(Float32.new(13.5))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar sub")
 val a = array_f32([
     Float32.new(2.0),
     Float32.new(4.0),
@@ -737,12 +835,7 @@ expect(subbed.get_f32(Index.new(5))).to_equal(Float32.new(11.0))
 
 #### uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar mul
 
-1. Float32 new
-2. Float32 new
-3. Float32 new
-4. Float32 new
-5. Float32 new
-6. Float32 new
+- uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar mul
    - Expected: multiplied.get_f32(Index.new(0)) equals `Float32.new(4.0)`
    - Expected: multiplied.get_f32(Index.new(5)) equals `Float32.new(24.0)`
 
@@ -750,10 +843,12 @@ expect(subbed.get_f32(Index.new(5))).to_equal(Float32.new(11.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar mul")
 val a = array_f32([
     Float32.new(2.0),
     Float32.new(4.0),
@@ -771,12 +866,7 @@ expect(multiplied.get_f32(Index.new(5))).to_equal(Float32.new(24.0))
 
 #### uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar div
 
-1. Float32 new
-2. Float32 new
-3. Float32 new
-4. Float32 new
-5. Float32 new
-6. Float32 new
+- uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar div
    - Expected: divided.get_f32(Index.new(0)) equals `Float32.new(1.0)`
    - Expected: divided.get_f32(Index.new(5)) equals `Float32.new(6.0)`
 
@@ -784,10 +874,12 @@ expect(multiplied.get_f32(Index.new(5))).to_equal(Float32.new(24.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses SIMD chunks plus scalar tail for one-dimensional Float32 scalar div")
 val a = array_f32([
     Float32.new(2.0),
     Float32.new(4.0),
@@ -805,13 +897,22 @@ expect(divided.get_f32(Index.new(5))).to_equal(Float32.new(6.0))
 
 #### rejects Float32 scalar arithmetic on non-Float32 arrays through Result APIs
 
+- rejects Float32 scalar arithmetic on non-Float32 arrays through Result APIs
+   - Expected: ints.try_add_scalar_f32(Float32.new(1.0)).is_err() is true
+   - Expected: ints.try_sub_scalar_f32(Float32.new(1.0)).is_err() is true
+   - Expected: ints.try_mul_scalar_f32(Float32.new(1.0)).is_err() is true
+   - Expected: ints.try_div_scalar_f32(Float32.new(1.0)).is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects Float32 scalar arithmetic on non-Float32 arrays through Result APIs")
 val ints = array_i64([Int64.new(1), Int64.new(2)])
 expect(ints.try_add_scalar_f32(Float32.new(1.0)).is_err()).to_equal(true)
 expect(ints.try_sub_scalar_f32(Float32.new(1.0)).is_err()).to_equal(true)
@@ -825,17 +926,19 @@ expect(ints.try_div_scalar_f32(Float32.new(1.0)).is_err()).to_equal(true)
 
 #### returns an error for incompatible shapes (2,3) + (2,)
 
-1. Float64 new
+- returns an error for incompatible shapes (2,3) + (2,)
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns an error for incompatible shapes (2,3) + (2,)")
 val a = array([Float64.new(1.0), Float64.new(2.0), Float64.new(3.0),
                Float64.new(4.0), Float64.new(5.0), Float64.new(6.0)]
              ).reshape(Shape.new([Index.new(2), Index.new(3)]))
@@ -859,9 +962,57 @@ expect(r.is_err()).to_equal(true)
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/agent_tasks/scilib_port_ndarray.md](doc/03_plan/agent_tasks/scilib_port_ndarray.md)
-- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
-- **Research:** [doc/01_research/scilib_fortran_port/02_python_api_surface.md](doc/01_research/scilib_fortran_port/02_python_api_surface.md)
+- **Plan:** `doc/03_plan/agent_tasks/scilib_port_ndarray.md`
+- **Design:** `doc/05_design/scilib_port_architecture.md`
+- **Research:** `doc/01_research/scilib_fortran_port/02_python_api_surface.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4fd9dccad2c8ec49e48d799f920b8b057454e7485d741575f10989ba1a836093`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4fd9dccad2c8ec49e48d799f920b8b057454e7485d741575f10989ba1a836093`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4fd9dccad2c8ec49e48d799f920b8b057454e7485d741575f10989ba1a836093`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/scilib/ndarray_broadcast_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/ndarray_broadcast_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/ndarray_broadcast_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/ndarray_broadcast_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/ndarray_broadcast_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '(2,1) and (1,3) -> (2,3)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/ndarray_broadcast_spec.spl:72:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '(2,3) and (3,) -> (2,3) (right-align)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/ndarray_broadcast_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '(3,) and scalar -> (3,)' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

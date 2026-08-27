@@ -1,29 +1,6 @@
 # Web Stack Sample Specification
 
-> <details>
-
-<!-- sdn-diagram:id=web_stack_sample_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=web_stack_sample_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-web_stack_sample_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=web_stack_sample_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering web_stack_sample source contracts.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,22 @@ web_stack_sample_spec -> std
 
 #### defines the canonical backend selector and matching storage paths
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- defines the canonical backend selector and matching storage paths
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("defines the canonical backend selector and matching storage paths")
 val config = read_source(APP_CONFIG)
 val web_app = read_source(WEB_APP)
 expect(config).to_contain("backend_kind: \"simpledb\"")
@@ -62,13 +48,18 @@ expect(web_app).to_contain("SessionStore.sqlite")
 
 #### declares the required auth crud and search routes
 
+- declares the required auth crud and search routes
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("declares the required auth crud and search routes")
 val routes = read_source(ROUTES)
 expect(routes).to_contain("pattern: \"/\"")
 expect(routes).to_contain("pattern: \"/register\"")
@@ -85,13 +76,18 @@ expect(routes).to_contain("pattern: \"/items/search\"")
 
 #### implements backend-neutral record storage and dual-backend sessions
 
+- implements backend-neutral record storage and dual-backend sessions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("implements backend-neutral record storage and dual-backend sessions")
 val persistence = read_source(PERSISTENCE)
 val session = read_source(SESSION)
 expect(persistence).to_contain("class WebRecordStore<T>:")
@@ -110,13 +106,18 @@ expect(session).to_contain("Failed to initialize Simple DB sessions")
 
 #### renders stable login created-item and search-result markers
 
+- renders stable login created-item and search-result markers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("renders stable login created-item and search-result markers")
 val app = read_source(APP_SOURCE)
 expect(app).to_contain("data-test=\"login-page-marker\"")
 expect(app).to_contain("data-test=\"login-success-marker\"")
@@ -140,12 +141,12 @@ expect(app).to_contain("fn search_items")
 | Category | Application |
 | Status | Active |
 | Source | `test/02_integration/app/web_stack_sample_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering web_stack_sample source contracts.
 - web_stack_sample source contracts
 
 ## Scenario Summary
@@ -160,3 +161,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `76c80fd676ba23ec34502e5eaab0f23e1c254d0a560e1f75ac64f40c372675f1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `76c80fd676ba23ec34502e5eaab0f23e1c254d0a560e1f75ac64f40c372675f1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `76c80fd676ba23ec34502e5eaab0f23e1c254d0a560e1f75ac64f40c372675f1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/app/web_stack_sample_spec.spl
+mirror: doc/06_spec/02_integration/app/web_stack_sample_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/app/web_stack_sample_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/app/web_stack_sample_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/app/web_stack_sample_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'defines the canonical backend selector and matching storage paths' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/web_stack_sample_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'declares the required auth crud and search routes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/web_stack_sample_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'implements backend-neutral record storage and dual-backend sessions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

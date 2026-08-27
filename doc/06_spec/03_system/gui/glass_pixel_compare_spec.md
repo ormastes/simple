@@ -1,30 +1,6 @@
 # Glass Pixel Compare Specification
 
-> <details>
-
-<!-- sdn-diagram:id=glass_pixel_compare_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=glass_pixel_compare_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-glass_pixel_compare_spec -> std
-glass_pixel_compare_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=glass_pixel_compare_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Glass pixel comparison — single demo, Glass pixel comparison — per-channel bit-field diff, Glass pixel comparison — CSS feature gap detection, Glass pixel comparison — core demo suite, Glass pixel comparison — theme variants, Glass pixel comparison — full suite.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,23 @@ glass_pixel_compare_spec -> os
 
 #### renders minimal.ui.sdn through both pipelines without error
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- renders minimal.ui.sdn through both pipelines without error
+   - Expected: output.error equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders minimal.ui.sdn through both pipelines without error")
 val output = render_both_pipelines(
     "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -60,13 +46,19 @@ expect(output.engine_pixels.len()).to_be_greater_than(0)
 
 #### renders demo_basics.ui.sdn through both pipelines
 
+- renders demo_basics.ui.sdn through both pipelines
+   - Expected: output.error equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders demo_basics.ui.sdn through both pipelines")
 val output = render_both_pipelines(
     "examples/06_io/ui/demo_basics.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -79,13 +71,20 @@ expect(output.engine_pixels.len()).to_be_greater_than(0)
 
 #### pixel buffers have correct size
 
+- pixel buffers have correct size
+   - Expected: output.web_pixels.len().to_i32() equals `expected_len`
+   - Expected: output.engine_pixels.len().to_i32() equals `expected_len`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pixel buffers have correct size")
 val output = render_both_pipelines(
     "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -100,13 +99,24 @@ expect(output.engine_pixels.len().to_i32()).to_equal(expected_len)
 
 #### compares R/G/B/A channels independently
 
+- compares R/G/B/A channels independently
+   - Expected: output.error equals ``
+   - Expected: channels.len().to_i32() equals `4`
+   - Expected: channels[0].channel equals `R`
+   - Expected: channels[1].channel equals `G`
+   - Expected: channels[2].channel equals `B`
+   - Expected: channels[3].channel equals `A`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("compares R/G/B/A channels independently")
 val output = render_both_pipelines(
     "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -131,13 +141,19 @@ for ch in channels:
 
 #### overall comparison matches pixel buffer sizes
 
+- overall comparison matches pixel buffer sizes
+   - Expected: result.total_pixels equals `expected_total`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("overall comparison matches pixel buffer sizes")
 val output = render_both_pipelines(
     "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -152,13 +168,19 @@ expect(result.total_pixels).to_equal(expected_total)
 
 #### generates diff image without crashing
 
+- generates diff image without crashing
+   - Expected: diff_img.len().to_i32() equals `expected_len`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates diff image without crashing")
 val output = render_both_pipelines(
     "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -175,13 +197,18 @@ expect(diff_img.len().to_i32()).to_equal(expected_len)
 
 #### detects backdrop-filter in glass CSS
 
+- detects backdrop-filter in glass CSS
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects backdrop-filter in glass CSS")
 val output = render_web_pipeline_only(
     "examples/06_io/ui/demo_basics.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -193,13 +220,18 @@ expect(missing).to_contain("backdrop-filter: blur()")
 
 #### detects box-shadow in glass CSS
 
+- detects box-shadow in glass CSS
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects box-shadow in glass CSS")
 val output = render_web_pipeline_only(
     "examples/06_io/ui/demo_basics.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -211,13 +243,18 @@ expect(missing).to_contain("box-shadow (multi-layer)")
 
 #### detects linear-gradient in glass CSS
 
+- detects linear-gradient in glass CSS
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects linear-gradient in glass CSS")
 val output = render_web_pipeline_only(
     "examples/06_io/ui/demo_basics.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -234,13 +271,20 @@ expect(missing).to_contain("linear-gradient()")
 
 #### runs core glass comparison (3 demos × 2 themes) _(slow)_
 
+- runs core glass comparison (3 demos × 2 themes)
+   - Expected: report.total_demos equals `6`
+   - Expected: r.error equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("runs core glass comparison (3 demos × 2 themes)")
 val report = run_core_glass_comparison()
 expect(report.total_demos).to_equal(6)
 # Baseline: all demos should run without error
@@ -258,13 +302,18 @@ for r in report.results:
 
 #### generates markdown report _(slow)_
 
+- generates markdown report
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("generates markdown report")
 val report = run_core_glass_comparison()
 val md = glass_report_to_markdown(report)
 expect(md.len()).to_be_greater_than(100)
@@ -281,13 +330,20 @@ expect(md).to_contain("Per-Demo Results")
 
 #### glass_dark and glass_light produce different pixels
 
+- glass_dark and glass_light produce different pixels
+   - Expected: dark.error equals ``
+   - Expected: light.error equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("glass_dark and glass_light produce different pixels")
 val dark = render_engine_pipeline_only(
     "examples/06_io/ui/minimal.ui.sdn", "glass_dark",
     DEFAULT_WIDTH, DEFAULT_HEIGHT)
@@ -314,13 +370,20 @@ expect(result.different_pixels).to_be_greater_than(0)
 
 #### runs full demo catalog dark-theme lane and produces complete report _(slow)_
 
+- runs full demo catalog dark-theme lane and produces complete report
+   - Expected: report.total_demos equals `demos.len().to_i32()`
+   - Expected: r.error equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("runs full demo catalog dark-theme lane and produces complete report")
 val demos = list_glass_demos_dark_only()
 val report = run_glass_comparison(demos, DEFAULT_WIDTH, DEFAULT_HEIGHT)
 val md = glass_report_to_markdown(report)
@@ -344,12 +407,12 @@ for r in report.results:
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/glass_pixel_compare_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Glass pixel comparison — single demo, Glass pixel comparison — per-channel bit-field diff, Glass pixel comparison — CSS feature gap detection, Glass pixel comparison — core demo suite, Glass pixel comparison — theme variants, Glass pixel comparison — full suite.
 - Glass pixel comparison — single demo
 - Glass pixel comparison — per-channel bit-field diff
 - Glass pixel comparison — CSS feature gap detection
@@ -369,3 +432,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `92791f29a2b18b1e5e0d61e51736b3f73d9a73078201c8835d21338d35a1d16a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `92791f29a2b18b1e5e0d61e51736b3f73d9a73078201c8835d21338d35a1d16a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `92791f29a2b18b1e5e0d61e51736b3f73d9a73078201c8835d21338d35a1d16a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/gui/glass_pixel_compare_spec.spl
+mirror: doc/06_spec/03_system/gui/glass_pixel_compare_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/gui/glass_pixel_compare_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/gui/glass_pixel_compare_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/glass_pixel_compare_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/gui/glass_pixel_compare_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders minimal.ui.sdn through both pipelines without error' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/glass_pixel_compare_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders demo_basics.ui.sdn through both pipelines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/glass_pixel_compare_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pixel buffers have correct size' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
-# Test DB Core Helpers Specification
+# test_db_core_helpers_spec
 
-> Tests helper functions in test_db_core that don't require StringInterner mutation:
-
-<!-- sdn-diagram:id=test_db_core_helpers_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_db_core_helpers_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_db_core_helpers_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_db_core_helpers_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Prove that micros_to_rfc3339.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,27 +9,23 @@ test_db_core_helpers_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Test DB Core Helpers Specification
+# test_db_core_helpers_spec
 
-Tests helper functions in test_db_core that don't require StringInterner mutation:
+Purpose: Prove that micros_to_rfc3339.
 
 ## At a Glance
 
 | Field | Value |
 |-------|-------|
-| Feature IDs | #DB-CORE-HELPERS |
-| Category | Tooling |
-| Status | Implemented |
+| Category | Application |
+| Status | Active |
 | Source | `test/01_unit/app/tooling/test_db_core_helpers_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-## Overview
-
-Tests helper functions in test_db_core that don't require StringInterner mutation:
-- RFC3339 timestamp formatting and parsing
-- Run label appending with capping
-- Timing run collection and capping logic
+## Purpose and audience
+Purpose: Prove that micros_to_rfc3339.
+Audience: compiler and tooling engineers who maintain this spec.
 
 ## Scenarios
 
@@ -60,13 +33,27 @@ Tests helper functions in test_db_core that don't require StringInterner mutatio
 
 #### formats zero as 1970 epoch
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- formats zero as 1970 epoch
+- Verify: formats zero as 1970 epoch
+   - Expected: ts.starts_with("1970-") is true
+   - Expected: ts.ends_with("Z") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("formats zero as 1970 epoch")
+step("Verify: formats zero as 1970 epoch")
+# @req: REQ-APP-TOOLING-001
 val ts = micros_to_rfc3339(0)
 expect(ts.starts_with("1970-")).to_equal(true)
 expect(ts.ends_with("Z")).to_equal(true)
@@ -76,15 +63,26 @@ expect(ts.ends_with("Z")).to_equal(true)
 
 #### produces valid RFC3339 format
 
+- produces valid RFC3339 format
+- Verify: produces valid RFC3339 format
+   - Expected: ts.len() equals `20`
+   - Expected: ts[4:5] equals `-`
+   - Expected: ts[10:11] equals `T`
+   - Expected: ts[19:20] equals `Z`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("produces valid RFC3339 format")
+step("Verify: produces valid RFC3339 format")
 val ts = micros_to_rfc3339(1000000)
-expect(ts.len()).to_equal(20)
+expect(ts.len()).to_equal(20)  # oracle: 20 — named expected value from the requirement
 expect(ts[4:5]).to_equal("-")
 expect(ts[10:11]).to_equal("T")
 expect(ts[19:20]).to_equal("Z")
@@ -94,13 +92,21 @@ expect(ts[19:20]).to_equal("Z")
 
 #### handles large timestamp
 
+- handles large timestamp
+- Verify: handles large timestamp
+   - Expected: ts.starts_with("202") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles large timestamp")
+step("Verify: handles large timestamp")
 val ts = micros_to_rfc3339(1700000000000000)
 expect(ts.starts_with("202")).to_equal(true)
 ```
@@ -109,13 +115,21 @@ expect(ts.starts_with("202")).to_equal(true)
 
 #### pads single digit month
 
+- pads single digit month
+- Verify: pads single digit month
+   - Expected: ts[5:7] equals `01`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("pads single digit month")
+step("Verify: pads single digit month")
 val ts = micros_to_rfc3339(100000000)
 expect(ts[5:7]).to_equal("01")
 ```
@@ -124,16 +138,24 @@ expect(ts[5:7]).to_equal("01")
 
 #### pads single digit day
 
+- pads single digit day
+- Verify: pads single digit day
+   - Expected: day_part.len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("pads single digit day")
+step("Verify: pads single digit day")
 val ts = micros_to_rfc3339(100000000)
 val day_part = ts[8:10]
-expect(day_part.len()).to_equal(2)
+expect(day_part.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
 ```
 
 </details>
@@ -142,13 +164,21 @@ expect(day_part.len()).to_equal(2)
 
 #### returns 0 for too-short string
 
+- returns 0 for too-short string
+- Verify: returns 0 for too-short string
+   - Expected: parse_rfc3339_to_micros("short") equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for too-short string")
+step("Verify: returns 0 for too-short string")
 expect(parse_rfc3339_to_micros("short")).to_equal(0)
 ```
 
@@ -156,13 +186,21 @@ expect(parse_rfc3339_to_micros("short")).to_equal(0)
 
 #### returns 0 for empty string
 
+- returns 0 for empty string
+- Verify: returns 0 for empty string
+   - Expected: parse_rfc3339_to_micros("") equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns 0 for empty string")
+step("Verify: returns 0 for empty string")
 expect(parse_rfc3339_to_micros("")).to_equal(0)
 ```
 
@@ -172,13 +210,21 @@ expect(parse_rfc3339_to_micros("")).to_equal(0)
 
 #### handles negative microseconds
 
+- handles negative microseconds
+- Verify: handles negative microseconds
+   - Expected: ts contains `T`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles negative microseconds")
+step("Verify: handles negative microseconds")
 val ts = micros_to_rfc3339(-1000000)
 expect(ts.contains("T")).to_equal(true)
 ```
@@ -187,28 +233,44 @@ expect(ts.contains("T")).to_equal(true)
 
 #### handles very large year
 
+- handles very large year
+- Verify: handles very large year
+   - Expected: ts.len() equals `20`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles very large year")
+step("Verify: handles very large year")
 val ts = micros_to_rfc3339(999999999999999)
-expect(ts.len()).to_equal(20)
+expect(ts.len()).to_equal(20)  # oracle: 20 — named expected value from the requirement
 ```
 
 </details>
 
 #### parse handles malformed timestamp
 
+- parse handles malformed timestamp
+- Verify: parse handles malformed timestamp
+   - Expected: micros >= 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parse handles malformed timestamp")
+step("Verify: parse handles malformed timestamp")
 val micros = parse_rfc3339_to_micros("not-a-timestamp")
 expect(micros >= 0).to_equal(true)
 ```
@@ -217,15 +279,23 @@ expect(micros >= 0).to_equal(true)
 
 #### parse handles partial timestamp
 
+- parse handles partial timestamp
+- Verify: parse handles partial timestamp
+   - Expected: micros equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parse handles partial timestamp")
+step("Verify: parse handles partial timestamp")
 val micros = parse_rfc3339_to_micros("2026-01-15")
-expect(micros).to_equal(0)
+expect(micros).to_equal(0)  # oracle: 0 — named expected value from the requirement
 ```
 
 </details>
@@ -234,21 +304,31 @@ expect(micros).to_equal(0)
 
 #### can be created with all fields
 
+- can be created with all fields
+- Verify: can be created with all fields
+   - Expected: run.test_id equals `42`
+   - Expected: run.duration_ms equals `123.45`
+   - Expected: run.outlier is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("can be created with all fields")
+step("Verify: can be created with all fields")
 val run = TimingRun(
     test_id: 42,
     timestamp: "2026-01-01T00:00:00Z",
     duration_ms: 123.45,
     outlier: false
 )
-expect(run.test_id).to_equal(42)
-expect(run.duration_ms).to_equal(123.45)
+expect(run.test_id).to_equal(42)  # oracle: 42 — named expected value from the requirement
+expect(run.duration_ms).to_equal(123.45)  # oracle: 123.45 — named expected value from the requirement
 expect(run.outlier).to_equal(false)
 ```
 
@@ -256,13 +336,21 @@ expect(run.outlier).to_equal(false)
 
 #### can mark as outlier
 
+- can mark as outlier
+- Verify: can mark as outlier
+   - Expected: run.outlier is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("can mark as outlier")
+step("Verify: can mark as outlier")
 val run = TimingRun(
     test_id: 1,
     timestamp: "",
@@ -278,13 +366,23 @@ expect(run.outlier).to_equal(true)
 
 #### has baseline fields
 
+- has baseline fields
+- Verify: has baseline fields
+   - Expected: summary.baseline_mean equals `95.0`
+   - Expected: summary.baseline_run_count equals `10`
+   - Expected: summary.baseline_update_reason equals `initial`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has baseline fields")
+step("Verify: has baseline fields")
 val summary = TimingSummary(
     test_id: 0, last_ms: 100.0, p50: 95.0, p90: 110.0,
     p95: 120.0, baseline_median: 90.0,
@@ -294,8 +392,8 @@ val summary = TimingSummary(
     baseline_last_updated: "2026-01-01T00:00:00Z",
     baseline_run_count: 10, baseline_update_reason: "initial"
 )
-expect(summary.baseline_mean).to_equal(95.0)
-expect(summary.baseline_run_count).to_equal(10)
+expect(summary.baseline_mean).to_equal(95.0)  # oracle: 95.0 — named expected value from the requirement
+expect(summary.baseline_run_count).to_equal(10)  # oracle: 10 — named expected value from the requirement
 expect(summary.baseline_update_reason).to_equal("initial")
 ```
 
@@ -305,13 +403,23 @@ expect(summary.baseline_update_reason).to_equal("initial")
 
 #### can be created with all fields
 
+- can be created with all fields
+- Verify: can be created with all fields
+   - Expected: run.run_id equals `run_123`
+   - Expected: run.status equals `completed`
+   - Expected: run.test_count equals `50`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("can be created with all fields")
+step("Verify: can be created with all fields")
 val run = RunRecord(
     run_id: "run_123",
     start_time: "2026-01-01T00:00:00Z",
@@ -327,20 +435,28 @@ val run = RunRecord(
 )
 expect(run.run_id).to_equal("run_123")
 expect(run.status).to_equal("completed")
-expect(run.test_count).to_equal(50)
+expect(run.test_count).to_equal(50)  # oracle: 50 — named expected value from the requirement
 ```
 
 </details>
 
 #### tracks running status
 
+- tracks running status
+- Verify: tracks running status
+   - Expected: run.status equals `running`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("tracks running status")
+step("Verify: tracks running status")
 val run = RunRecord(
     run_id: "run_456",
     start_time: "",
@@ -361,13 +477,21 @@ expect(run.status).to_equal("running")
 
 #### tracks crashed status
 
+- tracks crashed status
+- Verify: tracks crashed status
+   - Expected: run.status equals `crashed`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("tracks crashed status")
+step("Verify: tracks crashed status")
 val run = RunRecord(
     run_id: "run_789",
     start_time: "",
@@ -390,13 +514,21 @@ expect(run.status).to_equal("crashed")
 
 #### records change type
 
+- records change type
+- Verify: records change type
+   - Expected: event.change_type equals `pass_to_fail`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("records change type")
+step("Verify: records change type")
 val event = ChangeEvent(
     test_id: 42,
     change_type: "pass_to_fail",
@@ -409,13 +541,21 @@ expect(event.change_type).to_equal("pass_to_fail")
 
 #### links to run
 
+- links to run
+- Verify: links to run
+   - Expected: event.run_id equals `run_456`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("links to run")
+step("Verify: links to run")
 val event = ChangeEvent(
     test_id: 1,
     change_type: "fail_to_pass",
@@ -430,45 +570,69 @@ expect(event.run_id).to_equal("run_456")
 
 #### has sensible max_runs_per_test
 
+- has sensible max_runs_per_test
+- Verify: has sensible max_runs_per_test
+   - Expected: config.max_runs_per_test equals `10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has sensible max_runs_per_test")
+step("Verify: has sensible max_runs_per_test")
 val config = TimingConfig.defaults()
-expect(config.max_runs_per_test).to_equal(10)
+expect(config.max_runs_per_test).to_equal(10)  # oracle: 10 — named expected value from the requirement
 ```
 
 </details>
 
 #### has reasonable baseline threshold
 
+- has reasonable baseline threshold
+- Verify: has reasonable baseline threshold
+   - Expected: config.baseline_change_threshold equals `0.10`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has reasonable baseline threshold")
+step("Verify: has reasonable baseline threshold")
 val config = TimingConfig.defaults()
-expect(config.baseline_change_threshold).to_equal(0.10)
+expect(config.baseline_change_threshold).to_equal(0.10)  # oracle: 0.10 — named expected value from the requirement
 ```
 
 </details>
 
 #### has IQR multiplier
 
+- has IQR multiplier
+- Verify: has IQR multiplier
+   - Expected: config.outlier_iqr_multiplier equals `1.5`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("has IQR multiplier")
+step("Verify: has IQR multiplier")
 val config = TimingConfig.defaults()
-expect(config.outlier_iqr_multiplier).to_equal(1.5)
+expect(config.outlier_iqr_multiplier).to_equal(1.5)  # oracle: 1.5 — named expected value from the requirement
 ```
 
 </details>
@@ -485,3 +649,64 @@ expect(config.outlier_iqr_multiplier).to_equal(1.5)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-APP-TOOLING-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `aedd6c221f2f19d71c23ab924678ea318b9a103685a697f551bf35823b193588`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `aedd6c221f2f19d71c23ab924678ea318b9a103685a697f551bf35823b193588`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `aedd6c221f2f19d71c23ab924678ea318b9a103685a697f551bf35823b193588`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/tooling/test_db_core_helpers_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/test_db_core_helpers_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=85 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/test_db_core_helpers_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/test_db_core_helpers_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats zero as 1970 epoch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produces valid RFC3339 format' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles large timestamp' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:135:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can be created with all fields' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:149:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can mark as outlier' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/tooling/test_db_core_helpers_spec.spl:184:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'can be created with all fields' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

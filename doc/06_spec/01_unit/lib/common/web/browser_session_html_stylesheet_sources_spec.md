@@ -20,7 +20,7 @@ Resolves supported inline, linked, imported, and background-image stylesheet
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Resolves supported inline, linked, imported, and background-image stylesheet
@@ -32,8 +32,11 @@ sources. This is source-admission evidence, not complete CSS rendering.
 
 #### should deny every resource nested in inert templates
 
-- "<style> hidden{background:url
-- "<div style=\"background:url
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should deny every resource nested in inert templates
    - Expected: plan.script_blocks.len() equals `1`
    - Expected: plan.script_blocks[0].src equals `/visible.js`
    - Expected: plan.style_sources.len() equals `1`
@@ -45,10 +48,12 @@ sources. This is source-admission evidence, not complete CSS rendering.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should deny every resource nested in inert templates")
 val plan = browser_document_resource_plan(
     "<TEMPLATE><template><script src='/hidden.js'></script>" +
     "<style>.hidden{background:url('/hidden-style.png')}</style>" +
@@ -74,18 +79,20 @@ expect(plan.image_sources[0].authored_src).to_equal("/visible.png")
 
 #### should snapshot intersected head meta CSP in document source order
 
+- should snapshot intersected head meta CSP in document source order
 - Resolve supported HTML stylesheet sources
-- "<style> after{background-image:url
    - Expected: plan.script_blocks.len() equals `2`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should snapshot intersected head meta CSP in document source order")
 step("Resolve supported HTML stylesheet sources")
 val plan = browser_document_resource_plan(
     "<html><head>" +
@@ -121,6 +128,7 @@ expect(plan.final_csp_policy).to_equal(
 
 #### should extract inline and linked stylesheets in source order
 
+- should extract inline and linked stylesheets in source order
 - Resolve supported HTML stylesheet sources
    - Expected: sources.len() equals `4`
    - Expected: sources[0].kind equals `external`
@@ -136,10 +144,12 @@ expect(plan.final_csp_policy).to_equal(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should extract inline and linked stylesheets in source order")
 step("Resolve supported HTML stylesheet sources")
 val html = "<html><head><link rel=\"stylesheet\" href=\"/first.css\"><style>body { color: red; }</style><link rel=\"icon\" href=\"/favicon.ico\"><link rel=\"preload stylesheet\" href=\"/last.css\"><style>.last { color: blue; }</style></head></html>"
 
@@ -160,20 +170,21 @@ expect(sources[3].source).to_equal(".last { color: blue; }")
 
 #### should discover only exact single background URLs and rewrite network URLs
 
+- should discover only exact single background URLs and rewrite network URLs
 - Resolve supported HTML stylesheet sources
    - Expected: urls.len() equals `1`
    - Expected: urls[0] equals `../img/hero.png`
-- "url
-- "background: url
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should discover only exact single background URLs and rewrite network URLs")
 step("Resolve supported HTML stylesheet sources")
 val css = ".hero { background: #0f8 url('../img/hero.png') center no-repeat; } .multi { background: url('a.png'), url('b.png'); } .data { background-image: url(data:image/png;base64,abcd); }"
 
@@ -197,18 +208,20 @@ expect(rewritten).to_contain(
 
 #### should discover one URL layer inside a background shorthand
 
+- should discover one URL layer inside a background shorthand
 - Resolve supported HTML stylesheet sources
-- " x{background:#0f8 url
    - Expected: urls equals `["hero.png"]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should discover one URL layer inside a background shorthand")
 step("Resolve supported HTML stylesheet sources")
 val urls = _css_background_image_urls(
     ".x{background:#0f8 url('hero.png') center no-repeat}"
@@ -221,17 +234,19 @@ expect(urls).to_equal(["hero.png"])
 
 #### should rewrite only accepted background declaration URL spans
 
+- should rewrite only accepted background declaration URL spans
 - Resolve supported HTML stylesheet sources
-- "@import url
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should rewrite only accepted background declaration URL spans")
 step("Resolve supported HTML stylesheet sources")
 val css = "@import url('theme.css');@font-face{font-family:x;src:url('font.woff2')}.hero{background:url('hero.png') center no-repeat}"
 
@@ -248,22 +263,20 @@ expect(rewritten).to_equal(
 
 #### should leave unsafe background URLs unchanged and undiscovered
 
+- should leave unsafe background URLs unchanged and undiscovered
 - Resolve supported HTML stylesheet sources
-- " quote{background:url
-- " slash{background:url
-- " control{background:url
-- " tag{background:url
-- " interpolation{background:url
    - Expected: _css_background_image_urls(css) equals `[]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should leave unsafe background URLs unchanged and undiscovered")
 step("Resolve supported HTML stylesheet sources")
 val quote = 34.to_char()
 val slash = 92.to_char()
@@ -287,9 +300,8 @@ expect(_rewrite_css_background_image_urls(
 
 #### should resolve css imports and insert expanded sources at the requested index
 
+- should resolve css imports and insert expanded sources at the requested index
 - Resolve supported HTML stylesheet sources
-- BrowserStylesheetSource external
-- BrowserStylesheetSource inline
    - Expected: imports.len() equals `2`
    - Expected: imports[0].source equals `https://example.com/assets/base.css`
    - Expected: imports[1].source equals `https://example.com/assets/app/theme.css`
@@ -304,10 +316,12 @@ expect(_rewrite_css_background_image_urls(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should resolve css imports and insert expanded sources at the requested index")
 step("Resolve supported HTML stylesheet sources")
 val css = "@import url('../base.css');\n@import \"theme.css\";\n.main { display: block; }"
 
@@ -344,3 +358,72 @@ expect(combined[3].source).to_equal(".local {}")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `78e09a0c8219dcd6828675cae25282dfd96b0d0d1ed6b0608d2be9768f645cee`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `78e09a0c8219dcd6828675cae25282dfd96b0d0d1ed6b0608d2be9768f645cee`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `78e09a0c8219dcd6828675cae25282dfd96b0d0d1ed6b0608d2be9768f645cee`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl
+mirror: doc/06_spec/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:33:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should deny every resource nested in inert templates' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should deny every resource nested in inert templates' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:57:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should snapshot intersected head meta CSP in document source order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should snapshot intersected head meta CSP in document source order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:90:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should extract inline and linked stylesheets in source order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should extract inline and linked stylesheets in source order' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:108:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should discover only exact single background URLs and rewrite network URLs' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:129:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should discover one URL layer inside a background shorthand' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/common/web/browser_session_html_stylesheet_sources_spec.spl:139:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should rewrite only accepted background declaration URL spans' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

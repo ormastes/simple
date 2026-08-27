@@ -2,29 +2,6 @@
 
 > Arithmetic operations provide basic mathematical computations on numeric types. Simple supports integer and floating-point arithmetic with standard operators and correct operator precedence.
 
-<!-- sdn-diagram:id=arithmetic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=arithmetic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-arithmetic_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=arithmetic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 83 | 83 | 0 | 0 |
@@ -45,7 +22,7 @@ Arithmetic operations provide basic mathematical computations on numeric types. 
 | Difficulty | 1/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/arithmetic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -103,13 +80,18 @@ and correct operator precedence.
 
 #### adds positive integers
 
+- adds positive integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds positive integers")
 expect 2 + 3 == 5
 ```
 
@@ -117,13 +99,18 @@ expect 2 + 3 == 5
 
 #### adds zero
 
+- adds zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds zero")
 expect 5 + 0 == 5
 expect 0 + 5 == 5
 ```
@@ -132,13 +119,18 @@ expect 0 + 5 == 5
 
 #### adds larger numbers
 
+- adds larger numbers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds larger numbers")
 expect 100 + 200 == 300
 ```
 
@@ -146,16 +138,18 @@ expect 100 + 200 == 300
 
 #### adds negative integers
 
-1. expect
+- adds negative integers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds negative integers")
 expect ((-5)) + 3 == -2
 ```
 
@@ -165,13 +159,18 @@ expect ((-5)) + 3 == -2
 
 #### subtracts integers
 
+- subtracts integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("subtracts integers")
 expect 10 - 3 == 7
 ```
 
@@ -179,13 +178,18 @@ expect 10 - 3 == 7
 
 #### subtracts zero
 
+- subtracts zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("subtracts zero")
 expect 5 - 0 == 5
 ```
 
@@ -193,13 +197,18 @@ expect 5 - 0 == 5
 
 #### subtracts from zero
 
+- subtracts from zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("subtracts from zero")
 expect 0 - 5 == -5
 ```
 
@@ -207,13 +216,18 @@ expect 0 - 5 == -5
 
 #### subtracts resulting in negative
 
+- subtracts resulting in negative
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("subtracts resulting in negative")
 expect 3 - 10 == -7
 ```
 
@@ -223,13 +237,18 @@ expect 3 - 10 == -7
 
 #### multiplies integers
 
+- multiplies integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies integers")
 expect 4 * 5 == 20
 ```
 
@@ -237,13 +256,18 @@ expect 4 * 5 == 20
 
 #### multiplies by zero
 
+- multiplies by zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies by zero")
 expect 5 * 0 == 0
 expect 0 * 5 == 0
 ```
@@ -252,13 +276,18 @@ expect 0 * 5 == 0
 
 #### multiplies by one
 
+- multiplies by one
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies by one")
 expect 5 * 1 == 5
 ```
 
@@ -266,17 +295,18 @@ expect 5 * 1 == 5
 
 #### multiplies negative numbers
 
-1. expect
-2. expect
+- multiplies negative numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies negative numbers")
 expect ((-4)) * 5 == -20
 expect ((-4)) * -5 == 20
 ```
@@ -287,13 +317,18 @@ expect ((-4)) * -5 == 20
 
 #### divides integers
 
+- divides integers
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides integers")
 expect 15 / 3 == 5
 ```
 
@@ -301,13 +336,18 @@ expect 15 / 3 == 5
 
 #### divides with truncation
 
+- divides with truncation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides with truncation")
 expect 7 / 2 == 3
 ```
 
@@ -315,13 +355,18 @@ expect 7 / 2 == 3
 
 #### divides by one
 
+- divides by one
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides by one")
 expect 42 / 1 == 42
 ```
 
@@ -329,13 +374,18 @@ expect 42 / 1 == 42
 
 #### divides zero by number
 
+- divides zero by number
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides zero by number")
 expect 0 / 5 == 0
 ```
 
@@ -343,16 +393,18 @@ expect 0 / 5 == 0
 
 #### divides negative numbers
 
-1. expect
+- divides negative numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides negative numbers")
 expect ((-20)) / 4 == -5
 expect 20 / -4 == -5
 ```
@@ -363,13 +415,18 @@ expect 20 / -4 == -5
 
 #### evaluates multiplication before addition
 
+- evaluates multiplication before addition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("evaluates multiplication before addition")
 expect 2 + 3 * 4 == 14
 ```
 
@@ -377,13 +434,18 @@ expect 2 + 3 * 4 == 14
 
 #### evaluates multiplication before subtraction
 
+- evaluates multiplication before subtraction
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("evaluates multiplication before subtraction")
 expect 10 - 3 * 2 == 4
 ```
 
@@ -391,13 +453,18 @@ expect 10 - 3 * 2 == 4
 
 #### evaluates division before addition
 
+- evaluates division before addition
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("evaluates division before addition")
 expect 10 + 20 / 4 == 15
 ```
 
@@ -405,13 +472,18 @@ expect 10 + 20 / 4 == 15
 
 #### handles chain of same precedence (left-to-right)
 
+- handles chain of same precedence (left-to-right)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles chain of same precedence (left-to-right)")
 expect 20 - 5 - 3 == 12
 expect 20 / 4 / 2 == 2
 ```
@@ -420,13 +492,18 @@ expect 20 / 4 / 2 == 2
 
 #### respects multiple operations
 
+- respects multiple operations
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("respects multiple operations")
 expect 2 + 3 * 4 - 1 == 13
 ```
 
@@ -434,13 +511,18 @@ expect 2 + 3 * 4 - 1 == 13
 
 #### handles complex expression
 
+- handles complex expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles complex expression")
 expect 2 * 3 + 4 * 5 == 26
 ```
 
@@ -450,16 +532,18 @@ expect 2 * 3 + 4 * 5 == 26
 
 #### changes addition before multiplication
 
-1. expect
+- changes addition before multiplication
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("changes addition before multiplication")
 expect (2 + 3) * 4 == 20
 ```
 
@@ -467,16 +551,18 @@ expect (2 + 3) * 4 == 20
 
 #### changes subtraction before division
 
-1. expect
+- changes subtraction before division
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("changes subtraction before division")
 expect (20 - 4) / 2 == 8
 ```
 
@@ -484,16 +570,18 @@ expect (20 - 4) / 2 == 8
 
 #### handles nested parentheses
 
-1. expect
+- handles nested parentheses
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles nested parentheses")
 expect ((2 + 3) * 4) + 1 == 21
 ```
 
@@ -501,16 +589,18 @@ expect ((2 + 3) * 4) + 1 == 21
 
 #### handles deeply nested parentheses
 
-1. expect
+- handles deeply nested parentheses
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles deeply nested parentheses")
 expect (((10 + 5) * 2) - 5) / 3 == 6
 ```
 
@@ -520,13 +610,18 @@ expect (((10 + 5) * 2) - 5) / 3 == 6
 
 #### calculates simple modulo
 
+- calculates simple modulo
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates simple modulo")
 expect 17 % 5 == 2
 ```
 
@@ -534,13 +629,18 @@ expect 17 % 5 == 2
 
 #### modulo of exact division
 
+- modulo of exact division
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("modulo of exact division")
 expect 20 % 5 == 0
 ```
 
@@ -548,13 +648,18 @@ expect 20 % 5 == 0
 
 #### modulo with smaller divisor
 
+- modulo with smaller divisor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("modulo with smaller divisor")
 expect 3 % 7 == 3
 ```
 
@@ -562,13 +667,18 @@ expect 3 % 7 == 3
 
 #### modulo with one
 
+- modulo with one
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("modulo with one")
 expect 5 % 1 == 0
 ```
 
@@ -576,16 +686,18 @@ expect 5 % 1 == 0
 
 #### modulo with negative dividend
 
-1. expect
+- modulo with negative dividend
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("modulo with negative dividend")
 expect ((-17)) % 5 == -2
 ```
 
@@ -593,13 +705,18 @@ expect ((-17)) % 5 == -2
 
 #### modulo with negative divisor
 
+- modulo with negative divisor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("modulo with negative divisor")
 expect 17 % -5 == 2
 ```
 
@@ -609,16 +726,18 @@ expect 17 % -5 == 2
 
 #### negates positive number
 
-1. expect
+- negates positive number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("negates positive number")
 expect ((-5)) == -5
 ```
 
@@ -626,16 +745,18 @@ expect ((-5)) == -5
 
 #### negates negative number
 
-1. expect
+- negates negative number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("negates negative number")
 expect (-(-5)) == 5
 ```
 
@@ -643,13 +764,18 @@ expect (-(-5)) == 5
 
 #### applies unary plus
 
+- applies unary plus
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies unary plus")
 # Skipped: unary plus not supported in parser
 expect true
 ```
@@ -658,13 +784,18 @@ expect true
 
 #### applies unary plus to negative
 
+- applies unary plus to negative
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies unary plus to negative")
 # Skipped: unary plus not supported in parser
 expect true
 ```
@@ -673,16 +804,18 @@ expect true
 
 #### negates in expression
 
-1. expect 10 +
+- negates in expression
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("negates in expression")
 expect 10 + (-5) == 5
 ```
 
@@ -694,13 +827,18 @@ expect 10 + (-5) == 5
 
 #### adds floats
 
+- adds floats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds floats")
 expect 2.5 + 3.5 == 6.0
 ```
 
@@ -708,13 +846,18 @@ expect 2.5 + 3.5 == 6.0
 
 #### adds float and integer
 
+- adds float and integer
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds float and integer")
 expect 2.5 + 3 == 5.5
 ```
 
@@ -724,13 +867,18 @@ expect 2.5 + 3 == 5.5
 
 #### subtracts floats
 
+- subtracts floats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("subtracts floats")
 expect 10.5 - 3.2 == 7.3
 ```
 
@@ -740,13 +888,18 @@ expect 10.5 - 3.2 == 7.3
 
 #### multiplies floats
 
+- multiplies floats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies floats")
 expect 2.5 * 4.0 == 10.0
 ```
 
@@ -756,13 +909,18 @@ expect 2.5 * 4.0 == 10.0
 
 #### divides floats
 
+- divides floats
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides floats")
 expect 10.0 / 2.0 == 5.0
 ```
 
@@ -770,13 +928,18 @@ expect 10.0 / 2.0 == 5.0
 
 #### divides with fractional result
 
+- divides with fractional result
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides with fractional result")
 expect 5.0 / 2.0 == 2.5
 ```
 
@@ -786,13 +949,18 @@ expect 5.0 / 2.0 == 2.5
 
 #### calculates 2 to power 3
 
+- calculates 2 to power 3
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates 2 to power 3")
 expect 2 ** 3 == 8
 ```
 
@@ -800,13 +968,18 @@ expect 2 ** 3 == 8
 
 #### calculates any number to power 0
 
+- calculates any number to power 0
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates any number to power 0")
 expect 5 ** 0 == 1
 ```
 
@@ -814,13 +987,18 @@ expect 5 ** 0 == 1
 
 #### calculates any number to power 1
 
+- calculates any number to power 1
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates any number to power 1")
 expect 5 ** 1 == 5
 ```
 
@@ -828,13 +1006,18 @@ expect 5 ** 1 == 5
 
 #### calculates 10 squared
 
+- calculates 10 squared
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates 10 squared")
 expect 10 ** 2 == 100
 ```
 
@@ -842,13 +1025,18 @@ expect 10 ** 2 == 100
 
 #### has higher precedence than multiplication
 
+- has higher precedence than multiplication
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has higher precedence than multiplication")
 expect 2 * 3 ** 2 == 18
 ```
 
@@ -858,13 +1046,18 @@ expect 2 * 3 ** 2 == 18
 
 #### adds integer to float
 
+- adds integer to float
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds integer to float")
 expect 5 + 2.5 == 7.5
 ```
 
@@ -872,13 +1065,18 @@ expect 5 + 2.5 == 7.5
 
 #### multiplies integer by float
 
+- multiplies integer by float
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies integer by float")
 expect 4 * 2.5 == 10.0
 ```
 
@@ -886,13 +1084,18 @@ expect 4 * 2.5 == 10.0
 
 #### divides integer by float
 
+- divides integer by float
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides integer by float")
 expect 10 / 2.5 == 4.0
 ```
 
@@ -900,13 +1103,18 @@ expect 10 / 2.5 == 4.0
 
 #### complex mixed expression
 
+- complex mixed expression
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("complex mixed expression")
 expect 2 + 3.5 * 4 == 16.0
 ```
 
@@ -916,13 +1124,18 @@ expect 2 + 3.5 * 4 == 16.0
 
 #### adds zero identity
 
+- adds zero identity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds zero identity")
 expect 42 + 0 == 42
 ```
 
@@ -930,13 +1143,18 @@ expect 42 + 0 == 42
 
 #### multiplies by one identity
 
+- multiplies by one identity
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies by one identity")
 expect 42 * 1 == 42
 ```
 
@@ -944,13 +1162,18 @@ expect 42 * 1 == 42
 
 #### multiplies by zero
 
+- multiplies by zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies by zero")
 expect 42 * 0 == 0
 ```
 
@@ -958,13 +1181,18 @@ expect 42 * 0 == 0
 
 #### subtracts zero
 
+- subtracts zero
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("subtracts zero")
 expect 42 - 0 == 42
 ```
 
@@ -972,13 +1200,18 @@ expect 42 - 0 == 42
 
 #### divides by one
 
+- divides by one
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides by one")
 expect 42 / 1 == 42
 ```
 
@@ -988,16 +1221,18 @@ expect 42 / 1 == 42
 
 #### adds two negatives
 
-1. expect
+- adds two negatives
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds two negatives")
 expect ((-5)) + -3 == -8
 ```
 
@@ -1005,13 +1240,18 @@ expect ((-5)) + -3 == -8
 
 #### adds positive and negative
 
+- adds positive and negative
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds positive and negative")
 expect 5 + -3 == 2
 ```
 
@@ -1019,16 +1259,18 @@ expect 5 + -3 == 2
 
 #### multiplies negatives
 
-1. expect
+- multiplies negatives
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies negatives")
 expect ((-5)) * -3 == 15
 ```
 
@@ -1036,13 +1278,18 @@ expect ((-5)) * -3 == 15
 
 #### multiplies positive and negative
 
+- multiplies positive and negative
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies positive and negative")
 expect 5 * -3 == -15
 ```
 
@@ -1050,16 +1297,18 @@ expect 5 * -3 == -15
 
 #### divides negatives
 
-1. expect
+- divides negatives
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides negatives")
 expect ((-20)) / -4 == 5
 ```
 
@@ -1067,13 +1316,18 @@ expect ((-20)) / -4 == 5
 
 #### divides positive by negative
 
+- divides positive by negative
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("divides positive by negative")
 expect 20 / -4 == -5
 ```
 
@@ -1083,33 +1337,8 @@ expect 20 / -4 == -5
 
 #### adds large numbers
 
-<details>
-<summary>Executable SSpec</summary>
+- adds large numbers
 
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect 1000000 + 2000000 == 3000000
-```
-
-</details>
-
-#### multiplies large numbers
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect 100000 * 100 == 10000000
-```
-
-</details>
-
-#### handles near max i64
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1118,6 +1347,46 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds large numbers")
+expect 1000000 + 2000000 == 3000000
+```
+
+</details>
+
+#### multiplies large numbers
+
+- multiplies large numbers
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies large numbers")
+expect 100000 * 100 == 10000000
+```
+
+</details>
+
+#### handles near max i64
+
+- handles near max i64
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles near max i64")
 # Not testing max itself to avoid overflow complexity
 val big = 9000000000000000000
 expect big + 0 == big
@@ -1129,20 +1398,8 @@ expect big + 0 == big
 
 #### uses arithmetic in variable assignment
 
-<details>
-<summary>Executable SSpec</summary>
+- uses arithmetic in variable assignment
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = 2 + 3 * 4
-expect result == 14
-```
-
-</details>
-
-#### chains multiple arithmetic operations
 
 <details>
 <summary>Executable SSpec</summary>
@@ -1151,6 +1408,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses arithmetic in variable assignment")
+val result = 2 + 3 * 4
+expect result == 14
+```
+
+</details>
+
+#### chains multiple arithmetic operations
+
+- chains multiple arithmetic operations
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains multiple arithmetic operations")
 val a = 10
 val b = 20
 val c = a + b * 2
@@ -1161,13 +1440,18 @@ expect c == 50
 
 #### modifies variable with arithmetic
 
+- modifies variable with arithmetic
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("modifies variable with arithmetic")
 var x = 10
 x = x + 5
 expect x == 15
@@ -1177,13 +1461,18 @@ expect x == 15
 
 #### multiple arithmetic assignments
 
+- multiple arithmetic assignments
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiple arithmetic assignments")
 var total = 0
 total = total + 5
 total = total + 10
@@ -1200,13 +1489,18 @@ expect total == 18
 
 #### sums array with loop
 
+- sums array with loop
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums array with loop")
 val arr = [1, 2, 3, 4, 5]
 var sum = 0
 for i in arr:
@@ -1221,13 +1515,18 @@ expect sum == 15
 
 #### multiply each element
 
+- multiply each element
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiply each element")
 val arr = [1, 2, 3]
 var product = 1
 for i in arr:
@@ -1239,13 +1538,18 @@ expect product == 6
 
 #### arithmetic on array indices
 
+- arithmetic on array indices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("arithmetic on array indices")
 val arr = [10, 20, 30, 40, 50]
 expect arr[2 + 1] == 40
 ```
@@ -1256,16 +1560,18 @@ expect arr[2 + 1] == 40
 
 #### condition with addition
 
-1. expect
+- condition with addition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("condition with addition")
 expect (if 2 + 3 == 5: true else: false) == true
 ```
 
@@ -1273,16 +1579,18 @@ expect (if 2 + 3 == 5: true else: false) == true
 
 #### condition with multiplication
 
-1. expect
+- condition with multiplication
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("condition with multiplication")
 expect (if 4 * 5 == 20: true else: false) == true
 ```
 
@@ -1290,16 +1598,18 @@ expect (if 4 * 5 == 20: true else: false) == true
 
 #### nested arithmetic in condition
 
-1. expect
+- nested arithmetic in condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("nested arithmetic in condition")
 expect (if 2 * 3 + 4 == 10: true else: false) == true
 ```
 
@@ -1307,16 +1617,18 @@ expect (if 2 * 3 + 4 == 10: true else: false) == true
 
 #### arithmetic comparison
 
-1. expect
+- arithmetic comparison
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("arithmetic comparison")
 expect (if 10 / 2 > 3: true else: false) == true
 ```
 
@@ -1326,13 +1638,18 @@ expect (if 10 / 2 > 3: true else: false) == true
 
 #### calculates average
 
+- calculates average
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates average")
 val sum = 10 + 20 + 30
 val avg = sum / 3
 expect avg == 20
@@ -1342,13 +1659,18 @@ expect avg == 20
 
 #### calculates compound interest
 
+- calculates compound interest
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates compound interest")
 val principal = 1000
 val rate = 5
 val years = 2
@@ -1360,13 +1682,18 @@ expect interest == 100
 
 #### calculates area of rectangle
 
+- calculates area of rectangle
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates area of rectangle")
 val width = 10
 val height = 5
 val area = width * height
@@ -1377,13 +1704,18 @@ expect area == 50
 
 #### converts between units
 
+- converts between units
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("converts between units")
 val kilometers = 5
 val meters = kilometers * 1000
 expect meters == 5000
@@ -1393,13 +1725,18 @@ expect meters == 5000
 
 #### calculates percentage
 
+- calculates percentage
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates percentage")
 val total = 200
 val part = 50
 val percent = part * 100 / total
@@ -1420,3 +1757,51 @@ expect percent == 25
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bcb9c7f4fe908d2382c25f14371881601f909f87381a49bf18ecc889c5d211c8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bcb9c7f4fe908d2382c25f14371881601f909f87381a49bf18ecc889c5d211c8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bcb9c7f4fe908d2382c25f14371881601f909f87381a49bf18ecc889c5d211c8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/arithmetic_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/arithmetic_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/arithmetic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/arithmetic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/arithmetic_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds positive integers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/arithmetic_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds zero' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/arithmetic_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds larger numbers' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

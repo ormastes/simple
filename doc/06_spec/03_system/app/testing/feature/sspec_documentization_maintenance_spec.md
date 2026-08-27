@@ -24,7 +24,7 @@ This operator specification is for SSpec authors, maintainers, reviewers, and
 | Design | doc/05_design/sspec_documentization_maintenance.md |
 | Research | doc/01_research/local/sspec_documentization_maintenance.md |
 | Source | `test/03_system/app/testing/feature/sspec_documentization_maintenance_spec.spl` |
-| Updated | 2026-08-04 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -108,18 +108,39 @@ preview-only and cannot approve or apply their own output.
 
 #### reports every professional documentization dimension
 
-**Step captures:**
-- text after_step
+- Inspect the SSpec documentization baseline
+   - Text capture: after_step
+   - Evidence: text output verified by 9 expected checks
+   - Expected: report.score.narrative equals `100`
+   - Expected: report.score.structure equals `100`
+   - Expected: report.score.oracle equals `100`
+   - Expected: report.score.traceability equals `100`
+   - Expected: report.score.evidence equals `100`
+   - Expected: report.score.coverage equals `100`
+   - Expected: report.score.maintainability equals `100`
+   - Expected: report.score.aggregate equals `100`
+   - Expected: report.findings.len() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req: REQ-SSDOC-003, REQ-SSDOC-004
+step("Inspect the SSpec documentization baseline")
+val report = analyze_sspec_text("fixture_spec.spl", professional_fixture())
+expect(report.score.narrative).to_equal(100)
+expect(report.score.structure).to_equal(100)
+expect(report.score.oracle).to_equal(100)
+expect(report.score.traceability).to_equal(100)
+expect(report.score.evidence).to_equal(100)
+expect(report.score.coverage).to_equal(100)
+expect(report.score.maintainability).to_equal(100)
+expect(report.score.aggregate).to_equal(100)
+expect(report.findings.len()).to_equal(0)
 ```
 
 </details>
@@ -129,18 +150,25 @@ Reproduction: this block contains the complete executable scenario source.
 
 #### reports blocker errors visibly and caps the aggregate
 
-**Step captures:**
-- text after_step
+- Review scored improvement findings
+   - Text capture: after_step
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req: REQ-SSDOC-003, REQ-SSDOC-004
+step("Review scored improvement findings")
+val report = analyze_sspec_text("blocked_spec.spl", blocked_fixture())
+val ids = finding_rule_ids(report)
+expect(ids).to_contain("SSDOC-ORA-001")
+expect(ids).to_contain("SSDOC-TRC-001")
+expect(report.score.blockers).to_be_greater_than(0)
+expect(report.score.aggregate).to_be_less_than(50)
 ```
 
 </details>
@@ -157,15 +185,18 @@ Reproduction: this block contains the complete executable scenario source.
 
 - Preview safe mechanical changes
    - Text capture: after_step
-   - Evidence: text output verified by 2 expected checks
+   - Evidence: text output verified by 3 expected checks
    - Expected: preview.rollback_content equals `source`
    - Expected: source equals `incomplete_fixture()`
+   - Expected: preview.content does not contain `TODO:" + " author purpose`
+- Confirm selected maintenance changes
+   - Expected: applied.content equals `preview.content`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -177,6 +208,13 @@ expect(preview.changed).to_be(true)
 expect(preview.rollback_content).to_equal(source)
 expect(source).to_equal(incomplete_fixture())
 expect(preview.content).to_contain("use std.spec.*")
+expect(preview.content).to_contain("# @step: Run the production behavior")
+expect(preview.content.contains("TODO:" + " author purpose")).to_equal(false)
+
+step("Confirm selected maintenance changes")
+val applied = apply_sspec_text("fixture_spec.spl", source)
+expect(applied.content).to_equal(preview.content)
+expect(apply_sspec_text("fixture_spec.spl", applied.content).changed).to_be(false)
 ```
 
 </details>
@@ -198,7 +236,7 @@ expect(preview.content).to_contain("use std.spec.*")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -213,6 +251,8 @@ expect(scaffold).to_contain("# @source-line: 2")
 expect(scaffold).to_contain("step(\"Review unresolved action for REQ-001\")")
 expect(scaffold).to_contain("# Expected: The tool must report a score.")
 expect(scaffold).to_contain("fail(\"TODO: replace generated placeholder with an executable assertion\")")
+expect(scaffold).to_contain("# REQ-001 <- reference.md:2")
+expect(scaffold.contains("\n        expect(")).to_be(false)
 ```
 
 </details>
@@ -261,18 +301,36 @@ expect(sspec_resolved_fingerprints(["fingerprint-b"], ["fingerprint-a", "fingerp
 
 #### renders a scorecard for the SPipe-owned operator manual
 
-**Step captures:**
-- text after_step
+- Generate and inspect the professional specification manual
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: result.report.mirror_state equals `current`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req: REQ-SSDOC-009, REQ-SSDOC-011
+step("Generate and inspect the professional specification manual")
+val base = "# Feature\n## Purpose and audience\n## Scope and preconditions\n" +
+    "## Primary workflow\n1. Run the production behavior\n" +
+    "## Requirements and traceability\nREQ-001\n## Evidence\nCaptured result\n" +
+    "## Verification and outcomes\nReady.\n## Unsupported behavior and limitations\n" +
+    "None.\n## Recovery and troubleshooting\nReview diagnostics.\n"
+val result = compose_sspec_documentized_manual(
+    "test/fixture_spec.spl", professional_fixture(), base, true)
+expect(result.content).to_start_with(base.trim())
+expect(result.content).to_contain("## Purpose and audience")
+expect(result.content).to_contain("## Primary workflow")
+expect(result.content).to_contain("## Generation history")
+expect(result.content).to_contain("## SSpec documentization scorecard")
+expect(result.content).to_contain("effective score: **100/100**")
+expect(result.content.contains("TODO: author")).to_be(false)
+expect(result.report.mirror_state).to_equal("current")
 ```
 
 </details>
@@ -301,36 +359,63 @@ Reproduction: this block contains the complete executable scenario source.
 
 </details>
 
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-SSDOC-002`
+- `REQ-SSDOC-003`
+- `REQ-SSDOC-004`
+- `REQ-SSDOC-006`
+- `REQ-SSDOC-007`
+- `REQ-SSDOC-008`
+- `REQ-SSDOC-009`
+- `REQ-SSDOC-011`
+- `REQ-SSDOC-012.`
+- `REQ-SSDOC-004:`
+- `REQ-001")`
+- `REQ-001\")")`
+- `REQ-001`
+- `REQ-SSDOC-012:`
+- `REQ-SSDOC-012`
+- `REQ-SSDOC-011:`
+- `REQ-001\n`
+- `REQ-001:`
+<!-- sspec-maintain:traceability:end -->
+
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `345b606a1522a3090bb20d3bcee3f7184784ea21c3a6609ae415c0fb5e28535c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `45a529f059452412a5973118d16bf362314f3d38d5def1953d2170be4e16b519`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `345b606a1522a3090bb20d3bcee3f7184784ea21c3a6609ae415c0fb5e28535c`.
+Source SHA-256: `45a529f059452412a5973118d16bf362314f3d38d5def1953d2170be4e16b519`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `345b606a1522a3090bb20d3bcee3f7184784ea21c3a6609ae415c0fb5e28535c`  
+Source SHA-256: `45a529f059452412a5973118d16bf362314f3d38d5def1953d2170be4e16b519`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
 
-SSpec documentization score: 88/100
+SSpec documentization score: 49/100
 source: test/03_system/app/testing/feature/sspec_documentization_maintenance_spec.spl
 mirror: doc/06_spec/03_system/app/testing/feature/sspec_documentization_maintenance_spec.md (current)
-findings: 3 blockers: 0
+findings: 3 blockers: 1
   narrative=80 structure=100 oracle=70
-  traceability=80 evidence=100 coverage=100 maintainability=100
+  traceability=60 evidence=100 coverage=100 maintainability=100
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=85; blocker cap makes effective=49
 test/03_system/app/testing/feature/sspec_documentization_maintenance_spec.spl:1:1: warning SSDOC-NAR-002 [narrative] (-20): generic placeholder narrative remains
   why: Generated filler is not specification content.
   improve: Replace generated filler with source-evidenced prose.
 test/03_system/app/testing/feature/sspec_documentization_maintenance_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 9 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/testing/feature/sspec_documentization_maintenance_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
-  why: Stable requirement identity connects intent, implementation, and evidence.
-  improve: Bind scenarios to stable selected REQ identities.
+test/03_system/app/testing/feature/sspec_documentization_maintenance_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
 <!-- sspec-maintain:scorecard:end -->

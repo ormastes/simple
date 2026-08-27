@@ -1,29 +1,6 @@
-# Compile Pipeline Unit Tests
+# Compile Pipeline Specification
 
-> 1. check
-
-<!-- sdn-diagram:id=compile_pipeline_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=compile_pipeline_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-compile_pipeline_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=compile_pipeline_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Compilation Stages, Compilation Targets, Compilation Options, Compilation Errors.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,18 +9,7 @@ compile_pipeline_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Compile Pipeline Unit Tests
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #APP-COMPILE-001 |
-| Category | App \| Compile |
-| Status | Implemented |
-| Source | `test/01_unit/app/compile/compile_pipeline_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+# Compile Pipeline Specification
 
 ## Scenarios
 
@@ -51,16 +17,22 @@ compile_pipeline_spec
 
 #### lex stage
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- lex stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lex stage")
 val stage = "lex"
 check(stage == "lex")
 ```
@@ -69,16 +41,18 @@ check(stage == "lex")
 
 #### parse stage
 
-1. check
+- parse stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parse stage")
 val stage = "parse"
 check(stage == "parse")
 ```
@@ -87,16 +61,18 @@ check(stage == "parse")
 
 #### typecheck stage
 
-1. check
+- typecheck stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("typecheck stage")
 val stage = "typecheck"
 check(stage == "typecheck")
 ```
@@ -105,16 +81,18 @@ check(stage == "typecheck")
 
 #### lower to hir stage
 
-1. check
+- lower to hir stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lower to hir stage")
 val stage = "hir_lower"
 check(stage == "hir_lower")
 ```
@@ -123,16 +101,18 @@ check(stage == "hir_lower")
 
 #### lower to mir stage
 
-1. check
+- lower to mir stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lower to mir stage")
 val stage = "mir_lower"
 check(stage == "mir_lower")
 ```
@@ -141,16 +121,18 @@ check(stage == "mir_lower")
 
 #### optimize stage
 
-1. check
+- optimize stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("optimize stage")
 val stage = "optimize"
 check(stage == "optimize")
 ```
@@ -159,16 +141,18 @@ check(stage == "optimize")
 
 #### codegen stage
 
-1. check
+- codegen stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("codegen stage")
 val stage = "codegen"
 check(stage == "codegen")
 ```
@@ -177,16 +161,18 @@ check(stage == "codegen")
 
 #### link stage
 
-1. check
+- link stage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("link stage")
 val stage = "link"
 check(stage == "link")
 ```
@@ -197,16 +183,18 @@ check(stage == "link")
 
 #### compile to native
 
-1. check
+- compile to native
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compile to native")
 val target = "native"
 check(target == "native")
 ```
@@ -215,16 +203,18 @@ check(target == "native")
 
 #### compile to c
 
-1. check
+- compile to c
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compile to c")
 val target = "c"
 check(target == "c")
 ```
@@ -233,16 +223,18 @@ check(target == "c")
 
 #### compile to llvm-ir
 
-1. check
+- compile to llvm-ir
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compile to llvm-ir")
 val target = "llvm-ir"
 check(target == "llvm-ir")
 ```
@@ -251,16 +243,18 @@ check(target == "llvm-ir")
 
 #### compile to wasm
 
-1. check
+- compile to wasm
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compile to wasm")
 val target = "wasm"
 check(target == "wasm")
 ```
@@ -269,16 +263,18 @@ check(target == "wasm")
 
 #### compile to cuda
 
-1. check
+- compile to cuda
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compile to cuda")
 val target = "cuda"
 check(target == "cuda")
 ```
@@ -287,16 +283,18 @@ check(target == "cuda")
 
 #### compile to vhdl
 
-1. check
+- compile to vhdl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("compile to vhdl")
 val target = "vhdl"
 check(target == "vhdl")
 ```
@@ -307,16 +305,18 @@ check(target == "vhdl")
 
 #### entry point specification
 
-1. check
+- entry point specification
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("entry point specification")
 val entry = "src/app/cli/main.spl"
 check(entry.ends_with(".spl"))
 ```
@@ -325,16 +325,18 @@ check(entry.ends_with(".spl"))
 
 #### output path specification
 
-1. check
+- output path specification
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("output path specification")
 val output = "build/output"
 check(output.starts_with("build"))
 ```
@@ -343,16 +345,18 @@ check(output.starts_with("build"))
 
 #### debug info inclusion
 
-1. check
+- debug info inclusion
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("debug info inclusion")
 val debug = true
 check(debug)
 ```
@@ -361,16 +365,18 @@ check(debug)
 
 #### optimization level
 
-1. check
+- optimization level
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("optimization level")
 val opt_level = 2
 check(opt_level >= 0 and opt_level <= 3)
 ```
@@ -379,16 +385,18 @@ check(opt_level >= 0 and opt_level <= 3)
 
 #### self-contained format
 
-1. check
+- self-contained format
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("self-contained format")
 val format = "self-contained"
 check(format == "self-contained")
 ```
@@ -399,16 +407,18 @@ check(format == "self-contained")
 
 #### file not found error
 
-1. check
+- file not found error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("file not found error")
 val error = "file_not_found"
 check(error == "file_not_found")
 ```
@@ -417,16 +427,18 @@ check(error == "file_not_found")
 
 #### syntax error
 
-1. check
+- syntax error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("syntax error")
 val error = "syntax_error"
 check(error == "syntax_error")
 ```
@@ -435,16 +447,18 @@ check(error == "syntax_error")
 
 #### type error
 
-1. check
+- type error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("type error")
 val error = "type_error"
 check(error == "type_error")
 ```
@@ -453,16 +467,18 @@ check(error == "type_error")
 
 #### linker error
 
-1. check
+- linker error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("linker error")
 val error = "linker_error"
 check(error == "linker_error")
 ```
@@ -471,21 +487,41 @@ check(error == "linker_error")
 
 #### multiple errors collected
 
-1. check
+- multiple errors collected
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("multiple errors collected")
 val errors = ["e1", "e2", "e3"]
 check(errors.len() == 3)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/compile/compile_pipeline_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Compilation Stages, Compilation Targets, Compilation Options, Compilation Errors.
+- Compilation Stages
+- Compilation Targets
+- Compilation Options
+- Compilation Errors
 
 ## Scenario Summary
 
@@ -499,3 +535,51 @@ check(errors.len() == 3)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ef973193d0bd1079f2c0414a0b8e61d307d2cfa41b60b2316bd3e992d4520e6b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ef973193d0bd1079f2c0414a0b8e61d307d2cfa41b60b2316bd3e992d4520e6b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ef973193d0bd1079f2c0414a0b8e61d307d2cfa41b60b2316bd3e992d4520e6b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/compile/compile_pipeline_spec.spl
+mirror: doc/06_spec/01_unit/app/compile/compile_pipeline_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/compile/compile_pipeline_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/compile/compile_pipeline_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/compile/compile_pipeline_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lex stage' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/compile/compile_pipeline_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parse stage' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/compile/compile_pipeline_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'typecheck stage' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # 29 Job Manager Specification
 
-> 1. Ok
-
-<!-- sdn-diagram:id=29_job_manager_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=29_job_manager_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-29_job_manager_spec -> std
-29_job_manager_spec -> test
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=29_job_manager_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32 job manager.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,18 +19,19 @@
 
 #### eval completes synchronously
 
-1. Ok
-2. Err
+- eval completes synchronously
    - Expected: "eval 1+1 failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("eval completes synchronously")
 val result = t32_hw_eval(client, "1+1")
 match result:
     Ok(v):
@@ -68,18 +45,19 @@ match result:
 
 #### long eval completes
 
-1. Ok
-2. Err
+- long eval completes
    - Expected: "VERSION.BUILD() failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("long eval completes")
 val result = t32_hw_eval(client, "VERSION.BUILD()")
 match result:
     Ok(v):
@@ -94,22 +72,19 @@ match result:
 
 #### multiple evals in sequence
 
-1. Ok
-2. Err
-3. Ok
-4. Err
-5. Ok
-6. Err
+- multiple evals in sequence
    - Expected: all_ok is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("multiple evals in sequence")
 val r1 = t32_hw_eval(client, "1+1")
 val r2 = t32_hw_eval(client, "2+2")
 val r3 = t32_hw_eval(client, "3+3")
@@ -132,18 +107,19 @@ expect(all_ok).to_equal(true)
 
 #### eval after error recovers
 
-1. Ok
-2. Err
+- eval after error recovers
    - Expected: "recovery eval failed: {e}" equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("eval after error recovers")
 # Send a bad expression first
 val bad = t32_hw_eval(client, "ZZZNOTEXPR.ZZZZ()")
 # bad may be Ok or Err depending on T32 behavior
@@ -165,12 +141,12 @@ match good:
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/t32_hw/29_job_manager_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering T32 job manager.
 - T32 job manager
 
 ## Scenario Summary
@@ -185,3 +161,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3f4f2767559c83dc671fe85e6b433ca8b14bc291c7571967d465c31fcbdf5b1a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3f4f2767559c83dc671fe85e6b433ca8b14bc291c7571967d465c31fcbdf5b1a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3f4f2767559c83dc671fe85e6b433ca8b14bc291c7571967d465c31fcbdf5b1a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/t32_hw/29_job_manager_spec.spl
+mirror: doc/06_spec/02_integration/t32_hw/29_job_manager_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/t32_hw/29_job_manager_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/t32_hw/29_job_manager_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/t32_hw/29_job_manager_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'eval completes synchronously' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/t32_hw/29_job_manager_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'long eval completes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/t32_hw/29_job_manager_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'multiple evals in sequence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

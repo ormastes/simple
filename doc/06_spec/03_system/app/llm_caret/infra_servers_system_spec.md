@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 3 | 0 | 1 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -18,9 +18,9 @@ Purpose: Prove LIVE round trips of the LLM Caret infrastructure tools against
 | Field | Value |
 |-------|-------|
 | Category | Application |
-| Status | In Progress |
+| Status | Active |
 | Source | `test/03_system/app/llm_caret/infra_servers_system_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -172,22 +172,27 @@ reset_config()
 
 ### infra servers: ftp backend
 
-#### is blocked until the runtime backs the ftp facade _(pending)_
+#### fails closed through the gate until the runtime backs the ftp facade
 
-- is blocked until the runtime backs the ftp facade
+- ftp_* is absent from the tool registry, so the gate rejects it loudly
+   - Expected: res.is_error is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-SYSTEM
-step("is blocked until the runtime backs the ftp facade")
-pending("BLOCKED: no local FTP server on this host and rt_ftp_* (src/lib/nogc_sync_mut/io/ftp_sffi.spl:17) is an unbacked runtime extern — set LLM_CARET_FTP_LIVE=1 with credentials to run once the facade is backed")
-return
+step("ftp_* is absent from the tool registry, so the gate rejects it loudly")
+# BLOCKED for the live lane: no local FTP server and rt_ftp_* (src/lib/nogc_sync_mut/io/ftp_sffi.spl:17)
+# is an unbacked runtime extern — set LLM_CARET_FTP_LIVE=1 with credentials once the facade is backed.
+val res = run_tool(allow_all_policy(WS), new_tool_call("ftp", "ftp_put",
+    _json([_kv("host", "ftp.example.invalid"), _kv("path", "/x"), _kv("content", "x")])))
+expect(res.is_error).to_equal(true)  # oracle: unbacked facade is rejected, never a silent nil result
+expect(res.content).to_contain("unknown tool: ftp_put")  # oracle: fail-closed reason names the missing facade
 ```
 
 </details>
@@ -253,10 +258,10 @@ reset_config()
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 4 |
-| Active scenarios | 3 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 1 |
+| Pending scenarios | 0 |
 
 
 </details>
@@ -272,43 +277,39 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `9d05ecbde9efbb59eaf8a3ff21e50ada28b83f3e87563070f64477e59859b13f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `901fd3106d1ba7c284d54e81fb2554c11eb4c0e515b06bb451fd2507e901e00d`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `9d05ecbde9efbb59eaf8a3ff21e50ada28b83f3e87563070f64477e59859b13f`.
+Source SHA-256: `901fd3106d1ba7c284d54e81fb2554c11eb4c0e515b06bb451fd2507e901e00d`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `9d05ecbde9efbb59eaf8a3ff21e50ada28b83f3e87563070f64477e59859b13f`  
+Source SHA-256: `901fd3106d1ba7c284d54e81fb2554c11eb4c0e515b06bb451fd2507e901e00d`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/03_system/app/llm_caret/infra_servers_system_spec.spl
 mirror: doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/app/llm_caret/infra_servers_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/llm_caret/infra_servers_system_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
 test/03_system/app/llm_caret/infra_servers_system_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sends a mail, sees it in mail_list and reads its body back' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 test/03_system/app/llm_caret/infra_servers_system_spec.spl:104:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'puts an object, lists it and gets identical bytes back' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/infra_servers_system_spec.spl:135:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is blocked until the runtime backs the ftp facade' has no retained capture or evidence
+test/03_system/app/llm_caret/infra_servers_system_spec.spl:135:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed through the gate until the runtime backs the ftp facade' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

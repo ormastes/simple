@@ -1,29 +1,6 @@
 # Hal Arm64 Phase A Specification
 
-> <details>
-
-<!-- sdn-diagram:id=hal_arm64_phase_a_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=hal_arm64_phase_a_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-hal_arm64_phase_a_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=hal_arm64_phase_a_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering hal.arm64 Phase A — console + CPU + boot.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,13 +17,20 @@ hal_arm64_phase_a_spec -> std
 
 #### hal_address_width returns 48 for arm64
 
+- hal_address_width returns 48 for arm64
+   - Expected: expected equals `48`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("hal_address_width returns 48 for arm64")
+"""ARM64 with 4-level 4KB granule uses 48-bit virtual addresses."""
 val expected: u32 = 48
 expect(expected).to_equal(48)
 ```
@@ -55,13 +39,20 @@ expect(expected).to_equal(48)
 
 #### PL011 UART base address is 0x09000000
 
+- PL011 UART base address is 0x09000000
+   - Expected: pl011_base equals `0x09000000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("PL011 UART base address is 0x09000000")
+"""QEMU virt machine maps PL011 at 0x09000000."""
 val pl011_base: u64 = 0x09000000
 expect(pl011_base).to_equal(0x09000000)
 ```
@@ -70,13 +61,20 @@ expect(pl011_base).to_equal(0x09000000)
 
 #### DAIF_ALL mask covers all four interrupt types
 
+- DAIF_ALL mask covers all four interrupt types
+   - Expected: daif_all equals `0xF`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("DAIF_ALL mask covers all four interrupt types")
+"""DAIF_ALL = 0xF masks Debug, SError, IRQ, FIQ."""
 val daif_all: u64 = 0xF
 expect(daif_all).to_equal(0xF)
 ```
@@ -85,13 +83,20 @@ expect(daif_all).to_equal(0xF)
 
 #### UARTCR enable bits are CR_UARTEN | CR_TXE
 
+- UARTCR enable bits are CR_UARTEN | CR_TXE
+   - Expected: combined equals `0x101`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("UARTCR enable bits are CR_UARTEN | CR_TXE")
+"""Control register must set bit 0 (UARTEN) and bit 8 (TXE) to enable TX."""
 val cr_uarten: u32 = 1
 val cr_txe: u32 = 1 << 8
 val combined: u32 = cr_uarten | cr_txe
@@ -102,13 +107,20 @@ expect(combined).to_equal(0x101)
 
 #### UARTFR TXFF bit is bit 5
 
+- UARTFR TXFF bit is bit 5
+   - Expected: fr_txff equals `32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("UARTFR TXFF bit is bit 5")
+"""Flag register bit 5 signals transmit FIFO full (spin condition)."""
 val fr_txff: u32 = 1 << 5
 expect(fr_txff).to_equal(32)
 ```
@@ -122,12 +134,12 @@ expect(fr_txff).to_equal(32)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering hal.arm64 Phase A — console + CPU + boot.
 - hal.arm64 Phase A — console + CPU + boot
 
 ## Scenario Summary
@@ -142,3 +154,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b4c5a492d22437026a2f1786a2cb5acbfe761e115baa43d29bcac24b20cee6d6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b4c5a492d22437026a2f1786a2cb5acbfe761e115baa43d29bcac24b20cee6d6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b4c5a492d22437026a2f1786a2cb5acbfe761e115baa43d29bcac24b20cee6d6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hal_address_width returns 48 for arm64' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'PL011 UART base address is 0x09000000' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/arch/hal_arm64_phase_a_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'DAIF_ALL mask covers all four interrupt types' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

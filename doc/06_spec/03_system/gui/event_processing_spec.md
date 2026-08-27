@@ -2,31 +2,6 @@
 
 > Verifies that the headless UI app accepts keyboard, focus, resize, and quit events, updates state through the run loop, and renders without crashing.
 
-<!-- sdn-diagram:id=event_processing_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=event_processing_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-event_processing_spec -> std
-event_processing_spec -> app
-event_processing_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=event_processing_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -51,7 +26,7 @@ Verifies that the headless UI app accepts keyboard, focus, resize, and quit even
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/event_processing_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -76,30 +51,22 @@ Headless tests enqueue `UIEvent` values and run until `UIEvent.Quit`.
 
 #### processes KeyPress events without crashing _(slow)_
 
-1. Ok
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. app inject event
 
-3. app inject event
-
-4. Ok
-
-5. Err
-
-6. fail
-
-7. Err
-
-8. fail
+- processes KeyPress events without crashing
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("processes KeyPress events without crashing")
 val result = HeadlessApp.new("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(app) :
@@ -125,34 +92,18 @@ match result:
 
 #### processes multiple navigation keys _(slow)_
 
-1. Ok
-
-2. app inject event
-
-3. app inject event
-
-4. app inject event
-
-5. app inject event
-
-6. Ok
-
-7. Err
-
-8. fail
-
-9. Err
-
-10. fail
+- processes multiple navigation keys
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("processes multiple navigation keys")
 val result = HeadlessApp.new("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(app) :
@@ -182,31 +133,19 @@ match result:
 
 #### processes FocusNext _(slow)_
 
-1. Ok
-
-2. app inject event
-
-3. app inject event
-
-4. Ok
+- processes FocusNext
    - Expected: app.render_count() equals `2`
-
-5. Err
-
-6. fail
-
-7. Err
-
-8. fail
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("processes FocusNext")
 val result = HeadlessApp.new("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(app) :
@@ -235,31 +174,19 @@ match result:
 
 #### processes FocusPrev _(slow)_
 
-1. Ok
-
-2. app inject event
-
-3. app inject event
-
-4. Ok
+- processes FocusPrev
    - Expected: app.render_count() equals `2`
-
-5. Err
-
-6. fail
-
-7. Err
-
-8. fail
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("processes FocusPrev")
 val result = HeadlessApp.new("examples/06_io/ui/demo.ui.sdn")
 match result:
     Ok(app) :
@@ -290,32 +217,20 @@ match result:
 
 #### tracks state after events _(slow)_
 
-1. Ok
-
-2. app inject event
-
-3. app inject event
-
-4. Ok
+- tracks state after events
    - Expected: app.render_count() equals `2`
    - Expected: state_after.mode_name() equals `NORMAL`
 
-5. Err
-
-6. fail
-
-7. Err
-
-8. fail
-
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tracks state after events")
 val result = HeadlessApp.new("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(app) :
@@ -347,29 +262,19 @@ match result:
 
 #### stops on Quit event _(slow)_
 
-1. Ok
-
-2. app inject event
-
-3. Ok
+- stops on Quit event
    - Expected: app.render_count() equals `1`
-
-4. Err
-
-5. fail
-
-6. Err
-
-7. fail
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("stops on Quit event")
 val result = HeadlessApp.new("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(app) :
@@ -397,31 +302,19 @@ match result:
 
 #### handles resize without crashing _(slow)_
 
-1. Ok
-
-2. app inject event
-
-3. app inject event
-
-4. Ok
+- handles resize without crashing
    - Expected: app.render_count() equals `2`
-
-5. Err
-
-6. fail
-
-7. Err
-
-8. fail
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles resize without crashing")
 val result = HeadlessApp.new("examples/06_io/ui/minimal.ui.sdn")
 match result:
     Ok(app) :
@@ -455,3 +348,54 @@ match result:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bb5bf072665779e36e3e5aa82313438f23f0661c83ad0389a3261207d529cb23`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bb5bf072665779e36e3e5aa82313438f23f0661c83ad0389a3261207d529cb23`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bb5bf072665779e36e3e5aa82313438f23f0661c83ad0389a3261207d529cb23`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/gui/event_processing_spec.spl
+mirror: doc/06_spec/03_system/gui/event_processing_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/gui/event_processing_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/gui/event_processing_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/event_processing_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/gui/event_processing_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'processes KeyPress events without crashing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/event_processing_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'processes multiple navigation keys' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/event_processing_spec.spl:95:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'processes FocusNext' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

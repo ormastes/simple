@@ -1,29 +1,6 @@
 # Regex Utils Specification
 
-> 1. expect regex is match
-
-<!-- sdn-diagram:id=regex_utils_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=regex_utils_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-regex_utils_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=regex_utils_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Regex Utils.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,17 +17,22 @@ regex_utils_spec -> std
 
 #### matches digit patterns
 
-1. expect regex is match
-2. expect regex is match
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- matches digit patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("matches digit patterns")
 expect regex_is_match(r"\d+", "build 42 passed") == true
 expect regex_is_match(r"^\d+$", "42x") == false
 ```
@@ -59,16 +41,18 @@ expect regex_is_match(r"^\d+$", "42x") == false
 
 #### finds the first number with range metadata
 
-1. Some
+- finds the first number with range metadata
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("finds the first number with range metadata")
 val found = regex_find(r"\d+", "run 128 ms")
 match found:
     Some(m):
@@ -83,44 +67,7 @@ match found:
 
 #### replaces all numeric runs
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val replaced = regex_replace_all(r"\d+", "p50=12 p95=48", "N")
-expect replaced == "pN=N pN=N"
-```
-
-</details>
-
-#### splits comma separated text and trims spacing
-
-1. expect parts len
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val parts = regex_split(r",\s*", "alpha, beta,gamma")
-expect parts.len() == 3
-expect parts[1] == "beta"
-```
-
-</details>
-
-#### validates common email and ipv4 shapes
-
-1. expect is valid email
-2. expect is valid email
-3. expect is valid ipv4
-4. expect is valid ipv4
+- replaces all numeric runs
 
 
 <details>
@@ -130,6 +77,49 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("replaces all numeric runs")
+val replaced = regex_replace_all(r"\d+", "p50=12 p95=48", "N")
+expect replaced == "pN=N pN=N"
+```
+
+</details>
+
+#### splits comma separated text and trims spacing
+
+- splits comma separated text and trims spacing
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("splits comma separated text and trims spacing")
+val parts = regex_split(r",\s*", "alpha, beta,gamma")
+expect parts.len() == 3
+expect parts[1] == "beta"
+```
+
+</details>
+
+#### validates common email and ipv4 shapes
+
+- validates common email and ipv4 shapes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("validates common email and ipv4 shapes")
 expect is_valid_email("dev@example.com") == true
 expect is_valid_email("@example.com") == false
 expect is_valid_ipv4("192.168.0.1") == true
@@ -140,16 +130,18 @@ expect is_valid_ipv4("999.168.0.1") == false
 
 #### extracts numeric strings in order
 
-1. expect nums len
+- extracts numeric strings in order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts numeric strings in order")
 val nums = extract_numbers("x=7 y=11 z=19")
 expect nums.len() == 3
 expect nums[0] == "7"
@@ -165,12 +157,12 @@ expect nums[2] == "19"
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/regex_utils_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Regex Utils.
 - Regex Utils
 
 ## Scenario Summary
@@ -185,3 +177,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `498101cbd9d55f371d4c306c835e9441fb9ff25849fe99baa513abd67a2da704`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `498101cbd9d55f371d4c306c835e9441fb9ff25849fe99baa513abd67a2da704`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `498101cbd9d55f371d4c306c835e9441fb9ff25849fe99baa513abd67a2da704`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/regex_utils_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/regex_utils_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/regex_utils_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/regex_utils_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/regex_utils_spec.spl:13:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches digit patterns' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/regex_utils_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'finds the first number with range metadata' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/regex_utils_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'replaces all numeric runs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

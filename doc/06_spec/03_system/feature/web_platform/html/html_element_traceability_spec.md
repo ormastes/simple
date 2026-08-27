@@ -24,7 +24,7 @@ This executable system specification traces ten HTML elements that were omitted 
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/feature/web_platform/html/html_element_traceability_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -222,9 +222,9 @@ this source remain authoritative.
 
 #### should retain h1 through h6 with selected block heading metrics
 
-- Trace HTML elements through Web semantics and Draw IR
+- should retain h1 through h6 with selected block heading metrics
    - GUI capture: after_step (HTML preferred when available)
--  expect pinned html corpus
+- Trace HTML elements through Web semantics and Draw IR
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 7 expected checks
    - Expected: style.display equals `block`
@@ -234,17 +234,17 @@ this source remain authoritative.
    - Expected: style.margin_t equals `margins[index]`
    - Expected: style.margin_r equals `0`
    - Expected: style.margin_b equals `margins[index]`
--  command
-   - GUI capture: after_step (HTML preferred when available)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 51 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should retain h1 through h6 with selected block heading metrics")
 step("Trace HTML elements through Web semantics and Draw IR")
 _expect_pinned_html_corpus()
 val ids = ["h1", "h2", "h3", "h4", "h5", "h6"]
@@ -262,7 +262,7 @@ val color_hex = [
 var index = 0
 while index < ids.len():
     val html = (
-        "<style>html,body{margin:0}</style><body id='body'><" +
+        "<style>html,body{{margin:0}}</style><body id='body'><" +
         tags[index] + " id='" + ids[index] +
         "' style='background:#" + color_hex[index] +
         "'>H</" + tags[index] + "></body>"
@@ -302,13 +302,9 @@ while index < ids.len():
 
 #### should keep sub and sup in inline flow with distinct baselines
 
+- should keep sub and sup in inline flow with distinct baselines
+   - GUI capture: after_step (HTML preferred when available)
 - Trace HTML elements through Web semantics and Draw IR
-   - GUI capture: after_step (HTML preferred when available)
--  expect pinned html corpus
-   - GUI capture: after_step (HTML preferred when available)
--  expect semantic identity
-   - GUI capture: after_step (HTML preferred when available)
--  expect semantic identity
    - GUI capture: after_step (HTML preferred when available)
    - Evidence: GUI state or HTML text verified by 10 expected checks
    - Expected: result.hit_index.styles[sub].display equals `inline`
@@ -321,19 +317,17 @@ while index < ids.len():
    - Expected: result.hit_index.styles[sup].vertical_align equals `super`
    - Expected: _style(sub_text, "font-size") equals `13`
    - Expected: _style(sup_text, "font-size") equals `13`
--  command
-   - GUI capture: after_step (HTML preferred when available)
--  command
-   - GUI capture: after_step (HTML preferred when available)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 82 lines folded for reproduction.
+Runnable source: 84 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should keep sub and sup in inline flow with distinct baselines")
 step("Trace HTML elements through Web semantics and Draw IR")
 _expect_pinned_html_corpus()
 val html = (
@@ -422,36 +416,35 @@ expect(inherited_line_height.hit_index.styles[
 
 #### should fail closed for unsupported selectedcontent and render slot fallback inline
 
+- should fail closed for unsupported selectedcontent and render slot fallback inline
+   - GUI capture: after_step (HTML preferred when available)
 - Trace HTML elements through Web semantics and Draw IR
    - GUI capture: after_step (HTML preferred when available)
--  expect pinned html corpus
-   - GUI capture: after_step (HTML preferred when available)
-   - Evidence: GUI state or HTML text verified by 6 expected checks
+   - Evidence: GUI state or HTML text verified by 7 expected checks
    - Expected: result.hit_index.styles[selected].display equals `none`
    - Expected: _command_index(result.composition, "selected") equals `-1`
    - Expected: result.hit_index.styles[invalid_selected].display equals `inline`
    - Expected: result.hit_index.styles[multiple_selected].display equals `inline`
    - Expected: result.hit_index.styles[late_selected].display equals `inline`
    - Expected: result.hit_index.styles[slot].display equals `inline`
--  command
-   - GUI capture: after_step (HTML preferred when available)
-   - Evidence: GUI state or HTML text verified by 1 expected check
    - Expected: _count_color(pixels, 0xFFDC2626u32) equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 83 lines folded for reproduction.
+Runnable source: 85 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should fail closed for unsupported selectedcontent and render slot fallback inline")
 step("Trace HTML elements through Web semantics and Draw IR")
 _expect_pinned_html_corpus()
 val html = (
     "<style>html,body{margin:0;font-size:16px;" +
     "line-height:16px;color:#111827}" +
-    "#slot{color:#7c3aed}</style><body id='body'>" +
+    "#slot{{color:#7c3aed}}</style><body id='body'>" +
     "<select id='select'><button id='select-button'>" +
     "<selectedcontent id='selected' style='display:block;width:8px;" +
     "height:8px;background:#dc2626'></selectedcontent></button>" +
@@ -551,3 +544,67 @@ expect(_count_color(pixels, 0xFF7C3AEDu32)).to_be_greater_than(0)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-002`
+- `REQ-WEB-BROWSER-004`
+- `REQ-WEB-BROWSER-019`
+- `REQ-WEB-BROWSER-021`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8638e764dd50f59d2f5e9f6b059d932599330db308724edd5d82936a6f7f276e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8638e764dd50f59d2f5e9f6b059d932599330db308724edd5d82936a6f7f276e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8638e764dd50f59d2f5e9f6b059d932599330db308724edd5d82936a6f7f276e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **84/100**; blockers: **0**.
+
+SSpec documentization score: 84/100
+source: test/03_system/feature/web_platform/html/html_element_traceability_spec.spl
+mirror: doc/06_spec/03_system/feature/web_platform/html/html_element_traceability_spec.md (current)
+findings: 9 blockers: 0
+  narrative=100 structure=85 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/web_platform/html/html_element_traceability_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/web_platform/html/html_element_traceability_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:368:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should retain h1 through h6 with selected block heading metrics' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:368:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should retain h1 through h6 with selected block heading metrics' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:429:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should keep sub and sup in inline flow with distinct baselines' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:429:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should keep sub and sup in inline flow with distinct baselines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:521:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for unsupported selectedcontent and render slot fallback inline' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/feature/web_platform/html/html_element_traceability_spec.spl:521:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should fail closed for unsupported selectedcontent and render slot fallback inline' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

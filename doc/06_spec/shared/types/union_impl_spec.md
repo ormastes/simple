@@ -1,29 +1,6 @@
-# Union Keyword and Impl Blocks Specification
+# Union Impl Specification
 
-> union Status:
-
-<!-- sdn-diagram:id=union_impl_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=union_impl_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-union_impl_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=union_impl_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Union keyword, Union Impl Methods, Union Pattern Matching, Union Type Safety.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,48 +9,7 @@ union_impl_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Union Keyword and Impl Blocks Specification
-
-union Status:
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #UNION-KEYWORD, #ENUM-IMPL |
-| Category | Language Features |
-| Status | Implemented |
-| Source | `test/shared/types/union_impl_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Syntax
-
-```simple
-union Status:
-Active
-Inactive
-
-union Result:
-Ok(value: Int)
-Err(msg: String)
-
-impl Result:
-fn is_ok() -> bool:
-match self:
-case Result.Ok(_):
-true
-case _:
-false
-```
-
-## Key Behaviors
-
-- Union is an alias for enum - fully interchangeable
-- Variants can be simple (no payload) or have associated data
-- Impl blocks can be used to add methods
-- Pattern matching works with union variants
-- Union values are constructed with VariantName or VariantName(payload)
+# Union Impl Specification
 
 ## Scenarios
 
@@ -83,13 +19,18 @@ false
 
 #### parses union types correctly
 
+- parses union types correctly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("parses union types correctly")
 # Union is an alias for enum in Simple
 val s = Status.Active
 expect true
@@ -99,13 +40,18 @@ expect true
 
 #### creates inactive status variant
 
+- creates inactive status variant
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates inactive status variant")
 val s = Status.Inactive
 expect true
 ```
@@ -114,13 +60,18 @@ expect true
 
 #### creates union variant with string
 
+- creates union variant with string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates union variant with string")
 val r = MyResult.Err("failed")
 expect true
 ```
@@ -131,13 +82,18 @@ expect true
 
 #### supports union variants with payloads
 
+- supports union variants with payloads
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("supports union variants with payloads")
 val r1 = MyResult.Ok(42)
 val r2 = MyResult.Err("failed")
 expect true
@@ -147,13 +103,18 @@ expect true
 
 #### creates option with value
 
+- creates option with value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates option with value")
 val opt = MyOption.Some(10)
 expect true
 ```
@@ -162,13 +123,18 @@ expect true
 
 #### creates empty option
 
+- creates empty option
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates empty option")
 val opt = MyOption.Nothing
 expect true
 ```
@@ -179,13 +145,18 @@ expect true
 
 #### works with basic variant creation
 
+- works with basic variant creation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("works with basic variant creation")
 val opt = MyOption.Some(10)
 # Union types work, pattern matching is separate feature
 expect true
@@ -195,13 +166,18 @@ expect true
 
 #### creates multiple variants of same type
 
+- creates multiple variants of same type
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates multiple variants of same type")
 val opt1 = MyOption.Some(1)
 val opt2 = MyOption.Some(2)
 val opt3 = MyOption.Nothing
@@ -216,16 +192,18 @@ expect true
 
 #### checks if status is active
 
-1. expect s is active
+- checks if status is active
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if status is active")
 val s = Status.Active
 expect s.is_active() == true
 ```
@@ -234,16 +212,18 @@ expect s.is_active() == true
 
 #### checks if status is inactive
 
-1. expect s is active
+- checks if status is inactive
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if status is inactive")
 val s = Status.Inactive
 expect s.is_active() == false
 ```
@@ -252,16 +232,18 @@ expect s.is_active() == false
 
 #### displays status as string
 
-1. expect s display
+- displays status as string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("displays status as string")
 val s = Status.Active
 expect s.display() == "Active"
 ```
@@ -270,16 +252,18 @@ expect s.display() == "Active"
 
 #### displays inactive status
 
-1. expect s display
+- displays inactive status
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("displays inactive status")
 val s = Status.Inactive
 expect s.display() == "Inactive"
 ```
@@ -290,16 +274,18 @@ expect s.display() == "Inactive"
 
 #### checks if result is ok
 
-1. expect r is ok
+- checks if result is ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if result is ok")
 val r = MyResult.Ok(42)
 expect r.is_ok() == true
 ```
@@ -308,13 +294,19 @@ expect r.is_ok() == true
 
 #### checks if result is error ok
 
+- checks if result is error ok
+   - Expected: ok_check is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if result is error ok")
 val r1 = MyResult.Err("failed")
 val ok_check = r1.is_ok()
 expect(ok_check).to_equal(false)
@@ -324,13 +316,19 @@ expect(ok_check).to_equal(false)
 
 #### checks if result is error err
 
+- checks if result is error err
+   - Expected: err_check is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if result is error err")
 val r2 = MyResult.Err("failed")
 val err_check = r2.is_err()
 expect(err_check).to_equal(true)
@@ -340,16 +338,18 @@ expect(err_check).to_equal(true)
 
 #### checks error predicate
 
-1. expect r is err
+- checks error predicate
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks error predicate")
 val r = MyResult.Ok(10)
 expect r.is_err() == false
 ```
@@ -360,16 +360,18 @@ expect r.is_err() == false
 
 #### checks if option has value
 
-1. expect opt is some
+- checks if option has value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if option has value")
 val opt = MyOption.Some(10)
 expect opt.is_some() == true
 ```
@@ -378,16 +380,18 @@ expect opt.is_some() == true
 
 #### checks if option is empty
 
-1. expect opt is some
+- checks if option is empty
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("checks if option is empty")
 val opt = MyOption.Nothing
 expect opt.is_some() == false
 ```
@@ -396,16 +400,18 @@ expect opt.is_some() == false
 
 #### gets value or default
 
-1. expect opt1 get or
+- gets value or default
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("gets value or default")
 val opt1 = MyOption.Some(42)
 expect opt1.get_or(0) == 42
 ```
@@ -414,16 +420,18 @@ expect opt1.get_or(0) == 42
 
 #### uses default when none
 
-1. expect opt2 get or
+- uses default when none
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("uses default when none")
 val opt2 = MyOption.Nothing
 expect opt2.get_or(100) == 100
 ```
@@ -436,13 +444,18 @@ expect opt2.get_or(100) == 100
 
 #### matches active status
 
+- matches active status
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches active status")
 val s = Status.Active
 val result = match s:
     case Status.Active:
@@ -456,13 +469,18 @@ expect result == "active"
 
 #### matches inactive status
 
+- matches inactive status
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches inactive status")
 val s = Status.Inactive
 val result = match s:
     case Status.Active:
@@ -478,13 +496,18 @@ expect result == "inactive"
 
 #### extracts ok value
 
+- extracts ok value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("extracts ok value")
 val r = MyResult.Ok(42)
 val result = match r:
     case MyResult.Ok(v):
@@ -498,13 +521,18 @@ expect result == 42
 
 #### extracts error message
 
+- extracts error message
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("extracts error message")
 val r = MyResult.Err("test error")
 val result = match r:
     case MyResult.Ok(_):
@@ -520,13 +548,18 @@ expect result == "test error"
 
 #### matches some variant with value
 
+- matches some variant with value
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches some variant with value")
 val opt = MyOption.Some(25)
 val result = match opt:
     case MyOption.Some(v):
@@ -540,13 +573,18 @@ expect result == 50
 
 #### matches nothing variant
 
+- matches nothing variant
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("matches nothing variant")
 val opt = MyOption.Nothing
 val result = match opt:
     case MyOption.Some(v):
@@ -564,13 +602,18 @@ expect result == -1
 
 #### creates result with integer
 
+- creates result with integer
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates result with integer")
 val r = MyResult.Ok(42)
 expect true
 ```
@@ -579,13 +622,18 @@ expect true
 
 #### creates result with string
 
+- creates result with string
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates result with string")
 val r = MyResult.Err("error message")
 expect true
 ```
@@ -594,13 +642,18 @@ expect true
 
 #### creates option with integer
 
+- creates option with integer
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("creates option with integer")
 val opt = MyOption.Some(100)
 expect true
 ```
@@ -611,13 +664,18 @@ expect true
 
 #### handles different union types independently
 
+- handles different union types independently
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("handles different union types independently")
 val status = Status.Active
 val result = MyResult.Ok(1)
 val option = MyOption.Some(2)
@@ -628,13 +686,18 @@ expect true
 
 #### union method calls preserve type
 
+- union method calls preserve type
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SHARED
+step("union method calls preserve type")
 val s1 = Status.Active
 val s2 = Status.Inactive
 val isActive = s1.is_active()
@@ -642,6 +705,24 @@ expect isActive == true
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/shared/types/union_impl_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Union keyword, Union Impl Methods, Union Pattern Matching, Union Type Safety.
+- Union keyword
+- Union Impl Methods
+- Union Pattern Matching
+- Union Type Safety
 
 ## Scenario Summary
 
@@ -655,3 +736,51 @@ expect isActive == true
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SHARED`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f2ae0a7045eb94354d89ab4dd0e36798dffc76c09b2dc0f86f0001fc7b91fab9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f2ae0a7045eb94354d89ab4dd0e36798dffc76c09b2dc0f86f0001fc7b91fab9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f2ae0a7045eb94354d89ab4dd0e36798dffc76c09b2dc0f86f0001fc7b91fab9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/shared/types/union_impl_spec.spl
+mirror: doc/06_spec/shared/types/union_impl_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/shared/types/union_impl_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/shared/types/union_impl_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/shared/types/union_impl_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses union types correctly' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/types/union_impl_spec.spl:149:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates inactive status variant' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/shared/types/union_impl_spec.spl:155:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates union variant with string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

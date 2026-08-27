@@ -1,30 +1,6 @@
 # Web Dashboard Diagnostics Panel Specification
 
-> <details>
-
-<!-- sdn-diagram:id=web_dashboard_diagnostics_panel_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=web_dashboard_diagnostics_panel_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-web_dashboard_diagnostics_panel_spec -> app
-web_dashboard_diagnostics_panel_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=web_dashboard_diagnostics_panel_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering web dashboard diagnostics panel readback.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,23 @@ web_dashboard_diagnostics_panel_spec -> std
 
 #### embeds diagnostics panel markup in the dashboard shell
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- embeds diagnostics panel markup in the dashboard shell
+   - Expected: html.split("switchView('tooling', this)").len() equals `1`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("embeds diagnostics panel markup in the dashboard shell")
 val html = generate_full_dashboard_html_with_diagnostics(
     4242,
     "<section id=\"status-card\">status</section>",
@@ -66,13 +52,18 @@ expect(html.split("switchView('tooling', this)").len()).to_equal(1)
 
 #### embeds tooling artifacts in a dedicated dashboard view
 
+- embeds tooling artifacts in a dedicated dashboard view
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("embeds tooling artifacts in a dedicated dashboard view")
 val html = generate_full_dashboard_html_with_diagnostics_and_tooling(
     4242,
     "<section id=\"status-card\">status</section>",
@@ -91,20 +82,18 @@ expect(html).to_contain("LLM Tooling Artifacts")
 
 #### renders authenticated HTTP dashboard with diagnostics JSONL readback
 
-- mkdir p
-- remove file if exists
-- write file
-- expect absence marker hidden
-- remove file if exists
+- renders authenticated HTTP dashboard with diagnostics JSONL readback
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders authenticated HTTP dashboard with diagnostics JSONL readback")
 val path = diagnostics_panel_fixture_path()
 mkdir_p(".build/llm_dashboard/diagnostics")
 remove_file_if_exists(path)
@@ -126,20 +115,18 @@ remove_file_if_exists(path)
 
 #### renders missing diagnostics fields as explicit none markers
 
-- mkdir p
-- remove file if exists
-- write file
-- expect absence marker hidden
-- remove file if exists
+- renders missing diagnostics fields as explicit none markers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders missing diagnostics fields as explicit none markers")
 val path = diagnostics_panel_fixture_path()
 mkdir_p(".build/llm_dashboard/diagnostics")
 remove_file_if_exists(path)
@@ -157,22 +144,19 @@ remove_file_if_exists(path)
 
 #### renders configured context and ponytail tooling panel
 
-- mkdir p
-- remove file if exists
-- write file
+- renders configured context and ponytail tooling panel
    - Expected: diagnostics_view.split("llm-tooling-artifacts-panel").len() equals `1`
-- expect absence marker hidden
-- remove file if exists
-- remove file if exists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders configured context and ponytail tooling panel")
 val diagnostics_path = diagnostics_panel_fixture_path()
 mkdir_p(".build/llm_dashboard/diagnostics")
 remove_file_if_exists(diagnostics_path)
@@ -201,21 +185,18 @@ remove_file_if_exists(tooling_path)
 
 #### renders missing tooling source as explicit absence
 
-- mkdir p
-- remove file if exists
-- write file
-- remove file if exists
-- expect absence marker hidden
-- remove file if exists
+- renders missing tooling source as explicit absence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders missing tooling source as explicit absence")
 val diagnostics_path = diagnostics_panel_fixture_path()
 mkdir_p(".build/llm_dashboard/diagnostics")
 remove_file_if_exists(diagnostics_path)
@@ -238,16 +219,18 @@ remove_file_if_exists(diagnostics_path)
 
 #### keeps the operator guide aligned with diagnostics, tooling, and vLLM panels
 
-- expect absence marker hidden
+- keeps the operator guide aligned with diagnostics, tooling, and vLLM panels
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the operator guide aligned with diagnostics, tooling, and vLLM panels")
 val guide = file_read("doc/07_guide/app/dashboard.md")
 
 expect(guide).to_contain("Web Dashboard")
@@ -269,12 +252,12 @@ expect_absence_marker_hidden(guide)
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering web dashboard diagnostics panel readback.
 - web dashboard diagnostics panel readback
 
 ## Scenario Summary
@@ -289,3 +272,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `321d57f1ea36e78b20149b09a77d285ce88c10e97ffd53b0d37cf4300f7fcfa5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `321d57f1ea36e78b20149b09a77d285ce88c10e97ffd53b0d37cf4300f7fcfa5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `321d57f1ea36e78b20149b09a77d285ce88c10e97ffd53b0d37cf4300f7fcfa5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl
+mirror: doc/06_spec/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'embeds diagnostics panel markup in the dashboard shell' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'embeds tooling artifacts in a dedicated dashboard view' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/web_dashboard/web_dashboard_diagnostics_panel_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders authenticated HTTP dashboard with diagnostics JSONL readback' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

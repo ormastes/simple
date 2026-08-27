@@ -1,23 +1,38 @@
 # Vhdl Source Map Debug Specification
 
+> Tests covering VHDL source-map HWIR debug metadata.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 4 | 4 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Vhdl Source Map Debug Specification
+
 ## Scenarios
 
 ### VHDL source-map HWIR debug metadata
 
 #### explains a VHDL line through HWIR and Simple source
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. check
+
+- explains a VHDL line through HWIR and Simple source
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("explains a VHDL line through HWIR and Simple source")
 val result = rtl_explain_vhdl_line_from_map(sample_map(), 8)
 check(result.found)
 expect result.hwir_id == "port:a:8"
@@ -30,18 +45,18 @@ check(result.to_text().contains("width_narrowing"))
 
 #### returns a missing explanation for unmapped lines
 
-1. check
-
-2. check
+- returns a missing explanation for unmapped lines
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns a missing explanation for unmapped lines")
 val result = rtl_explain_vhdl_line_from_map(sample_map(), 42)
 check(not result.found)
 check(result.to_text().contains("no RTL source-map entry"))
@@ -51,20 +66,18 @@ check(result.to_text().contains("no RTL source-map entry"))
 
 #### renders waveform groups from source-map ports
 
-1. expect groups len
-
-2. check
-
-3. check
+- renders waveform groups from source-map ports
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders waveform groups from source-map ports")
 val groups = rtl_waveform_groups_from_map(sample_map())
 expect groups.len() == 1
 val gtkw = rtl_render_gtkw_from_groups(groups)
@@ -76,18 +89,18 @@ check(gtkw.contains("a"))
 
 #### renders first divergence reports
 
-1. check
-
-2. check
+- renders first divergence reports
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("renders first divergence reports")
 val report = rtl_first_divergence_report(12, "0x1000", "0x13", "x1 expected 1 got 0", "", "", "demo.spl:2", "uut.debug_pc", "wave.gtkw")
 check(report.contains("First RTL Divergence"))
 check(report.contains("uut.debug_pc"))
@@ -101,13 +114,13 @@ check(report.contains("uut.debug_pc"))
 |-------|-------|
 | Category | Compiler |
 | Status | Active |
-| Source | `test/01_unit/compiler/driver/vhdl_source_map_debug_spec.spl` |
-| Updated | 2026-06-01 |
+| Source | `test/unit/compiler/driver/vhdl_source_map_debug_spec.spl` |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering VHDL source-map HWIR debug metadata.
 - VHDL source-map HWIR debug metadata
 
 ## Scenario Summary
@@ -120,3 +133,53 @@ Tests covering:
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `84f0ece17e15cb18560c97b6895c66af1251a2f20040588596853dd0f5cb8ad7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `84f0ece17e15cb18560c97b6895c66af1251a2f20040588596853dd0f5cb8ad7`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `84f0ece17e15cb18560c97b6895c66af1251a2f20040588596853dd0f5cb8ad7`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/unit/compiler/driver/vhdl_source_map_debug_spec.spl
+mirror: doc/06_spec/unit/compiler/driver/vhdl_source_map_debug_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/unit/compiler/driver/vhdl_source_map_debug_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/unit/compiler/driver/vhdl_source_map_debug_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/unit/compiler/driver/vhdl_source_map_debug_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'explains a VHDL line through HWIR and Simple source' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/unit/compiler/driver/vhdl_source_map_debug_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns a missing explanation for unmapped lines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/unit/compiler/driver/vhdl_source_map_debug_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders waveform groups from source-map ports' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,29 +1,6 @@
 # Parser Specification
 
-> <details>
-
-<!-- sdn-diagram:id=parser_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=parser_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-parser_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=parser_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SDN Parser.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +19,19 @@ parser_spec
 
 #### parses key-value pairs
 
+- parses key-value pairs
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses key-value pairs")
 val result = parse("name: Alice")
 expect(result).to_equal(nil)
 ```
@@ -57,13 +40,19 @@ expect(result).to_equal(nil)
 
 #### parses multiple values
 
+- parses multiple values
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses multiple values")
 val result = parse("name: Alice\nage: 30\ncity: NYC")
 expect(result).to_equal(nil)
 ```
@@ -74,13 +63,19 @@ expect(result).to_equal(nil)
 
 #### parses inline dicts
 
+- parses inline dicts
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses inline dicts")
 val source = "point = " + "{" + "xval: 10, yval: 20" + "}"
 val result = parse(source)
 expect(result).to_equal(nil)
@@ -90,20 +85,9 @@ expect(result).to_equal(nil)
 
 #### parses inline arrays
 
-<details>
-<summary>Executable SSpec</summary>
+- parses inline arrays
+   - Expected: result equals `nil`
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = parse("items = [1, 2, 3, 4, 5]")
-expect(result).to_equal(nil)
-```
-
-</details>
-
-#### parses nested inline collections
 
 <details>
 <summary>Executable SSpec</summary>
@@ -112,6 +96,29 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses inline arrays")
+val result = parse("items = [1, 2, 3, 4, 5]")
+expect(result).to_equal(nil)
+```
+
+</details>
+
+#### parses nested inline collections
+
+- parses nested inline collections
+   - Expected: result equals `nil`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("parses nested inline collections")
 val inner = "{" + "xval: 10" + "}"
 val source = "data = " + "{" + "items_list: [1, 2, 3], config: " + inner + "}"
 val result = parse(source)
@@ -124,13 +131,19 @@ expect(result).to_equal(nil)
 
 #### parses block dicts
 
+- parses block dicts
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses block dicts")
 val result = parse("person:\n    name: Alice\n    age: 30")
 expect(result).to_equal(nil)
 ```
@@ -139,13 +152,19 @@ expect(result).to_equal(nil)
 
 #### parses block arrays
 
+- parses block arrays
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses block arrays")
 val result = parse("numbers:\n    1\n    2\n    3")
 expect(result).to_equal(nil)
 ```
@@ -154,13 +173,19 @@ expect(result).to_equal(nil)
 
 #### disambiguates dict vs array blocks
 
+- disambiguates dict vs array blocks
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("disambiguates dict vs array blocks")
 val result = parse("config:\n    host: localhost\n    port: 8080")
 expect(result).to_equal(nil)
 ```
@@ -171,13 +196,19 @@ expect(result).to_equal(nil)
 
 #### reports syntax errors
 
+- reports syntax errors
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reports syntax errors")
 val result = parse("key:")
 expect(result).to_equal(nil)
 ```
@@ -186,13 +217,19 @@ expect(result).to_equal(nil)
 
 #### reports unexpected tokens
 
+- reports unexpected tokens
+   - Expected: result equals `nil`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reports unexpected tokens")
 val result = parse("key. value")
 expect(result).to_equal(nil)
 ```
@@ -206,12 +243,12 @@ expect(result).to_equal(nil)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/parser_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SDN Parser.
 - SDN Parser
 
 ## Scenario Summary
@@ -226,3 +263,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `33856ae80c98cae79b196d26da12b4cb2c2352313fdcb11eb8e99f79d130887f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `33856ae80c98cae79b196d26da12b4cb2c2352313fdcb11eb8e99f79d130887f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `33856ae80c98cae79b196d26da12b4cb2c2352313fdcb11eb8e99f79d130887f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/parser_spec.spl
+mirror: doc/06_spec/01_unit/std/parser_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/parser_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/parser_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/parser_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses key-value pairs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/parser_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses multiple values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/parser_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses inline dicts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

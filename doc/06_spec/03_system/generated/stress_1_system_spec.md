@@ -1,30 +1,5 @@
 # System Test - Full Integration
 
-> 1. verify
-
-<!-- sdn-diagram:id=stress_1_system_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=stress_1_system_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-stress_1_system_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=stress_1_system_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 15 | 15 | 0 | 0 |
@@ -42,7 +17,7 @@ stress_1_system_spec -> std
 | Category | Testing |
 | Status | Implemented |
 | Source | `test/03_system/generated/stress_1_system_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scenarios
@@ -51,17 +26,22 @@ stress_1_system_spec -> std
 
 #### end-to-end workflow
 
-1. verify
-2. verify
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- end-to-end workflow
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("end-to-end workflow")
 val input = "system test input"
 verify(input.len() > 0)
 
@@ -76,17 +56,18 @@ verify(processed.contains("step"))
 
 #### integration point 1
 
-1. data = data append
-2. verify
+- integration point 1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("integration point 1")
 
 var data = []
 for i in 0..30:
@@ -103,16 +84,18 @@ verify(sum == 435)
 
 #### integration point 2
 
-1. verify
+- integration point 2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("integration point 2")
 
 val dict = {"a": 1, "b": 2, "c": 3}
 var total = 0
@@ -128,17 +111,18 @@ verify(total == 6)
 
 #### full stack test
 
-1. processed = processed append
-2. verify
+- full stack test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("full stack test")
 
 # Bottom layer
 val base = [1, 2, 3]
@@ -160,16 +144,18 @@ verify(sum == 12)
 
 #### boundary condition test
 
-1. verify
+- boundary condition test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("boundary condition test")
 
 val cases = [0, 1, -1, 100, -100]
 
@@ -184,17 +170,18 @@ for c in cases:
 
 #### error handling test
 
-1. errors = errors append
-2. verify
+- error handling test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("error handling test")
 
 var errors = []
 
@@ -209,16 +196,18 @@ verify(errors.len() == 1)
 
 #### recovery test
 
-1. verify
+- recovery test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("recovery test")
 
 var state = "normal"
 
@@ -236,17 +225,18 @@ verify(state == "recovered")
 
 #### complex scenario
 
-1. results = results append
-2. verify
+- complex scenario
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("complex scenario")
 
 var results = []
 
@@ -263,16 +253,18 @@ verify(results.len() == 5)
 
 #### data flow test
 
-1. verify
+- data flow test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("data flow test")
 
 val source = "data"
 val stage1 = source + "_1"
@@ -287,16 +279,18 @@ verify(final == "data_1_2_3_final")
 
 #### state transition
 
-1. verify
+- state transition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("state transition")
 
 var state = 0
 
@@ -315,16 +309,18 @@ verify(state >= 0)
 
 #### validation chain
 
-1. verify
+- validation chain
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validation chain")
 
 val valid1 = true
 val valid2 = true
@@ -338,18 +334,18 @@ verify(all_valid)
 
 #### pipeline test
 
-1. filtered = filtered append
-2. transformed = transformed append
-3. verify
+- pipeline test
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pipeline test")
 
 val input = [1, 2, 3, 4, 5]
 
@@ -371,16 +367,18 @@ verify(transformed.len() == 2)
 
 #### comprehensive check
 
-1. verify
+- comprehensive check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("comprehensive check")
 
 var checks = 0
 
@@ -402,18 +400,18 @@ verify(checks == 5)
 
 #### resource lifecycle
 
-1. verify
-2. verify
-3. verify
+- resource lifecycle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resource lifecycle")
 
 var resource = "allocated"
 verify(resource.len() > 0)
@@ -431,19 +429,18 @@ verify(resource.len() == 0)
 
 #### complex condition
 
-1. verify
-2. verify
-3. verify
-4. verify
+- complex condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("complex condition")
 
 val a = 10
 val b = 20
@@ -475,3 +472,51 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bb1b07eb46e8c68d8d8e9b60673498ee110459e827b0146162bd1e9c3f563ee2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bb1b07eb46e8c68d8d8e9b60673498ee110459e827b0146162bd1e9c3f563ee2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bb1b07eb46e8c68d8d8e9b60673498ee110459e827b0146162bd1e9c3f563ee2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/generated/stress_1_system_spec.spl
+mirror: doc/06_spec/03_system/generated/stress_1_system_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/generated/stress_1_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/generated/stress_1_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/generated/stress_1_system_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'end-to-end workflow' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/generated/stress_1_system_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'integration point 1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/generated/stress_1_system_spec.spl:49:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'integration point 2' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,30 +2,6 @@
 
 > Verifies:
 
-<!-- sdn-diagram:id=fat32_alloc_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=fat32_alloc_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-fat32_alloc_spec -> std
-fat32_alloc_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=fat32_alloc_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 9 | 9 | 0 | 0 |
@@ -44,7 +20,7 @@ Verifies:
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/fs/fat32_alloc_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 **Bug:** fat32_no_cycle_guard_chain_walk_2026-06-11  FINDING-T2
@@ -71,21 +47,20 @@ Geometry used throughout:
 
 #### allocates cluster 2 from an empty FAT and marks it EOC
 
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
+- allocates cluster 2 from an empty FAT and marks it EOC
    - Expected: result.unwrap() equals `2u32`
-- assert true
    - Expected: entry2 equals `_eoc()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("allocates cluster 2 from an empty FAT and marks it EOC")
 # Empty FAT: all entries are 0 (FREE).
 val fat = _zero_sector()
 var dev = MockAllocDev.new()
@@ -106,22 +81,19 @@ expect(entry2).to_equal(_eoc())
 
 #### skips used clusters and allocates the first free one
 
-- var fat =  zero sector
-- fat =  fat put
-- fat =  fat put
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
+- skips used clusters and allocates the first free one
    - Expected: result.unwrap() equals `4u32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("skips used clusters and allocates the first free one")
 # Mark clusters 2 and 3 as used (EOC); cluster 4 is free.
 var fat = _zero_sector()
 fat = _fat_put(fat, 2u32, _eoc())
@@ -138,21 +110,19 @@ expect(result.unwrap()).to_equal(4u32)
 
 #### returns Err(ENOSPC=-28) when all clusters are used
 
-- var fat =  zero sector
-- fat =  fat put
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
+- returns Err(ENOSPC=-28) when all clusters are used
    - Expected: result.unwrap_err() equals `-28`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("returns Err(ENOSPC=-28) when all clusters are used")
 # data_clusters=8 means clusters 2..9 are valid.
 # Mark all 8 as used.
 var fat = _zero_sector()
@@ -174,13 +144,7 @@ expect(result.unwrap_err()).to_equal(-28)
 
 #### links chain_end to new_cluster in the FAT
 
-- var fat =  zero sector
-- fat =  fat put
-- fat =  fat put
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
-- assert true
+- links chain_end to new_cluster in the FAT
    - Expected: entry2 equals `3u32`
    - Expected: entry3 equals `_eoc()`
 
@@ -188,10 +152,12 @@ expect(result.unwrap_err()).to_equal(-28)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("links chain_end to new_cluster in the FAT")
 # cluster 2 is EOC (chain end), cluster 3 is EOC (freshly allocated).
 var fat = _zero_sector()
 fat = _fat_put(fat, 2u32, _eoc())
@@ -216,15 +182,7 @@ expect(entry3).to_equal(_eoc())
 
 #### keeps EOC at new tail after append
 
-- var fat =  zero sector
-- fat =  fat put
-- fat =  fat put
-- fat =  fat put
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
-- assert true
-- assert true
+- keeps EOC at new tail after append
    - Expected: _read_fat32_entry(wf, 2u32) equals `3u32`
    - Expected: _read_fat32_entry(wf, 3u32) equals `4u32`
    - Expected: _read_fat32_entry(wf, 4u32) equals `_eoc()`
@@ -233,10 +191,12 @@ expect(entry3).to_equal(_eoc())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps EOC at new tail after append")
 var fat = _zero_sector()
 fat = _fat_put(fat, 2u32, _eoc())
 fat = _fat_put(fat, 3u32, _eoc())
@@ -264,11 +224,7 @@ expect(_read_fat32_entry(wf, 4u32)).to_equal(_eoc())
 
 #### preserves bits 28-31 of existing entry when writing
 
-- var fat =  zero sector
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
-- assert true
+- preserves bits 28-31 of existing entry when writing
    - Expected: byte3 equals `0xF0u8`
    - Expected: rb[off5] equals `0x03u8`
    - Expected: rb[off5 + 1] equals `0x00u8`
@@ -278,10 +234,12 @@ expect(_read_fat32_entry(wf, 4u32)).to_equal(_eoc())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("preserves bits 28-31 of existing entry when writing")
 # Plant an entry at cluster 5 with top nibble 0xF0 (bits 28-31 set).
 var fat = _zero_sector()
 val off5 = (5u32 * 4u32).to_i32()
@@ -311,15 +269,9 @@ expect(rb[off5 + 2]).to_equal(0x00u8)
 
 #### allocates a cluster and stores bytes on a fresh handle
 
-- var fat =  zero sector
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
-- var h = wr unwrap
+- allocates a cluster and stores bytes on a fresh handle
    - Expected: h.start_cluster equals `2u32`
    - Expected: h.file_size equals `10u64`
-- var rbuf =  make buf
-- assert true
    - Expected: rd.unwrap() equals `10u64`
    - Expected: rbuf[0] equals `0xBBu8`
    - Expected: rbuf[9] equals `0xBBu8`
@@ -328,10 +280,12 @@ expect(rb[off5 + 2]).to_equal(0x00u8)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("allocates a cluster and stores bytes on a fresh handle")
 var fat = _zero_sector()
 var dev = MockAllocDev.new()
 dev = dev.with_sector(_fat_lba(), fat)
@@ -359,14 +313,8 @@ expect(rbuf[9]).to_equal(0xBBu8)
 
 #### multi-cluster write extends the chain
 
-- var fat =  zero sector
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
-- var h = wr unwrap
+- multi-cluster write extends the chain
    - Expected: h.file_size equals `600u64`
-- var rbuf =  make buf
-- assert true
    - Expected: rd.unwrap() equals `600u64`
    - Expected: rbuf[0] equals `0xCCu8`
    - Expected: rbuf[599] equals `0xCCu8`
@@ -375,10 +323,12 @@ expect(rbuf[9]).to_equal(0xBBu8)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("multi-cluster write extends the chain")
 # Write 600 bytes — spans 2 sectors = 2 clusters (spc=1, bps=512).
 var fat = _zero_sector()
 var dev = MockAllocDev.new()
@@ -404,21 +354,19 @@ expect(rbuf[599]).to_equal(0xCCu8)
 
 #### write to full FAT returns Err(ENOSPC)
 
-- var fat =  zero sector
-- fat =  fat put
-- var dev = MockAllocDev new
-- dev = dev with sector
-- assert true
+- write to full FAT returns Err(ENOSPC)
    - Expected: wr.unwrap_err() equals `-28`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("write to full FAT returns Err(ENOSPC)")
 # Mark all 8 clusters used.
 var fat = _zero_sector()
 var ci: u32 = 2u32
@@ -449,3 +397,54 @@ expect(wr.unwrap_err()).to_equal(-28)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ba6653efeaa88cfbc1e878f38e8f89c1de794f60a8ed360d65bc035e82790a8e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ba6653efeaa88cfbc1e878f38e8f89c1de794f60a8ed360d65bc035e82790a8e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ba6653efeaa88cfbc1e878f38e8f89c1de794f60a8ed360d65bc035e82790a8e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/os/kernel/fs/fat32_alloc_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/fs/fat32_alloc_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/fs/fat32_alloc_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/fs/fat32_alloc_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/fs/fat32_alloc_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/fs/fat32_alloc_spec.spl:163:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allocates cluster 2 from an empty FAT and marks it EOC' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/fs/fat32_alloc_spec.spl:181:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'skips used clusters and allocates the first free one' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/fs/fat32_alloc_spec.spl:195:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns Err(ENOSPC=-28) when all clusters are used' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

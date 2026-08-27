@@ -1,29 +1,6 @@
 # Test Db Performance Specification
 
-> 1. cleanup temp db
-
-<!-- sdn-diagram:id=test_db_performance_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_db_performance_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_db_performance_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_db_performance_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Test Database Performance, Large Test Suite, String Interning Efficiency, Window Capping Performance, Statistics Computation, File Size Growth, Many Runs (History), Memory Usage.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,31 +19,32 @@ test_db_performance_spec -> app
 
 #### loads 1000 test records in under 1 second
 
-1. cleanup temp db
-2. var db = create large db
-3. print benchmark
-4. cleanup temp db
+- loads 1000 test records in under 1 second
+   - Expected: save_result.ok == nil is false
+   - Expected: load_result.ok == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("loads 1000 test records in under 1 second")
 val test_name = "load_1k"
 cleanup_temp_db(test_name)
 
 # Create database with 1000 tests
 var db = create_large_db(1000)
 val save_result = db.save()
-expect(save_result.ok.?).to_be(true)
+expect(save_result.ok == nil).to_equal(false)
 
 # Benchmark load operation
 val result = benchmark("Load 1K tests", 1, \:
     val load_result = TestDatabase.load()
-    expect(load_result.ok.?).to_be(true)
+    expect(load_result.ok == nil).to_equal(false)
 )
 
 print_benchmark(result)
@@ -81,19 +59,19 @@ cleanup_temp_db(test_name)
 
 #### saves 1000 test records in under 1 second
 
-1. cleanup temp db
-2. var db = create large db
-3. print benchmark
-4. cleanup temp db
+- saves 1000 test records in under 1 second
+   - Expected: save_result.ok == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("saves 1000 test records in under 1 second")
 val test_name = "save_1k"
 cleanup_temp_db(test_name)
 
@@ -103,7 +81,7 @@ var db = create_large_db(1000)
 # Benchmark save operation
 val result = benchmark("Save 1K tests", 1, \:
     val save_result = db.save()
-    expect(save_result.ok.?).to_be(true)
+    expect(save_result.ok == nil).to_equal(false)
 )
 
 print_benchmark(result)
@@ -118,18 +96,20 @@ cleanup_temp_db(test_name)
 
 #### handles 10,000 test records efficiently
 
-1. cleanup temp db
-2. var db = create large db
-3. cleanup temp db
+- handles 10,000 test records efficiently
+   - Expected: save_result.ok == nil is false
+   - Expected: load_result.ok == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles 10,000 test records efficiently")
 val test_name = "load_10k"
 cleanup_temp_db(test_name)
 
@@ -143,7 +123,7 @@ val save_result = db.save()
 val save_end = time_now_unix_micros()
 val save_ms = (save_end - save_start) / 1000
 
-expect(save_result.ok.?).to_be(true)
+expect(save_result.ok == nil).to_equal(false)
 print "Save time: {save_ms}ms"
 
 # Load
@@ -152,7 +132,7 @@ val load_result = TestDatabase.load()
 val load_end = time_now_unix_micros()
 val load_ms = (load_end - load_start) / 1000
 
-expect(load_result.ok.?).to_be(true)
+expect(load_result.ok == nil).to_equal(false)
 val loaded_db = load_result.unwrap()
 expect(loaded_db.tests.len()).to_be(10000)
 print "Load time: {load_ms}ms"
@@ -179,16 +159,18 @@ cleanup_temp_db(test_name)
 
 #### achieves 60%+ memory savings with string interning
 
-1. var db = TestDatabase empty
+- achieves 60%+ memory savings with string interning
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("achieves 60%+ memory savings with string interning")
 var db = TestDatabase.empty()
 
 # Add 1000 tests with only 10 unique paths
@@ -237,18 +219,18 @@ expect(savings_pct).to_be_greater_than(60.0)
 
 #### caps timing runs efficiently (O(n) complexity)
 
-1. var db = TestDatabase empty
-2. duration ms:
-3. print benchmark
+- caps timing runs efficiently (O(n) complexity)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("caps timing runs efficiently (O(n) complexity)")
 var db = TestDatabase.empty()
 
 val test_name = "perf_test"
@@ -287,19 +269,19 @@ expect(result.total_ms).to_be_less_than(100)
 
 #### maintains correct statistics after capping
 
-1. var db = TestDatabase empty
-2. duration ms:
-3. var summary: TimingSummary? =
-4. summary = Some
+- maintains correct statistics after capping
+   - Expected: summary == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("maintains correct statistics after capping")
 var db = TestDatabase.empty()
 
 # Add many runs
@@ -321,7 +303,7 @@ for ts in db.timing:
         summary = Some(ts)
         break
 
-expect(summary.?).to_be(true)
+expect(summary == nil).to_equal(false)
 val stats = summary.unwrap()
 
 # P50 should be around 9-10 (median of 5-14)
@@ -335,18 +317,18 @@ expect(stats.p50).to_be_less_than(12.0)
 
 #### computes percentiles quickly for many tests
 
-1. var db = TestDatabase empty
-2. duration ms:
-3. print benchmark
+- computes percentiles quickly for many tests
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("computes percentiles quickly for many tests")
 var db = TestDatabase.empty()
 
 # Add 1000 tests with 10 timing runs each
@@ -381,20 +363,19 @@ expect(per_test_ms).to_be_less_than(2)
 
 #### maintains bounded file size with window capping
 
-1. cleanup temp db
-2. var db = TestDatabase empty
-3. duration ms:
-4. file sizes push
-5. cleanup temp db
+- maintains bounded file size with window capping
+   - Expected: save_result.ok == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("maintains bounded file size with window capping")
 val test_name = "size_growth"
 cleanup_temp_db(test_name)
 
@@ -417,7 +398,7 @@ for run in 0..20:  # Reduced from 100 for test speed
 
     # Save and record size
     val save_result = db.save()
-    expect(save_result.ok.?).to_be(true)
+    expect(save_result.ok == nil).to_equal(false)
 
     val db_path = temp_db_path(test_name)
     val size = file_size(db_path)
@@ -445,21 +426,18 @@ cleanup_temp_db(test_name)
 
 #### queries 500 test runs efficiently
 
-1. var db = TestDatabase empty
-2. start time: micros to rfc3339
-3. end time: micros to rfc3339
-4. pid: getpid
-5. print benchmark
-6. print benchmark
+- queries 500 test runs efficiently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("queries 500 test runs efficiently")
 var db = TestDatabase.empty()
 
 # Create 500 test runs
@@ -503,21 +481,18 @@ expect(filter_result.per_op_us).to_be_less_than(1000)
 
 #### prunes old runs efficiently
 
-1. var db = TestDatabase empty
-2. start time: micros to rfc3339
-3. end time: micros to rfc3339
-4. pid: getpid
-5. db prune runs
-6. print benchmark
+- prunes old runs efficiently
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("prunes old runs efficiently")
 var db = TestDatabase.empty()
 
 # Create 1000 runs
@@ -556,17 +531,19 @@ expect(prune_result.total_ms).to_be_less_than(100)
 
 #### maintains reasonable memory footprint for large database
 
-1. var db = TestDatabase empty
-2. duration ms:
+- maintains reasonable memory footprint for large database
+   - Expected: save_result.ok == nil is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("maintains reasonable memory footprint for large database")
 var db = TestDatabase.empty()
 
 # Create large database (5000 tests)
@@ -582,7 +559,7 @@ for i in 0..5000:
 
 # Save to disk
 val save_result = db.save()
-expect(save_result.ok.?).to_be(true)
+expect(save_result.ok == nil).to_equal(false)
 
 # TODO: Add memory profiling
 # For now, just verify database operations still work
@@ -600,12 +577,12 @@ expect(db.timing.len()).to_be(5000)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/tooling/test_db_performance_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Test Database Performance, Large Test Suite, String Interning Efficiency, Window Capping Performance, Statistics Computation, File Size Growth, Many Runs (History), Memory Usage.
 - Test Database Performance
 - Large Test Suite
 - String Interning Efficiency
@@ -627,3 +604,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4c7b2f2f12bf211ea407d31a998ffa69d7ca30956db51d023f8e44d297a613ea`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4c7b2f2f12bf211ea407d31a998ffa69d7ca30956db51d023f8e44d297a613ea`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4c7b2f2f12bf211ea407d31a998ffa69d7ca30956db51d023f8e44d297a613ea`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/tooling/test_db_performance_spec.spl
+mirror: doc/06_spec/01_unit/app/tooling/test_db_performance_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/tooling/test_db_performance_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/tooling/test_db_performance_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/tooling/test_db_performance_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'loads 1000 test records in under 1 second' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_performance_spec.spl:134:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'saves 1000 test records in under 1 second' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/tooling/test_db_performance_spec.spl:157:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles 10,000 test records efficiently' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

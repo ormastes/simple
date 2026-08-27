@@ -2,30 +2,6 @@
 
 > Full pipeline verification for Direction A (Simple -> C): 1. Compile Simple source to shared library (.so) 2. Generate C header from exported types/functions 3. Compile C consumer against the generated header 4. Link C consumer against the shared library 5. Execute and verify correct results
 
-<!-- sdn-diagram:id=direction_a_c_roundtrip_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=direction_a_c_roundtrip_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-direction_a_c_roundtrip_spec -> std
-direction_a_c_roundtrip_spec -> compiler
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=direction_a_c_roundtrip_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -45,7 +21,7 @@ Full pipeline verification for Direction A (Simple -> C): 1. Compile Simple sour
 | Category | Compiler Integration / SFFI |
 | Status | End-to-End Proof |
 | Source | `test/02_integration/sffi/direction_a_c_roundtrip_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -67,18 +43,18 @@ Requires: gcc (or cc) on the host system. Tests skip gracefully if unavailable.
 
 #### compiles a Simple library to shared object
 
-1. setup test dir
-2. assert ok
-3. assert ok
+- compiles a Simple library to shared object
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles a Simple library to shared object")
 setup_test_dir()
 val source_path = FIXTURE_DIR + "/calculator.spl"
 val output_path = TEST_DIR + "/libcalculator.so"
@@ -93,18 +69,18 @@ expect(output_path).to_end_with(".so")
 
 #### generates C header for exported types
 
-1. setup test dir
-2. assert ok
-3. assert ok
+- generates C header for exported types
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates C header for exported types")
 setup_test_dir()
 val source_path = FIXTURE_DIR + "/calculator.spl"
 
@@ -132,20 +108,19 @@ expect(header).to_contain("spl_library_shutdown")
 
 #### compiles C test program against generated header and shared library
 
-1. setup test dir
-2. print
-3. print
+- compiles C test program against generated header and shared library
    - Expected: code equals `0`
-4. assert ok
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles C test program against generated header and shared library")
 if not has_c_compiler():
     return "skip: no C compiler available (gcc/cc)"
 setup_test_dir()
@@ -174,18 +149,19 @@ assert_ok(rt_file_exists(output_bin), "C output binary missing")
 
 #### executes C test program and verifies PASS output
 
-1. print
-2. print
+- executes C test program and verifies PASS output
    - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("executes C test program and verifies PASS output")
 if not has_c_compiler():
     return "skip: no C compiler available (gcc/cc)"
 
@@ -209,13 +185,18 @@ expect(out).to_contain("PASS")
 
 #### includes include guard and standard types
 
+- includes include guard and standard types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("includes include guard and standard types")
 val header_path = TEST_DIR + "/calculator.h"
 if not rt_file_exists(header_path):
     return "skip: header not generated"
@@ -231,13 +212,18 @@ expect(header).to_contain("int64_t")
 
 #### declares opaque handle type for Calculator
 
+- declares opaque handle type for Calculator
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("declares opaque handle type for Calculator")
 val header_path = TEST_DIR + "/calculator.h"
 if not rt_file_exists(header_path):
     return "skip: header not generated"
@@ -251,13 +237,18 @@ expect(header).to_contain("spl_Calculator_t")
 
 #### includes _Static_assert for layout verification
 
+- includes _Static_assert for layout verification
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("includes _Static_assert for layout verification")
 val header_path = TEST_DIR + "/calculator.h"
 if not rt_file_exists(header_path):
     return "skip: header not generated"
@@ -280,3 +271,54 @@ expect(header).to_contain("_Static_assert")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2966b9b6dd7b9401d96f9a76c95c8b9746f60504d3ad725e9358e63afbfb1df4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2966b9b6dd7b9401d96f9a76c95c8b9746f60504d3ad725e9358e63afbfb1df4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2966b9b6dd7b9401d96f9a76c95c8b9746f60504d3ad725e9358e63afbfb1df4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/02_integration/sffi/direction_a_c_roundtrip_spec.spl
+mirror: doc/06_spec/02_integration/sffi/direction_a_c_roundtrip_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/sffi/direction_a_c_roundtrip_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/sffi/direction_a_c_roundtrip_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/sffi/direction_a_c_roundtrip_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/sffi/direction_a_c_roundtrip_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles a Simple library to shared object' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/sffi/direction_a_c_roundtrip_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates C header for exported types' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/sffi/direction_a_c_roundtrip_spec.spl:111:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles C test program against generated header and shared library' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

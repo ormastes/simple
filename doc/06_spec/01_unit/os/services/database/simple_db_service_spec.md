@@ -1,6 +1,6 @@
 # Simple Db Service Specification
 
-> <details>
+> Tests covering SimpleOS database command core.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,6 +17,11 @@
 
 #### keeps boot database state across bounded HTTP service requests
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- keeps boot database state across bounded HTTP service requests
 - Create a table through POST /db
 - Insert a value through the module-owned boot service
 - Select the persisted value through POST /db
@@ -26,10 +31,12 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps boot database state across bounded HTTP service requests")
 step("Create a table through POST /db")
 val create = simple_db_execute_http_request("POST /db HTTP/1.1\r\nContent-Length: 15\r\n\r\nCREATE settings")
 expect(create).to_contain("HTTP/1.1 200 OK")
@@ -49,7 +56,7 @@ expect(select.find("Content-Length:")).to_equal(-1)
 
 #### creates a table, stores a value, selects it, and bounds input
 
-- var db = SimpleDbService new
+- creates a table, stores a value, selects it, and bounds input
 - Create the settings table
    - Expected: db.execute("CREATE settings") equals `OK CREATE`
 - Insert a known setting
@@ -66,10 +73,12 @@ expect(select.find("Content-Length:")).to_equal(-1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("creates a table, stores a value, selects it, and bounds input")
 var db = SimpleDbService.new()
 
 step("Create the settings table")
@@ -93,7 +102,7 @@ expect(db.row_count()).to_equal(1)
 
 #### rejects invalid state transitions without changing stored data
 
-- var db = SimpleDbService new
+- rejects invalid state transitions without changing stored data
 - Reject commands before a table exists
    - Expected: db.execute("") equals `ERR empty command`
    - Expected: db.execute("INSERT missing key value") equals `ERR table not found`
@@ -114,10 +123,12 @@ expect(db.row_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects invalid state transitions without changing stored data")
 var db = SimpleDbService.new()
 
 step("Reject commands before a table exists")
@@ -143,7 +154,7 @@ expect(db.row_count()).to_equal(1)
 
 #### enforces bounded table and row capacity
 
-- var db = SimpleDbService new
+- enforces bounded table and row capacity
 - Fill the bounded table catalog
    - Expected: db.execute("CREATE table{table_index}") equals `OK CREATE`
    - Expected: db.execute("CREATE overflow") equals `ERR table limit`
@@ -157,10 +168,12 @@ expect(db.row_count()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("enforces bounded table and row capacity")
 var db = SimpleDbService.new()
 
 step("Fill the bounded table catalog")
@@ -189,12 +202,12 @@ expect(db.row_count()).to_equal(128)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/services/database/simple_db_service_spec.spl` |
-| Updated | 2026-07-19 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS database command core.
 - SimpleOS database command core
 
 ## Scenario Summary
@@ -209,3 +222,60 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-002`
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3fa1062551a1a567a364bd1f28dbfb42e3faf8735f78fbe34ce69cc2896a15d8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3fa1062551a1a567a364bd1f28dbfb42e3faf8735f78fbe34ce69cc2896a15d8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3fa1062551a1a567a364bd1f28dbfb42e3faf8735f78fbe34ce69cc2896a15d8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/os/services/database/simple_db_service_spec.spl
+mirror: doc/06_spec/01_unit/os/services/database/simple_db_service_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/01_unit/os/services/database/simple_db_service_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/services/database/simple_db_service_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/services/database/simple_db_service_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/services/database/simple_db_service_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/os/services/database/simple_db_service_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps boot database state across bounded HTTP service requests' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/database/simple_db_service_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a table, stores a value, selects it, and bounds input' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/services/database/simple_db_service_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects invalid state transitions without changing stored data' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

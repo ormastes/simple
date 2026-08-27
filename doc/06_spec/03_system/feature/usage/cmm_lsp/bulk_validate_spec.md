@@ -2,29 +2,6 @@
 
 > Tests for path normalization, dot-directory handling, file extension detection, and CMM file identification in the bulk validator. Covers the bug where rt_dir_list() callers could not handle paths containing `.`, `..`, or double slashes, and the heuristic that mistakenly treated directories as files (or vice versa).
 
-<!-- sdn-diagram:id=bulk_validate_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=bulk_validate_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-bulk_validate_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=bulk_validate_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 80 | 80 | 0 | 0 |
@@ -48,7 +25,7 @@ Tests for path normalization, dot-directory handling, file extension detection, 
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/feature/usage/cmm_lsp/bulk_validate_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -76,13 +53,19 @@ as files (or vice versa).
 
 #### returns identity for clean paths
 
+- returns identity for clean paths
+   - Expected: normalize_path("/opt/t32/demo") equals `/opt/t32/demo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns identity for clean paths")
 expect(normalize_path("/opt/t32/demo")).to_equal("/opt/t32/demo")
 ```
 
@@ -90,13 +73,19 @@ expect(normalize_path("/opt/t32/demo")).to_equal("/opt/t32/demo")
 
 #### returns identity for relative clean paths
 
+- returns identity for relative clean paths
+   - Expected: normalize_path("foo/bar/baz") equals `foo/bar/baz`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns identity for relative clean paths")
 expect(normalize_path("foo/bar/baz")).to_equal("foo/bar/baz")
 ```
 
@@ -104,13 +93,19 @@ expect(normalize_path("foo/bar/baz")).to_equal("foo/bar/baz")
 
 #### returns identity for root
 
+- returns identity for root
+   - Expected: normalize_path("/") equals `/`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns identity for root")
 expect(normalize_path("/")).to_equal("/")
 ```
 
@@ -120,13 +115,19 @@ expect(normalize_path("/")).to_equal("/")
 
 #### resolves single dot to current dir
 
+- resolves single dot to current dir
+   - Expected: normalize_path(".") equals `.`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves single dot to current dir")
 expect(normalize_path(".")).to_equal(".")
 ```
 
@@ -134,13 +135,19 @@ expect(normalize_path(".")).to_equal(".")
 
 #### resolves leading dot-slash
 
+- resolves leading dot-slash
+   - Expected: normalize_path("./foo") equals `foo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves leading dot-slash")
 expect(normalize_path("./foo")).to_equal("foo")
 ```
 
@@ -148,13 +155,19 @@ expect(normalize_path("./foo")).to_equal("foo")
 
 #### resolves middle dot component
 
+- resolves middle dot component
+   - Expected: normalize_path("foo/./bar") equals `foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves middle dot component")
 expect(normalize_path("foo/./bar")).to_equal("foo/bar")
 ```
 
@@ -162,13 +175,19 @@ expect(normalize_path("foo/./bar")).to_equal("foo/bar")
 
 #### resolves trailing dot
 
+- resolves trailing dot
+   - Expected: normalize_path("foo/bar/.") equals `foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves trailing dot")
 expect(normalize_path("foo/bar/.")).to_equal("foo/bar")
 ```
 
@@ -176,13 +195,19 @@ expect(normalize_path("foo/bar/.")).to_equal("foo/bar")
 
 #### resolves multiple consecutive dots
 
+- resolves multiple consecutive dots
+   - Expected: normalize_path("./foo/./bar/./baz") equals `foo/bar/baz`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves multiple consecutive dots")
 expect(normalize_path("./foo/./bar/./baz")).to_equal("foo/bar/baz")
 ```
 
@@ -190,13 +215,19 @@ expect(normalize_path("./foo/./bar/./baz")).to_equal("foo/bar/baz")
 
 #### resolves dot after absolute path
 
+- resolves dot after absolute path
+   - Expected: normalize_path("/opt/./t32/./demo") equals `/opt/t32/demo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves dot after absolute path")
 expect(normalize_path("/opt/./t32/./demo")).to_equal("/opt/t32/demo")
 ```
 
@@ -206,13 +237,19 @@ expect(normalize_path("/opt/./t32/./demo")).to_equal("/opt/t32/demo")
 
 #### resolves trailing parent ref
 
+- resolves trailing parent ref
+   - Expected: normalize_path("foo/bar/..") equals `foo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves trailing parent ref")
 expect(normalize_path("foo/bar/..")).to_equal("foo")
 ```
 
@@ -220,13 +257,19 @@ expect(normalize_path("foo/bar/..")).to_equal("foo")
 
 #### resolves middle parent ref
 
+- resolves middle parent ref
+   - Expected: normalize_path("foo/bar/../baz") equals `foo/baz`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves middle parent ref")
 expect(normalize_path("foo/bar/../baz")).to_equal("foo/baz")
 ```
 
@@ -234,13 +277,19 @@ expect(normalize_path("foo/bar/../baz")).to_equal("foo/baz")
 
 #### resolves multiple parent refs
 
+- resolves multiple parent refs
+   - Expected: normalize_path("a/b/c/../../d") equals `a/d`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves multiple parent refs")
 expect(normalize_path("a/b/c/../../d")).to_equal("a/d")
 ```
 
@@ -248,13 +297,19 @@ expect(normalize_path("a/b/c/../../d")).to_equal("a/d")
 
 #### resolves parent at root — stays at root
 
+- resolves parent at root — stays at root
+   - Expected: normalize_path("/..") equals `/`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves parent at root — stays at root")
 expect(normalize_path("/..")).to_equal("/")
 ```
 
@@ -262,13 +317,19 @@ expect(normalize_path("/..")).to_equal("/")
 
 #### resolves complex mixed dot and dotdot
 
+- resolves complex mixed dot and dotdot
+   - Expected: normalize_path("a/./b/../c/./d/../e") equals `a/c/e`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("resolves complex mixed dot and dotdot")
 expect(normalize_path("a/./b/../c/./d/../e")).to_equal("a/c/e")
 ```
 
@@ -276,13 +337,19 @@ expect(normalize_path("a/./b/../c/./d/../e")).to_equal("a/c/e")
 
 #### handles going above relative root with dotdot
 
+- handles going above relative root with dotdot
+   - Expected: normalize_path("../foo") equals `../foo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles going above relative root with dotdot")
 expect(normalize_path("../foo")).to_equal("../foo")
 ```
 
@@ -290,13 +357,19 @@ expect(normalize_path("../foo")).to_equal("../foo")
 
 #### handles double dotdot above relative root
 
+- handles double dotdot above relative root
+   - Expected: normalize_path("../../foo/bar") equals `../../foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles double dotdot above relative root")
 expect(normalize_path("../../foo/bar")).to_equal("../../foo/bar")
 ```
 
@@ -306,13 +379,19 @@ expect(normalize_path("../../foo/bar")).to_equal("../../foo/bar")
 
 #### collapses double slash in middle
 
+- collapses double slash in middle
+   - Expected: normalize_path("foo//bar") equals `foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("collapses double slash in middle")
 expect(normalize_path("foo//bar")).to_equal("foo/bar")
 ```
 
@@ -320,13 +399,19 @@ expect(normalize_path("foo//bar")).to_equal("foo/bar")
 
 #### collapses triple slash
 
+- collapses triple slash
+   - Expected: normalize_path("foo///bar") equals `foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("collapses triple slash")
 expect(normalize_path("foo///bar")).to_equal("foo/bar")
 ```
 
@@ -334,13 +419,19 @@ expect(normalize_path("foo///bar")).to_equal("foo/bar")
 
 #### collapses double slash at start of absolute path
 
+- collapses double slash at start of absolute path
+   - Expected: normalize_path("//opt/t32") equals `/opt/t32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("collapses double slash at start of absolute path")
 expect(normalize_path("//opt/t32")).to_equal("/opt/t32")
 ```
 
@@ -348,13 +439,19 @@ expect(normalize_path("//opt/t32")).to_equal("/opt/t32")
 
 #### collapses double slash with dots
 
+- collapses double slash with dots
+   - Expected: normalize_path(".//foo/./bar//baz") equals `foo/bar/baz`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("collapses double slash with dots")
 expect(normalize_path(".//foo/./bar//baz")).to_equal("foo/bar/baz")
 ```
 
@@ -364,13 +461,19 @@ expect(normalize_path(".//foo/./bar//baz")).to_equal("foo/bar/baz")
 
 #### strips trailing slash
 
+- strips trailing slash
+   - Expected: normalize_path("foo/bar/") equals `foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("strips trailing slash")
 expect(normalize_path("foo/bar/")).to_equal("foo/bar")
 ```
 
@@ -378,13 +481,19 @@ expect(normalize_path("foo/bar/")).to_equal("foo/bar")
 
 #### strips multiple trailing slashes
 
+- strips multiple trailing slashes
+   - Expected: normalize_path("foo/bar///") equals `foo/bar`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("strips multiple trailing slashes")
 expect(normalize_path("foo/bar///")).to_equal("foo/bar")
 ```
 
@@ -392,13 +501,19 @@ expect(normalize_path("foo/bar///")).to_equal("foo/bar")
 
 #### strips trailing slash on absolute path
 
+- strips trailing slash on absolute path
+   - Expected: normalize_path("/opt/t32/") equals `/opt/t32`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("strips trailing slash on absolute path")
 expect(normalize_path("/opt/t32/")).to_equal("/opt/t32")
 ```
 
@@ -408,13 +523,19 @@ expect(normalize_path("/opt/t32/")).to_equal("/opt/t32")
 
 #### returns dot for empty string
 
+- returns dot for empty string
+   - Expected: normalize_path("") equals `.`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns dot for empty string")
 expect(normalize_path("")).to_equal(".")
 ```
 
@@ -422,13 +543,19 @@ expect(normalize_path("")).to_equal(".")
 
 #### handles single component
 
+- handles single component
+   - Expected: normalize_path("foo") equals `foo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single component")
 expect(normalize_path("foo")).to_equal("foo")
 ```
 
@@ -436,13 +563,19 @@ expect(normalize_path("foo")).to_equal("foo")
 
 #### handles dot-dot only
 
+- handles dot-dot only
+   - Expected: normalize_path("..") equals `..`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles dot-dot only")
 expect(normalize_path("..")).to_equal("..")
 ```
 
@@ -450,13 +583,19 @@ expect(normalize_path("..")).to_equal("..")
 
 #### handles deeply nested dotdot collapse
 
+- handles deeply nested dotdot collapse
+   - Expected: normalize_path("a/b/c/d/e/../../../../f") equals `a/f`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles deeply nested dotdot collapse")
 expect(normalize_path("a/b/c/d/e/../../../../f")).to_equal("a/f")
 ```
 
@@ -466,13 +605,19 @@ expect(normalize_path("a/b/c/d/e/../../../../f")).to_equal("a/f")
 
 #### reproduces: dot-slash prefix ./subdir
 
+- reproduces: dot-slash prefix ./subdir
+   - Expected: normalize_path("./demo/practice") equals `demo/practice`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reproduces: dot-slash prefix ./subdir")
 expect(normalize_path("./demo/practice")).to_equal("demo/practice")
 ```
 
@@ -480,13 +625,19 @@ expect(normalize_path("./demo/practice")).to_equal("demo/practice")
 
 #### reproduces: middle dotdot dir/subdir/../other
 
+- reproduces: middle dotdot dir/subdir/../other
+   - Expected: normalize_path("/opt/t32/demo/../scripts") equals `/opt/t32/scripts`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reproduces: middle dotdot dir/subdir/../other")
 expect(normalize_path("/opt/t32/demo/../scripts")).to_equal("/opt/t32/scripts")
 ```
 
@@ -494,13 +645,19 @@ expect(normalize_path("/opt/t32/demo/../scripts")).to_equal("/opt/t32/scripts")
 
 #### reproduces: double slash from string concat
 
+- reproduces: double slash from string concat
+   - Expected: normalize_path("/opt/t32//demo") equals `/opt/t32/demo`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reproduces: double slash from string concat")
 expect(normalize_path("/opt/t32//demo")).to_equal("/opt/t32/demo")
 ```
 
@@ -508,13 +665,19 @@ expect(normalize_path("/opt/t32//demo")).to_equal("/opt/t32/demo")
 
 #### reproduces: complex mixed path
 
+- reproduces: complex mixed path
+   - Expected: normalize_path("./demo/./practice/../scripts//cmm/./") equals `demo/scripts/cmm`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reproduces: complex mixed path")
 expect(normalize_path("./demo/./practice/../scripts//cmm/./")).to_equal("demo/scripts/cmm")
 ```
 
@@ -526,13 +689,19 @@ expect(normalize_path("./demo/./practice/../scripts//cmm/./")).to_equal("demo/sc
 
 #### matches lowercase .cmm
 
+- matches lowercase .cmm
+   - Expected: is_cmm_file("test.cmm") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches lowercase .cmm")
 expect(is_cmm_file("test.cmm")).to_equal(true)
 ```
 
@@ -540,13 +709,19 @@ expect(is_cmm_file("test.cmm")).to_equal(true)
 
 #### matches uppercase .CMM
 
+- matches uppercase .CMM
+   - Expected: is_cmm_file("test.CMM") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches uppercase .CMM")
 expect(is_cmm_file("test.CMM")).to_equal(true)
 ```
 
@@ -554,13 +729,19 @@ expect(is_cmm_file("test.CMM")).to_equal(true)
 
 #### matches mixed case .Cmm
 
+- matches mixed case .Cmm
+   - Expected: is_cmm_file("test.Cmm") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches mixed case .Cmm")
 expect(is_cmm_file("test.Cmm")).to_equal(true)
 ```
 
@@ -568,13 +749,19 @@ expect(is_cmm_file("test.Cmm")).to_equal(true)
 
 #### matches mixed case .cMM
 
+- matches mixed case .cMM
+   - Expected: is_cmm_file("test.cMM") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches mixed case .cMM")
 expect(is_cmm_file("test.cMM")).to_equal(true)
 ```
 
@@ -582,13 +769,19 @@ expect(is_cmm_file("test.cMM")).to_equal(true)
 
 #### matches mixed case .CMm
 
+- matches mixed case .CMm
+   - Expected: is_cmm_file("test.CMm") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches mixed case .CMm")
 expect(is_cmm_file("test.CMm")).to_equal(true)
 ```
 
@@ -596,13 +789,19 @@ expect(is_cmm_file("test.CMm")).to_equal(true)
 
 #### matches long filename
 
+- matches long filename
+   - Expected: is_cmm_file("my_long_script_name.cmm") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches long filename")
 expect(is_cmm_file("my_long_script_name.cmm")).to_equal(true)
 ```
 
@@ -610,13 +809,19 @@ expect(is_cmm_file("my_long_script_name.cmm")).to_equal(true)
 
 #### matches filename with dots
 
+- matches filename with dots
+   - Expected: is_cmm_file("script.v2.cmm") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches filename with dots")
 expect(is_cmm_file("script.v2.cmm")).to_equal(true)
 ```
 
@@ -624,13 +829,19 @@ expect(is_cmm_file("script.v2.cmm")).to_equal(true)
 
 #### matches minimum length name
 
+- matches minimum length name
+   - Expected: is_cmm_file("a.cmm") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches minimum length name")
 expect(is_cmm_file("a.cmm")).to_equal(true)
 ```
 
@@ -640,13 +851,19 @@ expect(is_cmm_file("a.cmm")).to_equal(true)
 
 #### rejects .txt extension
 
+- rejects .txt extension
+   - Expected: is_cmm_file("test.txt") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects .txt extension")
 expect(is_cmm_file("test.txt")).to_equal(false)
 ```
 
@@ -654,13 +871,19 @@ expect(is_cmm_file("test.txt")).to_equal(false)
 
 #### rejects .c extension
 
+- rejects .c extension
+   - Expected: is_cmm_file("test.c") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects .c extension")
 expect(is_cmm_file("test.c")).to_equal(false)
 ```
 
@@ -668,13 +891,19 @@ expect(is_cmm_file("test.c")).to_equal(false)
 
 #### rejects .cmm prefix without dot
 
+- rejects .cmm prefix without dot
+   - Expected: is_cmm_file("cmm") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects .cmm prefix without dot")
 expect(is_cmm_file("cmm")).to_equal(false)
 ```
 
@@ -682,13 +911,19 @@ expect(is_cmm_file("cmm")).to_equal(false)
 
 #### rejects too short name
 
+- rejects too short name
+   - Expected: is_cmm_file(".cmm") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects too short name")
 expect(is_cmm_file(".cmm")).to_equal(false)
 ```
 
@@ -696,13 +931,19 @@ expect(is_cmm_file(".cmm")).to_equal(false)
 
 #### rejects partial extension .cm
 
+- rejects partial extension .cm
+   - Expected: is_cmm_file("test.cm") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects partial extension .cm")
 expect(is_cmm_file("test.cm")).to_equal(false)
 ```
 
@@ -710,13 +951,19 @@ expect(is_cmm_file("test.cm")).to_equal(false)
 
 #### rejects .cmmx extension
 
+- rejects .cmmx extension
+   - Expected: is_cmm_file("test.cmmx") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects .cmmx extension")
 expect(is_cmm_file("test.cmmx")).to_equal(false)
 ```
 
@@ -724,13 +971,19 @@ expect(is_cmm_file("test.cmmx")).to_equal(false)
 
 #### rejects empty string
 
+- rejects empty string
+   - Expected: is_cmm_file("") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects empty string")
 expect(is_cmm_file("")).to_equal(false)
 ```
 
@@ -738,13 +991,19 @@ expect(is_cmm_file("")).to_equal(false)
 
 #### rejects no extension
 
+- rejects no extension
+   - Expected: is_cmm_file("testfile") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects no extension")
 expect(is_cmm_file("testfile")).to_equal(false)
 ```
 
@@ -756,13 +1015,19 @@ expect(is_cmm_file("testfile")).to_equal(false)
 
 #### detects name without extension as directory
 
+- detects name without extension as directory
+   - Expected: is_likely_directory("demo") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects name without extension as directory")
 expect(is_likely_directory("demo")).to_equal(true)
 ```
 
@@ -770,13 +1035,19 @@ expect(is_likely_directory("demo")).to_equal(true)
 
 #### detects name without extension — underscore
 
+- detects name without extension — underscore
+   - Expected: is_likely_directory("my_scripts") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects name without extension — underscore")
 expect(is_likely_directory("my_scripts")).to_equal(true)
 ```
 
@@ -784,13 +1055,19 @@ expect(is_likely_directory("my_scripts")).to_equal(true)
 
 #### detects name without extension — digits
 
+- detects name without extension — digits
+   - Expected: is_likely_directory("t32") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects name without extension — digits")
 expect(is_likely_directory("t32")).to_equal(true)
 ```
 
@@ -798,13 +1075,19 @@ expect(is_likely_directory("t32")).to_equal(true)
 
 #### detects name with very long pseudo-extension
 
+- detects name with very long pseudo-extension
+   - Expected: is_likely_directory("file.longextname") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects name with very long pseudo-extension")
 expect(is_likely_directory("file.longextname")).to_equal(true)
 ```
 
@@ -814,13 +1097,19 @@ expect(is_likely_directory("file.longextname")).to_equal(true)
 
 #### detects .cmm as file
 
+- detects .cmm as file
+   - Expected: is_likely_directory("test.cmm") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects .cmm as file")
 expect(is_likely_directory("test.cmm")).to_equal(false)
 ```
 
@@ -828,13 +1117,19 @@ expect(is_likely_directory("test.cmm")).to_equal(false)
 
 #### detects .txt as file
 
+- detects .txt as file
+   - Expected: is_likely_directory("readme.txt") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects .txt as file")
 expect(is_likely_directory("readme.txt")).to_equal(false)
 ```
 
@@ -842,13 +1137,19 @@ expect(is_likely_directory("readme.txt")).to_equal(false)
 
 #### detects .c as file
 
+- detects .c as file
+   - Expected: is_likely_directory("main.c") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects .c as file")
 expect(is_likely_directory("main.c")).to_equal(false)
 ```
 
@@ -856,13 +1157,19 @@ expect(is_likely_directory("main.c")).to_equal(false)
 
 #### detects .h as file
 
+- detects .h as file
+   - Expected: is_likely_directory("header.h") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects .h as file")
 expect(is_likely_directory("header.h")).to_equal(false)
 ```
 
@@ -870,13 +1177,19 @@ expect(is_likely_directory("header.h")).to_equal(false)
 
 #### detects .py as file
 
+- detects .py as file
+   - Expected: is_likely_directory("script.py") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects .py as file")
 expect(is_likely_directory("script.py")).to_equal(false)
 ```
 
@@ -884,13 +1197,19 @@ expect(is_likely_directory("script.py")).to_equal(false)
 
 #### detects .cmm uppercase as file
 
+- detects .cmm uppercase as file
+   - Expected: is_likely_directory("TEST.CMM") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects .cmm uppercase as file")
 expect(is_likely_directory("TEST.CMM")).to_equal(false)
 ```
 
@@ -900,13 +1219,19 @@ expect(is_likely_directory("TEST.CMM")).to_equal(false)
 
 #### skips .git directory
 
+- skips .git directory
+   - Expected: is_likely_directory(".git") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("skips .git directory")
 expect(is_likely_directory(".git")).to_equal(false)
 ```
 
@@ -914,13 +1239,19 @@ expect(is_likely_directory(".git")).to_equal(false)
 
 #### skips .svn directory
 
+- skips .svn directory
+   - Expected: is_likely_directory(".svn") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("skips .svn directory")
 expect(is_likely_directory(".svn")).to_equal(false)
 ```
 
@@ -928,13 +1259,19 @@ expect(is_likely_directory(".svn")).to_equal(false)
 
 #### skips .gitignore file
 
+- skips .gitignore file
+   - Expected: is_likely_directory(".gitignore") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("skips .gitignore file")
 expect(is_likely_directory(".gitignore")).to_equal(false)
 ```
 
@@ -942,13 +1279,19 @@ expect(is_likely_directory(".gitignore")).to_equal(false)
 
 #### skips .hidden
 
+- skips .hidden
+   - Expected: is_likely_directory(".hidden") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("skips .hidden")
 expect(is_likely_directory(".hidden")).to_equal(false)
 ```
 
@@ -956,13 +1299,19 @@ expect(is_likely_directory(".hidden")).to_equal(false)
 
 #### skips dotfile with extension
 
+- skips dotfile with extension
+   - Expected: is_likely_directory(".bashrc") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("skips dotfile with extension")
 expect(is_likely_directory(".bashrc")).to_equal(false)
 ```
 
@@ -972,13 +1321,19 @@ expect(is_likely_directory(".bashrc")).to_equal(false)
 
 #### handles single char name as directory
 
+- handles single char name as directory
+   - Expected: is_likely_directory("a") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single char name as directory")
 expect(is_likely_directory("a")).to_equal(true)
 ```
 
@@ -986,13 +1341,19 @@ expect(is_likely_directory("a")).to_equal(true)
 
 #### handles name ending with dot only
 
+- handles name ending with dot only
+   - Expected: is_likely_directory("file.") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles name ending with dot only")
 # "file." has ext_len = 0, so not 1..4 → treated as directory
 expect(is_likely_directory("file.")).to_equal(true)
 ```
@@ -1005,13 +1366,19 @@ expect(is_likely_directory("file.")).to_equal(true)
 
 #### finds needle at start
 
+- finds needle at start
+   - Expected: contains("Unterminated block", "Unterminated") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds needle at start")
 expect(contains("Unterminated block", "Unterminated")).to_equal(true)
 ```
 
@@ -1019,13 +1386,19 @@ expect(contains("Unterminated block", "Unterminated")).to_equal(true)
 
 #### finds needle in middle
 
+- finds needle in middle
+   - Expected: contains("Line 5: Expected expression", "Expected") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds needle in middle")
 expect(contains("Line 5: Expected expression", "Expected")).to_equal(true)
 ```
 
@@ -1033,13 +1406,19 @@ expect(contains("Line 5: Expected expression", "Expected")).to_equal(true)
 
 #### finds needle at end
 
+- finds needle at end
+   - Expected: contains("something unexpected", "unexpected") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds needle at end")
 expect(contains("something unexpected", "unexpected")).to_equal(true)
 ```
 
@@ -1047,13 +1426,19 @@ expect(contains("something unexpected", "unexpected")).to_equal(true)
 
 #### finds exact match
 
+- finds exact match
+   - Expected: contains("hello", "hello") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds exact match")
 expect(contains("hello", "hello")).to_equal(true)
 ```
 
@@ -1063,13 +1448,19 @@ expect(contains("hello", "hello")).to_equal(true)
 
 #### returns false for missing needle
 
+- returns false for missing needle
+   - Expected: contains("hello world", "xyz") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for missing needle")
 expect(contains("hello world", "xyz")).to_equal(false)
 ```
 
@@ -1077,13 +1468,19 @@ expect(contains("hello world", "xyz")).to_equal(false)
 
 #### returns false when needle longer than haystack
 
+- returns false when needle longer than haystack
+   - Expected: contains("hi", "hello world") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false when needle longer than haystack")
 expect(contains("hi", "hello world")).to_equal(false)
 ```
 
@@ -1091,13 +1488,19 @@ expect(contains("hi", "hello world")).to_equal(false)
 
 #### returns false for empty haystack
 
+- returns false for empty haystack
+   - Expected: contains("", "x") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns false for empty haystack")
 expect(contains("", "x")).to_equal(false)
 ```
 
@@ -1107,13 +1510,19 @@ expect(contains("", "x")).to_equal(false)
 
 #### finds empty needle
 
+- finds empty needle
+   - Expected: contains("hello", "") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds empty needle")
 expect(contains("hello", "")).to_equal(true)
 ```
 
@@ -1121,13 +1530,19 @@ expect(contains("hello", "")).to_equal(true)
 
 #### handles single char needle
 
+- handles single char needle
+   - Expected: contains("abc", "b") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single char needle")
 expect(contains("abc", "b")).to_equal(true)
 ```
 
@@ -1135,13 +1550,19 @@ expect(contains("abc", "b")).to_equal(true)
 
 #### handles single char miss
 
+- handles single char miss
+   - Expected: contains("abc", "z") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles single char miss")
 expect(contains("abc", "z")).to_equal(false)
 ```
 
@@ -1149,13 +1570,19 @@ expect(contains("abc", "z")).to_equal(false)
 
 #### handles repeated pattern
 
+- handles repeated pattern
+   - Expected: contains("aaabaaab", "aaab") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles repeated pattern")
 expect(contains("aaabaaab", "aaab")).to_equal(true)
 ```
 
@@ -1167,13 +1594,19 @@ expect(contains("aaabaaab", "aaab")).to_equal(true)
 
 #### matches prefix
 
+- matches prefix
+   - Expected: starts_with("trace32 encrypted", "trace32") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches prefix")
 expect(starts_with("trace32 encrypted", "trace32")).to_equal(true)
 ```
 
@@ -1181,13 +1614,19 @@ expect(starts_with("trace32 encrypted", "trace32")).to_equal(true)
 
 #### matches full string
 
+- matches full string
+   - Expected: starts_with("hello", "hello") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches full string")
 expect(starts_with("hello", "hello")).to_equal(true)
 ```
 
@@ -1195,13 +1634,19 @@ expect(starts_with("hello", "hello")).to_equal(true)
 
 #### matches empty prefix
 
+- matches empty prefix
+   - Expected: starts_with("anything", "") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches empty prefix")
 expect(starts_with("anything", "")).to_equal(true)
 ```
 
@@ -1211,13 +1656,19 @@ expect(starts_with("anything", "")).to_equal(true)
 
 #### rejects wrong prefix
 
+- rejects wrong prefix
+   - Expected: starts_with("hello", "world") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects wrong prefix")
 expect(starts_with("hello", "world")).to_equal(false)
 ```
 
@@ -1225,13 +1676,19 @@ expect(starts_with("hello", "world")).to_equal(false)
 
 #### rejects longer prefix
 
+- rejects longer prefix
+   - Expected: starts_with("hi", "hello") is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects longer prefix")
 expect(starts_with("hi", "hello")).to_equal(false)
 ```
 
@@ -1249,3 +1706,51 @@ expect(starts_with("hi", "hello")).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f07bd7676d2c75f1372c2f22681eb949c7dfae83ac33e87ff354496f06491f34`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f07bd7676d2c75f1372c2f22681eb949c7dfae83ac33e87ff354496f06491f34`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f07bd7676d2c75f1372c2f22681eb949c7dfae83ac33e87ff354496f06491f34`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/cmm_lsp/bulk_validate_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/cmm_lsp/bulk_validate_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/cmm_lsp/bulk_validate_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/cmm_lsp/bulk_validate_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/cmm_lsp/bulk_validate_spec.spl:146:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns identity for clean paths' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/cmm_lsp/bulk_validate_spec.spl:151:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns identity for relative clean paths' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/cmm_lsp/bulk_validate_spec.spl:156:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns identity for root' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

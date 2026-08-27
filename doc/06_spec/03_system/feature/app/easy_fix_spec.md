@@ -2,29 +2,6 @@
 
 > Tests the EasyFix automatic code repair system that suggests and applies fixes for common compiler errors. Verifies that fix suggestions are accurate, that dry-run mode previews changes correctly, and that applied fixes resolve the errors.
 
-<!-- sdn-diagram:id=easy_fix_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=easy_fix_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-easy_fix_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=easy_fix_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 50 | 50 | 0 | 0 |
@@ -43,7 +20,7 @@ Tests the EasyFix automatic code repair system that suggests and applies fixes f
 | Category | Application |
 | Status | In Progress |
 | Source | `test/03_system/feature/app/easy_fix_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,13 +37,18 @@ dry-run mode previews changes correctly, and that applied fixes resolve the erro
 
 #### has Safe level
 
+- has Safe level
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has Safe level")
 val c = FixConfidence.Safe
 expect c == FixConfidence.Safe
 ```
@@ -75,13 +57,18 @@ expect c == FixConfidence.Safe
 
 #### has Likely level
 
+- has Likely level
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has Likely level")
 val c = FixConfidence.Likely
 expect c == FixConfidence.Likely
 ```
@@ -90,13 +77,18 @@ expect c == FixConfidence.Likely
 
 #### has Uncertain level
 
+- has Uncertain level
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("has Uncertain level")
 val c = FixConfidence.Uncertain
 expect c == FixConfidence.Uncertain
 ```
@@ -105,13 +97,18 @@ expect c == FixConfidence.Uncertain
 
 #### Safe != Likely
 
+- Safe != Likely
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Safe != Likely")
 expect FixConfidence.Safe != FixConfidence.Likely
 ```
 
@@ -119,13 +116,18 @@ expect FixConfidence.Safe != FixConfidence.Likely
 
 #### Safe != Uncertain
 
+- Safe != Uncertain
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Safe != Uncertain")
 expect FixConfidence.Safe != FixConfidence.Uncertain
 ```
 
@@ -133,13 +135,18 @@ expect FixConfidence.Safe != FixConfidence.Uncertain
 
 #### Likely != Uncertain
 
+- Likely != Uncertain
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Likely != Uncertain")
 expect FixConfidence.Likely != FixConfidence.Uncertain
 ```
 
@@ -149,13 +156,18 @@ expect FixConfidence.Likely != FixConfidence.Uncertain
 
 #### creates a replacement with all fields
 
+- creates a replacement with all fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates a replacement with all fields")
 val rep = Replacement.create(
     file: "test.spl",
     start: 10,
@@ -176,13 +188,18 @@ expect rep.new_text == "new_value"
 
 #### creates a zero-length insertion
 
+- creates a zero-length insertion
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates a zero-length insertion")
 val rep = Replacement.create(
     file: "test.spl",
     start: 10,
@@ -199,13 +216,18 @@ expect rep.new_text == "inserted "
 
 #### creates a deletion (empty new_text)
 
+- creates a deletion (empty new_text)
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates a deletion (empty new_text)")
 val rep = Replacement.create(
     file: "test.spl",
     start: 5,
@@ -222,17 +244,18 @@ expect rep.end - rep.start == 5
 
 #### formats for display
 
-1. expect formatted contains
-2. expect formatted contains
+- formats for display
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("formats for display")
 val rep = Replacement.create(
     file: "src/main.spl",
     start: 0,
@@ -252,16 +275,18 @@ expect formatted.contains("hello")
 
 #### creates an empty fix
 
-1. expect fix replacements len
+- creates an empty fix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates an empty fix")
 val fix = EasyFix.create(
     id: "L:test:1",
     description: "test fix",
@@ -276,16 +301,18 @@ expect fix.replacements.len() == 0
 
 #### adds replacements
 
-1. expect fix replacements len
+- adds replacements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds replacements")
 var fix = EasyFix.create(
     id: "L:test:1",
     description: "test fix",
@@ -301,16 +328,18 @@ expect fix.replacements.len() == 1
 
 #### adds multiple replacements
 
-1. expect fix replacements len
+- adds multiple replacements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds multiple replacements")
 var fix = EasyFix.create(
     id: "L:test:1",
     description: "multi-replacement fix",
@@ -329,16 +358,18 @@ expect fix.replacements.len() == 2
 
 #### reports safe confidence
 
-1. expect fix is safe
+- reports safe confidence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports safe confidence")
 val fix = EasyFix.create(id: "f1", description: "d", confidence: FixConfidence.Safe)
 expect fix.is_safe() == true
 ```
@@ -347,16 +378,18 @@ expect fix.is_safe() == true
 
 #### reports non-safe for Likely
 
-1. expect fix is safe
+- reports non-safe for Likely
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports non-safe for Likely")
 val fix = EasyFix.create(id: "f1", description: "d", confidence: FixConfidence.Likely)
 expect fix.is_safe() == false
 ```
@@ -365,16 +398,18 @@ expect fix.is_safe() == false
 
 #### reports non-safe for Uncertain
 
-1. expect fix is safe
+- reports non-safe for Uncertain
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports non-safe for Uncertain")
 val fix = EasyFix.create(id: "f1", description: "d", confidence: FixConfidence.Uncertain)
 expect fix.is_safe() == false
 ```
@@ -383,18 +418,18 @@ expect fix.is_safe() == false
 
 #### formats confidence as string
 
-1. expect safe confidence str
-2. expect likely confidence str
-3. expect uncertain confidence str
+- formats confidence as string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("formats confidence as string")
 val safe = EasyFix.create(id: "f1", description: "d", confidence: FixConfidence.Safe)
 val likely = EasyFix.create(id: "f2", description: "d", confidence: FixConfidence.Likely)
 val uncertain = EasyFix.create(id: "f3", description: "d", confidence: FixConfidence.Uncertain)
@@ -411,16 +446,18 @@ expect uncertain.confidence_str() == "uncertain"
 
 #### replaces text at the beginning
 
-1. var fix = EasyFix create
+- replaces text at the beginning
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaces text at the beginning")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello world"
 
@@ -441,16 +478,18 @@ match result:
 
 #### replaces text at the end
 
-1. var fix = EasyFix create
+- replaces text at the end
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaces text at the end")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello world"
 
@@ -471,16 +510,18 @@ match result:
 
 #### replaces text in the middle
 
-1. var fix = EasyFix create
+- replaces text in the middle
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaces text in the middle")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "aaa bbb ccc"
 
@@ -501,16 +542,18 @@ match result:
 
 #### inserts text (zero-length span)
 
-1. var fix = EasyFix create
+- inserts text (zero-length span)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inserts text (zero-length span)")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello world"
 
@@ -531,16 +574,18 @@ match result:
 
 #### deletes text (empty new_text)
 
-1. var fix = EasyFix create
+- deletes text (empty new_text)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("deletes text (empty new_text)")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello beautiful world"
 
@@ -563,17 +608,18 @@ match result:
 
 #### applies two fixes in same file
 
-1. var fix1 = EasyFix create
-2. var fix2 = EasyFix create
+- applies two fixes in same file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies two fixes in same file")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "aaa bbb ccc"
 
@@ -599,18 +645,18 @@ match result:
 
 #### applies three fixes preserving order
 
-1. var fix1 = EasyFix create
-2. var fix2 = EasyFix create
-3. var fix3 = EasyFix create
+- applies three fixes preserving order
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies three fixes preserving order")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "111 222 333 444"
 
@@ -641,18 +687,18 @@ match result:
 
 #### detects overlapping spans
 
-1. var fix1 = EasyFix create
-2. var fix2 = EasyFix create
-3. expect e contains
+- detects overlapping spans
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects overlapping spans")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello world"
 
@@ -679,17 +725,18 @@ match result:
 
 #### applies fixes to different files
 
-1. var fix1 = EasyFix create
-2. var fix2 = EasyFix create
+- applies fixes to different files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies fixes to different files")
 var sources: Dict<String, String> = {}
 sources["a.spl"] = "file_a content"
 sources["b.spl"] = "file_b content"
@@ -718,17 +765,18 @@ match result:
 
 #### returns error for missing file
 
-1. var fix = EasyFix create
-2. expect e contains
+- returns error for missing file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns error for missing file")
 var sources: Dict<String, String> = {}
 sources["exists.spl"] = "content"
 
@@ -753,16 +801,18 @@ match result:
 
 #### Safe filter returns only safe fixes
 
-1. expect filtered len
+- Safe filter returns only safe fixes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Safe filter returns only safe fixes")
 val safe = EasyFix.create(id: "safe", description: "d", confidence: FixConfidence.Safe)
 val likely = EasyFix.create(id: "likely", description: "d", confidence: FixConfidence.Likely)
 val uncertain = EasyFix.create(id: "uncertain", description: "d", confidence: FixConfidence.Uncertain)
@@ -777,16 +827,18 @@ expect filtered.len() == 1
 
 #### Likely filter returns safe and likely
 
-1. expect filtered len
+- Likely filter returns safe and likely
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Likely filter returns safe and likely")
 val safe = EasyFix.create(id: "safe", description: "d", confidence: FixConfidence.Safe)
 val likely = EasyFix.create(id: "likely", description: "d", confidence: FixConfidence.Likely)
 val uncertain = EasyFix.create(id: "uncertain", description: "d", confidence: FixConfidence.Uncertain)
@@ -800,16 +852,18 @@ expect filtered.len() == 2
 
 #### Uncertain filter returns all
 
-1. expect filtered len
+- Uncertain filter returns all
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("Uncertain filter returns all")
 val safe = EasyFix.create(id: "safe", description: "d", confidence: FixConfidence.Safe)
 val likely = EasyFix.create(id: "likely", description: "d", confidence: FixConfidence.Likely)
 val uncertain = EasyFix.create(id: "uncertain", description: "d", confidence: FixConfidence.Uncertain)
@@ -823,16 +877,18 @@ expect filtered.len() == 3
 
 #### returns empty list when no fixes match
 
-1. expect filtered len
+- returns empty list when no fixes match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns empty list when no fixes match")
 val uncertain = EasyFix.create(id: "u1", description: "d", confidence: FixConfidence.Uncertain)
 val filtered = FixApplicator.filter_by_confidence([uncertain], FixConfidence.Safe)
 expect filtered.len() == 0
@@ -844,16 +900,18 @@ expect filtered.len() == 0
 
 #### filters by prefix
 
-1. expect filtered len
+- filters by prefix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("filters by prefix")
 val f1 = EasyFix.create(id: "L:todo_format:1", description: "d", confidence: FixConfidence.Safe)
 val f2 = EasyFix.create(id: "L:bare_bool:1", description: "d", confidence: FixConfidence.Safe)
 val f3 = EasyFix.create(id: "L:todo_format:2", description: "d", confidence: FixConfidence.Safe)
@@ -866,16 +924,18 @@ expect filtered.len() == 2
 
 #### returns empty when no match
 
-1. expect filtered len
+- returns empty when no match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns empty when no match")
 val f1 = EasyFix.create(id: "L:todo:1", description: "d", confidence: FixConfidence.Safe)
 val filtered = FixApplicator.filter_by_id([f1], "E:type")
 expect filtered.len() == 0
@@ -885,16 +945,18 @@ expect filtered.len() == 0
 
 #### matches exact prefix
 
-1. expect filtered len
+- matches exact prefix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches exact prefix")
 val f1 = EasyFix.create(id: "L:abc", description: "d", confidence: FixConfidence.Safe)
 val f2 = EasyFix.create(id: "L:abcdef", description: "d", confidence: FixConfidence.Safe)
 val filtered = FixApplicator.filter_by_id([f1, f2], "L:abc")
@@ -909,17 +971,18 @@ expect filtered.len() == 2  # Both start with "L:abc"
 
 #### starts with zero counts
 
-1. expect report modified files len
-2. expect report details len
+- starts with zero counts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("starts with zero counts")
 val report = FixReport.empty()
 expect report.applied == 0
 expect report.skipped == 0
@@ -933,18 +996,18 @@ expect report.details.len() == 0
 
 #### formats dry-run report
 
-1. var report = FixReport empty
-2. expect output contains
-3. expect output contains
+- formats dry-run report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("formats dry-run report")
 var report = FixReport.empty()
 report.applied = 2
 report.modified_files = ["a.spl", "b.spl"]
@@ -959,18 +1022,18 @@ expect output.contains("2 fix(es)")
 
 #### formats applied report
 
-1. var report = FixReport empty
-2. expect output contains
-3. expect output contains
+- formats applied report
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("formats applied report")
 var report = FixReport.empty()
 report.applied = 1
 report.modified_files = ["test.spl"]
@@ -983,23 +1046,24 @@ expect output.contains("1 fix(es)")
 
 </details>
 
-### Lint-EasyFix Integration
+### EasyFixLint-EasyFix Integration
 
-#### Lint with EasyFix
+#### EasyFixLint with EasyFix
 
 #### creates lint with easy_fix
 
-1.  with fix
-2.  with easy fix
+- creates lint with easy_fix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates lint with easy_fix")
 var fix = EasyFix.create(
     id: "L:todo_format:1",
     description: "add format tags",
@@ -1009,53 +1073,69 @@ fix.add_replacement(Replacement.create(
     file: "test.spl", start: 10, end: 10, line: 1, column: 11, new_text: "[runtime][P2] "
 ))
 
-val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style,
-    "TODO/FIXME missing [area][priority] format")
+# WRONG-CONSTRUCTOR FIX (2026-08-04): `EasyFixLint` declares no
+# `static fn new` (src/lib/nogc_sync_mut/tooling/easy_fix/types.spl:240)
+# — its siblings Replacement/EasyFix use `static fn create`, and the
+# language rule is `Point(x: 3, y: 4)`, not `.new()`. `EasyFixLint.new(...)`
+# therefore died with "semantic: unknown static method new on class
+# EasyFixLint". Use the field constructor with all six declared fields.
+val lint = EasyFixLint(code: "T001", level: LintLevel.Warn, category: LintCategory.Style,
+    message: "TODO/FIXME missing [area][priority] format",
+    fix_hint: nil, easy_fix: nil)
     .with_fix("Use: TODO: [area][P0-P3] description")
     .with_easy_fix(fix)
 
-expect lint.easy_fix.? == true
-expect lint.fix_hint.? == true
+expect lint.easy_fix != nil
+expect lint.fix_hint != nil
 ```
 
 </details>
 
 #### creates lint without easy_fix
 
+- creates lint without easy_fix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lint = Lint.new("W001", LintLevel.Warn, LintCategory.Warning, "unused variable")
-expect lint.easy_fix.? == false
-expect lint.fix_hint.? == false
+# @req REQ-SSPEC-SYSTEM
+step("creates lint without easy_fix")
+val lint = EasyFixLint(code: "W001", level: LintLevel.Warn, category: LintCategory.Warning,
+    message: "unused variable", fix_hint: nil, easy_fix: nil)
+expect lint.easy_fix == nil
+expect lint.fix_hint == nil
 ```
 
 </details>
 
-#### LintResult with EasyFix
+#### EasyFixLintResult with EasyFix
 
 #### reports has_easy_fix true when present
 
-1. var fix = EasyFix create
-2.  with easy fix
-3. expect result has easy fix
+- reports has_easy_fix true when present
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports has_easy_fix true when present")
 var fix = EasyFix.create(id: "f1", description: "d", confidence: FixConfidence.Safe)
-val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style, "msg")
+val lint = EasyFixLint(code: "T001", level: LintLevel.Warn, category: LintCategory.Style,
+    message: "msg", fix_hint: nil, easy_fix: nil)
     .with_easy_fix(fix)
-val result = LintResult.new("test.spl", 1, 1, lint)
+# Same wrong-constructor fix: EasyFixLintResult declares no `static fn new`
+# (types.spl:277); use the field constructor.
+val result = EasyFixLintResult(file_path: "test.spl", line: 1, column: 1, lint: lint)
 expect result.has_easy_fix() == true
 ```
 
@@ -1063,18 +1143,23 @@ expect result.has_easy_fix() == true
 
 #### reports has_easy_fix false when absent
 
-1. expect result has easy fix
+- reports has_easy_fix false when absent
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val lint = Lint.new("W001", LintLevel.Warn, LintCategory.Warning, "msg")
-val result = LintResult.new("test.spl", 1, 1, lint)
+# @req REQ-SSPEC-SYSTEM
+step("reports has_easy_fix false when absent")
+val lint = EasyFixLint(code: "W001", level: LintLevel.Warn, category: LintCategory.Warning,
+    message: "msg", fix_hint: nil, easy_fix: nil)
+# Same wrong-constructor fix: EasyFixLintResult declares no `static fn new`
+# (types.spl:277); use the field constructor.
+val result = EasyFixLintResult(file_path: "test.spl", line: 1, column: 1, lint: lint)
 expect result.has_easy_fix() == false
 ```
 
@@ -1082,23 +1167,25 @@ expect result.has_easy_fix() == false
 
 #### includes fix info in formatted output
 
-1. var fix = EasyFix create
-2.  with easy fix
-3. expect formatted contains
-4. expect formatted contains
+- includes fix info in formatted output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("includes fix info in formatted output")
 var fix = EasyFix.create(id: "L:test:1", description: "d", confidence: FixConfidence.Safe)
-val lint = Lint.new("T001", LintLevel.Warn, LintCategory.Style, "msg")
+val lint = EasyFixLint(code: "T001", level: LintLevel.Warn, category: LintCategory.Style,
+    message: "msg", fix_hint: nil, easy_fix: nil)
     .with_easy_fix(fix)
-val result = LintResult.new("test.spl", 1, 1, lint)
+# Same wrong-constructor fix: EasyFixLintResult declares no `static fn new`
+# (types.spl:277); use the field constructor.
+val result = EasyFixLintResult(file_path: "test.spl", line: 1, column: 1, lint: lint)
 val formatted = result.format()
 expect formatted.contains("fix: available")
 expect formatted.contains("L:test:1")
@@ -1112,16 +1199,18 @@ expect formatted.contains("L:test:1")
 
 #### handles empty fix list
 
-1. expect new sources len
+- handles empty fix list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles empty fix list")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello"
 val result = FixApplicator.apply([], sources)
@@ -1136,16 +1225,18 @@ match result:
 
 #### handles fix with no replacements
 
-1. expect new sources len
+- handles fix with no replacements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles fix with no replacements")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello"
 val fix = EasyFix.create(id: "f1", description: "d", confidence: FixConfidence.Safe)
@@ -1163,16 +1254,18 @@ match result:
 
 #### replaces entire file content
 
-1. var fix = EasyFix create
+- replaces entire file content
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaces entire file content")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "old"
 
@@ -1193,16 +1286,18 @@ match result:
 
 #### inserts at beginning of file
 
-1. var fix = EasyFix create
+- inserts at beginning of file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("inserts at beginning of file")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "world"
 
@@ -1223,16 +1318,18 @@ match result:
 
 #### appends at end of file
 
-1. var fix = EasyFix create
+- appends at end of file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("appends at end of file")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "hello"
 
@@ -1255,16 +1352,18 @@ match result:
 
 #### handles replacement longer than original
 
-1. var fix = EasyFix create
+- handles replacement longer than original
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles replacement longer than original")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "ab"
 
@@ -1285,16 +1384,18 @@ match result:
 
 #### handles replacement shorter than original
 
-1. var fix = EasyFix create
+- handles replacement shorter than original
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles replacement shorter than original")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "abcdef"
 
@@ -1317,18 +1418,18 @@ match result:
 
 #### applies adjacent non-overlapping fixes
 
-1. var fix1 = EasyFix create
-2. var fix2 = EasyFix create
-3. var fix3 = EasyFix create
+- applies adjacent non-overlapping fixes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies adjacent non-overlapping fixes")
 var sources: Dict<String, String> = {}
 sources["test.spl"] = "aabbcc"
 
@@ -1367,3 +1468,51 @@ match result:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3051d8377dd9216cd9d00357abe3ef9beefeb0630ce699e769020a6ac3d86ae1`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3051d8377dd9216cd9d00357abe3ef9beefeb0630ce699e769020a6ac3d86ae1`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3051d8377dd9216cd9d00357abe3ef9beefeb0630ce699e769020a6ac3d86ae1`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/app/easy_fix_spec.spl
+mirror: doc/06_spec/03_system/feature/app/easy_fix_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/app/easy_fix_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/app/easy_fix_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/app/easy_fix_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Safe level' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/easy_fix_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Likely level' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/app/easy_fix_spec.spl:94:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has Uncertain level' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

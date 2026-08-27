@@ -2,30 +2,6 @@
 
 > This scenario audits the current SimpleOS hardening goal as a requirement matrix. It does not replace the deeper live gates; it verifies that the current workspace has authoritative evidence for every explicit clause in the user request.
 
-<!-- sdn-diagram:id=simpleos_hardening_evidence_matrix_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_hardening_evidence_matrix_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_hardening_evidence_matrix_spec -> std
-simpleos_hardening_evidence_matrix_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_hardening_evidence_matrix_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -48,7 +24,7 @@ This scenario audits the current SimpleOS hardening goal as a requirement matrix
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl` |
-| Updated | 2026-07-13 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -64,8 +40,9 @@ Simple GUI through WebRenderer bitmap evidence, host/QEMU WM counterpart
 bitmap evidence, SimpleOS LLVM port evidence, and the latest live QEMU Simple
 GUI/MDI framebuffer artifact. It also verifies the current GUI/Web/2D
 Vulkan-backed RenderDoc aggregate evidence, the full Lean formal proof
-integrity gate, the RISC-V/BYL dual-track formal gate, the focused critical
-concurrency/resource formal gate, and the focused memory-safety formal gate.
+integrity gate, the RISC-V/BYL dual-track formal gate, and the focused
+critical concurrency/resource formal gate, and the focused memory-safety formal
+gate.
 
 ## Acceptance Criteria
 
@@ -117,8 +94,8 @@ concurrency/resource formal gate, and the focused memory-safety formal gate.
   the same probe, header, body, top-lane, and taskbar pixel anchors as the live
   QMP capture spec.
 - The RV64 display-smoke QMP report must use contract v2 and prove dynamic
-  dimensions/stride, one correlated positive present revision, nonblack
-  pixels, and at least four canonical desktop palette witnesses.
+  scanout dimensions/stride, one correlated canonical-frame revision,
+  nonblack pixels, and at least four canonical desktop palette witnesses.
 - Async/thread/process/coroutine regression evidence must be surfaced as a
   counted matrix row with the async hardening wrapper total, passed, failed,
   and missing counts.
@@ -152,7 +129,7 @@ SIMPLE_LIB=src src/compiler_rust/target/release/simple test \
   `test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl`.
 - If layered GUI rows fail, rerun
   `test/03_system/gui/layered_simple_gui_web_engine2d_bitmap_evidence_spec.spl`.
-- If SSH rows fail, rerun `test/03_system/ssh_live_login_in_qemu_spec.spl`.
+- If SSH rows fail, rerun `test/03_system/os/ssh_live_login_in_qemu_spec.spl`.
 
 ## Matrix Rows
 
@@ -180,40 +157,22 @@ The wrapper emits these rows:
 - `simpleos_hardening_formal_lean_proofs_status`
 - `simpleos_hardening_formal_riscv_dual_track_status`
 - `simpleos_hardening_formal_critical_concurrency_status`
-- `simpleos_hardening_formal_critical_concurrency_gate`
-- `simpleos_hardening_formal_critical_concurrency_scope`
 - `simpleos_hardening_formal_critical_concurrency_evidence`
 - `simpleos_hardening_formal_memory_safety_status`
-- `simpleos_hardening_formal_memory_safety_gate`
-- `simpleos_hardening_formal_memory_safety_scope`
 - `simpleos_hardening_formal_memory_safety_evidence`
 - `simpleos_hardening_formal_storage_integrity_status`
-- `simpleos_hardening_formal_storage_integrity_gate`
-- `simpleos_hardening_formal_storage_integrity_scope`
 - `simpleos_hardening_formal_storage_integrity_evidence`
 - `simpleos_hardening_formal_boundary_integrity_status`
-- `simpleos_hardening_formal_boundary_integrity_gate`
-- `simpleos_hardening_formal_boundary_integrity_scope`
 - `simpleos_hardening_formal_boundary_integrity_evidence`
 - `simpleos_hardening_formal_process_resource_lifecycle_status`
-- `simpleos_hardening_formal_process_resource_lifecycle_gate`
-- `simpleos_hardening_formal_process_resource_lifecycle_scope`
 - `simpleos_hardening_formal_process_resource_lifecycle_evidence`
 - `simpleos_hardening_formal_coroutine_resource_bounds_status`
-- `simpleos_hardening_formal_coroutine_resource_bounds_gate`
-- `simpleos_hardening_formal_coroutine_resource_bounds_scope`
 - `simpleos_hardening_formal_coroutine_resource_bounds_evidence`
 - `simpleos_hardening_formal_compiler_language_status`
-- `simpleos_hardening_formal_compiler_language_gate`
-- `simpleos_hardening_formal_compiler_language_scope`
 - `simpleos_hardening_formal_compiler_language_evidence`
 - `simpleos_hardening_formal_ui_policy_status`
-- `simpleos_hardening_formal_ui_policy_gate`
-- `simpleos_hardening_formal_ui_policy_scope`
 - `simpleos_hardening_formal_ui_policy_evidence`
 - `simpleos_hardening_formal_coverage_status`
-- `simpleos_hardening_formal_coverage_gate`
-- `simpleos_hardening_formal_coverage_scope`
 - `simpleos_hardening_formal_coverage_evidence`
 - `simpleos_hardening_shared_wm_status`
 - `simpleos_hardening_cpu_simd_status`
@@ -233,10 +192,6 @@ required guest-side QEMU performance release gate is `pass`. Mission-critical
 release is a stricter gate: it still requires
 `scripts/check/check-simpleos-mission-critical-release.shs` to pass, including
 the strict RISC-V RTL SBY proof lane.
-
-The host-GPU 2D wrapper is supplemental and does not change the 26-row count.
-Set `SIMPLEOS_HOST_GPU_2D_LIVE=1` to run it, or provide
-`SIMPLEOS_HOST_GPU_2D_REPORT`; otherwise the matrix reports `not-run`.
 
 The report emits the counted `byl_sby_artifact_audit` row and the
 `riscv_rtl_rvfi_readiness_note` so generated SBY/RVFI readiness artifacts cannot
@@ -335,27 +290,36 @@ be mistaken for a completed RTL proof pass.
 
 #### rejects a status-only cached host-GPU report
 
-1. Validate the cached host-GPU report.
-2. Report malformed evidence without promoting it.
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-The matrix invokes the canonical host-GPU wrapper's report validator. A file
-containing only an overall `pass` and reason is classified as
-`fail/malformed-wrapper-report`; it cannot stand in for the three correlated
-Linux ISA receipts and their serial logs.
+
+- rejects a status-only cached host-GPU report
+- Validate the cached host-GPU report
+- Report malformed evidence without promoting it
+   - Expected: result[2] equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects a status-only cached host-GPU report")
 val run_id = _run_id()
 val host_gpu_report = _host_gpu_report_path(run_id)
 process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
+
 step("Validate the cached host-GPU report")
 expect(file_write(host_gpu_report,
     "simpleos_qemu_host_gpu_2d_status=pass\n" +
     "simpleos_qemu_host_gpu_2d_reason=all-linux-host-gpu-rows-pass\n"
 )).to_be(true)
 val result = _run_matrix_with_host_gpu_report(run_id, host_gpu_report)
+
 step("Report malformed evidence without promoting it")
 expect(result[2]).to_equal(0)
 expect(result[0]).to_contain("simpleos_hardening_qemu_host_gpu_2d_status=fail")
@@ -364,15 +328,24 @@ expect(result[0]).to_contain("simpleos_hardening_qemu_host_gpu_2d_reason=malform
 
 </details>
 
+<details>
+<summary>Advanced: passes the hardening matrix and mission-critical release gate with RTL/SBY prerequisites</summary>
+
 #### passes the hardening matrix and mission-critical release gate with RTL/SBY prerequisites
+
+- passes the hardening matrix and mission-critical release gate with RTL/SBY prerequisites
+   - Expected: code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 91 lines folded for reproduction.
+Runnable source: 215 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes the hardening matrix and mission-critical release gate with RTL/SBY prerequisites")
 val run_id = _run_id()
 val result = _run_matrix(run_id)
 val stdout = result[0]
@@ -381,6 +354,7 @@ val code = result[2]
 expect(code).to_equal(0)
 expect(stdout).to_contain("simpleos_hardening_stale_reports=none")
 expect(stdout).to_contain("simpleos_hardening_stale_report_names=none")
+expect(stdout).to_contain("simpleos_hardening_qemu_host_gpu_2d_status=not-run")
 expect(stdout).to_contain("qemu_gtk_wm_capture_evidence_2026-07-05.md")
 expect(stdout).to_contain("simpleos_hardening_matrix_status=pass")
 expect(stdout).to_contain("simpleos_hardening_matrix_reason=pass")
@@ -589,19 +563,24 @@ expect(report).to_contain("- formal_coverage_evidence: all SimpleOS hardening fo
 
 </details>
 
+
+</details>
+
 #### fails closed when live QMP passes but GUI SMF artifact contract is not executed
 
-- process run timeout
+- fails closed when live QMP passes but GUI SMF artifact contract is not executed
    - Expected: code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fails closed when live QMP passes but GUI SMF artifact contract is not executed")
 val run_id = _run_id()
 val qemu_report = _qemu_report_path(run_id)
 process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
@@ -662,17 +641,19 @@ expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_release_gate_statu
 
 #### keeps the combined GUI SMF artifact row passing while stale reports block release
 
-- process run timeout
-   - Expected: code equals `0`
+- keeps the combined GUI SMF artifact row passing while stale reports block release
+   - Expected: code equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps the combined GUI SMF artifact row passing while stale reports block release")
 val run_id = _run_id()
 val qemu_report = _qemu_report_path(run_id)
 process_run_timeout("/bin/sh", ["-c", "mkdir -p " + _build_dir(run_id)], 5000)
@@ -753,8 +734,56 @@ expect(stdout).to_contain("simpleos_hardening_qemu_guest_perf_harness_marker_lin
 
 ## Related Documentation
 
-- **Requirements:** [.spipe/gui_hardening_current_plan/state.md](.spipe/gui_hardening_current_plan/state.md)
-- **Plan:** [.spipe/gui_hardening_current_plan/state.md](.spipe/gui_hardening_current_plan/state.md)
+- **Requirements:** `.spipe/gui_hardening_current_plan/state.md`
+- **Plan:** `.spipe/gui_hardening_current_plan/state.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4a0f0700c11f26fdff6637957f7f54e630181a1f72c58c02f08e57d2841d7cc2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4a0f0700c11f26fdff6637957f7f54e630181a1f72c58c02f08e57d2841d7cc2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4a0f0700c11f26fdff6637957f7f54e630181a1f72c58c02f08e57d2841d7cc2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl
+mirror: doc/06_spec/03_system/gui/simpleos_hardening_evidence_matrix_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=80
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/gui/simpleos_hardening_evidence_matrix_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 4 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl:368:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a status-only cached host-GPU report' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl:604:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails closed when live QMP passes but GUI SMF artifact contract is not executed' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/gui/simpleos_hardening_evidence_matrix_spec.spl:662:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps the combined GUI SMF artifact row passing while stale reports block release' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

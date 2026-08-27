@@ -1,29 +1,6 @@
-# Lexer Integration Tests
+# Lexer Integration Specification
 
-> Integration testing for the lexer module - tokenization of Simple source code. Tests lexer interaction with other modules and public API coverage.
-
-<!-- sdn-diagram:id=lexer_integration_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lexer_integration_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lexer_integration_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lexer_integration_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Lexer Tokenization Integration, Lexer Symbol Recognition Integration, Lexer Error Handling Integration, Lexer Unicode Integration, Lexer Whitespace Integration, Lexer Number Literals Integration, Lexer String Literals Integration, Lexer Operator Recognition Integration, Lexer Performance Integration.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,46 +9,7 @@ lexer_integration_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Lexer Integration Tests
-
-Integration testing for the lexer module - tokenization of Simple source code. Tests lexer interaction with other modules and public API coverage.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #2001-2005 |
-| Category | Testing |
-| Difficulty | 3/5 |
-| Status | Implemented |
-| Source | `test/02_integration/compiler/lexer_integration_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Integration testing for the lexer module - tokenization of Simple source code.
-Tests lexer interaction with other modules and public API coverage.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| Tokenization | Converting source text to tokens |
-| Token Stream | Sequence of lexical tokens |
-| Error Recovery | Handling invalid syntax |
-
-## Related Specifications
-
-- [Lexer](../../src/compiler/10.frontend/core/lexer.spl) - Main lexer module
-- [Tokens](../../src/compiler/10.frontend/core/tokens.spl) - Token definitions
-
-## Examples
-
-```simple
-use compiler.core.lexer.{tokenize}
-val tokens = tokenize("fn foo(): pass")
-```
+# Lexer Integration Specification
 
 ## Scenarios
 
@@ -79,16 +17,22 @@ val tokens = tokenize("fn foo(): pass")
 
 #### tokenizes empty string
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- tokenizes empty string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes empty string")
 
 val input = ""
 check(input.len() == 0)
@@ -98,16 +42,18 @@ check(input.len() == 0)
 
 #### tokenizes identifier
 
-1. check
+- tokenizes identifier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes identifier")
 
 val input = "foo"
 check(input.len() == 3)
@@ -117,16 +63,18 @@ check(input.len() == 3)
 
 #### tokenizes number
 
-1. check
+- tokenizes number
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes number")
 
 val input = "42"
 check(input == "42")
@@ -136,16 +84,18 @@ check(input == "42")
 
 #### tokenizes string literal
 
-1. check
+- tokenizes string literal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes string literal")
 
 val input = "\"hello\""
 check(input.contains("hello"))
@@ -155,16 +105,18 @@ check(input.contains("hello"))
 
 #### tokenizes keywords
 
-1. check
+- tokenizes keywords
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes keywords")
 
 val keywords = ["fn", "class", "if", "else", "match", "for", "while"]
 for kw in keywords:
@@ -175,16 +127,18 @@ for kw in keywords:
 
 #### tokenizes operators
 
-1. check
+- tokenizes operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes operators")
 
 val operators = ["+", "-", "*", "/", "==", "!=", "<=", ">="]
 for op in operators:
@@ -195,16 +149,18 @@ for op in operators:
 
 #### tokenizes punctuation
 
-1. check
+- tokenizes punctuation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes punctuation")
 
 val puncts = ["(", ")", "[", "]", "{", "}", ",", ":", "."]
 for punct in puncts:
@@ -217,17 +173,18 @@ for punct in puncts:
 
 #### recognizes function definition
 
-1. check
-2. check
+- recognizes function definition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes function definition")
 
 val code = "fn add(x, y): x + y"
 check(code.contains("fn"))
@@ -238,17 +195,18 @@ check(code.contains("add"))
 
 #### recognizes class definition
 
-1. check
-2. check
+- recognizes class definition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes class definition")
 
 val code = "class Point:\n    x: i64\n    y: i64"
 check(code.contains("class"))
@@ -259,16 +217,18 @@ check(code.contains("Point"))
 
 #### recognizes variable declaration
 
-1. check
+- recognizes variable declaration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes variable declaration")
 
 val code = "val name = \"Alice\""
 check(code.contains("val"))
@@ -278,16 +238,18 @@ check(code.contains("val"))
 
 #### recognizes import statement
 
-1. check
+- recognizes import statement
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes import statement")
 
 val code = "use std.spec"
 check(code.contains("use"))
@@ -297,16 +259,18 @@ check(code.contains("use"))
 
 #### recognizes control flow
 
-1. check
+- recognizes control flow
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes control flow")
 
 val control = ["if", "elif", "else", "match", "for", "while"]
 for keyword in control:
@@ -319,16 +283,18 @@ for keyword in control:
 
 #### handles unterminated string
 
-1. check
+- handles unterminated string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles unterminated string")
 
 val invalid = "\"unclosed string"
 check(invalid.starts_with("\""))
@@ -338,16 +304,18 @@ check(invalid.starts_with("\""))
 
 #### handles invalid characters
 
-1. check
+- handles invalid characters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles invalid characters")
 
 val invalid = "@#$"
 check(invalid.len() == 3)
@@ -357,16 +325,18 @@ check(invalid.len() == 3)
 
 #### handles malformed numbers
 
-1. check
+- handles malformed numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles malformed numbers")
 
 val invalid = "123abc"
 check(invalid.contains("123"))
@@ -376,16 +346,18 @@ check(invalid.contains("123"))
 
 #### continues after error
 
-1. check
+- continues after error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("continues after error")
 
 val code = "valid @invalid valid"
 check(code.contains("valid"))
@@ -397,16 +369,18 @@ check(code.contains("valid"))
 
 #### handles unicode identifiers
 
-1. check
+- handles unicode identifiers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles unicode identifiers")
 
 val id = "変数"
 check(id.len() > 0)
@@ -416,16 +390,18 @@ check(id.len() > 0)
 
 #### handles unicode strings
 
-1. check
+- handles unicode strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles unicode strings")
 
 val str = "\"Hello 世界\""
 check(str.contains("世界"))
@@ -435,16 +411,18 @@ check(str.contains("世界"))
 
 #### handles emoji
 
-1. check
+- handles emoji
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles emoji")
 
 val emoji = "\"🚀🎉\""
 check(emoji.contains("🚀"))
@@ -454,16 +432,18 @@ check(emoji.contains("🚀"))
 
 #### handles RTL text
 
-1. check
+- handles RTL text
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles RTL text")
 
 val rtl = "\"שלום\""
 check(rtl.len() > 0)
@@ -475,16 +455,18 @@ check(rtl.len() > 0)
 
 #### ignores spaces
 
-1. check
+- ignores spaces
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("ignores spaces")
 
 val code = "val   x   =   42"
 check(code.contains("val"))
@@ -494,16 +476,18 @@ check(code.contains("val"))
 
 #### handles tabs
 
-1. check
+- handles tabs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles tabs")
 
 val code = "val\tx\t=\t42"
 check(code.contains("val"))
@@ -513,16 +497,18 @@ check(code.contains("val"))
 
 #### handles newlines
 
-1. check
+- handles newlines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles newlines")
 
 val code = "val x = 42\nval y = 43"
 check(code.contains("\n"))
@@ -532,16 +518,18 @@ check(code.contains("\n"))
 
 #### ignores line comments
 
-1. check
+- ignores line comments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("ignores line comments")
 
 val code = "val x = 42  # comment"
 check(code.contains("#"))
@@ -551,16 +539,18 @@ check(code.contains("#"))
 
 #### handles multi-line code
 
-1. check
+- handles multi-line code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles multi-line code")
 
 val code = "fn foo():\n    pass"
 check(code.contains("\n"))
@@ -572,16 +562,18 @@ check(code.contains("\n"))
 
 #### parses integers
 
-1. check
+- parses integers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses integers")
 
 val nums = ["0", "42", "1000", "99999"]
 for num in nums:
@@ -592,16 +584,18 @@ for num in nums:
 
 #### parses negative numbers
 
-1. check
+- parses negative numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses negative numbers")
 
 val nums = ["-1", "-42", "-1000"]
 for num in nums:
@@ -612,16 +606,18 @@ for num in nums:
 
 #### parses hex numbers
 
-1. check
+- parses hex numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses hex numbers")
 
 val nums = ["0x10", "0xFF", "0xABCD"]
 for num in nums:
@@ -632,16 +628,18 @@ for num in nums:
 
 #### parses binary numbers
 
-1. check
+- parses binary numbers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses binary numbers")
 
 val nums = ["0b101", "0b1111"]
 for num in nums:
@@ -654,17 +652,18 @@ for num in nums:
 
 #### parses simple strings
 
-1. check
-2. check
+- parses simple strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses simple strings")
 
 val strs = ["\"hello\"", "\"world\"", "\"test\""]
 for str in strs:
@@ -676,16 +675,18 @@ for str in strs:
 
 #### parses strings with escapes
 
-1. check
+- parses strings with escapes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses strings with escapes")
 
 val str = "\"line1\\nline2\""
 check(str.contains("\\n"))
@@ -695,16 +696,18 @@ check(str.contains("\\n"))
 
 #### parses raw strings
 
-1. check
+- parses raw strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses raw strings")
 
 val str = "r\"no\\escape\""
 check(str.starts_with("r\""))
@@ -714,16 +717,18 @@ check(str.starts_with("r\""))
 
 #### parses multiline strings
 
-1. check
+- parses multiline strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses multiline strings")
 
 val str = "\"\"\"multi\nline\"\"\""
 check(str.contains("\n"))
@@ -733,16 +738,18 @@ check(str.contains("\n"))
 
 #### handles string interpolation
 
-1. check
+- handles string interpolation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles string interpolation")
 
 val name = "world"
 val str = "Hello {name}"
@@ -755,16 +762,18 @@ check(str.contains("world"))
 
 #### recognizes arithmetic operators
 
-1. check
+- recognizes arithmetic operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes arithmetic operators")
 
 val ops = ["+", "-", "*", "/", "%", "**"]
 for op in ops:
@@ -775,16 +784,18 @@ for op in ops:
 
 #### recognizes comparison operators
 
-1. check
+- recognizes comparison operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes comparison operators")
 
 val ops = ["==", "!=", "<", ">", "<=", ">="]
 for op in ops:
@@ -795,16 +806,18 @@ for op in ops:
 
 #### recognizes logical operators
 
-1. check
+- recognizes logical operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes logical operators")
 
 val ops = ["and", "or", "not"]
 for op in ops:
@@ -815,16 +828,18 @@ for op in ops:
 
 #### recognizes special operators
 
-1. check
+- recognizes special operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes special operators")
 
 val ops = ["|>", ">>", "?."]
 for op in ops:
@@ -835,16 +850,18 @@ for op in ops:
 
 #### recognizes assignment operators
 
-1. check
+- recognizes assignment operators
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("recognizes assignment operators")
 
 val ops = ["=", "+=", "-=", "*="]
 for op in ops:
@@ -857,17 +874,18 @@ for op in ops:
 
 #### tokenizes 100 identifiers
 
-1. parts push
-2. check
+- tokenizes 100 identifiers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes 100 identifiers")
 
 var parts: [text] = []
 for i in 0..100:
@@ -881,17 +899,18 @@ check(code.len() > 400)
 
 #### tokenizes 50 function definitions
 
-1. parts push
-2. check
+- tokenizes 50 function definitions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tokenizes 50 function definitions")
 
 var parts: [text] = []
 for i in 0..50:
@@ -905,16 +924,18 @@ check(code.contains("fn"))
 
 #### handles deeply nested expressions
 
-1. check
+- handles deeply nested expressions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles deeply nested expressions")
 
 val code = "((((1 + 2) * 3) - 4) / 5)"
 val depth = code.count("(")
@@ -922,6 +943,29 @@ check(depth == 4)
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Source | `test/02_integration/compiler/lexer_integration_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Lexer Tokenization Integration, Lexer Symbol Recognition Integration, Lexer Error Handling Integration, Lexer Unicode Integration, Lexer Whitespace Integration, Lexer Number Literals Integration, Lexer String Literals Integration, Lexer Operator Recognition Integration, Lexer Performance Integration.
+- Lexer Tokenization Integration
+- Lexer Symbol Recognition Integration
+- Lexer Error Handling Integration
+- Lexer Unicode Integration
+- Lexer Whitespace Integration
+- Lexer Number Literals Integration
+- Lexer String Literals Integration
+- Lexer Operator Recognition Integration
+- Lexer Performance Integration
 
 ## Scenario Summary
 
@@ -935,3 +979,51 @@ check(depth == 4)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b2ee203b9aa1d41308ea08bb01d5c7dfdc36992fd1f318c6c4c047e9be1a19ad`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b2ee203b9aa1d41308ea08bb01d5c7dfdc36992fd1f318c6c4c047e9be1a19ad`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b2ee203b9aa1d41308ea08bb01d5c7dfdc36992fd1f318c6c4c047e9be1a19ad`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/compiler/lexer_integration_spec.spl
+mirror: doc/06_spec/02_integration/compiler/lexer_integration_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/compiler/lexer_integration_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/compiler/lexer_integration_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/compiler/lexer_integration_spec.spl:53:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes empty string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/lexer_integration_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes identifier' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/compiler/lexer_integration_spec.spl:67:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tokenizes number' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

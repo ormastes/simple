@@ -2,29 +2,6 @@
 
 > Validates that every current `WidgetKind.to_wire()` value is represented in the HTML widget renderer dispatch table, has an emitted renderer class marker, and is covered by the renderer spec corpus.
 
-<!-- sdn-diagram:id=gui_widget_rendering_fixture_coverage_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=gui_widget_rendering_fixture_coverage_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-gui_widget_rendering_fixture_coverage_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=gui_widget_rendering_fixture_coverage_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
@@ -47,7 +24,7 @@ Validates that every current `WidgetKind.to_wire()` value is represented in the 
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/gui_widget_rendering_fixture_coverage_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -89,6 +66,11 @@ sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs
 
 #### covers every WidgetKind in HTML renderer specs
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- covers every WidgetKind in HTML renderer specs
 - Run the widget rendering fixture coverage gate
    - Expected: code equals `0`
 - Read the emitted evidence contract
@@ -119,10 +101,12 @@ sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 82 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("covers every WidgetKind in HTML renderer specs")
 step("Run the widget rendering fixture coverage gate")
 val command = "rm -rf build/test-gui-widget-rendering-fixture-coverage && BUILD_DIR=build/test-gui-widget-rendering-fixture-coverage REPORT_PATH=build/test-gui-widget-rendering-fixture-coverage/report.md sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -220,8 +204,53 @@ expect(report).to_contain("- RenderDoc HTML fixture widgets covered: 43")
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/sys_test/html_css_spec_traceability.md](doc/03_plan/sys_test/html_css_spec_traceability.md)
-- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
+- **Plan:** `doc/03_plan/sys_test/html_css_spec_traceability.md`
+- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `efbb4b79ac9225977a515fa7827ffca13df09abc9518c772abe5d32d397c3184`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `efbb4b79ac9225977a515fa7827ffca13df09abc9518c772abe5d32d397c3184`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `efbb4b79ac9225977a515fa7827ffca13df09abc9518c772abe5d32d397c3184`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/03_system/check/gui_widget_rendering_fixture_coverage_spec.spl
+mirror: doc/06_spec/03_system/check/gui_widget_rendering_fixture_coverage_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/gui_widget_rendering_fixture_coverage_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/gui_widget_rendering_fixture_coverage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/gui_widget_rendering_fixture_coverage_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/check/gui_widget_rendering_fixture_coverage_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'covers every WidgetKind in HTML renderer specs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Sshd Production Packet Transcript Specification
 
-> 1.  client version bytes
-
-<!-- sdn-diagram:id=sshd_production_packet_transcript_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=sshd_production_packet_transcript_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-sshd_production_packet_transcript_spec -> std
-sshd_production_packet_transcript_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=sshd_production_packet_transcript_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SSHD production packet transcript.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,9 +17,21 @@ sshd_production_packet_transcript_spec -> os
 
 #### walks version, KEX, NEWKEYS, service, password auth, and channel packets
 
-1.  client version bytes
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2.  server version bytes
+
+- walks version, KEX, NEWKEYS, service, password auth, and channel packets
+   - Expected: server_version.is_ok() is true
+   - Expected: server_version.unwrap() equals `SSH-2.0-SimpleOS_1.0`
+   - Expected: client_kex.is_ok() is true
+   - Expected: server_kex.is_ok() is true
+   - Expected: algos.is_ok() is true
+   - Expected: algos.unwrap().kex equals `curve25519-sha256`
+   - Expected: algos.unwrap().host_key equals `ssh-ed25519`
+   - Expected: algos.unwrap().cipher_s2c equals `aes256-gcm@openssh.com`
+   - Expected: parsed_client_public.is_ok() is true
+   - Expected: parsed_client_public.unwrap() equals `client_public`
    - Expected: sig_blob.is_ok() is true
    - Expected: sig_parts.0 equals `ssh-ed25519`
    - Expected: ed25519_verify(pubkey, exchange_hash, sig_parts.1) is true
@@ -53,10 +41,8 @@ sshd_production_packet_transcript_spec -> os
    - Expected: service.is_ok() is true
    - Expected: service.unwrap() equals `ssh-userauth`
    - Expected: service_accept[0] equals `6`
-   - Expected: auth.is_ok() is true
-   - Expected: auth.unwrap().username equals `root`
-   - Expected: auth.unwrap().method equals `password`
-   - Expected: users.authenticate_password("root", "simpleos") is true
+   - Expected: auth.is_err() is true
+   - Expected: users.authenticate_password("root", "simpleos") is false
    - Expected: ssh_build_auth_success()[0] equals `52`
    - Expected: open.is_ok() is true
    - Expected: open.unwrap().0 equals `session`
@@ -75,12 +61,14 @@ sshd_production_packet_transcript_spec -> os
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
 Runnable source: 107 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("walks version, KEX, NEWKEYS, service, password auth, and channel packets")
 val seed = _ed25519_seed()
 val pubkey = ed25519_keypair_from_seed(seed).1
 val host_keys = HostKeySet(
@@ -89,7 +77,7 @@ val host_keys = HostKeySet(
     rsa_public_blob: nil,
     ecdsa_p256_pkcs8: nil
 )
-expect(host_keys.ed25519_seed != nil).to_equal(true)
+assert_not_equal(host_keys.ed25519_seed, nil)
 
 val server_version = ssh_parse_version_string(ssh_build_version_string())
 expect(server_version.is_ok()).to_equal(true)
@@ -156,12 +144,10 @@ expect(service.unwrap()).to_equal("ssh-userauth")
 val service_accept = ssh_build_service_accept("ssh-userauth")
 expect(service_accept[0]).to_equal(6)
 
-val users = sshd_create_default_users()
+val users = configured_test_users()
 val auth = ssh_parse_auth_request(_build_password_auth_request("root", "simpleos"))
-expect(auth.is_ok()).to_equal(true)
-expect(auth.unwrap().username).to_equal("root")
-expect(auth.unwrap().method).to_equal("password")
-expect(users.authenticate_password("root", "simpleos")).to_equal(true)
+expect(auth.is_err()).to_equal(true)
+expect(users.authenticate_password("root", "simpleos")).to_equal(false)
 expect(ssh_build_auth_success()[0]).to_equal(52)
 
 val open = ssh_parse_channel_open(_build_channel_open(7))
@@ -199,12 +185,12 @@ expect(close.unwrap()).to_equal(0)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SSHD production packet transcript.
 - SSHD production packet transcript
 
 ## Scenario Summary
@@ -219,3 +205,48 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8781d499c1a064b5eb53275139778e5187d58eb01d9f939ee673f70d2832c3a9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8781d499c1a064b5eb53275139778e5187d58eb01d9f939ee673f70d2832c3a9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8781d499c1a064b5eb53275139778e5187d58eb01d9f939ee673f70d2832c3a9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
+
+SSpec documentization score: 89/100
+source: test/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.spl
+mirror: doc/06_spec/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/os/apps/sshd/sshd_production_packet_transcript_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walks version, KEX, NEWKEYS, service, password auth, and channel packets' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

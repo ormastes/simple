@@ -2,29 +2,6 @@
 
 > MountTable DBFS Dispatch Specification
 
-<!-- sdn-diagram:id=mount_table_dbfs_dispatch_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mount_table_dbfs_dispatch_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mount_table_dbfs_dispatch_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mount_table_dbfs_dispatch_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
@@ -43,7 +20,7 @@ MountTable DBFS Dispatch Specification
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 MountTable DBFS Dispatch Specification
@@ -57,13 +34,23 @@ path lookups correctly through MountTable longest-prefix match.
 
 #### path under /data routes to DbFsDriver
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- path under /data routes to DbFsDriver
+   - Expected: resolved.driver_name() equals `DbFsDriver`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("path under /data routes to DbFsDriver")
 val mt = make_table_with_both()
 val resolved = mt.resolve_driver("/data/foo.txt").unwrap()
 expect(resolved.driver_name()).to_equal("DbFsDriver")
@@ -73,29 +60,41 @@ expect(resolved.driver_name()).to_equal("DbFsDriver")
 
 #### path under / (not /data) routes to RamFsDriver
 
+- path under / (not /data) routes to RamFsDriver
+   - Expected: resolved.driver_name() equals `ramfs`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("path under / (not /data) routes to RamFsDriver")
 val mt = make_table_with_both()
 val resolved = mt.resolve_driver("/etc/config").unwrap()
-expect(resolved.driver_name()).to_equal("RamFsDriver")
+expect(resolved.driver_name()).to_equal("ramfs")
 ```
 
 </details>
 
 #### exact /data route resolves to DbFsDriver
 
+- exact /data route resolves to DbFsDriver
+   - Expected: resolved.driver_name() equals `DbFsDriver`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("exact /data route resolves to DbFsDriver")
 val mt = make_table_with_both()
 val resolved = mt.resolve_driver("/data").unwrap()
 expect(resolved.driver_name()).to_equal("DbFsDriver")
@@ -105,13 +104,19 @@ expect(resolved.driver_name()).to_equal("DbFsDriver")
 
 #### nested path /data/a/b/c routes to DbFsDriver
 
+- nested path /data/a/b/c routes to DbFsDriver
+   - Expected: resolved.driver_name() equals `DbFsDriver`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("nested path /data/a/b/c routes to DbFsDriver")
 val mt = make_table_with_both()
 val resolved = mt.resolve_driver("/data/a/b/c").unwrap()
 expect(resolved.driver_name()).to_equal("DbFsDriver")
@@ -121,23 +126,9 @@ expect(resolved.driver_name()).to_equal("DbFsDriver")
 
 #### does not route sibling path names through the /data DBFS mount
 
-<details>
-<summary>Executable SSpec</summary>
+- does not route sibling path names through the /data DBFS mount
+   - Expected: resolved.driver_name() equals `ramfs`
 
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val mt = make_table_with_both()
-val resolved = mt.resolve_driver("/database/file").unwrap()
-expect(resolved.driver_name()).to_equal("RamFsDriver")
-```
-
-</details>
-
-### MountTable DBFS dispatch — exhaustive match compiles clean
-
-#### DriverInstance.DbFs variant is present in driver_name()
 
 <details>
 <summary>Executable SSpec</summary>
@@ -146,6 +137,32 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("does not route sibling path names through the /data DBFS mount")
+val mt = make_table_with_both()
+val resolved = mt.resolve_driver("/database/file").unwrap()
+expect(resolved.driver_name()).to_equal("ramfs")
+```
+
+</details>
+
+### MountTable DBFS dispatch — exhaustive match compiles clean
+
+#### DriverInstance.DbFs variant is present in driver_name()
+
+- DriverInstance.DbFs variant is present in driver_name()
+   - Expected: name equals `DbFsDriver`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("DriverInstance.DbFs variant is present in driver_name()")
 val driver = DbFsDriver.new_hosted()
 val inst = DriverInstance.DbFs(driver)
 # driver_name() must handle DbFs variant — if it panics, the match is not exhaustive.
@@ -159,29 +176,8 @@ expect(name).to_equal("DbFsDriver")
 
 #### unmount /data leaves / still resolvable
 
-- mt unmount
-   - Expected: resolved.driver_name() equals `RamFsDriver`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val mt = make_table_with_both()
-mt.unmount("/data").unwrap()
-val resolved = mt.resolve_driver("/etc/hosts").unwrap()
-expect(resolved.driver_name()).to_equal("RamFsDriver")
-```
-
-</details>
-
-#### resolve after unmount of /data returns error for /data path
-
-- mt unmount
-   - Expected: resolved.is_ok() is true
+- unmount /data leaves / still resolvable
+   - Expected: resolved.driver_name() equals `ramfs`
 
 
 <details>
@@ -191,6 +187,31 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("unmount /data leaves / still resolvable")
+val mt = make_table_with_both()
+mt.unmount("/data").unwrap()
+val resolved = mt.resolve_driver("/etc/hosts").unwrap()
+expect(resolved.driver_name()).to_equal("ramfs")
+```
+
+</details>
+
+#### resolve after unmount of /data returns error for /data path
+
+- resolve after unmount of /data returns error for /data path
+   - Expected: resolved.is_ok() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-INTEGRATION
+step("resolve after unmount of /data returns error for /data path")
 val mt = make_table_with_both()
 mt.unmount("/data").unwrap()
 # /data no longer has a dedicated mount; falls back to / (RamFs) if present.
@@ -213,3 +234,51 @@ expect(resolved.is_ok()).to_equal(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9d57836d85ca20b6ffcdce0f0a43100dc14ae5a66f600ae8cc31f26e2e0a47f2`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9d57836d85ca20b6ffcdce0f0a43100dc14ae5a66f600ae8cc31f26e2e0a47f2`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9d57836d85ca20b6ffcdce0f0a43100dc14ae5a66f600ae8cc31f26e2e0a47f2`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl
+mirror: doc/06_spec/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'path under /data routes to DbFsDriver' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl:41:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'path under / (not /data) routes to RamFsDriver' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/dbfs/mount_table_dbfs_dispatch_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exact /data route resolves to DbFsDriver' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

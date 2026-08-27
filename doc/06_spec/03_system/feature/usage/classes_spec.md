@@ -2,29 +2,6 @@
 
 > Tests for class definitions, instance creation, field access, methods, impl blocks, context blocks, method_missing, auto-forwarding properties, and static polymorphism with interface bindings.
 
-<!-- sdn-diagram:id=classes_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=classes_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-classes_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=classes_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 23 | 23 | 0 | 0 |
@@ -44,7 +21,7 @@ Tests for class definitions, instance creation, field access, methods, impl bloc
 | Category | Language \| Classes |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/classes_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -65,6 +42,8 @@ x: i64
 y: i64
 
 impl Point:
+use std.spec.step
+
 fn sum(self):
 return self.x + self.y
 
@@ -78,17 +57,22 @@ method()  # Dispatches to obj.method()
 
 #### calls static method on class
 
-1. static fn add
-2. expect Calculator add
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- calls static method on class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls static method on class")
 class Calculator:
     static fn add(a, b):
         return a + b
@@ -100,18 +84,18 @@ expect Calculator.add(3, 4) == 7
 
 #### calls multiple static methods
 
-1. static fn double
-2. static fn triple
-3. expect Math double
+- calls multiple static methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls multiple static methods")
 class Math:
     static fn double(x):
         return x * 2
@@ -128,17 +112,18 @@ expect Math.double(5) + Math.triple(4) == 22
 
 #### adds method to struct via impl
 
-1. fn sum
-2. expect p sum
+- adds method to struct via impl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds method to struct via impl")
 # Block-scoped impl now works!
 struct Point:
     x: i64
@@ -156,17 +141,18 @@ expect p.sum() == 40
 
 #### adds method with arguments via impl
 
-1. fn add
-2. expect c add
+- adds method with arguments via impl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds method with arguments via impl")
 # Block-scoped impl now works!
 struct Counter:
     value: i64
@@ -185,13 +171,18 @@ expect c.add(5) == 15
 
 #### creates instances with direct construction
 
+- creates instances with direct construction
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates instances with direct construction")
 class Person:
     name: text
     age: i64
@@ -204,13 +195,18 @@ expect p.age == 30
 
 #### accesses string field
 
+- accesses string field
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accesses string field")
 class Greeting:
     message: text
 
@@ -225,13 +221,18 @@ expect result == 1
 
 #### creates class with default field values
 
+- creates class with default field values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates class with default field values")
 class Counter:
     count: i64
 
@@ -245,17 +246,18 @@ expect c.count == 0
 
 #### calls instance method
 
-1. fn get double
-2. expect b get double
+- calls instance method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls instance method")
 class Box:
     value: i64
 
@@ -270,17 +272,18 @@ expect b.get_double() == 42
 
 #### calls method with arguments
 
-1. fn add
-2. expect a add
+- calls method with arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls method with arguments")
 class Adder:
     base: i64
 
@@ -297,17 +300,18 @@ expect a.add(5) == 15
 
 #### dispatches method to context object
 
-1. fn double
-2. res = double
+- dispatches method to context object
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dispatches method to context object")
 # Block-scoped context now works!
 class Calculator:
     fn double(self, x):
@@ -324,17 +328,18 @@ expect res == 42
 
 #### accesses self fields in context method
 
-1. fn add
-2. res = add
+- accesses self fields in context method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accesses self fields in context method")
 # Block-scoped context now works!
 class Adder:
     base: i64 = 10
@@ -355,17 +360,18 @@ expect res == 42
 
 #### calls method_missing for unknown method
 
-1. fn method missing
-2. expect d unknown method
+- calls method_missing for unknown method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls method_missing for unknown method")
 class DSL:
     fn method_missing(self, name, args, block):
         return 42
@@ -378,17 +384,18 @@ expect d.unknown_method() == 42
 
 #### passes arguments to method_missing
 
-1. fn method missing
-2. expect m any method
+- passes arguments to method_missing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes arguments to method_missing")
 class Multiplier:
     factor: i64 = 10
 
@@ -404,17 +411,18 @@ expect m.any_method(6) == 42
 
 #### uses method_missing in context block
 
-1. fn method missing
-2. res = something undefined
+- uses method_missing in context block
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses method_missing in context block")
 # Block-scoped context now works!
 class Counter:
     count: i64 = 0
@@ -435,16 +443,18 @@ expect res == 42
 
 #### gets property via get_ method
 
-1. fn get name
+- gets property via get_ method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("gets property via get_ method")
 class Person:
     fn get_name(self) -> text:
         return self._name
@@ -460,18 +470,18 @@ expect result == 1
 
 #### sets property via set_ method returning new instance
 
-1. fn get value
-2. fn set value
-3. expect c2 get value
+- sets property via set_ method returning new instance
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sets property via set_ method returning new instance")
 class ValueHolder:
     fn get_value(self) -> i64:
         return self._value
@@ -488,16 +498,18 @@ expect c2.get_value() == 42
 
 #### checks boolean property via is_ method
 
-1. fn is active
+- checks boolean property via is_ method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("checks boolean property via is_ method")
 class Item:
     fn is_active(self) -> bool:
         return self._active
@@ -513,18 +525,18 @@ expect result == 1
 
 #### uses combined getter and setter
 
-1. fn get content
-2. fn set content
-3. expect b2 get content
+- uses combined getter and setter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses combined getter and setter")
 class ContentBox:
     fn get_content(self) -> i64:
         return self._content
@@ -543,18 +555,18 @@ expect b2.get_content() == 100
 
 #### binds trait to concrete class
 
-1. fn log
-2. fn log
-3. fn create logger
+- binds trait to concrete class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("binds trait to concrete class")
 trait Logger:
     fn log(self, msg: text) -> text
 
@@ -579,20 +591,18 @@ expect result == 1
 
 #### binds trait with multiple methods
 
-1. fn add
-2. fn multiply
-3. fn add
-4. fn multiply
-5. expect calc add
+- binds trait with multiple methods
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("binds trait with multiple methods")
 trait Calculator:
     fn add(self, a: i64, b: i64) -> i64
     fn multiply(self, a: i64, b: i64) -> i64
@@ -613,20 +623,18 @@ expect calc.add(3, 4) + calc.multiply(2, 5) == 17
 
 #### binds trait with fields
 
-1. fn get value
-2. fn increment
-3. fn get value
-4. fn increment
-5. expect counter get value
+- binds trait with fields
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("binds trait with fields")
 trait Counter:
     fn get_value(self) -> i64
     fn increment(self) -> i64
@@ -650,19 +658,18 @@ expect counter.get_value() == 42
 
 #### passes bound trait as function parameter
 
-1. fn greet
-2. fn greet
-3. fn do greeting
-4. expect do greeting
+- passes bound trait as function parameter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes bound trait as function parameter")
 trait Greeter:
     fn greet(self, name: text) -> i64
 
@@ -687,19 +694,18 @@ expect do_greeting(greeter) == 50
 
 #### calculates different areas via Shape trait
 
-1. fn area
-2. fn area
-3. fn area
-4. expect s area
+- calculates different areas via Shape trait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calculates different areas via Shape trait")
 # Block-scoped impl Trait for Type now works!
 trait Shape:
     fn area(self) -> i64
@@ -738,3 +744,51 @@ expect s.area() + r.area() == 37
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `542b135522c62d8f905ba9a0f9db9adb2f6fe2694c377265e3b93b25a95f2b13`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `542b135522c62d8f905ba9a0f9db9adb2f6fe2694c377265e3b93b25a95f2b13`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `542b135522c62d8f905ba9a0f9db9adb2f6fe2694c377265e3b93b25a95f2b13`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/classes_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/classes_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/classes_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/classes_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/classes_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls static method on class' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/classes_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls multiple static methods' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/classes_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'adds method to struct via impl' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

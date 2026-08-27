@@ -2,29 +2,6 @@
 
 > This specification guards the canonical feature tracking row for the multicore-green lane. The row must remain honest after the selected Full Go-Like Runtime Roadmap requirements were written.
 
-<!-- sdn-diagram:id=multicore_green_tracking_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=multicore_green_tracking_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-multicore_green_tracking_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=multicore_green_tracking_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 13 | 13 | 0 | 0 |
@@ -48,7 +25,7 @@ This specification guards the canonical feature tracking row for the multicore-g
 | Design | doc/05_design/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/feature/usage/multicore_green_tracking_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -102,7 +79,7 @@ same commit as the tracking row.
 ## TUI Capture
 
 ```text
-Simple Test Runner v1.0.0-beta
+Simple Test Runner v1.0.0-RC
 Running: test/03_system/feature/usage/multicore_green_tracking_spec.spl
 Multicore green tracking contract PASSED
 Files: 1
@@ -228,6 +205,7 @@ Failed: 0
 
 #### tracks the multicore-green lane as current rather than done
 
+- tracks the multicore-green lane as current rather than done
 - Read the canonical multicore-green tracking row
 - Verify the lane is current while full Go-like runtime work remains active
    - Expected: absent_in_text(row, "\"done\"") equals `1`
@@ -236,10 +214,12 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tracks the multicore-green lane as current rather than done")
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 step("Verify the lane is current while full Go-like runtime work remains active")
@@ -252,6 +232,7 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 
 #### links selected requirements without stale option documents
 
+- links selected requirements without stale option documents
 - Read the canonical multicore-green tracking row
 - Verify selected requirement documents are linked
 - Verify deleted option documents are not linked
@@ -265,10 +246,12 @@ expect(absent_in_text(row, "\"done\"")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("links selected requirements without stale option documents")
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 val feature_req = rt_file_read_text("doc/02_requirements/feature/multicore_green.md") ?? ""
@@ -302,6 +285,7 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 
 #### links research plan architecture and design artifacts
 
+- links research plan architecture and design artifacts
 - Read the canonical multicore-green tracking row
 - Verify research links are present
 - Verify plan and design links are present
@@ -319,10 +303,12 @@ expect(absent_in_text(nfr_req, "bin/simple test test/05_perf/stress/multicore_gr
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 84 lines folded for reproduction.
+Runnable source: 86 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("links research plan architecture and design artifacts")
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 step("Verify research links are present")
@@ -413,6 +399,7 @@ expect(parallel_large_report).to_contain("active report checked by the large-pro
 
 #### keeps Go scheduler research current for profile fairness
 
+- keeps Go scheduler research current for profile fairness
 - Read the Go scheduler domain research notes
 - Verify the current refresh date and official Go scheduler model are recorded
 - Verify current GOMAXPROCS default/update behavior is captured
@@ -422,10 +409,12 @@ expect(parallel_large_report).to_contain("active report checked by the large-pro
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps Go scheduler research current for profile fairness")
 step("Read the Go scheduler domain research notes")
 val domain = rt_file_read_text("doc/01_research/domain/multicore_green.md") ?? ""
 val comparison = rt_file_read_text("doc/01_research/lib/threading/go_vs_simple_threads.md") ?? ""
@@ -454,6 +443,7 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 
 #### links SimpleOS and profile SSPEC evidence
 
+- links SimpleOS and profile SSPEC evidence
 - Read the canonical multicore-green tracking row
 - Verify SimpleOS green-carrier specs are linked
    - Expected: absent_in_text(simpleos_report, "hosted SimpleOS") equals `1`
@@ -468,10 +458,12 @@ expect(comparison).to_contain("runtime.GOMAXPROCS(0)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 163 lines folded for reproduction.
+Runnable source: 165 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("links SimpleOS and profile SSPEC evidence")
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 step("Verify SimpleOS green-carrier specs are linked")
@@ -518,11 +510,11 @@ expect(row).to_contain("test/03_system/feature/usage/concurrency_api_misuse_spec
 expect(row).to_contain("test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl")
-expect(row).to_contain("doc/06_spec/test/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/concurrency_api_misuse_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_agent_plan_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/os/simpleos/feature/simpleos_green_hardware_handoff_blocker_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/concurrency_api_misuse_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/smf_runtime_pool_closure_regression_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/cooperative_green_smf_mutable_global_regression_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/multicore_green_agent_plan_spec.md")
 step("Verify the public API contract summary remains explicit")
 expect(row).to_contain("positive_fixtures=6")
 expect(row).to_contain("misuse_fixtures=11")
@@ -641,6 +633,7 @@ expect(system_plan).to_contain("cooperative-presence")
 
 #### keeps generated checked-in and total misuse fixture counts distinct in the plan
 
+- keeps generated checked-in and total misuse fixture counts distinct in the plan
 - Read the multicore-green system-test plan
 - Verify the generated profile-script count is named separately
 - Verify the checked-in misuse fixture inventory is named separately
@@ -651,10 +644,12 @@ expect(system_plan).to_contain("cooperative-presence")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps generated checked-in and total misuse fixture counts distinct in the plan")
 step("Read the multicore-green system-test plan")
 val plan = read_sys_test_plan()
 step("Verify the generated profile-script count is named separately")
@@ -674,6 +669,7 @@ expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 
 #### keeps multicore-green tracking artifacts free of merge conflict markers
 
+- keeps multicore-green tracking artifacts free of merge conflict markers
 - Read tracking and plan artifacts for the multicore-green lane
 - Verify conflict markers and merged fixture counts are absent
    - Expected: absent_in_text(combined, "<<<<<<<") equals `1`
@@ -686,10 +682,12 @@ expect(absent_in_text(plan, "misuse_fixtures=611")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps multicore-green tracking artifacts free of merge conflict markers")
 step("Read tracking and plan artifacts for the multicore-green lane")
 val row = multicore_green_row(read_tracking_db())
 val agent_plan = rt_file_read_text("doc/03_plan/agent_tasks/multicore_green.md") ?? ""
@@ -707,6 +705,7 @@ expect(absent_in_text(combined, "misuse_fixtures=611")).to_equal(1)
 
 #### links implementation and guide surfaces
 
+- links implementation and guide surfaces
 - Read the canonical multicore-green tracking row
 - Verify Pure Simple implementation surfaces are linked
 - Verify native runtime-pool value-boundary evidence is tracked
@@ -716,10 +715,12 @@ expect(absent_in_text(combined, "misuse_fixtures=611")).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("links implementation and guide surfaces")
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 step("Verify Pure Simple implementation surfaces are linked")
@@ -742,6 +743,7 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 
 #### keeps public concurrency API maps aligned with sliced misuse diagnostics
 
+- keeps public concurrency API maps aligned with sliced misuse diagnostics
 - Read the public guide and coding-skill API maps
 - Verify sliced API misuse diagnostics stay documented
 
@@ -749,10 +751,12 @@ expect(row).to_contain("doc/07_guide/lib/misc/stdlib.md")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 32 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps public concurrency API maps aligned with sliced misuse diagnostics")
 step("Read the public guide and coding-skill API maps")
 val stdlib = rt_file_read_text("doc/07_guide/lib/misc/stdlib.md") ?? ""
 val perf = rt_file_read_text("doc/07_guide/compiler/check_perf.md") ?? ""
@@ -789,6 +793,7 @@ expect(coding).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 
 #### keeps guide surfaces honest about M:N evidence boundaries
 
+- keeps guide surfaces honest about M:N evidence boundaries
 - Read the public guide and profile guide
 - Verify cooperative green remains documented as single-carrier work
 - Verify hosted M:N claims require runtime-pool and scheduler-width evidence
@@ -802,10 +807,12 @@ expect(coding).to_contain("MulticoreGreenSlicedHandle.ran_inline_fallback()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 171 lines folded for reproduction.
+Runnable source: 173 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps guide surfaces honest about M:N evidence boundaries")
 step("Read the public guide and profile guide")
 val requirements = rt_file_read_text("doc/02_requirements/feature/multicore_green.md") ?? ""
 val nfr = rt_file_read_text("doc/02_requirements/nfr/multicore_green.md") ?? ""
@@ -983,6 +990,7 @@ expect(api_contract).to_contain("multicore_green_spawn_sliced")
 
 #### keeps concurrency TUI captures free of runner ordinal labels
 
+- keeps concurrency TUI captures free of runner ordinal labels
 - Read source manuals that describe multicore-green evidence
 - Verify captures use meaningful labels rather than [current/total] runner ordinals
    - Expected: absent_in_text(combined, runner_ordinal_label("1", "1")) equals `1`
@@ -993,10 +1001,12 @@ expect(api_contract).to_contain("multicore_green_spawn_sliced")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps concurrency TUI captures free of runner ordinal labels")
 step("Read source manuals that describe multicore-green evidence")
 val tracking_spec = rt_file_read_text("test/03_system/feature/usage/multicore_green_tracking_spec.spl") ?? ""
 val agent_plan_spec = rt_file_read_text("test/03_system/feature/usage/multicore_green_agent_plan_spec.spl") ?? ""
@@ -1017,6 +1027,7 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 
 #### links active runtime blockers and closed SimpleOS handoff evidence
 
+- links active runtime blockers and closed SimpleOS handoff evidence
 - Read the canonical multicore-green tracking row
 - Verify unresolved runtime blockers remain visible
 - Verify the SimpleOS final handoff closure remains visible
@@ -1034,10 +1045,12 @@ expect(combined).to_contain("Multicore green cross-language profile gate PASSED"
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("links active runtime blockers and closed SimpleOS handoff evidence")
 step("Read the canonical multicore-green tracking row")
 val row = multicore_green_row(read_tracking_db())
 step("Verify unresolved runtime blockers remain visible")
@@ -1073,11 +1086,11 @@ expect(row).to_contain("test/03_system/feature/usage/multicore_green_parallelism
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.spl")
 expect(row).to_contain("test/03_system/feature/usage/multicore_green_safepoint_fairness_regression_spec.spl")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_thread_yield_gap_spec.md")
-expect(row).to_contain("doc/06_spec/test/03_system/feature/usage/multicore_green_safepoint_fairness_regression_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/multicore_green_blocking_compensation_gap_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/multicore_green_parallelism_bound_gap_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/multicore_green_fairness_preemption_gap_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/multicore_green_thread_yield_gap_spec.md")
+expect(row).to_contain("doc/06_spec/03_system/feature/usage/multicore_green_safepoint_fairness_regression_spec.md")
 step("Verify stale active-blocker wording is absent")
 expect(absent_in_text(row, stale_simpleos_handoff_gate_phrase())).to_equal(1)
 expect(absent_in_text(row, "SimpleOS final handoff are closed")).to_equal(1)
@@ -1088,6 +1101,7 @@ expect(absent_in_text(row, "resumable-stepper native blocker remains open")).to_
 
 #### keeps active native regression syntax off the stale release wrapper
 
+- keeps active native regression syntax off the stale release wrapper
 - Read active native regression specs that compile generated probes
 - Reject stale release-wrapper commands in active Syntax examples
    - Expected: absent_in_text(thread_zero, "bin/release/simple test") equals `1`
@@ -1103,10 +1117,12 @@ expect(absent_in_text(row, "resumable-stepper native blocker remains open")).to_
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps active native regression syntax off the stale release wrapper")
 step("Read active native regression specs that compile generated probes")
 val thread_zero = read_file("test/03_system/feature/usage/thread_spawn_native_zero_join_blocker_spec.spl")
 val handle_array = read_file("test/03_system/feature/usage/multicore_green_handle_array_join_native_blocker_spec.spl")
@@ -1144,10 +1160,62 @@ expect(absent_in_text(callable, "val SIMPLE_BIN: text = \"bin/release/simple\"")
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
-- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
-- **Design:** [doc/05_design/multicore_green.md](doc/05_design/multicore_green.md)
-- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
+- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
+- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
+- **Design:** `doc/05_design/multicore_green.md`
+- **Research:** `doc/01_research/local/multicore_green.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-MCG-010.`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a75f3dd564022b683eca0212ddebc7a9d8658d91d2076fc758c3db2b57bfc3a8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a75f3dd564022b683eca0212ddebc7a9d8658d91d2076fc758c3db2b57bfc3a8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a75f3dd564022b683eca0212ddebc7a9d8658d91d2076fc758c3db2b57bfc3a8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/feature/usage/multicore_green_tracking_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/multicore_green_tracking_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/multicore_green_tracking_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/multicore_green_tracking_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/multicore_green_tracking_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 33 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/feature/usage/multicore_green_tracking_spec.spl:226:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'tracks the multicore-green lane as current rather than done' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/multicore_green_tracking_spec.spl:236:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'links selected requirements without stale option documents' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/multicore_green_tracking_spec.spl:267:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'links research plan architecture and design artifacts' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

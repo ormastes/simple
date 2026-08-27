@@ -1,29 +1,6 @@
-# Init Command Unit Tests
+# Init Specification
 
-> 1. check
-
-<!-- sdn-diagram:id=init_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=init_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-init_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=init_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Project Initialization, Project Templates, Init Options, Generated Files.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,18 +9,7 @@ init_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Init Command Unit Tests
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #APP-INIT-001 |
-| Category | App \| Init |
-| Status | Implemented |
-| Source | `test/01_unit/app/init/init_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+# Init Specification
 
 ## Scenarios
 
@@ -51,16 +17,22 @@ init_spec
 
 #### creates project directory
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates project directory
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates project directory")
 val created = true
 check(created)
 ```
@@ -69,16 +41,18 @@ check(created)
 
 #### creates src directory
 
-1. check
+- creates src directory
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates src directory")
 val path = "src/"
 check(path == "src/")
 ```
@@ -87,16 +61,18 @@ check(path == "src/")
 
 #### creates test directory
 
-1. check
+- creates test directory
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates test directory")
 val path = "test/"
 check(path == "test/")
 ```
@@ -105,16 +81,18 @@ check(path == "test/")
 
 #### creates main.spl
 
-1. check
+- creates main.spl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates main.spl")
 val path = "src/main.spl"
 check(path.ends_with(".spl"))
 ```
@@ -123,16 +101,18 @@ check(path.ends_with(".spl"))
 
 #### creates simple.sdn config
 
-1. check
+- creates simple.sdn config
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates simple.sdn config")
 val path = "simple.sdn"
 check(path.ends_with(".sdn"))
 ```
@@ -143,16 +123,18 @@ check(path.ends_with(".sdn"))
 
 #### binary project template
 
-1. check
+- binary project template
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("binary project template")
 val template = "binary"
 check(template == "binary")
 ```
@@ -161,16 +143,18 @@ check(template == "binary")
 
 #### library project template
 
-1. check
+- library project template
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("library project template")
 val template = "library"
 check(template == "library")
 ```
@@ -179,16 +163,18 @@ check(template == "library")
 
 #### workspace template
 
-1. check
+- workspace template
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("workspace template")
 val template = "workspace"
 check(template == "workspace")
 ```
@@ -197,16 +183,18 @@ check(template == "workspace")
 
 #### baremetal template
 
-1. check
+- baremetal template
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("baremetal template")
 val template = "baremetal"
 check(template == "baremetal")
 ```
@@ -217,16 +205,18 @@ check(template == "baremetal")
 
 #### project name
 
-1. check
+- project name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("project name")
 val name = "my-project"
 check(name.len() > 0)
 ```
@@ -235,16 +225,18 @@ check(name.len() > 0)
 
 #### custom path
 
-1. check
+- custom path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("custom path")
 val path = "/tmp/my-project"
 check(path.starts_with("/"))
 ```
@@ -253,16 +245,18 @@ check(path.starts_with("/"))
 
 #### no-git option
 
-1. check
+- no-git option
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("no-git option")
 val no_git = false
 check(not no_git or no_git)
 ```
@@ -271,16 +265,18 @@ check(not no_git or no_git)
 
 #### with examples
 
-1. check
+- with examples
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("with examples")
 val with_examples = true
 check(with_examples)
 ```
@@ -291,16 +287,18 @@ check(with_examples)
 
 #### main.spl has hello world
 
-1. check
+- main.spl has hello world
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("main.spl has hello world")
 val content = "print \"Hello, World!\""
 check(content.contains("Hello"))
 ```
@@ -309,16 +307,18 @@ check(content.contains("Hello"))
 
 #### simple.sdn has project name
 
-1. check
+- simple.sdn has project name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("simple.sdn has project name")
 val content = "name: my-project"
 check(content.contains("name"))
 ```
@@ -327,16 +327,18 @@ check(content.contains("name"))
 
 #### gitignore created
 
-1. check
+- gitignore created
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gitignore created")
 val file = ".gitignore"
 check(file.starts_with("."))
 ```
@@ -345,21 +347,41 @@ check(file.starts_with("."))
 
 #### CLAUDE.md created
 
-1. check
+- CLAUDE.md created
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("CLAUDE.md created")
 val file = "CLAUDE.md"
 check(file.ends_with(".md"))
 ```
 
 </details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/init/init_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering Project Initialization, Project Templates, Init Options, Generated Files.
+- Project Initialization
+- Project Templates
+- Init Options
+- Generated Files
 
 ## Scenario Summary
 
@@ -373,3 +395,51 @@ check(file.ends_with(".md"))
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `91ef2b05359efc5628180b91093aa4a27d09f1aac2022669ac2bf5662d164839`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `91ef2b05359efc5628180b91093aa4a27d09f1aac2022669ac2bf5662d164839`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `91ef2b05359efc5628180b91093aa4a27d09f1aac2022669ac2bf5662d164839`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/init/init_spec.spl
+mirror: doc/06_spec/01_unit/app/init/init_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/init/init_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/init/init_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/init/init_spec.spl:20:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates project directory' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/init/init_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates src directory' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/init/init_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates test directory' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

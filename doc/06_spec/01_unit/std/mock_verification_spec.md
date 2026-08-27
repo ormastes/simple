@@ -1,29 +1,6 @@
 # Mock Verification Specification
 
-> 1. mock fn expect call
-
-<!-- sdn-diagram:id=mock_verification_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mock_verification_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mock_verification_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mock_verification_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Mock Library - Phase 2 (Verification).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,19 +19,18 @@ mock_verification_spec
 
 #### sets expectation for call count
 
-1. mock fn expect call
-2. mock fn record call
-3. mock fn record call
-4. expect result is ok
+- sets expectation for call count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets expectation for call count")
 val mock_fn = MockFunction.new("handler")
 mock_fn.expect_call(2)
 mock_fn.record_call([])
@@ -67,19 +43,18 @@ expect result.is_ok()
 
 #### fails verification when call count mismatches
 
-1. mock fn expect call
-2. mock fn record call
-3. mock fn record call
-4. expect result is err
+- fails verification when call count mismatches
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails verification when call count mismatches")
 val mock_fn = MockFunction.new("process")
 mock_fn.expect_call(3)
 mock_fn.record_call([])
@@ -92,18 +67,18 @@ expect result.is_err()
 
 #### sets expectation for call arguments
 
-1. mock fn expect call with
-2. mock fn record call
-3. expect result is ok
+- sets expectation for call arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets expectation for call arguments")
 val mock_fn = MockFunction.new("save")
 mock_fn.expect_call_with(["id_123", "data"])
 mock_fn.record_call(["id_123", "data"])
@@ -115,18 +90,18 @@ expect result.is_ok()
 
 #### fails when arguments don't match
 
-1. mock fn expect call with
-2. mock fn record call
-3. expect result is err
+- fails when arguments don't match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails when arguments don't match")
 val mock_fn = MockFunction.new("update")
 mock_fn.expect_call_with(["old_value"])
 mock_fn.record_call(["new_value"])
@@ -140,17 +115,18 @@ expect result.is_err()
 
 #### returns success result
 
-1. expect result is ok
-2. expect not result is err
+- returns success result
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns success result")
 val result = VerificationResult.success()
 expect result.is_ok()
 expect not result.is_err()
@@ -160,18 +136,18 @@ expect not result.is_err()
 
 #### returns failure result with message
 
-1. expect result is err
-2. expect not result is ok
-3. expect result unwrap err
+- returns failure result with message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns failure result with message")
 val result = VerificationResult.failure("Test failed")
 expect result.is_err()
 expect not result.is_ok()
@@ -184,17 +160,18 @@ expect result.unwrap_err() == "Test failed"
 
 #### uses eq matcher for exact match
 
-1. expect matcher matches
-2. expect not matcher matches
+- uses eq matcher for exact match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses eq matcher for exact match")
 val matcher = Matcher.eq("hello")
 expect matcher.matches("hello")
 expect not matcher.matches("world")
@@ -204,18 +181,18 @@ expect not matcher.matches("world")
 
 #### uses any matcher for wildcard
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect matcher matches
+- uses any matcher for wildcard
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses any matcher for wildcard")
 val matcher = Matcher.any()
 expect matcher.matches("anything")
 expect matcher.matches("123")
@@ -228,19 +205,18 @@ expect matcher.matches("")
 
 #### uses gt matcher for greater than
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
-4. expect not matcher matches
+- uses gt matcher for greater than
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses gt matcher for greater than")
 val matcher = Matcher.gt(10)
 expect matcher.matches("15")
 expect matcher.matches("100")
@@ -252,19 +228,18 @@ expect not matcher.matches("10")
 
 #### uses lt matcher for less than
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
-4. expect not matcher matches
+- uses lt matcher for less than
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses lt matcher for less than")
 val matcher = Matcher.lt(10)
 expect matcher.matches("5")
 expect matcher.matches("0")
@@ -276,18 +251,18 @@ expect not matcher.matches("15")
 
 #### uses gte matcher for greater or equal
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
+- uses gte matcher for greater or equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses gte matcher for greater or equal")
 val matcher = Matcher.gte(10)
 expect matcher.matches("10")
 expect matcher.matches("15")
@@ -298,18 +273,18 @@ expect not matcher.matches("9")
 
 #### uses lte matcher for less or equal
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
+- uses lte matcher for less or equal
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses lte matcher for less or equal")
 val matcher = Matcher.lte(10)
 expect matcher.matches("10")
 expect matcher.matches("5")
@@ -322,18 +297,18 @@ expect not matcher.matches("11")
 
 #### uses contains matcher
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
+- uses contains matcher
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses contains matcher")
 val matcher = Matcher.contains("error")
 expect matcher.matches("fatal error occurred")
 expect matcher.matches("error")
@@ -344,18 +319,18 @@ expect not matcher.matches("warning")
 
 #### uses starts_with matcher
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
+- uses starts_with matcher
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses starts_with matcher")
 val matcher = Matcher.starts_with("HTTP")
 expect matcher.matches("HTTP/1.1")
 expect matcher.matches("HTTPS")
@@ -366,18 +341,18 @@ expect not matcher.matches("GET HTTP")
 
 #### uses ends_with matcher
 
-1. expect matcher matches
-2. expect matcher matches
-3. expect not matcher matches
+- uses ends_with matcher
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("uses ends_with matcher")
 val matcher = Matcher.ends_with(".json")
 expect matcher.matches("config.json")
 expect matcher.matches("data.json")
@@ -390,27 +365,7 @@ expect not matcher.matches("config.yaml")
 
 #### verifies no calls were made
 
-1. expect not mock fn was called
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val mock_fn = MockFunction.new("unused")
-expect not mock_fn.was_called()
-```
-
-</details>
-
-#### verifies single call
-
-1. mock fn record call
-2. expect mock fn was called
-3. expect mock fn was called n times
+- verifies no calls were made
 
 
 <details>
@@ -420,6 +375,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("verifies no calls were made")
+val mock_fn = MockFunction.new("unused")
+expect not mock_fn.was_called()
+```
+
+</details>
+
+#### verifies single call
+
+- verifies single call
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("verifies single call")
 val mock_fn = MockFunction.new("called_once")
 mock_fn.record_call([])
 expect mock_fn.was_called()
@@ -430,19 +407,18 @@ expect mock_fn.was_called_n_times(1)
 
 #### verifies specific call count
 
-1. mock fn record call
-2. mock fn record call
-3. mock fn record call
-4. expect mock fn was called n times
+- verifies specific call count
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("verifies specific call count")
 val mock_fn = MockFunction.new("counter")
 mock_fn.record_call([])
 mock_fn.record_call([])
@@ -454,19 +430,18 @@ expect mock_fn.was_called_n_times(3)
 
 #### gets call by index
 
-1. mock fn record call
-2. mock fn record call
-3. expect first is some
-4. Some
+- gets call by index
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets call by index")
 val mock_fn = MockFunction.new("api")
 mock_fn.record_call(["GET", "/users"])
 mock_fn.record_call(["POST", "/users"])
@@ -481,20 +456,18 @@ match first:
 
 #### gets last call
 
-1. mock fn record call
-2. mock fn record call
-3. mock fn record call
-4. expect last is some
-5. Some
+- gets last call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("gets last call")
 val mock_fn = MockFunction.new("sequence")
 mock_fn.record_call(["first"])
 mock_fn.record_call(["second"])
@@ -512,21 +485,18 @@ match last:
 
 #### provides error message for call count mismatch
 
-1. mock fn expect call
-2. mock fn record call
-3. expect result is err
-4. expect msg contains
-5. expect msg contains
-6. expect msg contains
+- provides error message for call count mismatch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides error message for call count mismatch")
 val mock_fn = MockFunction.new("test_fn")
 mock_fn.expect_call(2)
 mock_fn.record_call([])
@@ -542,20 +512,18 @@ expect msg.contains("1")
 
 #### provides error message for argument mismatch
 
-1. mock fn expect call with
-2. mock fn record call
-3. expect result is err
-4. expect msg contains
-5. expect msg contains
+- provides error message for argument mismatch
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides error message for argument mismatch")
 val mock_fn = MockFunction.new("service")
 mock_fn.expect_call_with(["expected_arg"])
 mock_fn.record_call(["actual_arg"])
@@ -572,19 +540,18 @@ expect msg.contains("expected_arg")
 
 #### verifies multiple expectations
 
-1. mock fn expect call
-2. mock fn record call
-3. mock fn record call
-4. expect result is ok
+- verifies multiple expectations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("verifies multiple expectations")
 val mock_fn = MockFunction.new("multi")
 mock_fn.expect_call(2)
 mock_fn.record_call([])
@@ -597,20 +564,18 @@ expect result.is_ok()
 
 #### resets expectations on reset
 
-1. mock fn expect call
-2. mock fn reset
-3. mock fn record call
-4. mock fn record call
-5. expect result is ok
+- resets expectations on reset
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("resets expectations on reset")
 val mock_fn = MockFunction.new("resettable")
 mock_fn.expect_call(1)
 mock_fn.reset()
@@ -626,18 +591,18 @@ expect result.is_ok()
 
 #### handles i64 literal in get_call
 
-1. mock fn record call
-2. mock fn record call
-3. expect call is some
+- handles i64 literal in get_call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles i64 literal in get_call")
 val mock_fn = MockFunction.new("literal_test")
 mock_fn.record_call(["first"])
 mock_fn.record_call(["second"])
@@ -650,17 +615,18 @@ expect call.is_some()
 
 #### handles i64 literal in array indexing
 
-1. mock fn record call
-2. Some
+- handles i64 literal in array indexing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles i64 literal in array indexing")
 val mock_fn = MockFunction.new("index_test")
 mock_fn.record_call(["value"])
 val call = mock_fn.get_call(0)
@@ -680,12 +646,12 @@ match call:
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/std/mock_verification_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Mock Library - Phase 2 (Verification).
 - Mock Library - Phase 2 (Verification)
 
 ## Scenario Summary
@@ -700,3 +666,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b98056bdeefb68ac846167d50ae1ccfac6e05e2835bf6f032230f63c53af7e57`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b98056bdeefb68ac846167d50ae1ccfac6e05e2835bf6f032230f63c53af7e57`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b98056bdeefb68ac846167d50ae1ccfac6e05e2835bf6f032230f63c53af7e57`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/std/mock_verification_spec.spl
+mirror: doc/06_spec/01_unit/std/mock_verification_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/std/mock_verification_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/std/mock_verification_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/std/mock_verification_spec.spl:218:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets expectation for call count' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/mock_verification_spec.spl:228:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fails verification when call count mismatches' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/std/mock_verification_spec.spl:238:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets expectation for call arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

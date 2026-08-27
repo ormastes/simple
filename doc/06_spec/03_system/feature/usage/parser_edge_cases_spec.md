@@ -2,29 +2,6 @@
 
 > The Simple parser must handle several non-trivial syntactic forms that are easy to mis-parse: the matrix-multiplication operator `@`, the keyword-style bitwise `xor` operator, and bracket-based array type annotations `[T]`. This spec exercises each form in isolation and in combination, verifying correct tokenisation, operator precedence, and type annotation parsing. A `super` keyword test is planned but commented out pending interpreter support for inheritance dispatch.
 
-<!-- sdn-diagram:id=parser_edge_cases_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=parser_edge_cases_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-parser_edge_cases_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=parser_edge_cases_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 9 | 9 | 0 | 0 |
@@ -44,7 +21,7 @@ The Simple parser must handle several non-trivial syntactic forms that are easy 
 | Category | Syntax |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/parser_edge_cases_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -60,6 +37,8 @@ commented out pending interpreter support for inheritance dispatch.
 
 ```simple
 # Matrix multiplication operator (@)
+use std.spec.step
+
 val result = 3 @ 4          # => 12
 
 # Bitwise XOR keyword operator
@@ -90,20 +69,8 @@ val c = (a xor b) @ 2       # xor first, then @
 
 #### parses @ operator in expressions
 
-<details>
-<summary>Executable SSpec</summary>
+- parses @ operator in expressions
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = 3 @ 4
-expect result == 12
-```
-
-</details>
-
-#### parses @ operator with variables
 
 <details>
 <summary>Executable SSpec</summary>
@@ -112,6 +79,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses @ operator in expressions")
+val result = 3 @ 4
+expect result == 12
+```
+
+</details>
+
+#### parses @ operator with variables
+
+- parses @ operator with variables
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses @ operator with variables")
 val a = 2
 val b = 5
 val result = a @ b
@@ -124,20 +113,8 @@ expect result == 10
 
 #### parses xor keyword in expressions
 
-<details>
-<summary>Executable SSpec</summary>
+- parses xor keyword in expressions
 
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = 5 xor 3
-expect result == 6
-```
-
-</details>
-
-#### parses xor keyword with variables
 
 <details>
 <summary>Executable SSpec</summary>
@@ -146,6 +123,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses xor keyword in expressions")
+val result = 5 xor 3
+expect result == 6
+```
+
+</details>
+
+#### parses xor keyword with variables
+
+- parses xor keyword with variables
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses xor keyword with variables")
 val a = 12
 val b = 7
 val result = a xor b
@@ -156,13 +155,18 @@ expect result == 11
 
 #### parses xor in complex expressions
 
+- parses xor in complex expressions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses xor in complex expressions")
 val result = (5 xor 3) xor 1
 expect result == 7
 ```
@@ -173,17 +177,18 @@ expect result == 7
 
 #### parses array types with square brackets
 
-1. fn takes array
-2. expect result length
+- parses array types with square brackets
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses array types with square brackets")
 fn takes_array(items: [i64]) -> [i64]:
     return items
 
@@ -196,16 +201,18 @@ expect result.length() == 3
 
 #### parses array return types
 
-1. fn make array
+- parses array return types
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses array return types")
 fn make_array() -> [text]:
     return ["a", "b", "c"]
 
@@ -219,23 +226,8 @@ expect result[0] == "a"
 
 #### handles @ and xor together
 
-1. expect result == 3  #
+- handles @ and xor together
 
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = (3 @ 2) xor 5
-expect result == 3  # (3 @ 2) = 6, 6 xor 5 = 3
-```
-
-</details>
-
-#### handles multiple operators
 
 <details>
 <summary>Executable SSpec</summary>
@@ -244,6 +236,28 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles @ and xor together")
+val result = (3 @ 2) xor 5
+expect result == 3  # (3 @ 2) = 6, 6 xor 5 = 3
+```
+
+</details>
+
+#### handles multiple operators
+
+- handles multiple operators
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles multiple operators")
 val a = 10
 val b = 3
 val c = (a xor b) @ 2
@@ -264,3 +278,51 @@ expect c == 18  # 10 xor 3 = 9, 9 @ 2 = 18
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `8b688f944776b829cee0ed8ee00b45b9843651b40a037471f32e54d7511dc782`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `8b688f944776b829cee0ed8ee00b45b9843651b40a037471f32e54d7511dc782`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `8b688f944776b829cee0ed8ee00b45b9843651b40a037471f32e54d7511dc782`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/parser_edge_cases_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/parser_edge_cases_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/parser_edge_cases_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/parser_edge_cases_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/parser_edge_cases_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses @ operator in expressions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/parser_edge_cases_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses @ operator with variables' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/parser_edge_cases_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses xor keyword in expressions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

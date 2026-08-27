@@ -2,30 +2,6 @@
 
 > Checks modeled coordinator state, teammate counts, status priority, progress
 
-<!-- sdn-diagram:id=coordinator_agent_status_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=coordinator_agent_status_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-coordinator_agent_status_spec -> std
-coordinator_agent_status_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=coordinator_agent_status_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 6 | 6 | 0 | 0 |
@@ -44,7 +20,7 @@ Checks modeled coordinator state, teammate counts, status priority, progress
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks modeled coordinator state, teammate counts, status priority, progress
@@ -56,6 +32,11 @@ summary, rendering, and source parity helpers.
 
 #### models teammate counts and status priority
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- models teammate counts and status priority
 - Sample state includes running, done, and error agents
    - Expected: coordinatorTeammateCount(state) equals `3`
    - Expected: coordinatorTotalCount(state) equals `4`
@@ -70,10 +51,12 @@ summary, rendering, and source parity helpers.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("models teammate counts and status priority")
 step("Sample state includes running, done, and error agents")
 val state = sampleCoordinatorAgentStatus()
 
@@ -91,6 +74,7 @@ expect(coordinatorAllDone(state)).to_equal(false)
 
 #### summarizes aggregate progress
 
+- summarizes aggregate progress
 - Progress sums coordinator and teammate steps
    - Expected: coordinatorProgressPercent(state) equals `50`
    - Expected: coordinatorProgressSummary(state) equals `error | teammates 3 | running 2 | done 1 | error 1 | progress 50%`
@@ -102,10 +86,12 @@ expect(coordinatorAllDone(state)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("summarizes aggregate progress")
 step("Progress sums coordinator and teammate steps")
 val state = sampleCoordinatorAgentStatus()
 
@@ -121,6 +107,7 @@ expect(state.errorCount()).to_equal(1)
 
 #### normalizes sources and statuses
 
+- normalizes sources and statuses
 - Aliases collapse to stable UI labels
    - Expected: running.source equals `builtin`
    - Expected: running.status equals `running`
@@ -136,10 +123,12 @@ expect(state.errorCount()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("normalizes sources and statuses")
 step("Aliases collapse to stable UI labels")
 val running = CoordinatorAgent.new("a", "A", " built-in ", "active", 0, 0, "")
 val done = CoordinatorAgent.new("b", "B", "USER", "completed", 5, 5, "")
@@ -160,6 +149,7 @@ expect(coordinatorStatusBadge("failed")).to_equal("[error]")
 
 #### renders expanded and collapsed rows
 
+- renders expanded and collapsed rows
 - Expanded render includes coordinator and teammate rows
 - Collapsed render keeps only the coordinator row
    - Expected: collapsedOutput does not contain `teammate QA`
@@ -168,10 +158,12 @@ expect(coordinatorStatusBadge("failed")).to_equal("[error]")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renders expanded and collapsed rows")
 step("Expanded render includes coordinator and teammate rows")
 val expanded = sampleCoordinatorAgentStatus()
 val output = renderCoordinatorAgentStatus(expanded)
@@ -195,9 +187,8 @@ expect(collapsedOutput.contains("teammate QA")).to_equal(false)
 
 #### reports all-done state without errors
 
+- reports all-done state without errors
 - Done wins when every agent is complete
-- CoordinatorAgent new
-- [CoordinatorAgent new
    - Expected: coordinatorAllDone(state) is true
    - Expected: coordinatorStatusLabel(state) equals `done`
 
@@ -205,10 +196,12 @@ expect(collapsedOutput.contains("teammate QA")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports all-done state without errors")
 step("Done wins when every agent is complete")
 val state = CoordinatorAgentStatusState.new(
     CoordinatorAgent.new("coord", "Coordinator", "project", "done", 1, 1, ""),
@@ -227,6 +220,7 @@ expect(coordinatorProgressSummary(state)).to_contain("progress 100%")
 
 #### exports source helper parity
 
+- exports source helper parity
 - Source helper constants stay pinned
    - Expected: coordinatorAgentStatusModeledSourceFile() equals `src/components/CoordinatorAgentStatus.tsx`
    - Expected: coordinatorAgentStatusModeledSourceHelper() equals `getCoordinatorAgentStatus`
@@ -238,10 +232,12 @@ expect(coordinatorProgressSummary(state)).to_contain("progress 100%")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("exports source helper parity")
 step("Source helper constants stay pinned")
 expect(coordinatorSourceOptions()).to_contain("project")
 expect(coordinatorSourceOptions()).to_contain("user")
@@ -268,3 +264,54 @@ expect(coordinatorAgentStatusModeledSourceLines()).to_equal(272)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `eeacc13aceacd6a12953c47763df2de846785b72fec65d5429484462427c6ff6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `eeacc13aceacd6a12953c47763df2de846785b72fec65d5429484462427c6ff6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `eeacc13aceacd6a12953c47763df2de846785b72fec65d5429484462427c6ff6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.spl
+mirror: doc/06_spec/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 10 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'models teammate counts and status priority' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.spl:34:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'summarizes aggregate progress' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/components/coordinator_agent_status_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'normalizes sources and statuses' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

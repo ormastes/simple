@@ -1,29 +1,6 @@
 # Decorators Specification
 
-> 1. check
-
-<!-- sdn-diagram:id=decorators_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=decorators_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-decorators_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=decorators_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Skip/Ignore Decorators, skip decorator, ignore decorator, only_on decorator, skip_if decorator, Simplified decorators, Real-world usage patterns, Semantic distinction, Edge cases.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,16 +19,18 @@ decorators_spec -> std
 
 #### creates skip decorator with all parameters
 
-1. check
+- creates skip decorator with all parameters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates skip decorator with all parameters")
 val decorator = skip(
     platforms: [],
     runtimes: [],
@@ -75,16 +54,18 @@ check(decorator != nil)
 
 #### creates skip decorator with platforms only
 
-1. check
+- creates skip decorator with platforms only
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates skip decorator with platforms only")
 val decorator = skip(
     platforms: ["windows"],
     runtimes: [],
@@ -107,16 +88,18 @@ check(decorator != nil)
 
 #### skip decorator runs test when conditions don't match
 
-1. check
+- skip decorator runs test when conditions don't match
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("skip decorator runs test when conditions don't match")
 var test_ran = false
 val decorator = skip(
     platforms: ["nonexistent_os_xyz"],
@@ -144,16 +127,18 @@ check(true)
 
 #### creates ignore decorator with all parameters
 
-1. check
+- creates ignore decorator with all parameters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates ignore decorator with all parameters")
 val decorator = ignore(
     platforms: [],
     runtimes: [],
@@ -176,16 +161,18 @@ check(decorator != nil)
 
 #### creates ignore decorator with platforms only
 
-1. check
+- creates ignore decorator with platforms only
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates ignore decorator with platforms only")
 val decorator = ignore(
     platforms: ["windows"],
     runtimes: [],
@@ -210,16 +197,18 @@ check(decorator != nil)
 
 #### creates only_on decorator
 
-1. check
+- creates only_on decorator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates only_on decorator")
 val decorator = only_on(
     platforms: ["linux"],
     runtimes: [],
@@ -241,16 +230,18 @@ check(decorator != nil)
 
 #### creates only_on decorator with multiple conditions
 
-1. check
+- creates only_on decorator with multiple conditions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates only_on decorator with multiple conditions")
 val decorator = only_on(
     platforms: ["linux", "macos"],
     runtimes: ["compiled"],
@@ -274,16 +265,18 @@ check(decorator != nil)
 
 #### creates skip_if decorator with condition
 
-1. check
+- creates skip_if decorator with condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates skip_if decorator with condition")
 val cond = fn(): false
 val decorator = skip_if(cond, "Condition not met")
 check(decorator != nil)
@@ -293,16 +286,18 @@ check(decorator != nil)
 
 #### creates skip_if with environment check
 
-1. check
+- creates skip_if with environment check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates skip_if with environment check")
 val cond = fn(): get_env("CI") == ""
 val decorator = skip_if(cond, "CI environment required")
 check(decorator != nil)
@@ -312,16 +307,18 @@ check(decorator != nil)
 
 #### creates skip_if with complex condition
 
-1. check
+- creates skip_if with complex condition
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates skip_if with complex condition")
 val cond = fn():
     val is_win = is_windows()
     val is_interp = is_interpreter()
@@ -336,16 +333,18 @@ check(decorator != nil)
 
 #### skip_on_windows creates decorator
 
-1. check
+- skip_on_windows creates decorator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("skip_on_windows creates decorator")
 val decorator = skip_on_windows("Not yet ported")
 check(decorator != nil)
 ```
@@ -354,16 +353,18 @@ check(decorator != nil)
 
 #### skip_on_linux creates decorator
 
-1. check
+- skip_on_linux creates decorator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("skip_on_linux creates decorator")
 val decorator = skip_on_linux("Not yet ported")
 check(decorator != nil)
 ```
@@ -372,16 +373,18 @@ check(decorator != nil)
 
 #### skip_on_interpreter creates decorator
 
-1. check
+- skip_on_interpreter creates decorator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("skip_on_interpreter creates decorator")
 val decorator = skip_on_interpreter("Requires compiled mode")
 check(decorator != nil)
 ```
@@ -390,16 +393,18 @@ check(decorator != nil)
 
 #### ignore_on_windows creates decorator
 
-1. check
+- ignore_on_windows creates decorator
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("ignore_on_windows creates decorator")
 val decorator = ignore_on_windows("Unix-only API")
 check(decorator != nil)
 ```
@@ -410,16 +415,18 @@ check(decorator != nil)
 
 #### creates platform-specific skip
 
-1. check
+- creates platform-specific skip
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates platform-specific skip")
 val skip_win = skip(
     platforms: ["windows"],
     runtimes: [],
@@ -442,16 +449,18 @@ check(skip_win != nil)
 
 #### creates runtime-specific skip
 
-1. check
+- creates runtime-specific skip
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates runtime-specific skip")
 val skip_interp = skip(
     platforms: [],
     runtimes: ["interpreter"],
@@ -474,16 +483,18 @@ check(skip_interp != nil)
 
 #### creates hardware-specific skip
 
-1. check
+- creates hardware-specific skip
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates hardware-specific skip")
 val skip_no_gpu = skip(
     platforms: [],
     runtimes: [],
@@ -506,16 +517,18 @@ check(skip_no_gpu != nil)
 
 #### creates complex multi-condition skip
 
-1. check
+- creates complex multi-condition skip
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates complex multi-condition skip")
 val skip_complex = skip(
     platforms: ["windows"],
     runtimes: ["interpreter"],
@@ -538,17 +551,18 @@ check(skip_complex != nil)
 
 #### creates ignore for platform-specific API
 
-1. reason: "Unix fork
-2. check
+- creates ignore for platform-specific API
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates ignore for platform-specific API")
 val ignore_win = ignore(
     platforms: ["windows"],
     runtimes: [],
@@ -571,16 +585,18 @@ check(ignore_win != nil)
 
 #### creates ignore for architecture limitation
 
-1. check
+- creates ignore for architecture limitation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("creates ignore for architecture limitation")
 val ignore_32bit = ignore(
     platforms: [],
     runtimes: [],
@@ -605,16 +621,18 @@ check(ignore_32bit != nil)
 
 #### skip represents TODO (will implement in future)
 
-1. check
+- skip represents TODO (will implement in future)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("skip represents TODO (will implement in future)")
 val skip_todo = skip(
     platforms: ["windows"],
     runtimes: [],
@@ -637,16 +655,18 @@ check(skip_todo != nil)
 
 #### ignore represents won't fix (fundamentally not supported)
 
-1. check
+- ignore represents won't fix (fundamentally not supported)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("ignore represents won't fix (fundamentally not supported)")
 val ignore_permanent = ignore(
     platforms: ["windows"],
     runtimes: [],
@@ -671,16 +691,18 @@ check(ignore_permanent != nil)
 
 #### handles empty reason
 
-1. check
+- handles empty reason
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("handles empty reason")
 val decorator = skip(
     platforms: ["windows"],
     runtimes: [],
@@ -703,16 +725,18 @@ check(decorator != nil)
 
 #### handles multiple platforms
 
-1. check
+- handles multiple platforms
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("handles multiple platforms")
 val decorator = skip(
     platforms: ["windows", "macos", "freebsd"],
     runtimes: [],
@@ -735,16 +759,18 @@ check(decorator != nil)
 
 #### handles multiple tags
 
-1. check
+- handles multiple tags
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("handles multiple tags")
 val decorator = skip(
     platforms: [],
     runtimes: [],
@@ -767,16 +793,18 @@ check(decorator != nil)
 
 #### handles version constraints
 
-1. check
+- handles version constraints
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("handles version constraints")
 val decorator = skip(
     platforms: [],
     runtimes: [],
@@ -804,12 +832,12 @@ check(decorator != nil)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/std/spec/decorators_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Skip/Ignore Decorators, skip decorator, ignore decorator, only_on decorator, skip_if decorator, Simplified decorators, Real-world usage patterns, Semantic distinction, Edge cases.
 - Skip/Ignore Decorators
 - skip decorator
 - ignore decorator
@@ -832,3 +860,59 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `252b8e7c61405f22a8bd5a3d8ee6e283e7ed9da53242745c19cba22ba48844a0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `252b8e7c61405f22a8bd5a3d8ee6e283e7ed9da53242745c19cba22ba48844a0`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `252b8e7c61405f22a8bd5a3d8ee6e283e7ed9da53242745c19cba22ba48844a0`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **76/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/lib/std/spec/decorators_spec.spl
+mirror: doc/06_spec/01_unit/lib/std/spec/decorators_spec.md (current)
+findings: 7 blockers: 2
+  narrative=100 structure=100 oracle=50
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=76; blocker cap makes effective=49
+doc/06_spec/01_unit/lib/std/spec/decorators_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/std/spec/decorators_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/std/spec/decorators_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/01_unit/lib/std/spec/decorators_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/std/spec/decorators_spec.spl:19:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates skip decorator with all parameters' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/std/spec/decorators_spec.spl:40:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates skip decorator with platforms only' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/std/spec/decorators_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'skip decorator runs test when conditions don't match' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

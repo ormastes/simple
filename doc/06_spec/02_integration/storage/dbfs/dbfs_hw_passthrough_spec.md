@@ -2,29 +2,6 @@
 
 > DBFS Hardware Direct-Accessibility Specification
 
-<!-- sdn-diagram:id=dbfs_hw_passthrough_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=dbfs_hw_passthrough_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-dbfs_hw_passthrough_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=dbfs_hw_passthrough_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -43,7 +20,7 @@ DBFS Hardware Direct-Accessibility Specification
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 DBFS Hardware Direct-Accessibility Specification
@@ -60,26 +37,30 @@ Verifies the currently implemented mount-table passthrough seam:
 
 #### RamFsDriver mounted alongside DBFS still resolves its own driver tag
 
-1. mt mount
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
 
-2. mt mount
-   - Expected: dev equals `RamFsDriver`
+
+- RamFsDriver mounted alongside DBFS still resolves its own driver tag
+   - Expected: dev equals `ramfs`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("RamFsDriver mounted alongside DBFS still resolves its own driver tag")
 val mt = MountTable.new()
 val ramfs = RamFsDriver.new()
 mt.mount("/", DriverInstance.RamFs(ramfs), MountOptions.default()).unwrap()
 val dbfs = DbFsDriver.new_hosted()
 mt.mount("/data", DriverInstance.DbFs(dbfs), MountOptions.default()).unwrap()
 val dev = mt.block_device_for("/etc/config").unwrap()
-expect(dev).to_equal("RamFsDriver")
+expect(dev).to_equal("ramfs")
 ```
 
 </details>
@@ -88,20 +69,20 @@ expect(dev).to_equal("RamFsDriver")
 
 #### paths under /data resolve to the DBFS mount rather than the sibling RamFs mount
 
-1. mt mount
-
-2. mt mount
+- paths under /data resolve to the DBFS mount rather than the sibling RamFs mount
    - Expected: fh.id > 0 is true
    - Expected: dev equals `DbFsDriver`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("paths under /data resolve to the DBFS mount rather than the sibling RamFs mount")
 val mt = MountTable.new()
 val ramfs = RamFsDriver.new()
 mt.mount("/", DriverInstance.RamFs(ramfs), MountOptions.default()).unwrap()
@@ -117,44 +98,31 @@ expect(dev).to_equal("DbFsDriver")
 
 ### DBFS HW passthrough — open_on_device wires through to backing BlockDevice
 
-#### write_passthrough on device-backed driver routes bytes through RawNvmeArena to BlockDevice
+#### write_passthrough routes bytes through the canonical DBFS device owner
 
-1. magic push
-
-2. magic push
-
-3. magic push
-
-4. magic push
-
-5. magic push
-
-6. magic push
-
-7. magic push
-
-8. magic push
+- write_passthrough routes bytes through the canonical DBFS device owner
+   - Expected: dbfs_result.is_ok() is true
    - Expected: write_result.is_ok() is true
    - Expected: bytes_written equals `8`
-
-9. dummy push
    - Expected: mem_result.is_err() is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("write_passthrough routes bytes through the canonical DBFS device owner")
 # Construct a RamBlockDevice and open DBFS directly over it.
 val ram_dev = RamBlockDevice.new_empty()
 val dbfs_result = DbFsDriver.open_on_device(ram_dev, 0, 1024)
 expect(dbfs_result.is_ok()).to_equal(true)
 val dbfs = dbfs_result.unwrap()
 # Verify write_passthrough returns a positive byte count — confirming
-# the arena_append path executed and data was dispatched to write_sector.
+# the owner append path executed and data was dispatched to write_sector.
 var magic: [u8] = []
 magic.push(222)   # 0xDE
 magic.push(173)   # 0xAD
@@ -183,20 +151,20 @@ expect(mem_result.is_err()).to_equal(true)
 
 #### DBFS and Fat32 variants both register through MountTable and return correct driver names
 
-1. mt mount
-
-2. mt mount
+- DBFS and Fat32 variants both register through MountTable and return correct driver names
    - Expected: dbfs_name equals `DbFsDriver`
    - Expected: fat32_name equals `Fat32Driver`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("DBFS and Fat32 variants both register through MountTable and return correct driver names")
 val mt = MountTable.new()
 val dbfs = DbFsDriver.new_hosted()
 val fat32 = FsFat32Driver.new_ram_backed()
@@ -222,3 +190,54 @@ expect(fat32_name).to_equal("Fat32Driver")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `2ee98fc46bcdea771a98326c70991788281aa95f86bfb3dc1a74622c23e7814d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `2ee98fc46bcdea771a98326c70991788281aa95f86bfb3dc1a74622c23e7814d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `2ee98fc46bcdea771a98326c70991788281aa95f86bfb3dc1a74622c23e7814d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl
+mirror: doc/06_spec/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'RamFsDriver mounted alongside DBFS still resolves its own driver tag' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'paths under /data resolve to the DBFS mount rather than the sibling RamFs mount' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/storage/dbfs/dbfs_hw_passthrough_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'write_passthrough routes bytes through the canonical DBFS device owner' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

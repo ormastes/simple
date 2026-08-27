@@ -1,30 +1,6 @@
 # Real Device Readiness Specification
 
-> <details>
-
-<!-- sdn-diagram:id=real_device_readiness_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=real_device_readiness_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-real_device_readiness_spec -> std
-real_device_readiness_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=real_device_readiness_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SimpleOS real-device readiness.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,25 @@ real_device_readiness_spec -> os
 
 #### accepts q35 NVMe and virtio-net only with hardware evidence
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- accepts q35 NVMe and virtio-net only with hardware evidence
+   - Expected: real_device_readiness_ready(ready) is true
+   - Expected: real_device_readiness_reason(ready) equals `ready`
+   - Expected: cmd[0] equals `qemu-system-x86_64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("accepts q35 NVMe and virtio-net only with hardware evidence")
 val ready = real_device_readiness_with_providers(
     "x86_64-q35",
     "q35-config-io",
@@ -92,13 +80,25 @@ expect(cmd).to_contain("virtio-net-pci,netdev=net0")
 
 #### rejects fallback or incomplete storage and network claims
 
+- rejects fallback or incomplete storage and network claims
+   - Expected: real_device_readiness_ready(no_pci_board) is false
+   - Expected: real_device_readiness_reason(no_pci_board) equals `missing-pci-board:mps2-an505`
+   - Expected: real_device_q35_qemu_command(no_pci_board, "kernel.elf", "disk.img").len() equals `0`
+   - Expected: real_device_readiness_reason(no_identify) equals `missing-nvme-identify`
+   - Expected: real_device_readiness_reason(no_rx_tx) equals `missing-network-rx-tx:e1000`
+   - Expected: real_device_readiness_ready(unspecified_provider) is false
+   - Expected: real_device_readiness_reason(unspecified_provider) equals `storage-provider-not-hardware:unspecified`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 74 lines folded for reproduction.
+Runnable source: 76 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("rejects fallback or incomplete storage and network claims")
 val no_pci_board = real_device_readiness(
     "mps2-an505",
     "none",
@@ -179,13 +179,28 @@ expect(real_device_readiness_reason(unspecified_provider)).to_equal("storage-pro
 
 #### distinguishes current C bridge evidence from pure Simple driver completion
 
+- distinguishes current C bridge evidence from pure Simple driver completion
+   - Expected: real_device_readiness_ready(current) is false
+   - Expected: real_device_readiness_reason(current) equals `storage-provider-not-hardware:c-boot-bridge`
+   - Expected: real_device_pure_simple_ready(current) is false
+   - Expected: real_device_pure_simple_reason(current) equals `storage-not-pure-simple:c-boot-bridge`
+   - Expected: real_device_readiness_ready(pure) is true
+   - Expected: real_device_pure_simple_ready(pure) is false
+   - Expected: real_device_pure_simple_reason(pure) equals `storage-direct-access:missing-required-access:mmio:direct-access-not-user-spa... (full value in folded executable source)`
+   - Expected: real_device_pure_simple_ready(pure_with_access) is true
+   - Expected: real_device_pure_simple_reason(pure_with_access) equals `ready`
+   - Expected: real_device_direct_access_reason(pure_with_access) equals `ready`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("distinguishes current C bridge evidence from pure Simple driver completion")
 val current = real_device_current_q35_c_bridge_readiness()
 expect(real_device_readiness_ready(current)).to_equal(false)
 expect(real_device_readiness_reason(current)).to_equal("storage-provider-not-hardware:c-boot-bridge")
@@ -255,13 +270,18 @@ expect(real_device_direct_access_reason(pure_with_access)).to_equal("ready")
 
 #### lists q35 boot markers needed for real storage and network acceptance
 
+- lists q35 boot markers needed for real storage and network acceptance
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("lists q35 boot markers needed for real storage and network acceptance")
 val markers = real_device_q35_boot_markers()
 expect(markers).to_contain("[stage1] nvme_identify_read=pass")
 expect(markers).to_contain("[stage1] nvme_rw_restore=pass")
@@ -273,13 +293,29 @@ expect(markers).to_contain("TEST PASSED")
 
 #### requires provider and direct-access serial markers for pure q35 completion
 
+- requires provider and direct-access serial markers for pure q35 completion
+   - Expected: real_device_q35_pure_simple_serial_accepts_completion(c_bridge_serial) is false
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(c_bridge_serial) equals `storage-not-pure-simple:c-boot-bridge`
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(missing_access) equals `missing-pure-simple-marker:storage_placement=user-space-driver`
+   - Expected: real_device_q35_pure_simple_serial_accepts_completion(tokenless_grants) is false
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(tokenless_grants) equals `missing-pure-simple-marker:storage_grant=resource-grant-set:tok=`
+   - Expected: real_device_q35_pure_simple_serial_accepts_completion(missing_perf) is false
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(missing_perf) equals `missing-pure-simple-marker:nvme_perf reason=ready`
+   - Expected: real_device_q35_pure_simple_serial_accepts_completion(ready_serial) is true
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(ready_serial) equals `ready`
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(spoofed_placement) equals `missing-pure-simple-marker:storage_placement=user-space-driver`
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(spoofed_grant) equals `missing-pure-simple-marker:storage_grant=resource-grant-set:tok=`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 78 lines folded for reproduction.
+Runnable source: 80 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("requires provider and direct-access serial markers for pure q35 completion")
 val c_bridge_serial =
     "[stage1] pci_count=7\n" +
     "[stage1] nvme_pci=present\n" +
@@ -364,13 +400,19 @@ expect(real_device_q35_pure_simple_serial_acceptance_reason(spoofed_grant)).to_e
 
 #### builds guest-side pure Simple q35 access and perf markers from measured evidence
 
+- builds guest-side pure Simple q35 access and perf markers from measured evidence
+   - Expected: real_device_q35_pure_simple_serial_acceptance_reason(serial) equals `ready`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("builds guest-side pure Simple q35 access and perf markers from measured evidence")
 val access = real_device_q35_pure_simple_access_marker(
     "resource-grant-set:tok=101",
     "resource-grant-set:tok=202"
@@ -412,13 +454,42 @@ expect(real_device_q35_pure_simple_serial_acceptance_reason(serial)).to_equal("r
 
 #### accepts physical NVMe perf only with pure Simple storage access and real-device identity
 
+- accepts physical NVMe perf only with pure Simple storage access and real-device identity
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(access + "\n" + perf + "\nTEST PASSED\n") equals `missing-physical-nvme-marker:user_namespace_assignment=hardware-data-queue`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(access + "\n" + "user_namespace_assignment=hardware-data-queue user_namespace_mode=user-assigned user_namespace_active_lease_count=1 user_namespace_direct_io=read-write-through user_namespace_shared_interface=fat32,nvfs,dbfs user_namespace_conflict_policy=active-lease-checked\n" + extent_sources + perf + "\nTEST PASSED\n") equals `missing-physical-nvme-marker:user_namespace_nsid=`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(access + "\n" + user_namespace + perf + "\nTEST PASSED\n") equals `missing-physical-nvme-marker:fat32_extent_source=freestanding-fat32-extents`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(loose_storage) equals `missing-physical-nvme-marker:storage_placement=user-space-driver`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(loose_assignment) equals `missing-physical-nvme-marker:user_namespace_assignment=hardware-data-queue`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(missing_user_nsid) equals `missing-physical-nvme-marker:user_namespace_nsid=`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(system_user_nsid) equals `physical-nvme-user-namespace-conflicts-system`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(invalid_user_nsid) equals `physical-nvme-user-nsid-invalid`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(system_queue) equals `physical-nvme-user-queue-not-data`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(invalid_queue) equals `physical-nvme-user-queue-invalid`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(missing_active_lease_count) equals `missing-physical-nvme-marker:user_namespace_active_lease_count=`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(missing_shared_interface) equals `missing-physical-nvme-marker:user_namespace_shared_interface=fat32,nvfs,dbfs`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(missing_baseline_device) equals `missing-physical-nvme-marker:c_baseline_device=same-nvme`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(missing_baseline_scope) equals `missing-physical-nvme-marker:c_baseline_scope=in-guest`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(missing_baseline_cache) equals `missing-physical-nvme-marker:c_baseline_cache=direct`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(zero_active_lease_count) equals `physical-nvme-active-lease-check-empty`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(invalid_active_lease_count) equals `physical-nvme-active-lease-count-invalid`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(q35_serial) equals `missing-physical-nvme-marker:hardware_target=real-nvme`
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(bridge_serial) equals `storage-not-pure-simple:c-boot-bridge`
+   - Expected: real_device_physical_nvme_serial_accepts_completion(serial) is true
+   - Expected: real_device_physical_nvme_serial_acceptance_reason(serial) equals `ready`
+   - Expected: real_device_physical_nvme_serial_check_command("build/serial/physical-nvme.log") equals `[`
+   - Expected: real_device_physical_nvme_validation_script() equals `scripts/os/run_simpleos_physical_nvme_perf.shs`
+   - Expected: real_device_physical_nvme_validation_command("build/serial/physical-nvme.log") equals `[`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 154 lines folded for reproduction.
+Runnable source: 156 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("accepts physical NVMe perf only with pure Simple storage access and real-device identity")
 val access = real_device_q35_pure_simple_access_marker(
     "resource-grant-set:tok=501",
     "resource-grant-set:tok=none"
@@ -579,13 +650,23 @@ expect(real_device_physical_nvme_live_production_validation_command_for_device_g
 
 #### does not report model or SFFI RDMA as hardware RDMA
 
+- does not report model or SFFI RDMA as hardware RDMA
+   - Expected: real_device_readiness_ready(model) is false
+   - Expected: real_device_readiness_reason(model) equals `rdma-not-hardware:model`
+   - Expected: real_device_readiness_reason(host) equals `rdma-not-hardware:sffi-host`
+   - Expected: real_device_readiness_ready(device) is true
+   - Expected: real_device_readiness_reason(unsafe) equals `missing-rdma-iommu-or-broker`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 74 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("does not report model or SFFI RDMA as hardware RDMA")
 val model = real_device_readiness(
     "x86_64-q35",
     "q35-config-io",
@@ -669,12 +750,12 @@ expect(real_device_readiness_reason(unsafe)).to_equal("missing-rdma-iommu-or-bro
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/drivers/real_device_readiness_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS real-device readiness.
 - SimpleOS real-device readiness
 
 ## Scenario Summary
@@ -689,3 +770,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `19084dc4abe25b089b8cb971bc1b5607386c9fe55f7366a3268fe6c53fd54989`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `19084dc4abe25b089b8cb971bc1b5607386c9fe55f7366a3268fe6c53fd54989`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `19084dc4abe25b089b8cb971bc1b5607386c9fe55f7366a3268fe6c53fd54989`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/os/drivers/real_device_readiness_spec.spl
+mirror: doc/06_spec/01_unit/os/drivers/real_device_readiness_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/drivers/real_device_readiness_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/drivers/real_device_readiness_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/drivers/real_device_readiness_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/drivers/real_device_readiness_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'accepts q35 NVMe and virtio-net only with hardware evidence' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/drivers/real_device_readiness_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects fallback or incomplete storage and network claims' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/drivers/real_device_readiness_spec.spl:166:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'distinguishes current C bridge evidence from pure Simple driver completion' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,30 +2,6 @@
 
 > Verifies that after write():
 
-<!-- sdn-diagram:id=fat32_dirent_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=fat32_dirent_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-fat32_dirent_spec -> std
-fat32_dirent_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=fat32_dirent_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -44,7 +20,7 @@ Verifies that after write():
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/fs/fat32_dirent_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 **Bug:** fat32_no_cycle_guard_chain_walk_2026-06-11  FINDING-T2-dirent
@@ -72,17 +48,19 @@ Geometry used throughout:
 
 #### dirent_sector equals root-dir LBA (64) for entry at byte 32
 
-- assert true
+- dirent_sector equals root-dir LBA (64) for entry at byte 32
    - Expected: h.dirent_sector equals `64u64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("dirent_sector equals root-dir LBA (64) for entry at byte 32")
 val root_dir = _make_root_dir_with_test_txt()
 val fs = _make_fs_with_rootdir(root_dir)
 val h_result = fs.open("/TEST.TXT")
@@ -96,17 +74,19 @@ expect(h.dirent_sector).to_equal(64u64)
 
 #### dirent_offset equals 32 for the second directory slot
 
-- assert true
+- dirent_offset equals 32 for the second directory slot
    - Expected: h.dirent_offset equals `32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("dirent_offset equals 32 for the second directory slot")
 val root_dir = _make_root_dir_with_test_txt()
 val fs = _make_fs_with_rootdir(root_dir)
 val h_result = fs.open("/TEST.TXT")
@@ -121,14 +101,7 @@ expect(h.dirent_offset).to_equal(32)
 
 #### after write, dirent first_cluster_low bytes reflect start_cluster
 
-- assert true
-- var dev = MockDirentDev new
-- dev = dev with sector
-- dev = dev with sector
-- buf push
-- buf push
-- buf push
-- assert true
+- after write, dirent first_cluster_low bytes reflect start_cluster
    - Expected: h1.start_cluster equals `2u32`
    - Expected: cl_low equals `2u32`
 
@@ -136,10 +109,12 @@ expect(h.dirent_offset).to_equal(32)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("after write, dirent first_cluster_low bytes reflect start_cluster")
 val root_dir = _make_root_dir_with_test_txt()
 val fs = _make_fs_with_rootdir(root_dir)
 val h_result = fs.open("/TEST.TXT")
@@ -169,22 +144,19 @@ expect(cl_low).to_equal(2u32)
 
 #### after write, dirent first_cluster_high bytes are zero for cluster < 65536
 
-- assert true
-- var dev = MockDirentDev new
-- dev = dev with sector
-- dev = dev with sector
-- buf push
-- assert true
+- after write, dirent first_cluster_high bytes are zero for cluster < 65536
    - Expected: cl_high equals `0u32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("after write, dirent first_cluster_high bytes are zero for cluster < 65536")
 val root_dir = _make_root_dir_with_test_txt()
 val fs = _make_fs_with_rootdir(root_dir)
 val h_result = fs.open("/TEST.TXT")
@@ -207,25 +179,19 @@ expect(cl_high).to_equal(0u32)
 
 #### after write, dirent file_size bytes equal bytes written
 
-- assert true
-- var dev = MockDirentDev new
-- dev = dev with sector
-- dev = dev with sector
-- buf push
-- buf push
-- buf push
-- buf push
-- assert true
+- after write, dirent file_size bytes equal bytes written
    - Expected: fsz equals `4u32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("after write, dirent file_size bytes equal bytes written")
 val root_dir = _make_root_dir_with_test_txt()
 val fs = _make_fs_with_rootdir(root_dir)
 val h_result = fs.open("/TEST.TXT")
@@ -253,24 +219,19 @@ expect(fsz).to_equal(4u32)
 
 #### root_dir_data cache file_size matches on-disk dirent after write
 
-- assert true
-- var dev = MockDirentDev new
-- dev = dev with sector
-- dev = dev with sector
-- buf push
-- buf push
-- assert true
-- assert true
+- root_dir_data cache file_size matches on-disk dirent after write
    - Expected: st.size equals `2u64`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("root_dir_data cache file_size matches on-disk dirent after write")
 val root_dir = _make_root_dir_with_test_txt()
 val fs = _make_fs_with_rootdir(root_dir)
 val h_result = fs.open("/TEST.TXT")
@@ -297,10 +258,7 @@ expect(st.size).to_equal(2u64)
 
 #### write with dirent_sector=0 succeeds without updating any sector
 
-- var dev = MockDirentDev new
-- dev = dev with sector
-- buf push
-- assert true
+- write with dirent_sector=0 succeeds without updating any sector
    - Expected: h1.file_size equals `1u64`
    - Expected: h1.dirent_sector equals `0u64`
 
@@ -308,10 +266,12 @@ expect(st.size).to_equal(2u64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("write with dirent_sector=0 succeeds without updating any sector")
 val fs = Fat32Filesystem.make_for_alloc_test(32u32, 64u32, 512u32, 1u32, 8u32)
 val h0 = _make_bare_handle()
 var dev = MockDirentDev.new()
@@ -341,3 +301,54 @@ expect(h1.dirent_sector).to_equal(0u64)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f18cb59c59952069a4aafcb0c1948a04ace09778f0030c3ee2b748db8aab947a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f18cb59c59952069a4aafcb0c1948a04ace09778f0030c3ee2b748db8aab947a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f18cb59c59952069a4aafcb0c1948a04ace09778f0030c3ee2b748db8aab947a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/os/kernel/fs/fat32_dirent_spec.spl
+mirror: doc/06_spec/01_unit/os/kernel/fs/fat32_dirent_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/kernel/fs/fat32_dirent_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/kernel/fs/fat32_dirent_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/kernel/fs/fat32_dirent_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/kernel/fs/fat32_dirent_spec.spl:203:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dirent_sector equals root-dir LBA (64) for entry at byte 32' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/fs/fat32_dirent_spec.spl:214:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dirent_offset equals 32 for the second directory slot' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/kernel/fs/fat32_dirent_spec.spl:226:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'after write, dirent first_cluster_low bytes reflect start_cluster' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

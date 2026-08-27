@@ -2,29 +2,6 @@
 
 > on pc{ execution(* target_func(..)) } use advice_func before priority 10
 
-<!-- sdn-diagram:id=aop_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=aop_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-aop_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=aop_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 21 | 21 | 0 | 0 |
@@ -44,7 +21,7 @@ on pc{ execution(* target_func(..)) } use advice_func before priority 10
 | Category | Language |
 | Status | In Progress |
 | Source | `test/03_system/feature/usage/aop_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
@@ -93,19 +70,18 @@ allow pc{ depend(within(api.**), within(core.**)) } "API can depend on core"
 
 #### parses before advice with execution pointcut
 
-1. fn log entry
-2. fn target func
-3. on pc{ execution
-4. expect target func
+- parses before advice with execution pointcut
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses before advice with execution pointcut")
 fn log_entry():
     pass
 
@@ -121,19 +97,18 @@ expect target_func() == 42
 
 #### parses before advice with wildcard return type
 
-1. fn trace
-2. fn compute
-3. on pc{ execution
-4. expect compute
+- parses before advice with wildcard return type
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses before advice with wildcard return type")
 fn trace():
     pass
 
@@ -151,19 +126,18 @@ expect compute(21) == 42
 
 #### parses after_success advice
 
-1. fn log exit
-2. fn add
-3. on pc{ execution
-4. expect add
+- parses after_success advice
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses after_success advice")
 fn log_exit():
     pass
 
@@ -179,21 +153,18 @@ expect add(20, 22) == 42
 
 #### parses after_error advice
 
-1. fn log error
-2. fn may fail
-3. Err
-4. Ok
-5. on pc{ execution
-6. expect may fail
+- parses after_error advice
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("parses after_error advice")
 fn log_error():
     pass
 
@@ -216,18 +187,18 @@ expect may_fail(42).unwrap() == 42
 
 #### executes before advice before target
 
-1. fn before advice
-2. fn target
-3. on pc{ execution
+- executes before advice before target
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes before advice before target")
 # Verify basic before advice execution
 var advice_called = false
 
@@ -252,18 +223,18 @@ expect advice_called == true
 
 #### executes after_success when target succeeds
 
-1. fn after advice
-2. fn target
-3. on pc{ execution
+- executes after_success when target succeeds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes after_success when target succeeds")
 var executed = false
 
 fn after_advice():
@@ -283,19 +254,18 @@ expect executed == true
 
 #### does not execute after_success when target returns Err
 
-1. fn after advice
-2. fn failing target
-3. Err
-4. on pc{ execution
+- does not execute after_success when target returns Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("does not execute after_success when target returns Err")
 var executed = false
 
 fn after_advice():
@@ -317,19 +287,18 @@ expect executed == false
 
 #### executes after_error when target returns Err
 
-1. fn error handler
-2. fn failing
-3. Err
-4. on pc{ execution
+- executes after_error when target returns Err
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("executes after_error when target returns Err")
 var error_logged = false
 
 fn error_handler():
@@ -353,19 +322,18 @@ expect error_logged == true
 
 #### matches specific function name
 
-1. fn marker
-2. fn specific func
-3. on pc{ execution
-4. specific func
+- matches specific function name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches specific function name")
 var called = false
 
 fn marker():
@@ -384,21 +352,18 @@ expect called == true
 
 #### matches with wildcard in function name
 
-1. fn counter
-2. fn calc add
-3. fn calc sub
-4. on pc{ execution
-5. calc add
-6. calc sub
+- matches with wildcard in function name
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches with wildcard in function name")
 var count = 0
 
 fn counter():
@@ -423,20 +388,18 @@ expect count == 2
 
 #### matches functions with specific attribute
 
-1. fn logger
-2. fn important operation
-3. fn regular operation
-4. on pc{ attr
-5. important operation
+- matches functions with specific attribute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches functions with specific attribute")
 var logged = false
 
 fn logger():
@@ -461,19 +424,18 @@ expect logged == true
 
 #### combines pointcuts with AND
 
-1. fn marker
-2. fn critical calc
-3. on pc{ execution
-4. critical calc
+- combines pointcuts with AND
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines pointcuts with AND")
 var called = false
 
 fn marker():
@@ -493,21 +455,18 @@ expect called == true
 
 #### combines pointcuts with OR
 
-1. fn counter
-2. fn func a
-3. fn func b
-4. on pc{ execution
-5. func a
-6. func b
+- combines pointcuts with OR
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("combines pointcuts with OR")
 var count = 0
 
 fn counter():
@@ -530,21 +489,18 @@ expect count == 2
 
 #### negates pointcuts with NOT
 
-1. fn counter
-2. fn should skip
-3. fn should count
-4. on pc{ !execution
-5. should skip
-6. should count
+- negates pointcuts with NOT
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("negates pointcuts with NOT")
 var count = 0
 
 fn counter():
@@ -571,17 +527,18 @@ expect count == 1
 
 #### declares forbidden import pattern
 
-1. forbid pc{ import
-2. expect "Production cannot import test internals" contains
+- declares forbidden import pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("declares forbidden import pattern")
 # This rule is checked at compile time
 forbid pc{ import(test.internal.*) } "Production cannot import test internals"
 
@@ -593,17 +550,18 @@ expect "Production cannot import test internals".contains("Production")
 
 #### declares forbidden dependency pattern
 
-1. forbid pc{ depend
-2. expect "Domain cannot depend on infrastructure" contains
+- declares forbidden dependency pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("declares forbidden dependency pattern")
 forbid pc{ depend(within(domain.**), within(infrastructure.**)) } "Domain cannot depend on infrastructure"
 
 expect "Domain cannot depend on infrastructure".contains("Domain")
@@ -615,17 +573,18 @@ expect "Domain cannot depend on infrastructure".contains("Domain")
 
 #### declares allowed dependency pattern
 
-1. allow pc{ depend
-2. expect "API layer can depend on core" contains
+- declares allowed dependency pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("declares allowed dependency pattern")
 allow pc{ depend(within(api.**), within(core.**)) } "API layer can depend on core"
 
 expect "API layer can depend on core".contains("API layer")
@@ -639,21 +598,18 @@ expect "API layer can depend on core".contains("API layer")
 
 #### reports join points woven
 
-1. fn track weave
-2. fn target1
-3. fn target2
-4. on pc{ execution
-5. target1
-6. target2
+- reports join points woven
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports join points woven")
 var woven_count = 0
 
 fn track_weave():
@@ -676,19 +632,18 @@ expect woven_count == 2
 
 #### validates advice configuration
 
-1. fn valid advice
-2. fn target
-3. on pc{ execution
-4. expect target
+- validates advice configuration
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("validates advice configuration")
 # Valid advice configuration should not produce errors
 fn valid_advice():
     pass
@@ -709,17 +664,18 @@ expect target() == 42
 
 #### function without advice has no weaving
 
-1. fn simple func
-2. expect simple func
+- function without advice has no weaving
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("function without advice has no weaving")
 fn simple_func() -> i64:
     42
 
@@ -731,17 +687,18 @@ expect simple_func() == 42
 
 #### disabled weaving produces no diagnostics
 
-1. fn isolated func
-2. expect isolated func
+- disabled weaving produces no diagnostics
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("disabled weaving produces no diagnostics")
 fn isolated_func() -> i64:
     100
 
@@ -762,3 +719,51 @@ expect isolated_func() == 100
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f8e383e4d4c6c7734d6b1c86eb29fe90a2192160e220f8881132c67697b46149`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f8e383e4d4c6c7734d6b1c86eb29fe90a2192160e220f8881132c67697b46149`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f8e383e4d4c6c7734d6b1c86eb29fe90a2192160e220f8881132c67697b46149`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/aop_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/aop_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/aop_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/aop_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/aop_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses before advice with execution pointcut' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/aop_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses before advice with wildcard return type' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/aop_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses after_success advice' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

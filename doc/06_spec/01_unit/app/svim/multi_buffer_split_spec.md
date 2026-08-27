@@ -2,29 +2,6 @@
 
 > svim multi-buffer editing and split pane layout specification
 
-<!-- sdn-diagram:id=multi_buffer_split_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=multi_buffer_split_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-multi_buffer_split_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=multi_buffer_split_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 18 | 18 | 0 | 0 |
@@ -43,7 +20,7 @@ svim multi-buffer editing and split pane layout specification
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/svim/multi_buffer_split_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 svim multi-buffer editing and split pane layout specification
@@ -58,16 +35,22 @@ to avoid import-chain issues.
 
 #### starts with one pane
 
-1. expect layout panes len
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- starts with one pane
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts with one pane")
 val layout = test_layout_new()
 expect layout.panes.len() == 1
 ```
@@ -76,18 +59,18 @@ expect layout.panes.len() == 1
 
 #### split adds a new pane
 
-1. var layout = test layout new
-2. layout = test layout split
-3. expect layout panes len
+- split adds a new pane
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("split adds a new pane")
 var layout = test_layout_new()
 layout = test_layout_split(layout)
 expect layout.panes.len() == 2
@@ -97,21 +80,18 @@ expect layout.panes.len() == 2
 
 #### close_others reduces to one pane
 
-1. var layout = test layout new
-2. layout = test layout split
-3. layout = test layout split
-4. expect layout panes len
-5. layout = test layout close others
-6. expect layout panes len
+- close_others reduces to one pane
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("close_others reduces to one pane")
 var layout = test_layout_new()
 layout = test_layout_split(layout)
 layout = test_layout_split(layout)
@@ -124,19 +104,18 @@ expect layout.panes.len() == 1
 
 #### focus_next cycles through panes
 
-1. var layout = test layout new
-2. layout = test layout split
-3. layout = test layout focus next
-4. layout = test layout focus next
+- focus_next cycles through panes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("focus_next cycles through panes")
 var layout = test_layout_new()
 layout = test_layout_split(layout)
 val second_id = layout.active_pane_id
@@ -150,19 +129,18 @@ expect layout.active_pane_id == second_id
 
 #### focus_prev wraps around
 
-1. var layout = test layout new
-2. layout = test layout split
-3. layout = test layout focus prev
-4. layout = test layout focus prev
+- focus_prev wraps around
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("focus_prev wraps around")
 var layout = test_layout_new()
 layout = test_layout_split(layout)
 val second_id = layout.active_pane_id
@@ -178,18 +156,18 @@ expect layout.active_pane_id == second_id
 
 #### add buffer updates active index
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
+- add buffer updates active index
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("add buffer updates active index")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "file_a.spl")
 expect bm.active == 0
@@ -201,19 +179,18 @@ expect bm.active == 1
 
 #### switch_next wraps around
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch next
+- switch_next wraps around
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("switch_next wraps around")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "a.spl")
 bm = test_bm_add(bm, "b.spl")
@@ -226,20 +203,18 @@ expect bm.active == 0
 
 #### switch_prev wraps around
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch prev
-5. bm = test bm switch prev
+- switch_prev wraps around
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("switch_prev wraps around")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "a.spl")
 bm = test_bm_add(bm, "b.spl")
@@ -253,19 +228,18 @@ expect bm.active == 1
 
 #### switch_by_name finds matching buffer
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch by name
+- switch_by_name finds matching buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("switch_by_name finds matching buffer")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "src/main.spl")
 bm = test_bm_add(bm, "src/lib.spl")
@@ -277,18 +251,18 @@ expect bm.active == 0
 
 #### switch_by_index rejects invalid index
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm switch by index
+- switch_by_index rejects invalid index
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("switch_by_index rejects invalid index")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "a.spl")
 bm = test_bm_switch_by_index(bm, 99)
@@ -301,16 +275,18 @@ expect bm.active == 0
 
 #### single pane fills entire area
 
-1. expect regions len
+- single pane fills entire area
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("single pane fills entire area")
 val regions = test_compute_single(1, 80, 24)
 expect regions.len() == 1
 expect regions[0].w == 80
@@ -321,16 +297,18 @@ expect regions[0].h == 24
 
 #### vertical split creates side-by-side regions
 
-1. expect regions len
+- vertical split creates side-by-side regions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("vertical split creates side-by-side regions")
 val regions = test_compute_vsplit(1, 2, 80, 24)
 expect regions.len() == 2
 expect regions[0].x == 0
@@ -341,16 +319,18 @@ expect regions[1].x > regions[0].x
 
 #### horizontal split creates stacked regions
 
-1. expect regions len
+- horizontal split creates stacked regions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("horizontal split creates stacked regions")
 val regions = test_compute_hsplit(1, 2, 80, 24)
 expect regions.len() == 2
 expect regions[0].y == 0
@@ -361,13 +341,18 @@ expect regions[1].y > regions[0].y
 
 #### split regions do not overlap
 
+- split regions do not overlap
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("split regions do not overlap")
 val regions = test_compute_vsplit(1, 2, 80, 24)
 val left_end = regions[0].x + regions[0].w
 expect left_end < regions[1].x
@@ -379,17 +364,18 @@ expect left_end < regions[1].x
 
 #### shows buffer and pane counts
 
-1. expect status contains
-2. expect status contains
+- shows buffer and pane counts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("shows buffer and pane counts")
 val status = test_pane_status(1, 2, 1, 3, false)
 expect status.contains("buf 1/2")
 expect status.contains("pane 1/3")
@@ -399,16 +385,18 @@ expect status.contains("pane 1/3")
 
 #### shows modified flag
 
-1. expect status contains
+- shows modified flag
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("shows modified flag")
 val status = test_pane_status(1, 1, 1, 1, true)
 expect status.contains("[+]")
 ```
@@ -419,21 +407,18 @@ expect status.contains("[+]")
 
 #### list shows active marker
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. expect listing contains
-5. expect listing contains
-6. expect listing contains
+- list shows active marker
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("list shows active marker")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "file_a.spl")
 bm = test_bm_add(bm, "file_b.spl")
@@ -447,20 +432,18 @@ expect listing.contains("file_b.spl")
 
 #### list marks correct active buffer
 
-1. var bm = test bm new
-2. bm = test bm add
-3. bm = test bm add
-4. bm = test bm switch by index
-5. expect listing contains
+- list marks correct active buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("list marks correct active buffer")
 var bm = test_bm_new()
 bm = test_bm_add(bm, "first.spl")
 bm = test_bm_add(bm, "second.spl")
@@ -483,3 +466,51 @@ expect listing.contains("* 1: first.spl")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b754237897798fc43b3afa601935421b7d4197c5b5691312d160b44fcc4471c5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b754237897798fc43b3afa601935421b7d4197c5b5691312d160b44fcc4471c5`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b754237897798fc43b3afa601935421b7d4197c5b5691312d160b44fcc4471c5`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/svim/multi_buffer_split_spec.spl
+mirror: doc/06_spec/01_unit/app/svim/multi_buffer_split_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/svim/multi_buffer_split_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/svim/multi_buffer_split_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/svim/multi_buffer_split_spec.spl:227:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts with one pane' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/svim/multi_buffer_split_spec.spl:233:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'split adds a new pane' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/svim/multi_buffer_split_spec.spl:240:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'close_others reduces to one pane' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

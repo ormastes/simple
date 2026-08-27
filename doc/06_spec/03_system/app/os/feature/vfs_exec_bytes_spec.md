@@ -2,30 +2,6 @@
 
 > Verifies that boot-file bytes returned through the VFS exec path are cloned
 
-<!-- sdn-diagram:id=vfs_exec_bytes_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=vfs_exec_bytes_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-vfs_exec_bytes_spec -> std
-vfs_exec_bytes_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=vfs_exec_bytes_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -44,7 +20,7 @@ Verifies that boot-file bytes returned through the VFS exec path are cloned
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/os/feature/vfs_exec_bytes_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Verifies that boot-file bytes returned through the VFS exec path are cloned
@@ -53,11 +29,11 @@ before they are cached or handed to callers.
 ## Scenarios
 
 ### vfs_exec_bytes feature spec
-_Byte buffers returned to callers must not share mutable array storage._
 
 #### clones FAT32 byte buffers instead of sharing array storage
 
-1. source push
+- clones FAT32 byte buffers instead of sharing array storage
+   - Expected: cloned equals `[0x41u8, 0x42u8, 0x43u8]`
    - Expected: source equals `[0x41u8, 0x42u8, 0x43u8, 0x44u8]`
    - Expected: cloned equals `[0x41u8, 0x42u8, 0x43u8]`
 
@@ -65,10 +41,12 @@ _Byte buffers returned to callers must not share mutable array storage._
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("clones FAT32 byte buffers instead of sharing array storage")
 var source = [0x41u8, 0x42u8, 0x43u8]
 val cloned = _clone_bytes(source)
 
@@ -84,7 +62,7 @@ expect(cloned).to_equal([0x41u8, 0x42u8, 0x43u8])
 
 #### maps canonical filesystem app SMF paths to FAT32 8.3 disk files
 
-1. app registry load hardcoded fallback
+- maps canonical filesystem app SMF paths to FAT32 8.3 disk files
    - Expected: _vfs_exec_disk_alias("/sys/apps/browser_demo.smf") equals `/SYS/APPS/BROWSMF.SMF`
    - Expected: _vfs_exec_disk_alias("/sys/apps/file_manager.smf") equals `/SYS/APPS/FILESMF.SMF`
    - Expected: _vfs_exec_disk_alias("/sys/apps/hello_world.smf") equals `/SYS/APPS/HELLOSMF.SMF`
@@ -96,10 +74,12 @@ expect(cloned).to_equal([0x41u8, 0x42u8, 0x43u8])
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maps canonical filesystem app SMF paths to FAT32 8.3 disk files")
 app_registry_load_hardcoded_fallback()
 expect(_vfs_exec_disk_alias("/sys/apps/browser_demo.smf")).to_equal("/SYS/APPS/BROWSMF.SMF")
 expect(_vfs_exec_disk_alias("/sys/apps/file_manager.smf")).to_equal("/SYS/APPS/FILESMF.SMF")
@@ -113,7 +93,7 @@ expect(_vfs_exec_disk_alias("/tmp/notes.txt")).to_equal("/tmp/notes.txt")
 
 #### maps shell-style executable paths to shared SMF app aliases
 
-1. app registry load hardcoded fallback
+- maps shell-style executable paths to shared SMF app aliases
    - Expected: _vfs_exec_disk_alias("/bin/simple") equals `/SYS/APPS/SIMPLSTC.SMF`
    - Expected: _vfs_exec_disk_alias("/usr/bin/simple") equals `/SYS/APPS/SIMPLSTC.SMF`
    - Expected: _vfs_exec_disk_alias("/bin/sh") equals `/SYS/APPS/SHELLSMF.SMF`
@@ -123,10 +103,12 @@ expect(_vfs_exec_disk_alias("/tmp/notes.txt")).to_equal("/tmp/notes.txt")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("maps shell-style executable paths to shared SMF app aliases")
 app_registry_load_hardcoded_fallback()
 expect(_vfs_exec_disk_alias("/bin/simple")).to_equal("/SYS/APPS/SIMPLSTC.SMF")
 expect(_vfs_exec_disk_alias("/usr/bin/simple")).to_equal("/SYS/APPS/SIMPLSTC.SMF")
@@ -138,23 +120,23 @@ expect(_vfs_exec_disk_alias("/usr/bin/shell")).to_equal("/SYS/APPS/SHELLSMF.SMF"
 
 #### keeps NVFS path reads pure Simple through the native driver
 
-1. var d = NvfsDriver new
+- keeps NVFS path reads pure Simple through the native driver
    - Expected: d.mount(MountOptions.default()).is_ok() is true
    - Expected: d.write(fh, 0, payload).unwrap() equals `5`
-2. d close
    - Expected: d.stat(path).unwrap().size equals `5u64`
    - Expected: d.read(rh, 0, out).unwrap() equals `5`
-3. d close
    - Expected: out equals `payload`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps NVFS path reads pure Simple through the native driver")
 var d = NvfsDriver.new("vfs-exec-nvfs")
 expect(d.mount(MountOptions.default()).is_ok()).to_equal(true)
 val path = Path(raw: "/SYS/VERSION.TXT")
@@ -185,3 +167,54 @@ expect(out).to_equal(payload)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b08902ed9666c360abfbfdeccc08203b2ec513c30612e8d7581cdc56de55edf6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b08902ed9666c360abfbfdeccc08203b2ec513c30612e8d7581cdc56de55edf6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b08902ed9666c360abfbfdeccc08203b2ec513c30612e8d7581cdc56de55edf6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/app/os/feature/vfs_exec_bytes_spec.spl
+mirror: doc/06_spec/03_system/app/os/feature/vfs_exec_bytes_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/os/feature/vfs_exec_bytes_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/os/feature/vfs_exec_bytes_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/os/feature/vfs_exec_bytes_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/os/feature/vfs_exec_bytes_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'clones FAT32 byte buffers instead of sharing array storage' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/os/feature/vfs_exec_bytes_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps canonical filesystem app SMF paths to FAT32 8.3 disk files' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/os/feature/vfs_exec_bytes_spec.spl:47:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps shell-style executable paths to shared SMF app aliases' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

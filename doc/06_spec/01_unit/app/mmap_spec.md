@@ -1,30 +1,6 @@
 # Mmap Specification
 
-> <details>
-
-<!-- sdn-diagram:id=mmap_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mmap_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mmap_spec -> std
-mmap_spec -> nogc_sync_mut
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mmap_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering MappedFile.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,13 +19,21 @@ mmap_spec -> nogc_sync_mut
 
 #### creates a valid MappedFile
 
+- creates a valid MappedFile
+   - Expected: mf.is_valid() is true
+   - Expected: mf.file_size() equals `4096`
+   - Expected: mf.path equals `/tmp/test.txt`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates a valid MappedFile")
 val mf = MappedFile(address: 12345, size: 4096, path: "/tmp/test.txt")
 expect(mf.is_valid()).to_equal(true)
 expect(mf.file_size()).to_equal(4096)
@@ -60,13 +44,19 @@ expect(mf.path).to_equal("/tmp/test.txt")
 
 #### zero address is invalid
 
+- zero address is invalid
+   - Expected: mf.is_valid() is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("zero address is invalid")
 val mf = MappedFile(address: 0, size: 0, path: "")
 expect(mf.is_valid()).to_equal(false)
 ```
@@ -77,13 +67,19 @@ expect(mf.is_valid()).to_equal(false)
 
 #### read_bytes rejects negative offset
 
+- read_bytes rejects negative offset
+   - Expected: result.is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("read_bytes rejects negative offset")
 val mf = MappedFile(address: 1000, size: 100, path: "test")
 val result = mf.read_bytes(-1, 10)
 expect(result.is_err()).to_equal(true)
@@ -93,13 +89,19 @@ expect(result.is_err()).to_equal(true)
 
 #### read_bytes rejects negative length
 
+- read_bytes rejects negative length
+   - Expected: result.is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("read_bytes rejects negative length")
 val mf = MappedFile(address: 1000, size: 100, path: "test")
 val result = mf.read_bytes(0, -5)
 expect(result.is_err()).to_equal(true)
@@ -109,13 +111,19 @@ expect(result.is_err()).to_equal(true)
 
 #### read_bytes rejects read past end
 
+- read_bytes rejects read past end
+   - Expected: result.is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("read_bytes rejects read past end")
 val mf = MappedFile(address: 1000, size: 100, path: "test")
 val result = mf.read_bytes(90, 20)
 expect(result.is_err()).to_equal(true)
@@ -125,13 +133,19 @@ expect(result.is_err()).to_equal(true)
 
 #### read_string rejects negative offset
 
+- read_string rejects negative offset
+   - Expected: result.is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("read_string rejects negative offset")
 val mf = MappedFile(address: 1000, size: 100, path: "test")
 val result = mf.read_string(-1, 10)
 expect(result.is_err()).to_equal(true)
@@ -141,13 +155,19 @@ expect(result.is_err()).to_equal(true)
 
 #### read_string rejects offset past end
 
+- read_string rejects offset past end
+   - Expected: result.is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("read_string rejects offset past end")
 val mf = MappedFile(address: 1000, size: 100, path: "test")
 val result = mf.read_string(200, 10)
 expect(result.is_err()).to_equal(true)
@@ -159,7 +179,7 @@ expect(result.is_err()).to_equal(true)
 
 #### invalidates mapping after close
 
-1. var mf = MappedFile
+- invalidates mapping after close
    - Expected: mf.is_valid() is true
    - Expected: mf.is_valid() is false
 
@@ -167,10 +187,12 @@ expect(result.is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("invalidates mapping after close")
 var mf = MappedFile(address: 1000, size: 100, path: "test")
 expect(mf.is_valid()).to_equal(true)
 # Note: close() calls rt_munmap which isn't available in interpreter
@@ -186,13 +208,19 @@ expect(mf.is_valid()).to_equal(false)
 
 #### returns error for non-existent file
 
+- returns error for non-existent file
+   - Expected: result.is_err() is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns error for non-existent file")
 val result = MappedFile.open("/tmp/simple_mmap_nonexistent_file_12345.txt")
 expect(result.is_err()).to_equal(true)
 val err = result.unwrap_err()
@@ -208,12 +236,12 @@ expect(err).to_contain("not found")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/mmap_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering MappedFile.
 - MappedFile
 
 ## Scenario Summary
@@ -228,3 +256,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `03a432aa211846e7b82fad93897ee7d0cf89bbd93c6cde61a3a94a944ff284ae`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `03a432aa211846e7b82fad93897ee7d0cf89bbd93c6cde61a3a94a944ff284ae`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `03a432aa211846e7b82fad93897ee7d0cf89bbd93c6cde61a3a94a944ff284ae`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/mmap_spec.spl
+mirror: doc/06_spec/01_unit/app/mmap_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mmap_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mmap_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mmap_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/mmap_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates a valid MappedFile' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mmap_spec.spl:38:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'zero address is invalid' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mmap_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'read_bytes rejects negative offset' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

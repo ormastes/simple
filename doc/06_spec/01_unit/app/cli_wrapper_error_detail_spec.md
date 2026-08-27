@@ -2,29 +2,6 @@
 
 > Regression guard for the release-binary error wrapper. The release binary
 
-<!-- sdn-diagram:id=cli_wrapper_error_detail_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cli_wrapper_error_detail_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cli_wrapper_error_detail_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cli_wrapper_error_detail_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -43,7 +20,7 @@ Regression guard for the release-binary error wrapper. The release binary
 | Category | Tooling / Error Reporting |
 | Status | Active |
 | Source | `test/01_unit/app/cli_wrapper_error_detail_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 **Bug ID:** B1 (compiler_bugs_for_crypto_2026-04-25.md)
@@ -63,13 +40,24 @@ Acceptance per plan:
 
 #### parse error: stderr > 50 bytes, stdout == 0
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- parse error: stderr > 50 bytes, stdout == 0
+   - Expected: stdout.len() equals `0`
+   - Expected: stderr.len() > 50 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parse error: stderr > 50 bytes, stdout == 0")
 val script = _write_temp("parse", "fn main():\n    val x = {\n")
 val (stdout, stderr, code) = _run_simple(script)
 val _ = rt_file_delete(script)
@@ -82,13 +70,19 @@ expect(stderr.len() > 50).to_equal(true)
 
 #### parse error: '[STDERR]' literal must NOT appear in stdout
 
+- parse error: '[STDERR]' literal must NOT appear in stdout
+   - Expected: stdout does not contain `[STDERR]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("parse error: '[STDERR]' literal must NOT appear in stdout")
 val script = _write_temp("parse_no_prefix", "fn main():\n    val x = {\n")
 val (stdout, _, _) = _run_simple(script)
 val _ = rt_file_delete(script)
@@ -99,13 +93,20 @@ expect(stdout.contains("[STDERR]")).to_equal(false)
 
 #### runtime error: real message reaches stderr
 
+- runtime error: real message reaches stderr
+   - Expected: stdout does not contain `[STDERR]`
+   - Expected: stderr.len() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("runtime error: real message reaches stderr")
 val script = _write_temp("runtime", "fn main():\n    val x = 10\n    val y = 0\n    print x / y\n")
 val (stdout, stderr, code) = _run_simple(script)
 val _ = rt_file_delete(script)
@@ -118,13 +119,20 @@ expect(stderr.len() > 0).to_equal(true)
 
 #### semantic error: stderr carries the message; stdout has no '[STDERR]'
 
+- semantic error: stderr carries the message; stdout has no '[STDERR]'
+   - Expected: stdout does not contain `[STDERR]`
+   - Expected: stderr.len() > 0 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("semantic error: stderr carries the message; stdout has no '[STDERR]'")
 # Avoid f-string interpolation by using an unresolved function call
 # rather than a `use foo.{bar}` import (the spec body is itself an
 # interpolating string literal).
@@ -150,3 +158,54 @@ expect(stderr.len() > 0).to_equal(true)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ec34ac33ed16f48e42baa3fe49403cce7dd0f66f6d1dcabe065e7175077c3e31`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ec34ac33ed16f48e42baa3fe49403cce7dd0f66f6d1dcabe065e7175077c3e31`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ec34ac33ed16f48e42baa3fe49403cce7dd0f66f6d1dcabe065e7175077c3e31`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/cli_wrapper_error_detail_spec.spl
+mirror: doc/06_spec/01_unit/app/cli_wrapper_error_detail_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/cli_wrapper_error_detail_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/cli_wrapper_error_detail_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/cli_wrapper_error_detail_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/cli_wrapper_error_detail_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parse error: stderr > 50 bytes, stdout == 0' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli_wrapper_error_detail_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parse error: '[STDERR]' literal must NOT appear in stdout' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli_wrapper_error_detail_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'runtime error: real message reaches stderr' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

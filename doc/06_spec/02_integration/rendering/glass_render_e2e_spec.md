@@ -1,31 +1,6 @@
 # Glass Render E2e Specification
 
-> <details>
-
-<!-- sdn-diagram:id=glass_render_e2e_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=glass_render_e2e_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-glass_render_e2e_spec -> std
-glass_render_e2e_spec -> common
-glass_render_e2e_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=glass_render_e2e_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Glass Theme End-to-End Rendering.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -44,13 +19,18 @@ glass_render_e2e_spec -> os
 
 #### generates non-empty HTML
 
+- generates non-empty HTML
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates non-empty HTML")
 val html = generate_glass_test_html("glass_dark")
 expect(html.len()).to_be_greater_than(100)
 # Should contain key structural elements
@@ -63,7 +43,7 @@ expect(html).to_contain("widget-button")
 
 #### renders to non-empty pixel buffer
 
-1. var renderer = BrowserRenderer create
+- renders to non-empty pixel buffer
    - Expected: result.pixel_data.len() equals `PIXEL_COUNT`
    - Expected: result.format equals `pixels`
 
@@ -71,10 +51,12 @@ expect(html).to_contain("widget-button")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("renders to non-empty pixel buffer")
 val html = generate_glass_test_html("glass_dark")
 var renderer = BrowserRenderer.create(W, H)
 val result = renderer.render_html_to_pixels(html)
@@ -86,17 +68,19 @@ expect(result.format).to_equal("pixels")
 
 #### pixels contain dark background colors
 
-1. var renderer = BrowserRenderer create
+- pixels contain dark background colors
    - Expected: result.pixel_data.len() equals `PIXEL_COUNT`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("pixels contain dark background colors")
 val html = generate_glass_test_html("glass_dark")
 var renderer = BrowserRenderer.create(W, H)
 val result = renderer.render_html_to_pixels(html)
@@ -113,17 +97,19 @@ expect(dark_count).to_be_greater_than(0)
 
 #### pixels contain glass accent blue
 
-1. var renderer = BrowserRenderer create
+- pixels contain glass accent blue
    - Expected: result.pixel_data.len() equals `PIXEL_COUNT`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("pixels contain glass accent blue")
 val html = generate_glass_test_html("glass_dark")
 var renderer = BrowserRenderer.create(W, H)
 val result = renderer.render_html_to_pixels(html)
@@ -145,7 +131,7 @@ expect(total_blue).to_be_greater_than(0)
 
 #### renders to non-empty pixel buffer
 
-1. var renderer = BrowserRenderer create
+- renders to non-empty pixel buffer
    - Expected: result.pixel_data.len() equals `PIXEL_COUNT`
    - Expected: result.format equals `pixels`
 
@@ -153,10 +139,12 @@ expect(total_blue).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("renders to non-empty pixel buffer")
 val html = generate_glass_test_html("glass_light")
 var renderer = BrowserRenderer.create(W, H)
 val result = renderer.render_html_to_pixels(html)
@@ -168,8 +156,7 @@ expect(result.format).to_equal("pixels")
 
 #### light theme differs from dark theme
 
-1. var renderer d = BrowserRenderer create
-2. var renderer l = BrowserRenderer create
+- light theme differs from dark theme
    - Expected: dark_result.pixel_data.len() equals `PIXEL_COUNT`
    - Expected: light_result.pixel_data.len() equals `PIXEL_COUNT`
 
@@ -177,10 +164,12 @@ expect(result.format).to_equal("pixels")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("light theme differs from dark theme")
 val dark_html = generate_glass_test_html("glass_dark")
 val light_html = generate_glass_test_html("glass_light")
 var renderer_d = BrowserRenderer.create(W, H)
@@ -205,7 +194,7 @@ expect(cmp.match_percentage).to_be_less_than(5000)
 
 #### stress test renders without crash
 
-1. var renderer = BrowserRenderer create
+- stress test renders without crash
    - Expected: result.pixel_data.len() equals `PIXEL_COUNT`
    - Expected: result.format equals `pixels`
 
@@ -213,10 +202,12 @@ expect(cmp.match_percentage).to_be_less_than(5000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stress test renders without crash")
 val html = build_rendering_stress_html()
 expect(html.len()).to_be_greater_than(100)
 var renderer = BrowserRenderer.create(W, H)
@@ -235,17 +226,19 @@ expect(result.format).to_equal("pixels")
 
 #### stress test produces varied pixels
 
-1. var renderer = BrowserRenderer create
+- stress test produces varied pixels
    - Expected: result.pixel_data.len() equals `PIXEL_COUNT`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("stress test produces varied pixels")
 val html = build_rendering_stress_html()
 var renderer = BrowserRenderer.create(W, H)
 val result = renderer.render_html_to_pixels(html)
@@ -265,13 +258,22 @@ expect(unique).to_be_greater_than(3)
 
 #### both engines produce non-empty output for glass_dark
 
+- both engines produce non-empty output for glass_dark
+   - Expected: int_cap.success is true
+   - Expected: float_cap.success is true
+   - Expected: int_cap.pixels.len() equals `PIXEL_COUNT`
+   - Expected: float_cap.pixels.len() equals `PIXEL_COUNT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("both engines produce non-empty output for glass_dark")
 val html = generate_glass_test_html("glass_dark")
 val int_cap = capture_with_effect_engine(html, W, H, "int")
 val float_cap = capture_with_effect_engine(html, W, H, "float")
@@ -285,13 +287,20 @@ expect(float_cap.pixels.len()).to_equal(PIXEL_COUNT)
 
 #### float and int engines produce similar output
 
+- float and int engines produce similar output
+   - Expected: int_cap.success is true
+   - Expected: float_cap.success is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("float and int engines produce similar output")
 val html = generate_glass_test_html("glass_dark")
 val int_cap = capture_with_effect_engine(html, W, H, "int")
 val float_cap = capture_with_effect_engine(html, W, H, "float")
@@ -311,8 +320,7 @@ expect(result.match_percentage).to_be_greater_than(9949)
 
 #### same HTML renders identically twice
 
-1. var renderer1 = BrowserRenderer create
-2. var renderer2 = BrowserRenderer create
+- same HTML renders identically twice
    - Expected: result1.pixel_data.len() equals `PIXEL_COUNT`
    - Expected: result2.pixel_data.len() equals `PIXEL_COUNT`
    - Expected: cmp.match_percentage equals `10000`
@@ -321,10 +329,12 @@ expect(result.match_percentage).to_be_greater_than(9949)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("same HTML renders identically twice")
 val html = generate_glass_test_html("glass_dark")
 var renderer1 = BrowserRenderer.create(W, H)
 var renderer2 = BrowserRenderer.create(W, H)
@@ -346,12 +356,12 @@ expect(cmp.match_percentage).to_equal(10000)
 | Category | Other |
 | Status | Active |
 | Source | `test/02_integration/rendering/glass_render_e2e_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Glass Theme End-to-End Rendering.
 - Glass Theme End-to-End Rendering
 
 ## Scenario Summary
@@ -366,3 +376,57 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `66f3435a0a18428abdbc90171a6e291e73af78040fef5450a22c30093ce1728e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `66f3435a0a18428abdbc90171a6e291e73af78040fef5450a22c30093ce1728e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `66f3435a0a18428abdbc90171a6e291e73af78040fef5450a22c30093ce1728e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/02_integration/rendering/glass_render_e2e_spec.spl
+mirror: doc/06_spec/02_integration/rendering/glass_render_e2e_spec.md (current)
+findings: 7 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=55 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/rendering/glass_render_e2e_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
+  why: Retained evidence must be visible or linked from the professional manual.
+  improve: Select a supported evidence display and regenerate.
+doc/06_spec/02_integration/rendering/glass_render_e2e_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/rendering/glass_render_e2e_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/rendering/glass_render_e2e_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/rendering/glass_render_e2e_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'generates non-empty HTML' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/rendering/glass_render_e2e_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'renders to non-empty pixel buffer' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/rendering/glass_render_e2e_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pixels contain dark background colors' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

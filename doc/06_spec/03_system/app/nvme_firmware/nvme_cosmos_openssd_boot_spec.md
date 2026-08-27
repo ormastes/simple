@@ -23,7 +23,7 @@ Executes the host runtime ABI, MMIO, ARM abort, PCIe transport, FTL metadata, NV
 | Plan | doc/03_plan/sys_test/cosmos_openssd_production_hal.md |
 | Design | doc/05_design/cosmos_openssd_production_hal.md |
 | Source | `test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -86,13 +86,11 @@ deployed `bin/simple` exists and this spec has not been executed or doc-generate
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-012
-    # @req REQ-012
-# @req REQ-SSPEC-SYSTEM
+# @req REQ-012 REQ-SSPEC-SYSTEM NFR-012
 step("should execute the host FSBL, NFC, and PCIe MMIO state machines")
 step("Compile and run the fail-closed host mock-MMIO integration driver")
 val (out, err, code) = _run("sh " + HOST_MMIO)
@@ -736,35 +734,31 @@ Requirements covered by the scenarios in this manual:
 - `REQ-SSPEC-SYSTEM`
 - `REQ-012`
 - `REQ-SSPEC-SYSTEM;`
-- `REQ-SSPEC-SYSTEM..004`
-- `REQ-SSPEC-SYSTEM..009`
-- `REQ-SSPEC-SYSTEM..005`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `a2e712dc3ed520514f308876c0032a034957e679b5d45ab2e06af2c0c9e6abce`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `899e208b4e231417bf8168413ebc75de7aa8e2b1fd944b7456209b6bcea153c2`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `a2e712dc3ed520514f308876c0032a034957e679b5d45ab2e06af2c0c9e6abce`.
+Source SHA-256: `899e208b4e231417bf8168413ebc75de7aa8e2b1fd944b7456209b6bcea153c2`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `a2e712dc3ed520514f308876c0032a034957e679b5d45ab2e06af2c0c9e6abce`  
+Source SHA-256: `899e208b4e231417bf8168413ebc75de7aa8e2b1fd944b7456209b6bcea153c2`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl
 mirror: doc/06_spec/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.md (current)
-findings: 13 blockers: 1
+findings: 12 blockers: 0
   narrative=100 structure=70 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -774,34 +768,31 @@ doc/06_spec/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.md:1:1: wa
 test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 31 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
 test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:109:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the host FSBL, NFC, and PCIe MMIO state machines' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:109:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should execute the host FSBL, NFC, and PCIe MMIO state machines' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:129:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the standalone PCIe contract runner' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:127:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the standalone PCIe contract runner' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should execute the standalone PCIe contract runner' has no retained capture or evidence
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:127:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should execute the standalone PCIe contract runner' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:150:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute actual ARM prefetch and data abort entry paths' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:148:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute actual ARM prefetch and data abort entry paths' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:150:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should execute actual ARM prefetch and data abort entry paths' has no retained capture or evidence
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:148:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should execute actual ARM prefetch and data abort entry paths' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:162:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the hardened NVMe IO callback service contract runner' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:160:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the hardened NVMe IO callback service contract runner' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:173:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the crash-consistent FTL metadata contract runner' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:171:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should execute the crash-consistent FTL metadata contract runner' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:231:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should bind persistent NFC media and fail closed outside silicon' describes the test rather than its outcome
+test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl:229:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should bind persistent NFC media and fail closed outside silicon' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

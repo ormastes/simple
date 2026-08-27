@@ -2,29 +2,6 @@
 
 > capture_before_ffi(before_buffer)
 
-<!-- sdn-diagram:id=screenshot_ffi_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=screenshot_ffi_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-screenshot_ffi_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=screenshot_ffi_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 11 | 11 | 0 | 0 |
@@ -43,7 +20,7 @@ capture_before_ffi(before_buffer)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/std/screenshot/screenshot_ffi_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 capture_before_ffi(before_buffer)
@@ -63,21 +40,18 @@ capture_before_ffi(before_buffer)
 
 #### enables and disables screenshot capture
 
-1. disable ffi screenshots
-2. expect is ffi screenshots enabled
-3. enable ffi screenshots
-4. expect is ffi screenshots enabled
-5. disable ffi screenshots
-6. expect is ffi screenshots enabled
+- enables and disables screenshot capture
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("enables and disables screenshot capture")
 disable_ffi_screenshots()
 expect is_ffi_screenshots_enabled() == false
 
@@ -92,17 +66,18 @@ expect is_ffi_screenshots_enabled() == false
 
 #### sets refresh mode
 
-1. set ffi refresh
-2. set ffi refresh
+- sets refresh mode
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets refresh mode")
 set_ffi_refresh(true)
 set_ffi_refresh(false)
 # No assertion needed - just verifies FFI calls work
@@ -114,17 +89,18 @@ set_ffi_refresh(false)
 
 #### sets output directory
 
-1. set ffi output dir
-2. set ffi output dir
+- sets output directory
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets output directory")
 set_ffi_output_dir("doc/spec/test_images")
 # No assertion needed - just verifies FFI calls work
 # Reset to default
@@ -137,17 +113,18 @@ set_ffi_output_dir("doc/06_spec/image")
 
 #### sets and clears test context
 
-1. set ffi test context
-2. clear ffi test context
+- sets and clears test context
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("sets and clears test context")
 set_ffi_test_context("test/unit/ui/button_spec.spl", "renders button")
 clear_ffi_test_context()
 # No assertion needed - just verifies FFI calls work
@@ -157,23 +134,18 @@ clear_ffi_test_context()
 
 #### generates correct paths from context
 
-1. enable ffi screenshots
-2. set ffi output dir
-3. set ffi test context
-4. expect before path contains
-5. expect before path contains
-6. expect after path contains
-7. clear ffi test context
-8. disable ffi screenshots
+- generates correct paths from context
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates correct paths from context")
 enable_ffi_screenshots()
 set_ffi_output_dir("doc/06_spec/image")
 set_ffi_test_context("test/unit/ui/button_spec.spl", "renders button")
@@ -196,20 +168,18 @@ disable_ffi_screenshots()
 
 #### captures before terminal buffer
 
-1. enable ffi screenshots
-2. set ffi test context
-3. clear ffi captures
-4. clear ffi test context
-5. disable ffi screenshots
+- captures before terminal buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("captures before terminal buffer")
 enable_ffi_screenshots()
 set_ffi_test_context("test/unit/ui/text_spec.spl", "displays text")
 
@@ -226,20 +196,18 @@ disable_ffi_screenshots()
 
 #### captures after terminal buffer
 
-1. enable ffi screenshots
-2. set ffi test context
-3. clear ffi captures
-4. clear ffi test context
-5. disable ffi screenshots
+- captures after terminal buffer
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("captures after terminal buffer")
 enable_ffi_screenshots()
 set_ffi_test_context("test/unit/ui/text_spec.spl", "displays text")
 
@@ -257,20 +225,18 @@ disable_ffi_screenshots()
 
 #### captures ANSI formatted terminal output
 
-1. enable ffi screenshots
-2. set ffi test context
-3. clear ffi captures
-4. clear ffi test context
-5. disable ffi screenshots
+- captures ANSI formatted terminal output
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("captures ANSI formatted terminal output")
 enable_ffi_screenshots()
 set_ffi_test_context("test/unit/ui/ansi_spec.spl", "renders colored text")
 
@@ -289,19 +255,18 @@ disable_ffi_screenshots()
 
 #### checks if screenshot exists
 
-1. enable ffi screenshots
-2. set ffi test context
-3. clear ffi test context
-4. disable ffi screenshots
+- checks if screenshot exists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("checks if screenshot exists")
 enable_ffi_screenshots()
 set_ffi_test_context("test/nonexistent/spec.spl", "nonexistent test")
 
@@ -319,23 +284,18 @@ disable_ffi_screenshots()
 
 #### captures TUI widget rendering
 
-1. enable ffi screenshots
-2. set ffi output dir
-3. set ffi test context
-4. capture before ffi
-5. capture after ffi
-6. clear ffi captures
-7. clear ffi test context
-8. disable ffi screenshots
+- captures TUI widget rendering
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("captures TUI widget rendering")
 enable_ffi_screenshots()
 set_ffi_output_dir("doc/06_spec/image")
 set_ffi_test_context("test/unit/ui/tui/button_spec.spl", "renders button with border")
@@ -369,28 +329,18 @@ disable_ffi_screenshots()
 
 #### captures multiple screenshots in sequence
 
-1. enable ffi screenshots
-2. set ffi output dir
-3. set ffi test context
-4. capture before ffi
-5. capture after ffi
-6. clear ffi captures
-7. clear ffi test context
-8. set ffi test context
-9. capture before ffi
-10. capture after ffi
-11. clear ffi captures
-12. clear ffi test context
-13. disable ffi screenshots
+- captures multiple screenshots in sequence
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("captures multiple screenshots in sequence")
 enable_ffi_screenshots()
 set_ffi_output_dir("doc/06_spec/image")
 
@@ -425,3 +375,54 @@ disable_ffi_screenshots()
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `bf2cac9d983cfc42f30b333de1fd2028baf9739bd51b7d3b40b549edcb702a89`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `bf2cac9d983cfc42f30b333de1fd2028baf9739bd51b7d3b40b549edcb702a89`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `bf2cac9d983cfc42f30b333de1fd2028baf9739bd51b7d3b40b549edcb702a89`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/02_integration/lib/std/screenshot/screenshot_ffi_spec.spl
+mirror: doc/06_spec/02_integration/lib/std/screenshot/screenshot_ffi_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=55 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/std/screenshot/screenshot_ffi_spec.md:1:1: warning SSDOC-EVD-003 [evidence] (-15): source captures are not rendered as manual evidence
+  why: Retained evidence must be visible or linked from the professional manual.
+  improve: Select a supported evidence display and regenerate.
+doc/06_spec/02_integration/lib/std/screenshot/screenshot_ffi_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/std/screenshot/screenshot_ffi_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/std/screenshot/screenshot_ffi_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'enables and disables screenshot capture' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/std/screenshot/screenshot_ffi_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets refresh mode' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/std/screenshot/screenshot_ffi_spec.spl:37:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets output directory' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

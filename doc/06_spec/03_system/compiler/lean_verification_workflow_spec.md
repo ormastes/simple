@@ -1,30 +1,6 @@
 # Lean Verification Workflow Specification
 
-> 1. opts = codegen LeanCodegenOptions new
-
-<!-- sdn-diagram:id=lean_verification_workflow_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=lean_verification_workflow_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-lean_verification_workflow_spec -> std
-lean_verification_workflow_spec -> verification
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=lean_verification_workflow_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Lean Verification Workflow.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,19 +19,7 @@ lean_verification_workflow_spec -> verification
 
 #### assembles Lean codegen state
 
-1. opts = codegen LeanCodegenOptions new
-2. opts = opts with module name
-3. opts = opts with output dir
-4. opts = opts with stubs
-5. gen = codegen LeanCodegen new
-6. func = codegen LeanFunction new
-7. func = func add param
-8. func = func with return type
-9. func = func with body
-10. gen = gen add function
-11. thm = codegen LeanTheorem new
-12. thm = thm add param
-13. gen = gen add theorem
+- assembles Lean codegen state
    - Expected: gen.options.module_name equals `SystemDemo`
    - Expected: gen.options.output_dir equals `temp_root`
    - Expected: gen.functions.len() equals `1`
@@ -67,10 +31,12 @@ lean_verification_workflow_spec -> verification
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("assembles Lean codegen state")
 val temp_root = "/tmp/simple-lean-verification-system"
 
 opts = codegen.LeanCodegenOptions.new()
@@ -104,8 +70,7 @@ expect(gen.theorems[0].name).to_equal("system_demo_nonnegative")
 
 #### formats a mixed proof summary
 
-1. exit code: Some
-2. exit code: Some
+- formats a mixed proof summary
    - Expected: summary.files_checked equals `2`
    - Expected: summary.files_passed equals `2`
    - Expected: summary.files_failed equals `0`
@@ -119,10 +84,12 @@ expect(gen.theorems[0].name).to_equal("system_demo_nonnegative")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("formats a mixed proof summary")
 val proven = runner.LeanCheckResult(
     file: "src/verification/proven.lean",
     success: true,
@@ -165,12 +132,12 @@ expect(summary.format()).to_contain("Admitted (sorry): 2")
 | Category | Compiler |
 | Status | Active |
 | Source | `test/03_system/compiler/lean_verification_workflow_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Lean Verification Workflow.
 - Lean Verification Workflow
 
 ## Scenario Summary
@@ -185,3 +152,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6705d19f5d2429899e6d01b92a36e1423a15c54ad56a8e0b6ad4a0d2e856d49b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6705d19f5d2429899e6d01b92a36e1423a15c54ad56a8e0b6ad4a0d2e856d49b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6705d19f5d2429899e6d01b92a36e1423a15c54ad56a8e0b6ad4a0d2e856d49b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/compiler/lean_verification_workflow_spec.spl
+mirror: doc/06_spec/03_system/compiler/lean_verification_workflow_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/compiler/lean_verification_workflow_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/compiler/lean_verification_workflow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/compiler/lean_verification_workflow_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/compiler/lean_verification_workflow_spec.spl:14:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'assembles Lean codegen state' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/compiler/lean_verification_workflow_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'formats a mixed proof summary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

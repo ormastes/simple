@@ -1,29 +1,6 @@
-# @tag:size_regression
+# exe_size_budget_spec
 
-> extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-<!-- sdn-diagram:id=exe_size_budget_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=exe_size_budget_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-exe_size_budget_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=exe_size_budget_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Executable size regression guard — Phase 5 T2.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,9 +9,9 @@ exe_size_budget_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# @tag:size_regression
+# exe_size_budget_spec
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+Executable size regression guard — Phase 5 T2.
 
 ## At a Glance
 
@@ -43,23 +20,26 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/infrastructure/exe_size_budget_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_read_bytes(path: text) -> [u8]
-extern fn rt_file_exists(path: text) -> bool
+Executable size regression guard — Phase 5 T2.
 
-fn run_shell(cmd: text) -> (text, text, i64):
-    rt_process_run("/bin/sh", ["-c", cmd])
+Compiles a hello-world Simple program to a stripped native binary and asserts
+that the on-disk size stays within a defined budget.
 
-val BUDGET_BYTES: i64 = 12582912     # 12 MB — ~25% headroom over the 9.4 MB measured baseline
-val BASELINE_BYTES: i64 = 9623568    # measured 2026-04-28; improvement should show as gap vs budget
+Budget: 12 MB (12,582,912 bytes).  Current baseline: ~9.4 MB (9,623,568 bytes).
+The ~25% headroom accommodates cross-machine noise from rustc/libc version
+differences while still catching regressions above that threshold.
 
-val FIXTURE_SPL = "build/size-bench/hello.spl"
-val OUTPUT_BIN  = "build/size-bench/hello.spl.native.stripped"
+On failure the test prints:
+  - old budget vs new size and % delta
+  - `size -A <bin> | head -20` section breakdown
+  - `nm --size-sort -r -S <bin> | head -10` top symbols
 
-describe "exe size budget — stripped hello-world native binary":
+The test also verifies the produced binary actually runs and prints "Hello World"
+so a stub-generation false-green is caught immediately (per memory:
+feedback_compile_mode_false_greens.md).
 
 ## Scenarios
 
@@ -67,13 +47,19 @@ describe "exe size budget — stripped hello-world native binary":
 
 #### fixture source file exists
 
+- fixture source file exists
+   - Expected: rt_file_exists(FIXTURE_SPL) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fixture source file exists")
 expect(rt_file_exists(FIXTURE_SPL)).to_equal(true)
 ```
 
@@ -81,13 +67,19 @@ expect(rt_file_exists(FIXTURE_SPL)).to_equal(true)
 
 #### compiles hello.spl to a stripped native binary
 
+- compiles hello.spl to a stripped native binary
+   - Expected: result.2 equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("compiles hello.spl to a stripped native binary")
 # Compile fresh so the test is not stale even if the pre-built artifact
 # was produced by an older toolchain.
 val result = run_shell(
@@ -103,13 +95,19 @@ expect(result.2).to_equal(0)
 
 #### produced binary exists after compile
 
+- produced binary exists after compile
+   - Expected: rt_file_exists(OUTPUT_BIN) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("produced binary exists after compile")
 expect(rt_file_exists(OUTPUT_BIN)).to_equal(true)
 ```
 
@@ -117,17 +115,19 @@ expect(rt_file_exists(OUTPUT_BIN)).to_equal(true)
 
 #### binary runs and prints Hello World (not a stub)
 
-1. print "exit code: " + result 2 to text
+- binary runs and prints Hello World (not a stub)
    - Expected: stdout contains `Hello World`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("binary runs and prints Hello World (not a stub)")
 # Per feedback_compile_mode_false_greens.md: compile path can produce a
 # stub that reports success but does not actually execute.  Verify real output.
 val result = run_shell(OUTPUT_BIN)
@@ -144,21 +144,19 @@ expect(stdout.contains("Hello World")).to_equal(true)
 
 #### stripped binary size is within budget
 
-1. print "  Budget  : " + BUDGET BYTES to text
-2. print "  Actual  : " + size bytes to text
-3. print "  Baseline: " + BASELINE BYTES to text
-4. print "  Delta   : +" + pct to text
-5. print "--- size -A
+- stripped binary size is within budget
    - Expected: size_bytes <= BUDGET_BYTES is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("stripped binary size is within budget")
 val data = rt_file_read_bytes(OUTPUT_BIN) ?? []
 val size_bytes: i64 = data.len()
 
@@ -188,13 +186,20 @@ expect(size_bytes <= BUDGET_BYTES).to_equal(true)
 
 #### baseline has not grown beyond budget (sanity — pre-built artifact)
 
+- baseline has not grown beyond budget (sanity — pre-built artifact)
+   - Expected: size_bytes > 0 is true
+   - Expected: size_bytes < 52428800 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("baseline has not grown beyond budget (sanity — pre-built artifact)")
 # Assert on the known pre-built artifact size without re-compiling,
 # so this test passes even in environments where compile is unavailable.
 val data = rt_file_read_bytes(OUTPUT_BIN) ?? []
@@ -219,3 +224,54 @@ expect(size_bytes < 52428800).to_equal(true)   # hard ceiling: 50 MB
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cdc009f76a7e61e26f4de68a8591245253e70160b3c83b6db19359983349f037`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cdc009f76a7e61e26f4de68a8591245253e70160b3c83b6db19359983349f037`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cdc009f76a7e61e26f4de68a8591245253e70160b3c83b6db19359983349f037`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/infrastructure/exe_size_budget_spec.spl
+mirror: doc/06_spec/03_system/infrastructure/exe_size_budget_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/infrastructure/exe_size_budget_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/infrastructure/exe_size_budget_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/infrastructure/exe_size_budget_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/infrastructure/exe_size_budget_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fixture source file exists' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/infrastructure/exe_size_budget_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles hello.spl to a stripped native binary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/infrastructure/exe_size_budget_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'produced binary exists after compile' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,37 +2,6 @@
 
 > Mixins are stateful traits — they inject fields and methods into classes at definition time. Unlike traits (behavioral contracts for runtime dispatch), mixins provide structural composition without inheritance.
 
-<!-- sdn-diagram:id=mixin_basic_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mixin_basic_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mixin_basic_spec -> Timestamped
-mixin_basic_spec -> Trackable
-mixin_basic_spec -> Valuable
-mixin_basic_spec -> Scorable
-mixin_basic_spec -> HasId
-mixin_basic_spec -> HasName
-mixin_basic_spec -> Ident
-mixin_basic_spec -> Labeled
-mixin_basic_spec -> Defaultable
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mixin_basic_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -53,7 +22,7 @@ Mixins are stateful traits — they inject fields and methods into classes at de
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/features/mixin_basic_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -99,13 +68,18 @@ class User:
 
 #### injects mixin fields into class
 
+- injects mixin fields into class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("injects mixin fields into class")
 mixin Trackable:
     created_at: i64
 
@@ -122,13 +96,18 @@ expect item.name == "test"
 
 #### injects multiple fields from mixin
 
+- injects multiple fields from mixin
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("injects multiple fields from mixin")
 mixin Timestamped:
     created_at: i64
     updated_at: i64
@@ -149,17 +128,18 @@ expect r.id == 1
 
 #### injects mixin methods into class
 
-1. fn doubled
-2. expect c doubled
+- injects mixin methods into class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("injects mixin methods into class")
 mixin Valuable:
     amount: i64
 
@@ -177,17 +157,18 @@ expect c.doubled() == 50
 
 #### injects mixin method with arguments
 
-1. fn add score
-2. expect p add score
+- injects mixin method with arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("injects mixin method with arguments")
 mixin Scorable:
     score: i64
 
@@ -208,13 +189,18 @@ expect p.add_score(5) == 15
 
 #### applies two mixins to one class
 
+- applies two mixins to one class
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("applies two mixins to one class")
 mixin HasId:
     id: i64
 
@@ -234,19 +220,18 @@ expect e.name == "Alice"
 
 #### methods from both mixins available
 
-1. fn get id
-2. fn get label
-3. expect w get id
-4. expect w get label
+- methods from both mixins available
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("methods from both mixins available")
 mixin Ident:
     id: i64
 
@@ -274,18 +259,18 @@ expect w.get_label() == "button"
 
 #### class method overrides mixin method
 
-1. fn compute
-2. fn compute
-3. expect c compute
+- class method overrides mixin method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("class method overrides mixin method")
 mixin Defaultable:
     val_: i64
 
@@ -316,3 +301,51 @@ expect c.compute() == 50
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ac790a1f045d8f481dcb12109b6adb5de56fb3cea556ad5fb7fec1f81e9fde51`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ac790a1f045d8f481dcb12109b6adb5de56fb3cea556ad5fb7fec1f81e9fde51`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ac790a1f045d8f481dcb12109b6adb5de56fb3cea556ad5fb7fec1f81e9fde51`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/features/mixin_basic_spec.spl
+mirror: doc/06_spec/03_system/feature/features/mixin_basic_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/features/mixin_basic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/features/mixin_basic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/features/mixin_basic_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'injects mixin fields into class' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/mixin_basic_spec.spl:80:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'injects multiple fields from mixin' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/features/mixin_basic_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'injects mixin methods into class' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

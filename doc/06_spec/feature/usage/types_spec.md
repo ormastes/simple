@@ -1,5 +1,16 @@
 # Simple Language Type System - Test Specification
 
+> Executable tests for Simple's type system basics: primitives, mutability, generics, and type inference.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 5 | 5 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Simple Language Type System - Test Specification
+
 Executable tests for Simple's type system basics: primitives, mutability, generics, and type inference.
 
 ## At a Glance
@@ -7,10 +18,155 @@ Executable tests for Simple's type system basics: primitives, mutability, generi
 | Field | Value |
 |-------|-------|
 | Feature IDs | #20-29 |
+| Category | Language Features |
 | Status | Stable (Basic Features) |
-| Source | `test/03_system/feature/usage/types_spec.spl` |
-| Updated | 2026-04-07 |
-| Generator | `simple spipe-docgen` (Rust) |
+| Source | `test/feature/usage/types_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Executable tests for Simple's type system basics: primitives, mutability, generics, and type inference.
+
+Note: Advanced features (unit types, capability effects, suspension operators) are not yet implemented.
+
+## Scenarios
+
+### Types Spec
+
+#### basic type literals
+
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- basic type literals
+   - Expected: s equals `hello`
+   - Expected: i equals `42`
+   - Expected: b is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("basic type literals")
+# String, integer, boolean, float literals
+val s = "hello"
+val i = 42
+val b = true
+val f = 3.14
+expect(s).to_equal("hello")
+expect(i).to_equal(42)
+expect(b).to_equal(true)
+```
+
+</details>
+
+#### mutability rules - val and const
+
+- mutability rules - val and const
+   - Expected: y equals `20`
+   - Expected: MAX equals `100`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("mutability rules - val and const")
+val y = 20
+const MAX = 100
+expect(y).to_equal(20)
+expect(MAX).to_equal(100)
+```
+
+</details>
+
+#### mutable variables
+
+- mutable variables
+   - Expected: count equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("mutable variables")
+var count = 0
+count = count + 1
+count = count + 1
+expect(count).to_equal(2)
+```
+
+</details>
+
+#### generic container - array
+
+- generic container - array
+   - Expected: numbers[0] equals `1`
+   - Expected: strings[1] equals `b`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("generic container - array")
+# Array is a generic type [T]
+val numbers = [1, 2, 3, 4, 5]
+val strings = ["a", "b", "c"]
+expect(numbers[0]).to_equal(1)
+expect(strings[1]).to_equal("b")
+```
+
+</details>
+
+#### option type basic usage
+
+- option type basic usage
+   - Expected: some_val equals `42`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("option type basic usage")
+# Option is a built-in generic type
+val some_val = 42
+val none_val = nil
+
+# Basic Option behavior
+if some_val != nil:
+    expect(some_val).to_equal(42)
+
+if none_val == nil:
+    check(true)
+```
+
+</details>
 
 ## Scenario Summary
 
@@ -22,33 +178,56 @@ Executable tests for Simple's type system basics: primitives, mutability, generi
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
-**Keywords:** types, mutability, type-inference
-**Last Updated:** 2026-02-08
-**Topics:** type-system
-**Migrated From:** doc/06_spec/types.md
 
-## Overview
+</details>
 
-Executable tests for Simple's type system basics: primitives, mutability, generics, and type inference.
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-Note: Advanced features (unit types, capability effects, suspension operators) are not yet implemented.
+Requirements covered by the scenarios in this manual:
 
-## Evidence
+- `REQ-SSPEC-FEATURE`
+<!-- sspec-maintain:traceability:end -->
 
-| Category | Count |
-|----------|------:|
-| Artifacts | 1 |
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-### Artifacts
+- Canonical SPipe generation for source `a114a8e69d547f1806da679363764afbb8569179e39e61ab3ccb700b324453ee`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/types/result.json` |
+Source SHA-256: `a114a8e69d547f1806da679363764afbb8569179e39e61ab3ccb700b324453ee`.
+<!-- sspec-maintain:provenance:end -->
 
-## Scenarios
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
 
-- basic type literals
-- mutability rules - val and const
-- mutable variables
-- generic container - array
-- option type basic usage
+Source SHA-256: `a114a8e69d547f1806da679363764afbb8569179e39e61ab3ccb700b324453ee`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/feature/usage/types_spec.spl
+mirror: doc/06_spec/feature/usage/types_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/feature/usage/types_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/feature/usage/types_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/feature/usage/types_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/feature/usage/types_spec.spl:32:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'basic type literals' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/types_spec.spl:44:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mutability rules - val and const' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/types_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mutable variables' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

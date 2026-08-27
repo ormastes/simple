@@ -1,29 +1,6 @@
-# T32 MCP Dispatch Wiring Tests
+# Mcp T32 Dispatch Wiring Specification
 
-> Self-contained SPipe tests verifying T32 MCP tool dispatch wiring:
-
-<!-- sdn-diagram:id=mcp_t32_dispatch_wiring_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mcp_t32_dispatch_wiring_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mcp_t32_dispatch_wiring_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mcp_t32_dispatch_wiring_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32 MCP dispatch wiring.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,30 +9,7 @@ mcp_t32_dispatch_wiring_spec -> std
 <details>
 <summary>Full Scenario Manual</summary>
 
-# T32 MCP Dispatch Wiring Tests
-
-Self-contained SPipe tests verifying T32 MCP tool dispatch wiring:
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Integration / Module Test |
-| Difficulty | 2/5 |
-| Status | Implemented |
-| Source | `test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Self-contained SPipe tests verifying T32 MCP tool dispatch wiring:
-- All 36 tool names are recognized by the full dispatch
-- Cold frontend only handles a 13-tool subset
-- Tool name detection works for both compact and spaced JSON
-- JSON-RPC method routing covers all protocol methods
-
-No imports from t32_mcp.* or t32_lsp_mcp.* — all helpers are inlined.
+# Mcp T32 Dispatch Wiring Specification
 
 ## Scenarios
 
@@ -65,13 +19,19 @@ No imports from t32_mcp.* or t32_lsp_mcp.* — all helpers are inlined.
 
 #### detects t32_sessions_list
 
+- detects t32_sessions_list
+   - Expected: detect_tool_name(msg) equals `t32_sessions_list`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_sessions_list")
 val msg = make_tools_call("t32_sessions_list")
 expect(detect_tool_name(msg)).to_equal("t32_sessions_list")
 ```
@@ -80,13 +40,19 @@ expect(detect_tool_name(msg)).to_equal("t32_sessions_list")
 
 #### detects t32_session_open
 
+- detects t32_session_open
+   - Expected: detect_tool_name(msg) equals `t32_session_open`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_session_open")
 val msg = make_tools_call("t32_session_open")
 expect(detect_tool_name(msg)).to_equal("t32_session_open")
 ```
@@ -95,13 +61,19 @@ expect(detect_tool_name(msg)).to_equal("t32_session_open")
 
 #### detects t32_cmd_run
 
+- detects t32_cmd_run
+   - Expected: detect_tool_name(msg) equals `t32_cmd_run`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_cmd_run")
 val msg = make_tools_call("t32_cmd_run")
 expect(detect_tool_name(msg)).to_equal("t32_cmd_run")
 ```
@@ -110,13 +82,19 @@ expect(detect_tool_name(msg)).to_equal("t32_cmd_run")
 
 #### detects t32_eval
 
+- detects t32_eval
+   - Expected: detect_tool_name(msg) equals `t32_eval`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_eval")
 val msg = make_tools_call("t32_eval")
 expect(detect_tool_name(msg)).to_equal("t32_eval")
 ```
@@ -125,13 +103,19 @@ expect(detect_tool_name(msg)).to_equal("t32_eval")
 
 #### detects t32_cmm_run
 
+- detects t32_cmm_run
+   - Expected: detect_tool_name(msg) equals `t32_cmm_run`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_cmm_run")
 val msg = make_tools_call("t32_cmm_run")
 expect(detect_tool_name(msg)).to_equal("t32_cmm_run")
 ```
@@ -140,13 +124,19 @@ expect(detect_tool_name(msg)).to_equal("t32_cmm_run")
 
 #### detects t32_window_capture
 
+- detects t32_window_capture
+   - Expected: detect_tool_name(msg) equals `t32_window_capture`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_window_capture")
 val msg = make_tools_call("t32_window_capture")
 expect(detect_tool_name(msg)).to_equal("t32_window_capture")
 ```
@@ -155,13 +145,19 @@ expect(detect_tool_name(msg)).to_equal("t32_window_capture")
 
 #### detects t32_field_get with space-colon
 
+- detects t32_field_get with space-colon
+   - Expected: detect_tool_name(msg) equals `t32_field_get`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_field_get with space-colon")
 # Build message with "name": "t32_field_get" (space before value)
 val msg = LB() + Q() + "method" + Q() + ": " + Q() + "tools/call" + Q() + ", " + Q() + "params" + Q() + ": " + LB() + Q() + "name" + Q() + ": " + Q() + "t32_field_get" + Q() + RB() + RB()
 expect(detect_tool_name(msg)).to_equal("t32_field_get")
@@ -171,13 +167,19 @@ expect(detect_tool_name(msg)).to_equal("t32_field_get")
 
 #### detects t32_dialog_click
 
+- detects t32_dialog_click
+   - Expected: detect_tool_name(msg) equals `t32_dialog_click`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_dialog_click")
 val msg = make_tools_call("t32_dialog_click")
 expect(detect_tool_name(msg)).to_equal("t32_dialog_click")
 ```
@@ -186,13 +188,19 @@ expect(detect_tool_name(msg)).to_equal("t32_dialog_click")
 
 #### detects t32_error_check
 
+- detects t32_error_check
+   - Expected: detect_tool_name(msg) equals `t32_error_check`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("detects t32_error_check")
 val msg = make_tools_call("t32_error_check")
 expect(detect_tool_name(msg)).to_equal("t32_error_check")
 ```
@@ -201,13 +209,19 @@ expect(detect_tool_name(msg)).to_equal("t32_error_check")
 
 #### returns empty for message without tool name
 
+- returns empty for message without tool name
+   - Expected: detect_tool_name(msg) equals ``
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns empty for message without tool name")
 val msg = LB() + Q() + "method" + Q() + ":" + Q() + "initialize" + Q() + RB()
 expect(detect_tool_name(msg)).to_equal("")
 ```
@@ -218,13 +232,19 @@ expect(detect_tool_name(msg)).to_equal("")
 
 #### full tool set has exactly 36 entries
 
+- full tool set has exactly 36 entries
+   - Expected: full_tools().len() equals `36`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("full tool set has exactly 36 entries")
 expect(full_tools().len()).to_equal(36)
 ```
 
@@ -232,16 +252,18 @@ expect(full_tools().len()).to_equal(36)
 
 #### t32_session_open is in full tool set
 
-1. check
+- t32_session_open is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_session_open is in full tool set")
 check(list_contains(full_tools(), "t32_session_open"))
 ```
 
@@ -249,16 +271,18 @@ check(list_contains(full_tools(), "t32_session_open"))
 
 #### t32_session_resume is in full tool set
 
-1. check
+- t32_session_resume is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_session_resume is in full tool set")
 check(list_contains(full_tools(), "t32_session_resume"))
 ```
 
@@ -266,16 +290,18 @@ check(list_contains(full_tools(), "t32_session_resume"))
 
 #### t32_cmd_run is in full tool set
 
-1. check
+- t32_cmd_run is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_cmd_run is in full tool set")
 check(list_contains(full_tools(), "t32_cmd_run"))
 ```
 
@@ -283,16 +309,18 @@ check(list_contains(full_tools(), "t32_cmd_run"))
 
 #### t32_cmm_run is in full tool set
 
-1. check
+- t32_cmm_run is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_cmm_run is in full tool set")
 check(list_contains(full_tools(), "t32_cmm_run"))
 ```
 
@@ -300,16 +328,18 @@ check(list_contains(full_tools(), "t32_cmm_run"))
 
 #### t32_eval is in full tool set
 
-1. check
+- t32_eval is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_eval is in full tool set")
 check(list_contains(full_tools(), "t32_eval"))
 ```
 
@@ -317,16 +347,18 @@ check(list_contains(full_tools(), "t32_eval"))
 
 #### t32_window_list is in full tool set
 
-1. check
+- t32_window_list is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_window_list is in full tool set")
 check(list_contains(full_tools(), "t32_window_list"))
 ```
 
@@ -334,16 +366,18 @@ check(list_contains(full_tools(), "t32_window_list"))
 
 #### t32_window_capture is in full tool set
 
-1. check
+- t32_window_capture is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_window_capture is in full tool set")
 check(list_contains(full_tools(), "t32_window_capture"))
 ```
 
@@ -351,16 +385,18 @@ check(list_contains(full_tools(), "t32_window_capture"))
 
 #### t32_setup_headless is in full tool set
 
-1. check
+- t32_setup_headless is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_setup_headless is in full tool set")
 check(list_contains(full_tools(), "t32_setup_headless"))
 ```
 
@@ -368,16 +404,18 @@ check(list_contains(full_tools(), "t32_setup_headless"))
 
 #### t32_status_snapshot is in full tool set
 
-1. check
+- t32_status_snapshot is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_status_snapshot is in full tool set")
 check(list_contains(full_tools(), "t32_status_snapshot"))
 ```
 
@@ -385,16 +423,18 @@ check(list_contains(full_tools(), "t32_status_snapshot"))
 
 #### t32_cmm_validate is in full tool set
 
-1. check
+- t32_cmm_validate is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_cmm_validate is in full tool set")
 check(list_contains(full_tools(), "t32_cmm_validate"))
 ```
 
@@ -402,16 +442,18 @@ check(list_contains(full_tools(), "t32_cmm_validate"))
 
 #### t32_job_get is in full tool set
 
-1. check
+- t32_job_get is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_job_get is in full tool set")
 check(list_contains(full_tools(), "t32_job_get"))
 ```
 
@@ -419,16 +461,18 @@ check(list_contains(full_tools(), "t32_job_get"))
 
 #### t32_job_cancel is in full tool set
 
-1. check
+- t32_job_cancel is in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_job_cancel is in full tool set")
 check(list_contains(full_tools(), "t32_job_cancel"))
 ```
 
@@ -436,16 +480,18 @@ check(list_contains(full_tools(), "t32_job_cancel"))
 
 #### every cold tool is also in full tool set
 
-1. check
+- every cold tool is also in full tool set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("every cold tool is also in full tool set")
 val cold = cold_tools()
 val full = full_tools()
 for tool in cold:
@@ -458,21 +504,8 @@ for tool in cold:
 
 #### full-only set has 23 entries
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 1 line folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-expect(full_only_tools().len()).to_equal(23)
-```
-
-</details>
-
-#### full-only tools are not in cold set
-
-1. check
+- full-only set has 23 entries
+   - Expected: full_only_tools().len() equals `23`
 
 
 <details>
@@ -482,6 +515,27 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("full-only set has 23 entries")
+expect(full_only_tools().len()).to_equal(23)
+```
+
+</details>
+
+#### full-only tools are not in cold set
+
+- full-only tools are not in cold set
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("full-only tools are not in cold set")
 val cold = cold_tools()
 for tool in full_only_tools():
     check(not list_contains(cold, tool))
@@ -491,16 +545,18 @@ for tool in full_only_tools():
 
 #### full-only tools are all in full set
 
-1. check
+- full-only tools are all in full set
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("full-only tools are all in full set")
 val full = full_tools()
 for tool in full_only_tools():
     check(list_contains(full, tool))
@@ -510,17 +566,18 @@ for tool in full_only_tools():
 
 #### t32_session_open was unreachable in cold
 
-1. check
-2. check
+- t32_session_open was unreachable in cold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_session_open was unreachable in cold")
 check(not list_contains(cold_tools(), "t32_session_open"))
 check(list_contains(full_tools(), "t32_session_open"))
 ```
@@ -529,17 +586,18 @@ check(list_contains(full_tools(), "t32_session_open"))
 
 #### t32_cmd_run was unreachable in cold
 
-1. check
-2. check
+- t32_cmd_run was unreachable in cold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_cmd_run was unreachable in cold")
 check(not list_contains(cold_tools(), "t32_cmd_run"))
 check(list_contains(full_tools(), "t32_cmd_run"))
 ```
@@ -548,17 +606,18 @@ check(list_contains(full_tools(), "t32_cmd_run"))
 
 #### t32_window_capture was unreachable in cold
 
-1. check
-2. check
+- t32_window_capture was unreachable in cold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("t32_window_capture was unreachable in cold")
 check(not list_contains(cold_tools(), "t32_window_capture"))
 check(list_contains(full_tools(), "t32_window_capture"))
 ```
@@ -569,13 +628,19 @@ check(list_contains(full_tools(), "t32_window_capture"))
 
 #### cold tool set has exactly 13 entries
 
+- cold tool set has exactly 13 entries
+   - Expected: cold_tools().len() equals `13`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold tool set has exactly 13 entries")
 expect(cold_tools().len()).to_equal(13)
 ```
 
@@ -583,16 +648,18 @@ expect(cold_tools().len()).to_equal(13)
 
 #### cold handles t32_sessions_list
 
-1. check
+- cold handles t32_sessions_list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold handles t32_sessions_list")
 check(list_contains(cold_tools(), "t32_sessions_list"))
 ```
 
@@ -600,16 +667,18 @@ check(list_contains(cold_tools(), "t32_sessions_list"))
 
 #### cold handles t32_field_get
 
-1. check
+- cold handles t32_field_get
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold handles t32_field_get")
 check(list_contains(cold_tools(), "t32_field_get"))
 ```
 
@@ -617,16 +686,18 @@ check(list_contains(cold_tools(), "t32_field_get"))
 
 #### cold handles t32_dialog_click
 
-1. check
+- cold handles t32_dialog_click
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold handles t32_dialog_click")
 check(list_contains(cold_tools(), "t32_dialog_click"))
 ```
 
@@ -634,16 +705,18 @@ check(list_contains(cold_tools(), "t32_dialog_click"))
 
 #### cold handles t32_error_check
 
-1. check
+- cold handles t32_error_check
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold handles t32_error_check")
 check(list_contains(cold_tools(), "t32_error_check"))
 ```
 
@@ -651,16 +724,18 @@ check(list_contains(cold_tools(), "t32_error_check"))
 
 #### cold does NOT handle t32_session_open
 
-1. check
+- cold does NOT handle t32_session_open
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT handle t32_session_open")
 check(not list_contains(cold_tools(), "t32_session_open"))
 ```
 
@@ -668,16 +743,18 @@ check(not list_contains(cold_tools(), "t32_session_open"))
 
 #### cold does NOT handle t32_cmd_run
 
-1. check
+- cold does NOT handle t32_cmd_run
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT handle t32_cmd_run")
 check(not list_contains(cold_tools(), "t32_cmd_run"))
 ```
 
@@ -685,16 +762,18 @@ check(not list_contains(cold_tools(), "t32_cmd_run"))
 
 #### cold does NOT handle t32_eval
 
-1. check
+- cold does NOT handle t32_eval
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT handle t32_eval")
 check(not list_contains(cold_tools(), "t32_eval"))
 ```
 
@@ -702,16 +781,18 @@ check(not list_contains(cold_tools(), "t32_eval"))
 
 #### cold does NOT handle t32_window_capture
 
-1. check
+- cold does NOT handle t32_window_capture
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT handle t32_window_capture")
 check(not list_contains(cold_tools(), "t32_window_capture"))
 ```
 
@@ -719,16 +800,18 @@ check(not list_contains(cold_tools(), "t32_window_capture"))
 
 #### cold does NOT handle t32_setup_headless
 
-1. check
+- cold does NOT handle t32_setup_headless
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT handle t32_setup_headless")
 check(not list_contains(cold_tools(), "t32_setup_headless"))
 ```
 
@@ -738,16 +821,18 @@ check(not list_contains(cold_tools(), "t32_setup_headless"))
 
 #### initialize method recognized
 
-1. check
+- initialize method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("initialize method recognized")
 check(list_contains(full_methods(), "initialize"))
 ```
 
@@ -755,16 +840,18 @@ check(list_contains(full_methods(), "initialize"))
 
 #### tools/list method recognized
 
-1. check
+- tools/list method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("tools/list method recognized")
 check(list_contains(full_methods(), "tools/list"))
 ```
 
@@ -772,16 +859,18 @@ check(list_contains(full_methods(), "tools/list"))
 
 #### tools/call method recognized
 
-1. check
+- tools/call method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("tools/call method recognized")
 check(list_contains(full_methods(), "tools/call"))
 ```
 
@@ -789,16 +878,18 @@ check(list_contains(full_methods(), "tools/call"))
 
 #### resources/list method recognized
 
-1. check
+- resources/list method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("resources/list method recognized")
 check(list_contains(full_methods(), "resources/list"))
 ```
 
@@ -806,16 +897,18 @@ check(list_contains(full_methods(), "resources/list"))
 
 #### resources/templates/list method recognized
 
-1. check
+- resources/templates/list method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("resources/templates/list method recognized")
 check(list_contains(full_methods(), "resources/templates/list"))
 ```
 
@@ -823,16 +916,18 @@ check(list_contains(full_methods(), "resources/templates/list"))
 
 #### shutdown method recognized
 
-1. check
+- shutdown method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("shutdown method recognized")
 check(list_contains(full_methods(), "shutdown"))
 ```
 
@@ -840,16 +935,18 @@ check(list_contains(full_methods(), "shutdown"))
 
 #### ping method recognized
 
-1. check
+- ping method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("ping method recognized")
 check(list_contains(full_methods(), "ping"))
 ```
 
@@ -857,16 +954,18 @@ check(list_contains(full_methods(), "ping"))
 
 #### prompts/list method recognized
 
-1. check
+- prompts/list method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("prompts/list method recognized")
 check(list_contains(full_methods(), "prompts/list"))
 ```
 
@@ -874,16 +973,18 @@ check(list_contains(full_methods(), "prompts/list"))
 
 #### notifications/cancelled method recognized
 
-1. check
+- notifications/cancelled method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("notifications/cancelled method recognized")
 check(list_contains(full_methods(), "notifications/cancelled"))
 ```
 
@@ -891,16 +992,18 @@ check(list_contains(full_methods(), "notifications/cancelled"))
 
 #### logging/setLevel method recognized
 
-1. check
+- logging/setLevel method recognized
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("logging/setLevel method recognized")
 check(list_contains(full_methods(), "logging/setLevel"))
 ```
 
@@ -910,16 +1013,18 @@ check(list_contains(full_methods(), "logging/setLevel"))
 
 #### cold recognizes initialize
 
-1. check
+- cold recognizes initialize
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold recognizes initialize")
 check(list_contains(cold_methods(), "initialize"))
 ```
 
@@ -927,16 +1032,18 @@ check(list_contains(cold_methods(), "initialize"))
 
 #### cold recognizes tools/call
 
-1. check
+- cold recognizes tools/call
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold recognizes tools/call")
 check(list_contains(cold_methods(), "tools/call"))
 ```
 
@@ -944,16 +1051,18 @@ check(list_contains(cold_methods(), "tools/call"))
 
 #### cold recognizes shutdown
 
-1. check
+- cold recognizes shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold recognizes shutdown")
 check(list_contains(cold_methods(), "shutdown"))
 ```
 
@@ -961,16 +1070,18 @@ check(list_contains(cold_methods(), "shutdown"))
 
 #### cold recognizes ping
 
-1. check
+- cold recognizes ping
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold recognizes ping")
 check(list_contains(cold_methods(), "ping"))
 ```
 
@@ -978,16 +1089,18 @@ check(list_contains(cold_methods(), "ping"))
 
 #### cold does NOT recognize prompts/list
 
-1. check
+- cold does NOT recognize prompts/list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT recognize prompts/list")
 check(not list_contains(cold_methods(), "prompts/list"))
 ```
 
@@ -995,16 +1108,18 @@ check(not list_contains(cold_methods(), "prompts/list"))
 
 #### cold does NOT recognize resources/templates/list
 
-1. check
+- cold does NOT recognize resources/templates/list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT recognize resources/templates/list")
 check(not list_contains(cold_methods(), "resources/templates/list"))
 ```
 
@@ -1012,16 +1127,18 @@ check(not list_contains(cold_methods(), "resources/templates/list"))
 
 #### cold does NOT recognize logging/setLevel
 
-1. check
+- cold does NOT recognize logging/setLevel
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold does NOT recognize logging/setLevel")
 check(not list_contains(cold_methods(), "logging/setLevel"))
 ```
 
@@ -1031,19 +1148,18 @@ check(not list_contains(cold_methods(), "logging/setLevel"))
 
 #### make_tools_call produces valid JSON structure
 
-1. check
-2. check
-3. check
-4. check
+- make_tools_call produces valid JSON structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("make_tools_call produces valid JSON structure")
 val msg = make_tools_call("t32_cmd_run")
 check(msg.contains(Q() + "jsonrpc" + Q()))
 check(msg.contains(Q() + "2.0" + Q()))
@@ -1055,18 +1171,18 @@ check(msg.contains(Q() + "t32_cmd_run" + Q()))
 
 #### make_method_request produces valid JSON structure
 
-1. check
-2. check
-3. check
+- make_method_request produces valid JSON structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("make_method_request produces valid JSON structure")
 val msg = make_method_request("initialize")
 check(msg.contains(Q() + "jsonrpc" + Q()))
 check(msg.contains(Q() + "initialize" + Q()))
@@ -1077,16 +1193,18 @@ check(msg.contains(Q() + "id" + Q()))
 
 #### escape_json handles backslash
 
-1. check
+- escape_json handles backslash
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("escape_json handles backslash")
 val escaped = escape_json("a\\b")
 check(escaped.contains("\\\\"))
 ```
@@ -1095,16 +1213,18 @@ check(escaped.contains("\\\\"))
 
 #### escape_json handles quotes
 
-1. check
+- escape_json handles quotes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("escape_json handles quotes")
 val escaped = escape_json("say " + Q() + "hello" + Q())
 check(escaped.contains("\\" + Q()))
 ```
@@ -1115,13 +1235,19 @@ check(escaped.contains("\\" + Q()))
 
 #### default T32_MCP_FRONTEND should be full
 
+- default T32_MCP_FRONTEND should be full
+   - Expected: default_frontend equals `full`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("default T32_MCP_FRONTEND should be full")
 # The wrapper script sets: T32_MCP_FRONTEND="${T32_MCP_FRONTEND:-full}"
 # This means when unset, it defaults to "full" not "cold"
 val default_frontend = "full"
@@ -1132,16 +1258,18 @@ expect(default_frontend).to_equal("full")
 
 #### full mode routes to full entry point
 
-1. check
+- full mode routes to full entry point
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("full mode routes to full entry point")
 # In full mode: SOURCE_ARTIFACT="$FULL_ENTRY"
 # FULL_ENTRY="${REPO_ROOT}/src/app/t32_mcp_server/main.spl"
 val full_entry = "src/app/t32_mcp_server/main.spl"
@@ -1152,16 +1280,18 @@ check(full_entry.contains("t32_mcp_server"))
 
 #### cold mode routes to cold entry point
 
-1. check
+- cold mode routes to cold entry point
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cold mode routes to cold entry point")
 # In cold mode: SOURCE_ARTIFACT="$COLD_ENTRY"
 # COLD_ENTRY="${REPO_ROOT}/examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
 val cold_entry = "examples/10_tooling/trace32_tools/t32_mcp/frontend_cold.spl"
@@ -1172,18 +1302,19 @@ check(cold_entry.contains("frontend_cold"))
 
 #### full dispatch handles all tools cold cannot
 
-1. check
-2. check
+- full dispatch handles all tools cold cannot
    - Expected: only.len() + cold.len() equals `full.len()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("full dispatch handles all tools cold cannot")
 # The key invariant: every full_only tool must be in full but not cold
 val full = full_tools()
 val cold = cold_tools()
@@ -1197,6 +1328,21 @@ expect(only.len() + cold.len()).to_equal(full.len())
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering T32 MCP dispatch wiring.
+- T32 MCP dispatch wiring
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -1209,3 +1355,54 @@ expect(only.len() + cold.len()).to_equal(full.len())
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b0482d8acdd390636e8b7229fb75c317fbbe9f5e053f00d116fe47622ab78e0e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b0482d8acdd390636e8b7229fb75c317fbbe9f5e053f00d116fe47622ab78e0e`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b0482d8acdd390636e8b7229fb75c317fbbe9f5e053f00d116fe47622ab78e0e`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl:298:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects t32_sessions_list' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl:304:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects t32_session_open' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_t32/mcp_t32_dispatch_wiring_spec.spl:310:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects t32_cmd_run' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

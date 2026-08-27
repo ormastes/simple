@@ -1,29 +1,6 @@
-# Shutdown Specification
+# shutdown_spec
 
-> <details>
-
-<!-- sdn-diagram:id=shutdown_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=shutdown_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-shutdown_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=shutdown_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Purpose: Prove that exit codes.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,7 +9,23 @@ shutdown_spec -> app
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Shutdown Specification
+# shutdown_spec
+
+Purpose: Prove that exit codes.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/test_runner_new/shutdown_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Prove that exit codes.
+Audience: compiler and tooling engineers who maintain this spec.
 
 ## Scenarios
 
@@ -40,17 +33,39 @@ shutdown_spec -> app
 
 #### should have distinct exit codes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should have distinct exit codes
+- Verify: should have distinct exit codes
+   - Expected: EXIT_SUCCESS equals `0`
+   - Expected: EXIT_FAILURE equals `1`
+   - Expected: EXIT_RESOURCE_SHUTDOWN equals `42`
+   - Expected: EXIT_RECOVERY_FAILED equals `43`
+   - Expected: all_different is true
+   - Expected: diff2 is true
+   - Expected: diff3 is true
+   - Expected: diff4 is true
+   - Expected: diff5 is true
+   - Expected: diff6 is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(EXIT_SUCCESS).to_equal(0)
-expect(EXIT_FAILURE).to_equal(1)
-expect(EXIT_RESOURCE_SHUTDOWN).to_equal(42)
-expect(EXIT_RECOVERY_FAILED).to_equal(43)
+# @req REQ-SSPEC-UNIT
+step("should have distinct exit codes")
+step("Verify: should have distinct exit codes")
+# @req: REQ-APP-TEST-RUNNER-NEW-001
+expect(EXIT_SUCCESS).to_equal(0)  # oracle: 0 — named expected value from the requirement
+expect(EXIT_FAILURE).to_equal(1)  # oracle: 1 — named expected value from the requirement
+expect(EXIT_RESOURCE_SHUTDOWN).to_equal(42)  # oracle: 42 — named expected value from the requirement
+expect(EXIT_RECOVERY_FAILED).to_equal(43)  # oracle: 43 — named expected value from the requirement
 
 # All codes should be different
 val all_different = EXIT_SUCCESS != EXIT_FAILURE
@@ -74,13 +89,24 @@ expect(diff6).to_equal(true)
 
 #### should format summary with all fields
 
+- should format summary with all fields
+- Verify: should format summary with all fields
+   - Expected: summary contains `cpu`
+   - Expected: summary contains `10`
+   - Expected: summary contains `2`
+   - Expected: summary contains `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should format summary with all fields")
+step("Verify: should format summary with all fields")
 val summary = shutdown_format_summary("cpu", [], 10, 2, 3)
 
 expect(summary.contains("cpu")).to_equal(true)
@@ -93,13 +119,21 @@ expect(summary.contains("3")).to_equal(true)
 
 #### should include reason in summary
 
+- should include reason in summary
+- Verify: should include reason in summary
+   - Expected: summary contains `memory`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should include reason in summary")
+step("Verify: should include reason in summary")
 val summary = shutdown_format_summary("memory", [], 0, 0, 0)
 
 expect(summary.contains("memory")).to_equal(true)
@@ -109,13 +143,21 @@ expect(summary.contains("memory")).to_equal(true)
 
 #### should format with multiple completed files
 
+- should format with multiple completed files
+- Verify: should format with multiple completed files
+   - Expected: summary contains `3`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should format with multiple completed files")
+step("Verify: should format with multiple completed files")
 val completed = ["a.spl", "b.spl", "c.spl"]
 val summary = shutdown_format_summary("cpu", completed, 5, 1, 2)
 
@@ -126,13 +168,21 @@ expect(summary.contains("3")).to_equal(true)  # 3 completed files
 
 #### should handle empty completed list
 
+- should handle empty completed list
+- Verify: should handle empty completed list
+   - Expected: summary contains `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should handle empty completed list")
+step("Verify: should handle empty completed list")
 val completed: [text] = []
 val summary = shutdown_format_summary("periodic", completed, 0, 0, 0)
 
@@ -143,13 +193,21 @@ expect(summary.contains("0")).to_equal(true)
 
 #### should include passed count
 
+- should include passed count
+- Verify: should include passed count
+   - Expected: summary contains `42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should include passed count")
+step("Verify: should include passed count")
 val summary = shutdown_format_summary("test", [], 42, 0, 0)
 
 expect(summary.contains("42")).to_equal(true)
@@ -159,13 +217,21 @@ expect(summary.contains("42")).to_equal(true)
 
 #### should include failed count
 
+- should include failed count
+- Verify: should include failed count
+   - Expected: summary contains `7`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should include failed count")
+step("Verify: should include failed count")
 val summary = shutdown_format_summary("test", [], 0, 7, 0)
 
 expect(summary.contains("7")).to_equal(true)
@@ -175,35 +241,27 @@ expect(summary.contains("7")).to_equal(true)
 
 #### should include skipped count
 
+- should include skipped count
+- Verify: should include skipped count
+   - Expected: summary contains `9`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("should include skipped count")
+step("Verify: should include skipped count")
 val summary = shutdown_format_summary("test", [], 0, 0, 9)
 
 expect(summary.contains("9")).to_equal(true)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/test_runner_new/shutdown_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- exit codes
-- shutdown_format_summary
 
 ## Scenario Summary
 
@@ -217,3 +275,70 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-APP-TEST-RUNNER-NEW-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c777000bac921481a61f14965f1cc647fb44cf57ad3fbdbcd8ee731e4282067a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c777000bac921481a61f14965f1cc647fb44cf57ad3fbdbcd8ee731e4282067a`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c777000bac921481a61f14965f1cc647fb44cf57ad3fbdbcd8ee731e4282067a`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/01_unit/app/test_runner_new/shutdown_spec.spl
+mirror: doc/06_spec/01_unit/app/test_runner_new/shutdown_spec.md (current)
+findings: 11 blockers: 0
+  narrative=100 structure=70 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/test_runner_new/shutdown_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/test_runner_new/shutdown_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:24:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should have distinct exit codes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:24:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should have distinct exit codes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:50:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should format summary with all fields' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should format summary with all fields' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:61:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should include reason in summary' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should include reason in summary' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:69:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should format with multiple completed files' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:78:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should handle empty completed list' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/app/test_runner_new/shutdown_spec.spl:87:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should include passed count' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,30 +1,6 @@
 # Smf Dynlib Artifact Specification
 
-> <details>
-
-<!-- sdn-diagram:id=smf_dynlib_artifact_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=smf_dynlib_artifact_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-smf_dynlib_artifact_spec -> std
-smf_dynlib_artifact_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=smf_dynlib_artifact_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering pure GUI SMF dynlib artifact.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,27 @@ smf_dynlib_artifact_spec -> app
 
 #### maps common host architecture names to SMF arch codes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- maps common host architecture names to SMF arch codes
+   - Expected: gui_smf_dynlib_arch_code("x86_64") equals `1u8`
+   - Expected: gui_smf_dynlib_arch_code("amd64") equals `1u8`
+   - Expected: gui_smf_dynlib_arch_code("arm64") equals `3u8`
+   - Expected: gui_smf_dynlib_arch_code("aarch64") equals `3u8`
+   - Expected: gui_smf_dynlib_arch_code("weird") equals `0u8`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("maps common host architecture names to SMF arch codes")
 expect(gui_smf_dynlib_arch_code("x86_64")).to_equal(1u8)
 expect(gui_smf_dynlib_arch_code("amd64")).to_equal(1u8)
 expect(gui_smf_dynlib_arch_code("arm64")).to_equal(3u8)
@@ -59,17 +49,27 @@ expect(gui_smf_dynlib_arch_code("weird")).to_equal(0u8)
 
 #### wraps an ELF host dynlib as a role-2 SMF library envelope
 
+- wraps an ELF host dynlib as a role-2 SMF library envelope
+   - Expected: smf.len() equals `6 + 128`
+   - Expected: parsed.stub_size equals `6i64`
+   - Expected: parsed.smf_data_offset equals `6i64`
+   - Expected: parsed.role equals `2i64`
+   - Expected: parsed.arch equals `1i64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("wraps an ELF host dynlib as a role-2 SMF library envelope")
 val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
 expect(smf.len()).to_equal(6 + 128)
 val header = gui_smf_parse_header(smf)
-expect(header == nil).to_equal(false)
+expect(header).to_not_equal(nil)
 val parsed = header.unwrap()
 expect(parsed.stub_size).to_equal(6i64)
 expect(parsed.smf_data_offset).to_equal(6i64)
@@ -81,16 +81,22 @@ expect(parsed.arch).to_equal(1i64)
 
 #### wraps a Mach-O host dynlib as a role-2 arm64 SMF library envelope
 
+- wraps a Mach-O host dynlib as a role-2 arm64 SMF library envelope
+   - Expected: header.unwrap().arch equals `3i64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("wraps a Mach-O host dynlib as a role-2 arm64 SMF library envelope")
 val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
 val header = gui_smf_parse_header(smf)
-expect(header == nil).to_equal(false)
+expect(header).to_not_equal(nil)
 expect(header.unwrap().arch).to_equal(3i64)
 ```
 
@@ -98,13 +104,24 @@ expect(header.unwrap().arch).to_equal(3i64)
 
 #### emits a contract-only row without claiming QEMU or macOS execution
 
+- emits a contract-only row without claiming QEMU or macOS execution
+   - Expected: contract.status equals `pass`
+   - Expected: contract.smf_role equals `2i64`
+   - Expected: contract.arch_code equals `3i64`
+   - Expected: contract.embedded_dynlib is true
+   - Expected: contract.qemu_status equals `not-run`
+   - Expected: contract.macos_status equals `not-run`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("emits a contract-only row without claiming QEMU or macOS execution")
 val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
 val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
 expect(contract.status).to_equal("pass")
@@ -125,13 +142,20 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 #### accepts a precomputed digest for on-disk artifact evidence
 
+- accepts a precomputed digest for on-disk artifact evidence
+   - Expected: contract.status equals `pass`
+   - Expected: contract.sha256_hex equals `precomputed-digest`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("accepts a precomputed digest for on-disk artifact evidence")
 val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
 val contract = gui_smf_artifact_contract_with_sha256("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick", "precomputed-digest")
 expect(contract.status).to_equal("pass")
@@ -144,13 +168,22 @@ expect(row).to_contain(" sha256=precomputed-digest ")
 
 #### fails closed for an embedded dynlib with a non-arm64 release arch
 
+- fails closed for an embedded dynlib with a non-arm64 release arch
+   - Expected: contract.status equals `fail`
+   - Expected: contract.smf_role equals `2i64`
+   - Expected: contract.arch_code equals `1i64`
+   - Expected: contract.embedded_dynlib is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails closed for an embedded dynlib with a non-arm64 release arch")
 val smf = gui_smf_wrap_native_library([0x7Fu8, 0x45u8, 0x4Cu8, 0x46u8, 2u8, 1u8], 1u8)
 val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "gui_dynlib_hot_probe_tick")
 expect(contract.status).to_equal("fail")
@@ -167,13 +200,22 @@ expect(row).to_contain(" symbol=gui_dynlib_hot_probe_tick ")
 
 #### fails closed for an embedded arm64 dynlib with the wrong release symbol
 
+- fails closed for an embedded arm64 dynlib with the wrong release symbol
+   - Expected: contract.status equals `fail`
+   - Expected: contract.smf_role equals `2i64`
+   - Expected: contract.arch_code equals `3i64`
+   - Expected: contract.embedded_dynlib is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails closed for an embedded arm64 dynlib with the wrong release symbol")
 val smf = gui_smf_wrap_native_library([0xCFu8, 0xFAu8, 0xEDu8, 0xFEu8, 0u8], 3u8)
 val contract = gui_smf_artifact_contract("build/gui/pure_gui_hot.smf", smf, "unexpected_probe")
 expect(contract.status).to_equal("fail")
@@ -190,13 +232,25 @@ expect(row).to_contain(" symbol=unexpected_probe ")
 
 #### fails closed for non-SMF artifact bytes
 
+- fails closed for non-SMF artifact bytes
+   - Expected: contract.status equals `fail`
+   - Expected: contract.smf_role equals `-1i64`
+   - Expected: contract.embedded_dynlib is false
+   - Expected: contract.qemu_status equals `not-run`
+   - Expected: contract.qemu_reason equals `live-qemu-not-executed`
+   - Expected: contract.macos_status equals `not-run`
+   - Expected: contract.macos_reason equals `requires-macos-arm64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails closed for non-SMF artifact bytes")
 val contract = gui_smf_artifact_contract("build/gui/not_a_dynlib.smf", [1u8, 2u8, 3u8, 4u8], "gui_dynlib_hot_probe_tick")
 expect(contract.status).to_equal("fail")
 expect(contract.smf_role).to_equal(-1i64)
@@ -211,13 +265,24 @@ expect(contract.macos_reason).to_equal("requires-macos-arm64")
 
 #### fails closed for an empty SMF library envelope
 
+- fails closed for an empty SMF library envelope
+   - Expected: contract.status equals `fail`
+   - Expected: contract.embedded_dynlib is false
+   - Expected: contract.qemu_status equals `not-run`
+   - Expected: contract.qemu_reason equals `live-qemu-not-executed`
+   - Expected: contract.macos_status equals `not-run`
+   - Expected: contract.macos_reason equals `requires-macos-arm64`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("fails closed for an empty SMF library envelope")
 val smf = gui_smf_wrap_native_library([], 1u8)
 val contract = gui_smf_artifact_contract("build/gui/empty_dynlib.smf", smf, "gui_dynlib_hot_probe_tick")
 expect(contract.status).to_equal("fail")
@@ -232,13 +297,18 @@ expect(contract.macos_reason).to_equal("requires-macos-arm64")
 
 #### emits a missing artifact contract row
 
+- emits a missing artifact contract row
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("emits a missing artifact contract row")
 val row = gui_smf_artifact_contract_row(gui_smf_artifact_contract_missing("", "gui_dynlib_hot_probe_tick"))
 expect(row).to_start_with("GUI_SMF_ARTIFACT_CONTRACT status=missing")
 expect(row).to_contain(" qemu_reason=live-qemu-not-executed ")
@@ -249,7 +319,10 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 
 #### wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO
 
-- extracted stub push
+- wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO
+   - Expected: rt_file_write_bytes(dynlib_path, dynlib_bytes) is true
+   - Expected: rt_file_write_bytes(smf_path, smf) is true
+   - Expected: header.stub_size equals `6i64`
    - Expected: rt_file_write_bytes(extracted_path, extracted_stub) is true
    - Expected: extracted.len() equals `6`
    - Expected: extracted[0] equals `0x7Fu8`
@@ -259,10 +332,12 @@ expect(row).to_contain(" macos_reason=requires-macos-arm64")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("wraps and extracts a role-2 SMF dynlib through pure Simple helpers and file IO")
 val dynlib_path = "/tmp/simple_gui_smf_dynlib_fixture.so"
 val smf_path = "/tmp/simple_gui_smf_dynlib_fixture.smf"
 val extracted_path = "/tmp/simple_gui_smf_dynlib_fixture.extracted.so"
@@ -273,7 +348,7 @@ val smf = gui_smf_wrap_native_library(loaded, 1u8)
 expect(rt_file_write_bytes(smf_path, smf)).to_equal(true)
 val smf_loaded = rt_file_read_bytes(smf_path) ?? []
 val parsed = gui_smf_parse_header(smf_loaded)
-expect(parsed == nil).to_equal(false)
+expect(parsed).to_not_equal(nil)
 val header = parsed.unwrap()
 expect(header.stub_size).to_equal(6i64)
 var extracted_stub: [u8] = []
@@ -297,12 +372,12 @@ expect(extracted[1]).to_equal(0x45u8)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/gui_perf/smf_dynlib_artifact_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering pure GUI SMF dynlib artifact.
 - pure GUI SMF dynlib artifact
 
 ## Scenario Summary
@@ -317,3 +392,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1debe574dad25c2beda79d3af82837a1482f116ad095667bffa935b29ed253d8`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1debe574dad25c2beda79d3af82837a1482f116ad095667bffa935b29ed253d8`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1debe574dad25c2beda79d3af82837a1482f116ad095667bffa935b29ed253d8`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/01_unit/app/gui_perf/smf_dynlib_artifact_spec.spl
+mirror: doc/06_spec/01_unit/app/gui_perf/smf_dynlib_artifact_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/gui_perf/smf_dynlib_artifact_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/gui_perf/smf_dynlib_artifact_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/gui_perf/smf_dynlib_artifact_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/gui_perf/smf_dynlib_artifact_spec.spl:33:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'maps common host architecture names to SMF arch codes' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/gui_perf/smf_dynlib_artifact_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'wraps an ELF host dynlib as a role-2 SMF library envelope' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/gui_perf/smf_dynlib_artifact_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'wraps a Mach-O host dynlib as a role-2 arm64 SMF library envelope' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -24,7 +24,7 @@ Validates the status wrapper that ties all GUI widget fixture witnesses to the M
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | N/A |
 | Source | `test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl` |
-| Updated | 2026-07-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -136,6 +136,11 @@ files with `RDOC` magic, and confirm the widget feature list still contains all
 
 #### reports current widget coverage and live RenderDoc lanes
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- reports current widget coverage and live RenderDoc lanes
 - Run the GUI widget RenderDoc goal status wrapper
    - Expected: code equals `0`
 - Read the emitted evidence contract
@@ -147,10 +152,12 @@ files with `RDOC` magic, and confirm the widget feature list still contains all
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports current widget coverage and live RenderDoc lanes")
 step("Run the GUI widget RenderDoc goal status wrapper")
 val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-current && BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-current REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-current/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -217,6 +224,7 @@ expect(report).to_contain("- Electron requested Vulkan:")
 
 #### rejects magic-only Simple widget evidence beside valid Electron proof
 
+- rejects magic-only Simple widget evidence beside valid Electron proof
 - Create magic-only Simple and controlled Electron RenderDoc gate inputs
    - Expected: code equals `1`
 - Assert RDOC magic cannot replace Simple replay and device proof
@@ -225,10 +233,12 @@ expect(report).to_contain("- Electron requested Vulkan:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 50 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects magic-only Simple widget evidence beside valid Electron proof")
 step("Create magic-only Simple and controlled Electron RenderDoc gate inputs")
 val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-pass && mkdir -p build/test-gui-widget-renderdoc-goal-status-pass/simple build/test-gui-widget-renderdoc-goal-status-pass/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-pass/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-widget-renderdoc-goal-status-pass/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-pass/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-pass/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-pass/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-pass/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-pass/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-pass/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-pass/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-pass/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-pass/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-pass/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs --strict"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -283,6 +293,7 @@ expect(report).to_contain("- blocked gates: 1")
 
 #### rejects symlinked widget RenderDoc artifacts
 
+- rejects symlinked widget RenderDoc artifacts
 - Create otherwise-valid child evidence with symlinked RDOC and ARGB artifacts
    - Expected: code equals `0`
 - Assert aggregate evidence rejects the symlinked artifacts
@@ -291,10 +302,12 @@ expect(report).to_contain("- blocked gates: 1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects symlinked widget RenderDoc artifacts")
 step("Create otherwise-valid child evidence with symlinked RDOC and ARGB artifacts")
 val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-symlink-artifacts && mkdir -p build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/simple-real.rdc && ln -s simple-real.rdc build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron-real.rdc && ln -s electron-real.rdc build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron_argb-real.json && ln -s electron_argb-real.json build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-symlink-artifacts/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -322,6 +335,7 @@ expect(evidence).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc w
 
 #### forwards the Electron child gate failure class for missing ARGB proof
 
+- forwards the Electron child gate failure class for missing ARGB proof
 - Create controlled Electron evidence without ARGB proof
    - Expected: code equals `0`
 - Assert parent evidence carries the child gate root cause
@@ -330,10 +344,12 @@ expect(evidence).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc w
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("forwards the Electron child gate failure class for missing ARGB proof")
 step("Create controlled Electron evidence without ARGB proof")
 val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-missing-argb && mkdir -p build/test-gui-widget-renderdoc-goal-status-missing-argb/simple build/test-gui-widget-renderdoc-goal-status-missing-argb/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-argb/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-argb/electron/electron.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-argb/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-missing-argb/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-argb/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-missing-argb/electron/missing_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-missing-argb/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-argb/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-argb/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-missing-argb/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-missing-argb/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -356,6 +372,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=2")
 
 #### rejects Simple widget RDOC evidence without widget HTML byte proof
 
+- rejects Simple widget RDOC evidence without widget HTML byte proof
 - Create Simple widget RDOC evidence with a fixture path but no byte count
    - Expected: code equals `0`
 - Assert missing widget HTML bytes keeps the Simple widget gate incomplete
@@ -364,10 +381,12 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gate_count=2")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects Simple widget RDOC evidence without widget HTML byte proof")
 step("Create Simple widget RDOC evidence with a fixture path but no byte count")
 val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes && mkdir -p build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/simple.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-missing-widget-bytes/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -391,6 +410,7 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Simple GUI 
 
 #### forwards missing Electron RDOC while preserving ARGB proof status
 
+- forwards missing Electron RDOC while preserving ARGB proof status
 - Create controlled Electron evidence with ARGB proof but no RDOC capture
    - Expected: code equals `0`
 - Assert parent evidence keeps the RDOC and ARGB states separate
@@ -399,10 +419,12 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Simple GUI 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("forwards missing Electron RDOC while preserving ARGB proof status")
 step("Create controlled Electron evidence with ARGB proof but no RDOC capture")
 val command = "rm -rf build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb && mkdir -p build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/simple.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/electron_argb.json && printf '[1:1:ERROR:content/browser/gpu/gpu_process_host.cc:998] GPU process exited unexpectedly: exit_code=139\\n[1:1:ERROR:content/browser/gpu/gpu_process_host.cc:998] GPU process exited unexpectedly: exit_code=139\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/renderdoc-electron-html.log && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=fail\\nrdoc_capture_reason=missing-rdc\\nrdoc_capture_file=\\nrdoc_capture_magic=\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --no-zygote --ozone-platform=x11 --enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE --ignore-gpu-blocklist --enable-gpu-rasterization --use-angle=vulkan\\nrdoc_log=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/renderdoc-electron-html.log\\n' > build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/simple/evidence.env RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/electron/evidence.env BUILD_DIR=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/out REPORT_PATH=build/test-gui-widget-renderdoc-goal-status-missing-rdc-with-argb/report.md sh scripts/check/check-gui-widget-renderdoc-goal-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
@@ -448,3 +470,45 @@ expect(evidence).to_contain("gui_widget_renderdoc_goal_blocked_gates=Simple GUI 
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `a16479692ae272b13380e82d19be33100fc06b8baf37d6af236b82c174419cfc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `a16479692ae272b13380e82d19be33100fc06b8baf37d6af236b82c174419cfc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `a16479692ae272b13380e82d19be33100fc06b8baf37d6af236b82c174419cfc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
+
+SSpec documentization score: 91/100
+source: test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl
+mirror: doc/06_spec/03_system/check/gui_widget_renderdoc_goal_status_spec.md (current)
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/check/gui_widget_renderdoc_goal_status_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/gui_widget_renderdoc_goal_status_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/gui_widget_renderdoc_goal_status_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 7 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,5 +1,16 @@
 # Dictionary Grammar and Syntax Specification
 
+> Tests for dictionary literal syntax, ensuring correct grammar is used.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 18 | 18 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Dictionary Grammar and Syntax Specification
+
 Tests for dictionary literal syntax, ensuring correct grammar is used.
 
 ## At a Glance
@@ -9,9 +20,399 @@ Tests for dictionary literal syntax, ensuring correct grammar is used.
 | Feature IDs | #1002, #1018 |
 | Category | Language, Syntax |
 | Status | Complete |
-| Source | `test/03_system/feature/usage/dict_grammar_spec.spl` |
-| Updated | 2026-04-07 |
-| Generator | `simple spipe-docgen` (Rust) |
+| Source | `test/feature/usage/dict_grammar_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Tests for dictionary literal syntax, ensuring correct grammar is used.
+Verifies that {"key": value} syntax works correctly.
+
+## Scenarios
+
+### Dictionary Grammar
+
+#### basic dict syntax
+
+#### creates dict with string keys
+
+- creates dict with string keys
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates dict with string keys")
+val config = {"name": "Alice", "age": 30}
+expect config["name"] == "Alice"
+expect config["age"] == 30
+```
+
+</details>
+
+#### creates dict with integer values
+
+- creates dict with integer values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates dict with integer values")
+val scores = {"math": 95, "science": 87, "history": 92}
+expect scores["math"] == 95
+```
+
+</details>
+
+#### creates dict with mixed value types
+
+- creates dict with mixed value types
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates dict with mixed value types")
+val data = {"count": 42, "name": "test", "active": true}
+expect data["count"] == 42
+expect data["active"] == true
+```
+
+</details>
+
+#### creates nested dicts
+
+- creates nested dicts
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates nested dicts")
+val nested = {"outer": {"inner": 123}}
+expect nested["outer"]["inner"] == 123
+```
+
+</details>
+
+#### creates empty dict
+
+- creates empty dict
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("creates empty dict")
+val empty: Dict<text, i32> = {}
+expect empty.len() == 0
+```
+
+</details>
+
+#### dict with arrays
+
+#### stores arrays as values
+
+- stores arrays as values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("stores arrays as values")
+val data = {"numbers": [1, 2, 3], "letters": ["a", "b", "c"]}
+expect data["numbers"][0] == 1
+expect data["letters"][2] == "c"
+```
+
+</details>
+
+#### stores nested structures
+
+- stores nested structures
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("stores nested structures")
+val complex = {
+    "users": [
+        {"name": "Alice", "id": 1},
+        {"name": "Bob", "id": 2}
+    ]
+}
+expect complex["users"][0]["name"] == "Alice"
+```
+
+</details>
+
+#### dict operations
+
+#### inserts new key-value pair
+
+- inserts new key-value pair
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("inserts new key-value pair")
+var dict = {"a": 1}
+dict["b"] = 2
+expect dict["b"] == 2
+```
+
+</details>
+
+#### updates existing value
+
+- updates existing value
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("updates existing value")
+var dict = {"x": 10}
+dict["x"] = 20
+expect dict["x"] == 20
+```
+
+</details>
+
+#### checks key existence
+
+- checks key existence
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("checks key existence")
+val dict = {"key": "value"}
+expect dict.has("key")
+expect not dict.has("missing")
+```
+
+</details>
+
+#### gets keys
+
+- gets keys
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("gets keys")
+val dict = {"a": 1, "b": 2, "c": 3}
+val keys = dict.keys()
+expect keys.len() == 3
+```
+
+</details>
+
+#### gets values
+
+- gets values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("gets values")
+val dict = {"a": 1, "b": 2}
+val values = dict.values()
+expect values.len() == 2
+```
+
+</details>
+
+#### dict with optional chaining
+
+#### stores optional values
+
+- stores optional values
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("stores optional values")
+val dict = {"present": Some(42), "absent": nil}
+expect dict["present"] == Some(42)
+```
+
+</details>
+
+#### uses optional chaining with dict access
+
+- uses optional chaining with dict access
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("uses optional chaining with dict access")
+val dict = {"key": Some("value")}
+expect dict["key"]?.to_string() == Some("value")
+```
+
+</details>
+
+#### returns nil for missing key with ?
+
+- returns nil for missing key with ?
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("returns nil for missing key with ?")
+val dict = {"a": 1}
+expect dict.get("missing") == nil
+```
+
+</details>
+
+#### dict type annotations
+
+#### annotates string to int dict
+
+- annotates string to int dict
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("annotates string to int dict")
+val dict: Dict<text, i32> = {"one": 1, "two": 2}
+expect dict["one"] == 1
+```
+
+</details>
+
+#### annotates string to string dict
+
+- annotates string to string dict
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("annotates string to string dict")
+val dict: Dict<text, text> = {"greeting": "hello"}
+expect dict["greeting"] == "hello"
+```
+
+</details>
+
+#### annotates complex value types
+
+- annotates complex value types
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-FEATURE
+step("annotates complex value types")
+val dict: Dict<text, [i32]> = {"nums": [1, 2, 3]}
+expect dict["nums"].len() == 3
+```
+
+</details>
 
 ## Scenario Summary
 
@@ -23,38 +424,53 @@ Tests for dictionary literal syntax, ensuring correct grammar is used.
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
-Tests for dictionary literal syntax, ensuring correct grammar is used.
-Verifies that {"key": value} syntax works correctly.
 
-## Evidence
+</details>
 
-| Category | Count |
-|----------|------:|
-| Artifacts | 1 |
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-### Artifacts
+Requirements covered by the scenarios in this manual:
 
-| Item | Kind | Path |
-|------|------|------|
-| `result.json` | JSON artifact | `build/test-artifacts/feature/usage/dict_grammar/result.json` |
+- `REQ-SSPEC-FEATURE`
+<!-- sspec-maintain:traceability:end -->
 
-## Scenarios
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-- creates dict with string keys
-- creates dict with integer values
-- creates dict with mixed value types
-- creates nested dicts
-- creates empty dict
-- stores arrays as values
-- stores nested structures
-- inserts new key-value pair
-- updates existing value
-- checks key existence
-- gets keys
-- gets values
-- stores optional values
-- uses optional chaining with dict access
-- returns nil for missing key with ?
-- annotates string to int dict
-- annotates string to string dict
-- annotates complex value types
+- Canonical SPipe generation for source `082e733db5dc19d4f18e9a16f1de8b99df02265cc9992ae168ed5bafba27071f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `082e733db5dc19d4f18e9a16f1de8b99df02265cc9992ae168ed5bafba27071f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `082e733db5dc19d4f18e9a16f1de8b99df02265cc9992ae168ed5bafba27071f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/feature/usage/dict_grammar_spec.spl
+mirror: doc/06_spec/feature/usage/dict_grammar_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/feature/usage/dict_grammar_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/feature/usage/dict_grammar_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/feature/usage/dict_grammar_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates dict with string keys' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/dict_grammar_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates dict with integer values' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/feature/usage/dict_grammar_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates dict with mixed value types' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

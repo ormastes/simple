@@ -1,29 +1,6 @@
 # Tasks Specification
 
-> <details>
-
-<!-- sdn-diagram:id=tasks_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=tasks_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-tasks_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=tasks_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering TaskStatus, TaskPriority, TaskProgress, Task, TaskError, TaskManager.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,21 +17,22 @@ tasks_spec
 
 #### converts to string
 
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- converts to string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to string")
 assert_true(TaskStatus.Pending.to_string() == "pending")
 assert_true(TaskStatus.Running.to_string() == "running")
 assert_true(TaskStatus.Completed.to_string() == "completed")
@@ -67,21 +45,18 @@ assert_true(TaskStatus.TimedOut.to_string() == "timed_out")
 
 #### identifies terminal states
 
-- assert false
-- assert false
-- assert true
-- assert true
-- assert true
-- assert true
+- identifies terminal states
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identifies terminal states")
 assert_false(TaskStatus.Pending.is_terminal())
 assert_false(TaskStatus.Running.is_terminal())
 assert_true(TaskStatus.Completed.is_terminal())
@@ -96,19 +71,18 @@ assert_true(TaskStatus.TimedOut.is_terminal())
 
 #### converts to string
 
-- assert true
-- assert true
-- assert true
-- assert true
+- converts to string
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to string")
 assert_true(TaskPriority.Low.to_string() == "low")
 assert_true(TaskPriority.Normal.to_string() == "normal")
 assert_true(TaskPriority.High.to_string() == "high")
@@ -119,19 +93,18 @@ assert_true(TaskPriority.Critical.to_string() == "critical")
 
 #### converts to numeric
 
-- assert true
-- assert true
-- assert true
-- assert true
+- converts to numeric
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to numeric")
 assert_true(TaskPriority.Low.to_i64() == 0)
 assert_true(TaskPriority.Normal.to_i64() == 1)
 assert_true(TaskPriority.High.to_i64() == 2)
@@ -144,16 +117,18 @@ assert_true(TaskPriority.Critical.to_i64() == 3)
 
 #### creates basic progress
 
-- assert true
+- creates basic progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates basic progress")
 val progress = TaskProgress(current: 50, total: nil, message: nil, percentage: nil)
 assert_true(progress.current == 50)
 ```
@@ -162,21 +137,18 @@ assert_true(progress.current == 50)
 
 #### adds total for percentage
 
-- var p0 = TaskProgress
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
+- adds total for percentage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds total for percentage")
 var p0 = TaskProgress(current: 25, total: nil, message: nil, percentage: nil)
 val progress = p0.with_total(100)
 assert_true(progress.current == 25)
@@ -198,18 +170,18 @@ match progress.percentage:
 
 #### adds message
 
-- var p0 = TaskProgress
-- assert true
-- assert true
+- adds message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds message")
 var p0 = TaskProgress(current: 10, total: nil, message: nil, percentage: nil)
 val progress = p0.with_message("Processing...")
 
@@ -224,21 +196,18 @@ match progress.message:
 
 #### converts to dict
 
-- var p0 = TaskProgress
-- var p1 = p0 with total
-- assert true
-- assert true
-- assert true
-- assert true
+- converts to dict
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to dict")
 var p0 = TaskProgress(current: 50, total: nil, message: nil, percentage: nil)
 var p1 = p0.with_total(100)
 val progress = p1.with_message("Half done")
@@ -256,17 +225,18 @@ assert_true(dict.has("percentage"))
 
 #### creates new task
 
-- assert true
-- assert true
+- creates new task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates new task")
 val task = Task(id: "task_1", operation: "test_operation", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
 assert_true(task.id == "task_1")
 assert_true(task.operation == "test_operation")
@@ -276,17 +246,18 @@ assert_true(task.operation == "test_operation")
 
 #### sets priority
 
-- var t0 = Task
-- assert true
+- sets priority
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets priority")
 var t0 = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
 val task = t0.with_priority(TaskPriority.High)
 assert_true(task.priority == TaskPriority.High)
@@ -296,18 +267,18 @@ assert_true(task.priority == TaskPriority.High)
 
 #### sets timeout
 
-- var t0 = Task
-- assert true
-- assert true
+- sets timeout
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets timeout")
 var t0 = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
 val task = t0.with_timeout(5000)
 
@@ -322,18 +293,18 @@ match task.timeout_ms:
 
 #### checks running state
 
-- var task = Task
-- assert false
-- assert true
+- checks running state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks running state")
 var task = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
 assert_false(task.is_running())
 
@@ -346,19 +317,18 @@ assert_true(task.is_running())
 
 #### checks complete state
 
-- var task = Task
-- assert false
-- assert true
-- assert true
+- checks complete state
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("checks complete state")
 var task = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
 assert_false(task.is_complete())
 
@@ -373,20 +343,18 @@ assert_true(task.is_complete())
 
 #### converts to dict
 
-- var t0 = Task
-- assert true
-- assert true
-- assert true
-- assert true
+- converts to dict
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to dict")
 var t0 = Task(id: "task_1", operation: "test", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
 val task = t0.with_priority(TaskPriority.High)
 val dict = task.to_dict()
@@ -403,18 +371,18 @@ assert_true(dict.get("priority") == "high")
 
 #### creates error
 
-- assert true
-- assert true
-- assert false
+- creates error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates error")
 val error = TaskError(code: "ERR_001", message: "Something went wrong", retryable: false, details: nil)
 assert_true(error.code == "ERR_001")
 assert_true(error.message == "Something went wrong")
@@ -425,18 +393,18 @@ assert_false(error.retryable)
 
 #### adds details
 
-- var e0 = TaskError
-- assert true
-- assert true
+- adds details
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("adds details")
 var e0 = TaskError(code: "ERR", message: "msg", retryable: false, details: nil)
 val error = e0.with_details("extra info")
 
@@ -451,17 +419,18 @@ match error.details:
 
 #### marks as retryable
 
-- var e0 = TaskError
-- assert true
+- marks as retryable
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("marks as retryable")
 var e0 = TaskError(code: "ERR", message: "msg", retryable: false, details: nil)
 val error = e0.as_retryable()
 assert_true(error.retryable)
@@ -471,19 +440,21 @@ assert_true(error.retryable)
 
 #### converts to MCP error
 
-- assert true
+- converts to MCP error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("converts to MCP error")
 val error = TaskError(code: "timeout", message: "Operation timed out", retryable: false, details: nil)
 val mcp_error = error.to_mcp_error()
-assert_true(mcp_error.category == ErrorCategory.Tool)
+assert_true(mcp_error.category == TaskErrorCategory.Tool)
 ```
 
 </details>
@@ -492,17 +463,18 @@ assert_true(mcp_error.category == ErrorCategory.Tool)
 
 #### creates task manager
 
-- assert true
-- assert true
+- creates task manager
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates task manager")
 val manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 assert_true(manager.running_count == 0)
 assert_true(manager.max_concurrent_tasks == 10)
@@ -512,19 +484,18 @@ assert_true(manager.max_concurrent_tasks == 10)
 
 #### creates task
 
-- var manager = TaskManager
-- assert true
-- assert true
-- assert true
+- creates task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates task")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("test_operation")
 assert_true(task_id.starts_with("task_"))
@@ -540,21 +511,18 @@ match manager.get_task(task_id):
 
 #### creates task with options
 
-- var manager = TaskManager
-- Some
-- assert true
-- assert true
-- assert true
-- assert true
+- creates task with options
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates task with options")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task_with_options(
     "important_op",
@@ -578,23 +546,18 @@ match manager.get_task(task_id):
 
 #### starts task
 
-- var manager = TaskManager
-- var result = manager start task
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
+- starts task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("starts task")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("op")
 
@@ -619,23 +582,18 @@ assert_true(manager.running_count == 1)
 
 #### updates progress
 
-- var manager = TaskManager
-- manager start task
-- var result = manager update progress
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
+- updates progress
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("updates progress")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("op")
 manager.start_task(task_id)
@@ -662,20 +620,18 @@ match manager.get_task(task_id):
 
 #### updates progress with message
 
-- var manager = TaskManager
-- manager start task
-- var result = manager update progress with message
-- assert true
-- assert true
+- updates progress with message
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("updates progress with message")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("op")
 manager.start_task(task_id)
@@ -692,32 +648,26 @@ match result:
 
 #### completes task
 
-- var manager = TaskManager
-- manager start task
-- var result = manager complete task
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
+- completes task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("completes task")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("op")
 manager.start_task(task_id)
 
 var result = manager.complete_task(task_id, "success")
 match result:
-    case Ok(_):
-        assert_true(true)
+    case Ok(success):
+        assert_true(success)
     case Err(_):
         assert_true(false)
 
@@ -735,23 +685,18 @@ assert_true(manager.running_count == 0)
 
 #### fails task
 
-- var manager = TaskManager
-- manager start task
-- var result = manager fail task
-- assert true
-- assert true
-- assert true
-- assert true
-- assert true
+- fails task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("fails task")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("op")
 manager.start_task(task_id)
@@ -777,22 +722,18 @@ match manager.get_task(task_id):
 
 #### cancels task
 
-- var manager = TaskManager
-- manager start task
-- var result = manager cancel task
-- assert true
-- assert true
-- assert true
-- assert true
+- cancels task
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cancels task")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val task_id = manager.create_task("op")
 manager.start_task(task_id)
@@ -815,20 +756,18 @@ match manager.get_task(task_id):
 
 #### lists all tasks
 
-- var manager = TaskManager
-- manager create task
-- manager create task
-- manager create task
-- assert true
+- lists all tasks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lists all tasks")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 manager.create_task("op1")
 manager.create_task("op2")
@@ -842,21 +781,18 @@ assert_true(tasks.len() == 3)
 
 #### lists tasks by status
 
-- var manager = TaskManager
-- manager create task
-- manager start task
-- manager start task
-- assert true
-- assert true
+- lists tasks by status
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("lists tasks by status")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val id1 = manager.create_task("op1")
 val id2 = manager.create_task("op2")
@@ -876,21 +812,18 @@ assert_true(pending.len() == 1)
 
 #### respects max concurrent tasks
 
-- var manager = TaskManager
-- manager start task
-- manager start task
-- var result = manager start task
-- assert true
-- assert true
+- respects max concurrent tasks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("respects max concurrent tasks")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 2, next_id: 0)
 
 val id1 = manager.create_task("op1")
@@ -905,27 +838,25 @@ match result:
     case Ok(_):
         assert_true(false)
     case Err(e):
-        assert_true(e.category == ErrorCategory.RateLimit)
+        assert_true(e.category == TaskErrorCategory.RateLimit)
 ```
 
 </details>
 
 #### cleans up completed tasks
 
-- var manager = TaskManager
-- manager start task
-- manager complete task
-- manager cleanup completed
-- assert true
+- cleans up completed tasks
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("cleans up completed tasks")
 var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
 val id1 = manager.create_task("op1")
 val id2 = manager.create_task("op2")
@@ -948,12 +879,12 @@ assert_true(manager.list_tasks().len() == 1)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/mcp_unit/tasks_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering TaskStatus, TaskPriority, TaskProgress, Task, TaskError, TaskManager.
 - TaskStatus
 - TaskPriority
 - TaskProgress
@@ -973,3 +904,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d53d298afaa5f30fc21dde8ad49fb02c267d010150a97aa6ce0c97609c94b76d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d53d298afaa5f30fc21dde8ad49fb02c267d010150a97aa6ce0c97609c94b76d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d53d298afaa5f30fc21dde8ad49fb02c267d010150a97aa6ce0c97609c94b76d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/mcp_unit/tasks_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_unit/tasks_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_unit/tasks_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_unit/tasks_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_unit/tasks_spec.spl:301:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts to string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/tasks_spec.spl:311:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'identifies terminal states' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_unit/tasks_spec.spl:322:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'converts to string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

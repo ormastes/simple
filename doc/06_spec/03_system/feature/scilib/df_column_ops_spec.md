@@ -2,29 +2,6 @@
 
 > DataFrame column-level operations: accessor, assign, drop, rename, dtypes, astype. **DataFrame ops are PLAIN method calls — never inside `math{}`** (architect anti-pattern #2; OQ-A: string-keyed indexing and groupby semantics are structurally incompatible with `MathExpr`).
 
-<!-- sdn-diagram:id=df_column_ops_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=df_column_ops_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-df_column_ops_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=df_column_ops_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 11 | 11 | 0 | 0 |
@@ -47,7 +24,7 @@ DataFrame column-level operations: accessor, assign, drop, rename, dtypes, astyp
 | Plan | doc/03_plan/agent_tasks/scilib_port_df.md |
 | Design | doc/05_design/scilib_port_architecture.md |
 | Source | `test/03_system/feature/scilib/df_column_ops_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -82,9 +59,7 @@ plain Simple methods.
 
 #### returns the requested column as a Series
 
-1. SeriesErased F64Series
-2. SeriesErased I64Series
-3. ]) unwrap
+- returns the requested column as a Series
    - Expected: a.len() equals `Index.new(3)`
    - Expected: a.get(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: a.get(Index.new(2)) equals `Float64.new(3.0)`
@@ -93,10 +68,12 @@ plain Simple methods.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns the requested column as a Series")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0), Float64.new(2.0), Float64.new(3.0)])),
     SeriesErased.I64Series(Series.from_values(Symbol.from("b"), [Int64.new(10), Int64.new(20), Int64.new(30)])),
@@ -113,18 +90,19 @@ expect(a.get(Index.new(2))).to_equal(Float64.new(3.0))
 
 #### returns an error result
 
-1. SeriesErased F64Series
-2. ]) unwrap
+- returns an error result
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns an error result")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0), Float64.new(2.0)])),
 ]).unwrap()
@@ -138,8 +116,7 @@ expect(r.is_err()).to_equal(true)
 
 #### assign adds a new column to the schema
 
-1. SeriesErased F64Series
-2. ]) unwrap
+- assign adds a new column to the schema
    - Expected: df2.column_count() equals `Index.new(2)`
    - Expected: b.get(Index.new(0)) equals `Float64.new(10.0)`
 
@@ -147,10 +124,12 @@ expect(r.is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("assign adds a new column to the schema")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0), Float64.new(2.0)])),
 ]).unwrap()
@@ -164,8 +143,7 @@ expect(b.get(Index.new(0))).to_equal(Float64.new(10.0))
 
 #### assign replaces an existing column
 
-1. SeriesErased F64Series
-2. ]) unwrap
+- assign replaces an existing column
    - Expected: df2.column_count() equals `Index.new(1)`
    - Expected: a.get(Index.new(0)) equals `Float64.new(99.0)`
 
@@ -173,10 +151,12 @@ expect(b.get(Index.new(0))).to_equal(Float64.new(10.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("assign replaces an existing column")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0), Float64.new(2.0)])),
 ]).unwrap()
@@ -190,9 +170,7 @@ expect(a.get(Index.new(0))).to_equal(Float64.new(99.0))
 
 #### drop removes the named column
 
-1. SeriesErased F64Series
-2. SeriesErased F64Series
-3. ]) unwrap
+- drop removes the named column
    - Expected: df2.column_count() equals `Index.new(1)`
    - Expected: df2.col(Symbol.from("a")).is_err() is true
    - Expected: b.get(Index.new(0)) equals `Float64.new(2.0)`
@@ -201,10 +179,12 @@ expect(a.get(Index.new(0))).to_equal(Float64.new(99.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("drop removes the named column")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0)])),
     SeriesErased.F64Series(Series.from_values(Symbol.from("b"), [Float64.new(2.0)])),
@@ -220,18 +200,19 @@ expect(b.get(Index.new(0))).to_equal(Float64.new(2.0))
 
 #### drop returns an error when column is missing
 
-1. SeriesErased F64Series
-2. ]) unwrap
+- drop returns an error when column is missing
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("drop returns an error when column is missing")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0)])),
 ]).unwrap()
@@ -245,8 +226,7 @@ expect(r.is_err()).to_equal(true)
 
 #### renames an existing column
 
-1. SeriesErased F64Series
-2. ]) unwrap
+- renames an existing column
    - Expected: df2.col(Symbol.from("alpha")).unwrap().get(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: df2.col(Symbol.from("a")).is_err() is true
 
@@ -254,10 +234,12 @@ expect(r.is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("renames an existing column")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0), Float64.new(2.0)])),
 ]).unwrap()
@@ -270,19 +252,19 @@ expect(df2.col(Symbol.from("a")).is_err()).to_equal(true)
 
 #### errors when new name already exists
 
-1. SeriesErased F64Series
-2. SeriesErased F64Series
-3. ]) unwrap
+- errors when new name already exists
    - Expected: r.is_err() is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("errors when new name already exists")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0)])),
     SeriesErased.F64Series(Series.from_values(Symbol.from("b"), [Float64.new(2.0)])),
@@ -297,9 +279,7 @@ expect(r.is_err()).to_equal(true)
 
 #### dtypes returns the schema in column order
 
-1. SeriesErased F64Series
-2. SeriesErased I64Series
-3. ]) unwrap
+- dtypes returns the schema in column order
    - Expected: s.len() equals `Index.new(2)`
    - Expected: s.dtype_at(Index.new(0)) equals `DType.F64`
    - Expected: s.dtype_at(Index.new(1)) equals `DType.I64`
@@ -308,10 +288,12 @@ expect(r.is_err()).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dtypes returns the schema in column order")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0)])),
     SeriesErased.I64Series(Series.from_values(Symbol.from("b"), [Int64.new(10)])),
@@ -326,8 +308,7 @@ expect(s.dtype_at(Index.new(1))).to_equal(DType.I64)
 
 #### astype converts Int64 column to Float64
 
-1. SeriesErased I64Series
-2. ]) unwrap
+- astype converts Int64 column to Float64
    - Expected: a.dtype equals `DType.F64`
    - Expected: a.get(Index.new(0)) equals `Float64.new(1.0)`
    - Expected: a.get(Index.new(2)) equals `Float64.new(3.0)`
@@ -336,10 +317,12 @@ expect(s.dtype_at(Index.new(1))).to_equal(DType.I64)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("astype converts Int64 column to Float64")
 val df = DataFrame.from_columns([
     SeriesErased.I64Series(Series.from_values(Symbol.from("a"), [Int64.new(1), Int64.new(2), Int64.new(3)])),
 ]).unwrap()
@@ -356,9 +339,7 @@ expect(a.get(Index.new(2))).to_equal(Float64.new(3.0))
 
 #### df.col(...).add(other) goes through Series methods, not math{}
 
-1. SeriesErased F64Series
-2. SeriesErased F64Series
-3. ]) unwrap
+- df.col(...).add(other) goes through Series methods, not math{}
    - Expected: r.len() equals `Index.new(2)`
    - Expected: r.get(Index.new(0)) equals `Float64.new(11.0)`
    - Expected: r.get(Index.new(1)) equals `Float64.new(22.0)`
@@ -367,10 +348,12 @@ expect(a.get(Index.new(2))).to_equal(Float64.new(3.0))
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("df.col(...).add(other) goes through Series methods, not math{}")
 val df = DataFrame.from_columns([
     SeriesErased.F64Series(Series.from_values(Symbol.from("a"), [Float64.new(1.0), Float64.new(2.0)])),
     SeriesErased.F64Series(Series.from_values(Symbol.from("b"), [Float64.new(10.0), Float64.new(20.0)])),
@@ -398,8 +381,56 @@ expect(r.get(Index.new(1))).to_equal(Float64.new(22.0))
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/agent_tasks/scilib_port_df.md](doc/03_plan/agent_tasks/scilib_port_df.md)
-- **Design:** [doc/05_design/scilib_port_architecture.md](doc/05_design/scilib_port_architecture.md)
+- **Plan:** `doc/03_plan/agent_tasks/scilib_port_df.md`
+- **Design:** `doc/05_design/scilib_port_architecture.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4b99d026a5917308cb1ce8ecbe31e0cb5e6e02582d9f44b9adb4ad7d6f8d62ed`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4b99d026a5917308cb1ce8ecbe31e0cb5e6e02582d9f44b9adb4ad7d6f8d62ed`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4b99d026a5917308cb1ce8ecbe31e0cb5e6e02582d9f44b9adb4ad7d6f8d62ed`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/scilib/df_column_ops_spec.spl
+mirror: doc/06_spec/03_system/feature/scilib/df_column_ops_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/scilib/df_column_ops_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/scilib/df_column_ops_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/scilib/df_column_ops_spec.spl:62:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns the requested column as a Series' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/df_column_ops_spec.spl:75:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns an error result' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/scilib/df_column_ops_spec.spl:98:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'assign adds a new column to the schema' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

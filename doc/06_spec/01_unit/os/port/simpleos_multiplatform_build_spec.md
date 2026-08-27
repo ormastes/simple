@@ -1,33 +1,10 @@
 # Simpleos Multiplatform Build Specification
 
-> <details>
-
-<!-- sdn-diagram:id=simpleos_multiplatform_build_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_multiplatform_build_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_multiplatform_build_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_multiplatform_build_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering SimpleOS multi-platform build catalog.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -40,13 +17,22 @@ simpleos_multiplatform_build_spec -> os
 
 #### exposes 32-bit x86 as a first-class supported target
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- exposes 32-bit x86 as a first-class supported target
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("exposes 32-bit x86 as a first-class supported target")
 val names = simpleos_platform_target_names()
 expect(names).to_contain("i686-simpleos")
 expect(simpleos_supported_targets()).to_contain("i686-simpleos")
@@ -54,17 +40,75 @@ expect(simpleos_supported_targets()).to_contain("i686-simpleos")
 
 </details>
 
-#### records unique QEMU artifact names for all first-class platforms
+#### exposes UP Squared Apollo Lake as an isolated physical target
+
+- exposes UP Squared Apollo Lake as an isolated physical target
+   - Expected: up2.name equals `x86_64-up-squared-apollo-lake`
+   - Expected: up2.native_target equals `x86_64-unknown-none`
+   - Expected: up2.default_entry equals `src/os/kernel/arch/x86_64/up_squared/entry.spl`
+   - Expected: up2.linker_script equals `src/os/kernel/arch/x86_64/up_squared/linker.ld`
+   - Expected: up2.disk_image_output equals `build/os/up-squared-apollo-lake/usb/board-usb.img`
+   - Expected: up2.qemu_system equals ``
+   - Expected: up2.board_adapter_id equals `up-squared-apollo-lake`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("exposes UP Squared Apollo Lake as an isolated physical target")
+val target = simpleos_platform_target_by_name("x86_64-up-squared-apollo-lake")
+if val up2 = target:
+    expect(up2.name).to_equal("x86_64-up-squared-apollo-lake")
+    expect(up2.native_target).to_equal("x86_64-unknown-none")
+    expect(up2.default_entry).to_equal("src/os/kernel/arch/x86_64/up_squared/entry.spl")
+    expect(up2.linker_script).to_equal("src/os/kernel/arch/x86_64/up_squared/linker.ld")
+    expect(up2.disk_image_output).to_equal("build/os/up-squared-apollo-lake/usb/board-usb.img")
+    expect(up2.qemu_system).to_equal("")
+    expect(up2.board_adapter_id).to_equal("up-squared-apollo-lake")
+```
+
+</details>
+
+#### records unique QEMU artifact names for all first-class platforms
+
+- records unique QEMU artifact names for all first-class platforms
+   - Expected: names.len() equals `7`
+   - Expected: simpleos_platform_artifact_slug("x86_64") equals `x86_64`
+   - Expected: simpleos_platform_disk_image_output("x86_64") equals `build/os/fat32-x86_64.img`
+   - Expected: simpleos_platform_kernel_output("x86_64") equals `build/os/simpleos_x86_64.elf`
+   - Expected: simpleos_platform_artifact_slug("x86_32") equals `x86_32`
+   - Expected: simpleos_platform_disk_image_output("x86_32") equals `build/os/fat32-x86_32.img`
+   - Expected: simpleos_platform_kernel_output("x86_32") equals `build/os/simpleos_x86_32.elf`
+   - Expected: simpleos_platform_artifact_slug("arm64") equals `arm64`
+   - Expected: simpleos_platform_disk_image_output("arm64") equals `build/os/fat32-arm64.img`
+   - Expected: simpleos_platform_kernel_output("arm64") equals `build/os/simpleos_aarch64.elf`
+   - Expected: simpleos_platform_artifact_slug("arm32") equals `arm32`
+   - Expected: simpleos_platform_disk_image_output("arm32") equals `build/os/fat32-arm32.img`
+   - Expected: simpleos_platform_kernel_output("arm32") equals `build/os/simpleos_arm32.elf`
+   - Expected: simpleos_platform_artifact_slug("riscv64") equals `riscv64`
+   - Expected: simpleos_platform_disk_image_output("riscv64") equals `build/os/fat32-riscv64.img`
+   - Expected: simpleos_platform_kernel_output("riscv64") equals `build/os/simpleos_riscv64.elf`
+   - Expected: simpleos_platform_artifact_slug("riscv32") equals `riscv32`
+   - Expected: simpleos_platform_disk_image_output("riscv32") equals `build/os/fat32-riscv32.img`
+   - Expected: simpleos_platform_kernel_output("riscv32") equals `build/os/simpleos_riscv32.elf`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("records unique QEMU artifact names for all first-class platforms")
 val names = simpleos_platform_target_names()
-expect(names.len()).to_equal(6)
+expect(names.len()).to_equal(7)
 
 expect(simpleos_platform_artifact_slug("x86_64")).to_equal("x86_64")
 expect(simpleos_platform_disk_image_output("x86_64")).to_equal("build/os/fat32-x86_64.img")
@@ -95,13 +139,27 @@ expect(simpleos_platform_kernel_output("riscv32")).to_equal("build/os/simpleos_r
 
 #### exposes QEMU target metadata from the shared platform catalog
 
+- exposes QEMU target metadata from the shared platform catalog
+   - Expected: simpleos_platform_default_entry("x86_64") equals `examples/09_embedded/simple_os/arch/x86_64/os_entry.spl`
+   - Expected: simpleos_platform_linker_script("x86_64") equals `examples/09_embedded/simple_os/arch/x86_64/linker.ld`
+   - Expected: simpleos_platform_native_target("x86_64") equals `x86_64-unknown-none`
+   - Expected: simpleos_platform_qemu_system("x86_64") equals `qemu-system-x86_64`
+   - Expected: simpleos_platform_qemu_machine("x86_64") equals `q35`
+   - Expected: simpleos_platform_qemu_cpu("x86_64") equals `qemu64`
+   - Expected: simpleos_platform_default_entry("arm32") equals `src/os/kernel/arch/arm32/boot.spl`
+   - Expected: simpleos_platform_qemu_system("arm32") equals `qemu-system-arm`
+   - Expected: simpleos_platform_qemu_cpu("arm32") equals `cortex-a15`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("exposes QEMU target metadata from the shared platform catalog")
 expect(simpleos_platform_default_entry("x86_64")).to_equal("examples/09_embedded/simple_os/arch/x86_64/os_entry.spl")
 expect(simpleos_platform_linker_script("x86_64")).to_equal("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
 expect(simpleos_platform_native_target("x86_64")).to_equal("x86_64-unknown-none")
@@ -116,15 +174,122 @@ expect(simpleos_platform_qemu_cpu("arm32")).to_equal("cortex-a15")
 
 </details>
 
-#### resolves common x86_32 aliases to the i686 target
+#### keeps target-native userland triples separate from kernel targets
+
+- keeps target-native userland triples separate from kernel targets
+   - Expected: simpleos_platform_native_target("x86_64") equals `x86_64-unknown-none`
+   - Expected: simpleos_platform_userland_target("x86_64") equals `x86_64-unknown-simpleos`
+   - Expected: simpleos_platform_userland_abi("x86_64") equals `sysv`
+   - Expected: simpleos_platform_native_target("arm64") equals `aarch64-unknown-none`
+   - Expected: simpleos_platform_userland_target("arm64") equals `aarch64-unknown-simpleos`
+   - Expected: simpleos_platform_userland_abi("arm64") equals `aapcs64`
+   - Expected: simpleos_platform_native_target("riscv64") equals `riscv64-unknown-none`
+   - Expected: simpleos_platform_userland_target("riscv64") equals `riscv64gc-unknown-simpleos`
+   - Expected: simpleos_platform_userland_abi("riscv64") equals `lp64d`
+   - Expected: simpleos_userland_target("x86_64") equals `x86_64-unknown-simpleos`
+   - Expected: simpleos_userland_abi("arm64") equals `aapcs64`
+   - Expected: simpleos_userland_firmware_contract("riscv64") equals `SimpleOsFirmwareContractKind.OpenSbi`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps target-native userland triples separate from kernel targets")
+expect(simpleos_platform_native_target("x86_64")).to_equal("x86_64-unknown-none")
+expect(simpleos_platform_userland_target("x86_64")).to_equal("x86_64-unknown-simpleos")
+expect(simpleos_platform_userland_abi("x86_64")).to_equal("sysv")
+
+expect(simpleos_platform_native_target("arm64")).to_equal("aarch64-unknown-none")
+expect(simpleos_platform_userland_target("arm64")).to_equal("aarch64-unknown-simpleos")
+expect(simpleos_platform_userland_abi("arm64")).to_equal("aapcs64")
+
+expect(simpleos_platform_native_target("riscv64")).to_equal("riscv64-unknown-none")
+expect(simpleos_platform_userland_target("riscv64")).to_equal("riscv64gc-unknown-simpleos")
+expect(simpleos_platform_userland_abi("riscv64")).to_equal("lp64d")
+expect(simpleos_userland_target("x86_64")).to_equal("x86_64-unknown-simpleos")
+expect(simpleos_userland_abi("arm64")).to_equal("aapcs64")
+expect(simpleos_userland_firmware_contract("riscv64")).to_equal(SimpleOsFirmwareContractKind.OpenSbi)
+```
+
+</details>
+
+#### keeps canonical userland target triples unique across required architectures
+
+- keeps canonical userland target triples unique across required architectures
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("keeps canonical userland target triples unique across required architectures")
+val triples = [
+    simpleos_platform_userland_target("x86_64"),
+    simpleos_platform_userland_target("arm64"),
+    simpleos_platform_userland_target("riscv64")
+]
+var i = 0
+while i < triples.len():
+    var j = i + 1
+    while j < triples.len():
+        expect(triples[i] == triples[j]).to_be(false)
+        j = j + 1
+    i = i + 1
+```
+
+</details>
+
+#### records the established firmware profile for each userland lane
+
+- records the established firmware profile for each userland lane
+   - Expected: simpleos_platform_userland_firmware_contract("x86_64") equals `SimpleOsFirmwareContractKind.LimineBios`
+   - Expected: simpleos_platform_userland_firmware_contract("arm64") equals `SimpleOsFirmwareContractKind.RawLoader`
+   - Expected: simpleos_platform_userland_firmware_contract("riscv64") equals `SimpleOsFirmwareContractKind.OpenSbi`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("records the established firmware profile for each userland lane")
+expect(simpleos_platform_userland_firmware_contract("x86_64")).to_equal(SimpleOsFirmwareContractKind.LimineBios)
+expect(simpleos_platform_userland_firmware_contract("arm64")).to_equal(SimpleOsFirmwareContractKind.RawLoader)
+expect(simpleos_platform_userland_firmware_contract("riscv64")).to_equal(SimpleOsFirmwareContractKind.OpenSbi)
+```
+
+</details>
+
+#### resolves common x86_32 aliases to the i686 target
+
+- resolves common x86_32 aliases to the i686 target
+   - Expected: resolved.name equals `i686-simpleos`
+   - Expected: resolved.arch equals `Architecture.X86`
+   - Expected: resolved.bits equals `32`
+   - Expected: resolved_i386.name equals `i686-simpleos`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("resolves common x86_32 aliases to the i686 target")
 val target = simpleos_platform_target_by_name("x86_32")
 if val resolved = target:
     expect(resolved.name).to_equal("i686-simpleos")
@@ -140,13 +305,18 @@ if val resolved_i386 = i386:
 
 #### uses freestanding i686 flags for 32-bit x86 C and assembly boot inputs
 
+- uses freestanding i686 flags for 32-bit x86 C and assembly boot inputs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("uses freestanding i686 flags for 32-bit x86 C and assembly boot inputs")
 val c_flags = simpleos_platform_c_flags("i686-simpleos")
 expect(c_flags).to_contain("--target=i686-unknown-none-elf")
 expect(c_flags).to_contain("-m32")
@@ -162,13 +332,18 @@ expect(asm_flags).to_contain("-m32")
 
 #### tracks x86_32 C and assembly boot support sources
 
+- tracks x86_32 C and assembly boot support sources
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("tracks x86_32 C and assembly boot support sources")
 val c_sources = simpleos_platform_boot_c_sources("x86_32")
 expect(c_sources).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c")
 
@@ -180,13 +355,18 @@ expect(asm_sources).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/
 
 #### records the grandfathered x86_64 native boot backlog separately from entry stubs
 
+- records the grandfathered x86_64 native boot backlog separately from entry stubs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("records the grandfathered x86_64 native boot backlog separately from entry stubs")
 val backlog = simpleos_platform_grandfathered_native_sources("x86_64")
 expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/ap_trampoline.s")
 expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/syscall_entry.s")
@@ -196,15 +376,58 @@ expect(backlog).to_contain("examples/09_embedded/simple_os/arch/x86_64/boot/rt_e
 
 </details>
 
-#### tracks ARM C and assembly boot support sources
+#### shares the Unicode scalar text constructor across every SimpleOS target
+
+- shares the Unicode scalar text constructor across every SimpleOS target
+   - Expected: simpleos_platform_runtime_impl_kind(name) equals `SimpleOsNativeImplementationKind.Simple`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("shares the Unicode scalar text constructor across every SimpleOS target")
+for name in simpleos_platform_target_names():
+    expect(simpleos_platform_runtime_impl_kind(name)).to_equal(SimpleOsNativeImplementationKind.Simple)
+val source = file_read("src/runtime/simple_core/core_string.spl")
+expect(source).to_contain("pub fn text_dot_from_char_code(code: i64) -> i64:")
+expect(source).to_contain("code > 1114111 or (code >= 55296 and code <= 57343)")
+expect(source).to_contain("spl_store_u8(data, 3, 128 | (code & 63))")
+expect(source).to_contain("val out = rt_string_new(data, len)")
+val provider = file_read("examples/09_embedded/simple_os/arch/common/boot/text_codepoint_runtime.h")
+expect(provider).to_contain("RuntimeValue text_dot_from_char_code(int64_t code)")
+expect(provider).to_contain("scalar >= 0xd800 && scalar <= 0xdfff")
+expect(provider).to_contain("return rt_string_new((RuntimeValue)(uintptr_t)utf8, len)")
+expect(file_read("examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+expect(file_read("examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+expect(file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+expect(file_read("examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+expect(file_read("examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+expect(file_read("examples/09_embedded/simple_os/arch/riscv32/boot/baremetal_stubs.c")).to_contain("../../common/boot/text_codepoint_runtime.h")
+val staged_qemu = file_read("scripts/check/check-simpleos-memory-leveling-qemu.shs")
+expect(staged_qemu).to_contain("arch/common/boot/text_codepoint_runtime.h")
+```
+
+</details>
+
+#### tracks ARM C and assembly boot support sources
+
+- tracks ARM C and assembly boot support sources
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-OS
+step("tracks ARM C and assembly boot support sources")
 val arm64_c_sources = simpleos_platform_boot_c_sources("arm64")
 expect(arm64_c_sources).to_contain("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
 val arm64_asm_sources = simpleos_platform_boot_asm_sources("arm64")
@@ -220,13 +443,23 @@ expect(arm32_asm_sources).to_contain("examples/09_embedded/simple_os/arch/arm32/
 
 #### delegates native SimpleOS target helpers through the platform catalog
 
+- delegates native SimpleOS target helpers through the platform catalog
+   - Expected: simpleos_target_arch("i686-simpleos") equals `x86`
+   - Expected: simpleos_clang_target("i686-simpleos") equals `i686-unknown-none-elf`
+   - Expected: simpleos_target_artifact_slug("i686-simpleos") equals `x86_32`
+   - Expected: simpleos_target_kernel_output("i686-simpleos") equals `build/os/simpleos_x86_32.elf`
+   - Expected: simpleos_target_disk_image_output("i686-simpleos") equals `build/os/fat32-x86_32.img`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("delegates native SimpleOS target helpers through the platform catalog")
 expect(simpleos_target_arch("i686-simpleos")).to_equal("x86")
 expect(simpleos_clang_target("i686-simpleos")).to_equal("i686-unknown-none-elf")
 expect(simpleos_boot_c_sources("i686-simpleos")).to_contain("examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c")
@@ -240,13 +473,26 @@ expect(simpleos_target_disk_image_output("i686-simpleos")).to_equal("build/os/fa
 
 #### records riscv32 as RV32IMAC ILP32 soft-float
 
+- records riscv32 as RV32IMAC ILP32 soft-float
+   - Expected: resolved.name equals `riscv32imac-simpleos`
+   - Expected: resolved.bits equals `32`
+   - Expected: resolved.isa equals `rv32imac`
+   - Expected: resolved.abi equals `ilp32`
+   - Expected: resolved.float_abi equals `soft`
+   - Expected: simpleos_platform_isa("riscv32") equals `rv32imac`
+   - Expected: simpleos_platform_float_abi("riscv32") equals `soft`
+   - Expected: simpleos_platform_needs_soft_float_runtime("riscv32") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("records riscv32 as RV32IMAC ILP32 soft-float")
 val target = simpleos_platform_target_by_name("riscv32")
 if val resolved = target:
     expect(resolved.name).to_equal("riscv32imac-simpleos")
@@ -268,13 +514,21 @@ expect(simpleos_platform_needs_soft_float_runtime("riscv32")).to_equal(true)
 
 #### delegates riscv32 ABI helpers through native build config
 
+- delegates riscv32 ABI helpers through native build config
+   - Expected: simpleos_target_isa("riscv32imac-simpleos") equals `rv32imac`
+   - Expected: simpleos_target_float_abi("riscv32imac-simpleos") equals `soft`
+   - Expected: simpleos_target_needs_soft_float_runtime("riscv32imac-simpleos") is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("delegates riscv32 ABI helpers through native build config")
 expect(simpleos_target_isa("riscv32imac-simpleos")).to_equal("rv32imac")
 expect(simpleos_target_float_abi("riscv32imac-simpleos")).to_equal("soft")
 expect(simpleos_target_needs_soft_float_runtime("riscv32imac-simpleos")).to_equal(true)
@@ -284,13 +538,26 @@ expect(simpleos_target_needs_soft_float_runtime("riscv32imac-simpleos")).to_equa
 
 #### keeps RISC-V SimpleOS boot support in Simple sources
 
+- keeps RISC-V SimpleOS boot support in Simple sources
+   - Expected: simpleos_platform_boot_c_sources("riscv64").len() equals `0`
+   - Expected: simpleos_platform_boot_asm_sources("riscv64").len() equals `0`
+   - Expected: simpleos_boot_c_sources("riscv64gc-simpleos").len() equals `0`
+   - Expected: simpleos_boot_asm_sources("riscv64gc-simpleos").len() equals `0`
+   - Expected: simpleos_platform_boot_c_sources("riscv32").len() equals `0`
+   - Expected: simpleos_platform_boot_asm_sources("riscv32").len() equals `0`
+   - Expected: simpleos_boot_c_sources("riscv32imac-simpleos").len() equals `0`
+   - Expected: simpleos_boot_asm_sources("riscv32imac-simpleos").len() equals `0`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("keeps RISC-V SimpleOS boot support in Simple sources")
 expect(simpleos_platform_boot_c_sources("riscv64").len()).to_equal(0)
 expect(simpleos_platform_boot_asm_sources("riscv64").len()).to_equal(0)
 expect(simpleos_boot_c_sources("riscv64gc-simpleos").len()).to_equal(0)
@@ -306,13 +573,27 @@ expect(simpleos_boot_asm_sources("riscv32imac-simpleos").len()).to_equal(0)
 
 #### records native-surface policy for primary reduction targets
 
+- records native-surface policy for primary reduction targets
+   - Expected: simpleos_platform_boot_impl_kind("x86_64") equals `SimpleOsNativeImplementationKind.StandaloneAsm`
+   - Expected: simpleos_platform_runtime_impl_kind("x86_64") equals `SimpleOsNativeImplementationKind.Simple`
+   - Expected: simpleos_platform_standalone_asm_policy("x86_64") equals `SimpleOsStandaloneAsmPolicy.EntryStubsOnly`
+   - Expected: simpleos_platform_boot_impl_kind("riscv64") equals `SimpleOsNativeImplementationKind.EmbeddedAsm`
+   - Expected: simpleos_platform_runtime_impl_kind("riscv64") equals `SimpleOsNativeImplementationKind.Simple`
+   - Expected: simpleos_platform_standalone_asm_policy("riscv64") equals `SimpleOsStandaloneAsmPolicy.EntryStubsOnly`
+   - Expected: simpleos_platform_boot_impl_kind("riscv32") equals `SimpleOsNativeImplementationKind.EmbeddedAsm`
+   - Expected: simpleos_platform_runtime_impl_kind("riscv32") equals `SimpleOsNativeImplementationKind.Simple`
+   - Expected: simpleos_platform_standalone_asm_policy("riscv32") equals `SimpleOsStandaloneAsmPolicy.EntryStubsOnly`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("records native-surface policy for primary reduction targets")
 expect(simpleos_platform_boot_impl_kind("x86_64")).to_equal(SimpleOsNativeImplementationKind.StandaloneAsm)
 expect(simpleos_platform_runtime_impl_kind("x86_64")).to_equal(SimpleOsNativeImplementationKind.Simple)
 expect(simpleos_platform_standalone_asm_policy("x86_64")).to_equal(SimpleOsStandaloneAsmPolicy.EntryStubsOnly)
@@ -330,13 +611,23 @@ expect(simpleos_platform_standalone_asm_policy("riscv32")).to_equal(SimpleOsStan
 
 #### delegates native-surface policy through native build config
 
+- delegates native-surface policy through native build config
+   - Expected: simpleos_target_boot_impl_kind("x86_64-simpleos") equals `SimpleOsNativeImplementationKind.StandaloneAsm`
+   - Expected: simpleos_target_runtime_impl_kind("x86_64-simpleos") equals `SimpleOsNativeImplementationKind.Simple`
+   - Expected: simpleos_target_standalone_asm_policy("x86_64-simpleos") equals `SimpleOsStandaloneAsmPolicy.EntryStubsOnly`
+   - Expected: simpleos_target_boot_impl_kind("riscv64gc-simpleos") equals `SimpleOsNativeImplementationKind.EmbeddedAsm`
+   - Expected: simpleos_target_standalone_asm_policy("riscv64gc-simpleos") equals `SimpleOsStandaloneAsmPolicy.EntryStubsOnly`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("delegates native-surface policy through native build config")
 expect(simpleos_target_boot_impl_kind("x86_64-simpleos")).to_equal(SimpleOsNativeImplementationKind.StandaloneAsm)
 expect(simpleos_target_runtime_impl_kind("x86_64-simpleos")).to_equal(SimpleOsNativeImplementationKind.Simple)
 expect(simpleos_target_standalone_asm_policy("x86_64-simpleos")).to_equal(SimpleOsStandaloneAsmPolicy.EntryStubsOnly)
@@ -350,13 +641,29 @@ expect(simpleos_target_standalone_asm_policy("riscv64gc-simpleos")).to_equal(Sim
 
 #### records boot firmware, media layout, and staged toolchain contracts
 
+- records boot firmware, media layout, and staged toolchain contracts
+   - Expected: simpleos_platform_firmware_contract("x86_64") equals `SimpleOsFirmwareContractKind.LimineBios`
+   - Expected: simpleos_platform_image_layout("x86_64") equals `SimpleOsImageLayoutKind.Fat32Disk`
+   - Expected: simpleos_platform_board_adapter_id("x86_64") equals `x86_pc_bios_uefi`
+   - Expected: simpleos_platform_firmware_contract("arm64") equals `SimpleOsFirmwareContractKind.RawLoader`
+   - Expected: simpleos_platform_image_layout("arm64") equals `SimpleOsImageLayoutKind.VirtioFat32`
+   - Expected: simpleos_platform_board_adapter_id("arm64") equals `arm64_u_boot_dtb_sbc`
+   - Expected: simpleos_platform_firmware_contract("riscv64") equals `SimpleOsFirmwareContractKind.OpenSbi`
+   - Expected: simpleos_platform_image_layout("riscv64") equals `SimpleOsImageLayoutKind.HostedVirtioFat32`
+   - Expected: simpleos_platform_board_adapter_id("riscv64") equals `mlk_s02_100t`
+   - Expected: simpleos_platform_staged_toolchain_app_names("arm64") equals `["simple_compiler", "simple_loader", "clang", "rust"]`
+   - Expected: simpleos_platform_staged_toolchain_app_names("riscv64") equals `["simple_compiler", "simple_loader", "llvm", "clang", "rust"]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("records boot firmware, media layout, and staged toolchain contracts")
 expect(simpleos_platform_firmware_contract("x86_64")).to_equal(SimpleOsFirmwareContractKind.LimineBios)
 expect(simpleos_platform_image_layout("x86_64")).to_equal(SimpleOsImageLayoutKind.Fat32Disk)
 expect(simpleos_platform_board_adapter_id("x86_64")).to_equal("x86_pc_bios_uefi")
@@ -377,13 +684,26 @@ expect(simpleos_platform_staged_toolchain_app_names("riscv64")).to_equal(["simpl
 
 #### maps acceptance lanes from the catalog instead of separate target tables
 
+- maps acceptance lanes from the catalog instead of separate target tables
+   - Expected: arm64_lane.name equals `arm64-virtio-fat32-smf`
+   - Expected: arm64_lane.lane_kind equals `SimpleOsLaneKind.FsExec`
+   - Expected: arm64_lane.entry equals `examples/09_embedded/simple_os/arch/arm64/fs_exec_entry.spl`
+   - Expected: arm64_lane.media_path_hint equals `build/os/fat32-arm64.img`
+   - Expected: rv64_lane.name equals `riscv64-hosted`
+   - Expected: rv64_lane.lane_kind equals `SimpleOsLaneKind.HostedCompileSmoke`
+   - Expected: rv64_lane.entry equals `examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl`
+   - Expected: rv64_lane.media_path_hint equals `build/os/fat32-riscv64.img`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("maps acceptance lanes from the catalog instead of separate target tables")
 val arm64_lane = simpleos_platform_qemu_acceptance_lane("arm64")
 expect(arm64_lane.name).to_equal("arm64-virtio-fat32-smf")
 expect(arm64_lane.lane_kind).to_equal(SimpleOsLaneKind.FsExec)
@@ -410,13 +730,14 @@ expect(rv64_markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=sim
 
 #### looks up named QEMU lanes without duplicating the x86 smoke lane
 
-1. fail
+- looks up named QEMU lanes without duplicating the x86 smoke lane
+   - Expected: lane.lane_kind equals `SimpleOsLaneKind.HostedCompileSmoke`
+   - Expected: lane.output equals `build/os/simpleos_riscv64_hosted.elf`
    - Expected: lane.lane_kind equals `SimpleOsLaneKind.FsExec`
    - Expected: lane.entry equals `examples/09_embedded/simple_os/arch/riscv64/smoke_entry.spl`
    - Expected: lane.timeout_ms equals `60000`
    - Expected: lane.media_path_hint equals `build/os/fat32-riscv64.img`
    - Expected: lane.required_serial_markers.len() equals `0`
-2. fail
    - Expected: x64_lanes.len() equals `2`
    - Expected: x64_lanes[0].name equals `x86_64-smoke`
    - Expected: x64_lanes[1].name equals `x86_64-q35-pure-nvme-perf`
@@ -425,16 +746,17 @@ expect(rv64_markers).to_contain("HOSTED_FS_TOOLCHAIN_READY arch=riscv64 apps=sim
    - Expected: lane.image_layout equals `SimpleOsImageLayoutKind.Fat32Disk`
    - Expected: lane.output equals `build/os/simpleos_x86_64_pure_nvme_perf.elf`
    - Expected: lane.timeout_ms equals `30000`
-3. fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 64 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("looks up named QEMU lanes without duplicating the x86 smoke lane")
 val rv64_hosted = simpleos_platform_qemu_lane("riscv64", "riscv64-hosted")
 if val lane = rv64_hosted:
     expect(lane.lane_kind).to_equal(SimpleOsLaneKind.HostedCompileSmoke)
@@ -503,22 +825,25 @@ else:
 
 #### captures representative board-ready lanes per ISA family
 
-1. fail
+- captures representative board-ready lanes per ISA family
+   - Expected: resolved_x64_board.lane_kind equals `SimpleOsLaneKind.BoardCompileSmoke`
+   - Expected: resolved_x64_board.board_adapter_id equals `x86_pc_bios_uefi`
+   - Expected: resolved_x64_board.media_path_hint equals `build/os/fat32-x86_64.img`
    - Expected: resolved_arm64_board.firmware_contract equals `SimpleOsFirmwareContractKind.UBootDtb`
    - Expected: resolved_arm64_board.board_adapter_id equals `arm64_u_boot_dtb_sbc`
-2. fail
    - Expected: resolved_rv64_board.board_adapter_id equals `mlk_s02_100t`
-3. fail
    - Expected: simpleos_platform_board_lane("arm32") equals `nil`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("captures representative board-ready lanes per ISA family")
 val x64_board = simpleos_platform_board_lane("x86_64")
 if val resolved_x64_board = x64_board:
     expect(resolved_x64_board.lane_kind).to_equal(SimpleOsLaneKind.BoardCompileSmoke)
@@ -548,13 +873,18 @@ expect(simpleos_platform_board_lane("arm32")).to_equal(nil)
 
 #### tracks grandfathered non-hal native exceptions for riscv hosted leaves
 
+- tracks grandfathered non-hal native exceptions for riscv hosted leaves
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("tracks grandfathered non-hal native exceptions for riscv hosted leaves")
 val rv64_backlog = simpleos_platform_grandfathered_native_sources("riscv64")
 expect(rv64_backlog).to_contain("examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c")
 expect(rv64_backlog).to_contain("examples/09_embedded/simple_os/arch/riscv64/boot/ghdl_boot_info_runtime.c")
@@ -572,23 +902,74 @@ expect(rv32_backlog).to_contain("examples/09_embedded/simple_os/arch/riscv32/boo
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/port/simpleos_multiplatform_build_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering SimpleOS multi-platform build catalog.
 - SimpleOS multi-platform build catalog
 
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-OS`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f61d999035d1170b79ff60107f649c6b1adab914e74c3059d19967522830f4f3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f61d999035d1170b79ff60107f649c6b1adab914e74c3059d19967522830f4f3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f61d999035d1170b79ff60107f649c6b1adab914e74c3059d19967522830f4f3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/os/port/simpleos_multiplatform_build_spec.spl
+mirror: doc/06_spec/01_unit/os/port/simpleos_multiplatform_build_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/os/port/simpleos_multiplatform_build_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/port/simpleos_multiplatform_build_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/port/simpleos_multiplatform_build_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 15 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/port/simpleos_multiplatform_build_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes 32-bit x86 as a first-class supported target' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/port/simpleos_multiplatform_build_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'exposes UP Squared Apollo Lake as an isolated physical target' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/port/simpleos_multiplatform_build_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records unique QEMU artifact names for all first-class platforms' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

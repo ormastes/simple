@@ -2,29 +2,6 @@
 
 > Tests for multi-line syntax patterns including function calls spanning multiple lines, array literals, and continuation lines.
 
-<!-- sdn-diagram:id=multiline_syntax_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=multiline_syntax_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-multiline_syntax_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=multiline_syntax_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 11 | 11 | 0 | 0 |
@@ -44,7 +21,7 @@ Tests for multi-line syntax patterns including function calls spanning multiple 
 | Category | Language \| Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/multiline_syntax_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -56,6 +33,8 @@ multiple lines, array literals, and continuation lines.
 
 ```simple
 # Multi-line function call
+use std.spec.step
+
 val result = function_name(
 arg1,
 arg2,
@@ -82,16 +61,18 @@ val sum = 1 + 2 + \
 
 #### calls function with arguments on multiple lines
 
-1. fn add
+- calls function with arguments on multiple lines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls function with arguments on multiple lines")
 fn add(a, b):
     return a + b
 
@@ -106,16 +87,18 @@ expect result == 3
 
 #### calls function with named arguments on multiple lines
 
-1. fn greet
+- calls function with named arguments on multiple lines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("calls function with named arguments on multiple lines")
 fn greet(name, msg):
     return 42
 
@@ -132,18 +115,18 @@ expect result == 42
 
 #### nests function calls on single line
 
-1. fn inner
-2. fn outer
-3. expect outer
+- nests function calls on single line
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("nests function calls on single line")
 fn inner(x):
     return x * 2
 
@@ -157,19 +140,18 @@ expect outer(inner(5), inner(3)) == 16
 
 #### nests function calls on multiple lines
 
-1. fn inner
-2. fn outer
-3. inner
-4. inner
+- nests function calls on multiple lines
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("nests function calls on multiple lines")
 fn inner(x):
     return x * 2
 
@@ -189,13 +171,18 @@ expect result == 16
 
 #### creates multi-line array literal
 
+- creates multi-line array literal
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates multi-line array literal")
 val arr = [
     1,
     2,
@@ -208,16 +195,18 @@ expect arr[0] + arr[1] + arr[2] == 6
 
 #### creates multi-line struct initialization
 
-1. fn Config new
+- creates multi-line struct initialization
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates multi-line struct initialization")
 struct Config:
     name: str
     value: i64
@@ -238,16 +227,18 @@ expect c.value == 42
 
 #### continues function call to next line
 
-1. fn match exception
+- continues function call to next line
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("continues function call to next line")
 fn match_exception(a, b, c):
     return 42
 
@@ -260,16 +251,18 @@ expect result == 42
 
 #### continues call at same indent level
 
-1. fn match exception
+- continues call at same indent level
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("continues call at same indent level")
 fn match_exception(a, b, c):
     return 42
 
@@ -282,13 +275,18 @@ val result = match_exception("ValueError", "some message",
 
 #### destructures tuple from array element
 
+- destructures tuple from array element
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures tuple from array element")
 val arr = [(10, 20)]
 val _pair = arr[0]
 val a = _pair[0]
@@ -300,13 +298,18 @@ expect a + b == 30
 
 #### accesses tuple elements with dot notation
 
+- accesses tuple elements with dot notation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("accesses tuple elements with dot notation")
 val arr = [(10, 20)]
 expect arr[0].0 + arr[0].1 == 30
 ```
@@ -315,13 +318,18 @@ expect arr[0].0 + arr[0].1 == 30
 
 #### destructures nested tuple data
 
+- destructures nested tuple data
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("destructures nested tuple data")
 val docstrings = [("content", 1), ("other", 2)]
 val _pair = docstrings[0]
 val content = _pair[0]
@@ -343,3 +351,51 @@ expect line == 1
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `b55ddab063e8b44aced3fce5df259a4c8a0e1f13ed89cf4b3578cac26fdb6a53`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `b55ddab063e8b44aced3fce5df259a4c8a0e1f13ed89cf4b3578cac26fdb6a53`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `b55ddab063e8b44aced3fce5df259a4c8a0e1f13ed89cf4b3578cac26fdb6a53`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/multiline_syntax_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/multiline_syntax_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/multiline_syntax_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/multiline_syntax_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/multiline_syntax_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls function with arguments on multiple lines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/multiline_syntax_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'calls function with named arguments on multiple lines' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/multiline_syntax_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'nests function calls on single line' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

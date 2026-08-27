@@ -1,29 +1,6 @@
-# daemon_sdk_lock_system_spec
+# Daemon Sdk Lock System Specification
 
-> @cover src/lib/nogc_async_mut/mcp/__init__.spl 60%
-
-<!-- sdn-diagram:id=daemon_sdk_lock_system_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=daemon_sdk_lock_system_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-daemon_sdk_lock_system_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=daemon_sdk_lock_system_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering DaemonLock System, real lock acquisition, stale lock detection, lock release, reacquisition.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,26 +9,7 @@ daemon_sdk_lock_system_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# daemon_sdk_lock_system_spec
-
-@cover src/lib/nogc_async_mut/mcp/__init__.spl 60%
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #DSDK-SYS-011 to #DSDK-SYS-020 |
-| Category | Infrastructure / System Test |
-| Status | Active |
-| Source | `test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-@cover src/lib/nogc_async_mut/mcp/__init__.spl 60%
-Daemon SDK Lock System Test
-
-Tests real PID lock file behavior: writes actual lock files,
-checks our own PID, verifies stale lock detection with real process checks.
+# Daemon Sdk Lock System Specification
 
 ## Scenarios
 
@@ -61,19 +19,20 @@ checks our own PID, verifies stale lock detection with real process checks.
 
 #### acquires lock with our PID
 
-1. lock sys setup
+- acquires lock with our PID
    - Expected: pid equals `our_pid`
    - Expected: rt_file_exists(lock_get_file()) is true
-2. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("acquires lock with our PID")
 lock_sys_setup()
 val pid = lock_acquire()
 val our_pid = rt_getpid()
@@ -86,19 +45,19 @@ lock_sys_cleanup()
 
 #### writes correct PID to lock file
 
-1. lock sys setup
-2. lock acquire
+- writes correct PID to lock file
    - Expected: stored_pid equals `our_pid`
-3. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("writes correct PID to lock file")
 lock_sys_setup()
 lock_acquire()
 val stored_pid = lock_read_pid()
@@ -111,19 +70,19 @@ lock_sys_cleanup()
 
 #### detects our own process as alive
 
-1. lock sys setup
+- detects our own process as alive
    - Expected: rt_process_exists(our_pid) is true
-2. lock sys cleanup
-3. print "SKIP: rt process exists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects our own process as alive")
 if _can_run:
     lock_sys_setup()
     val our_pid = rt_getpid()
@@ -139,19 +98,19 @@ else:
 
 #### detects stale lock from dead PID
 
-1. lock sys setup
-2. lock write
+- detects stale lock from dead PID
    - Expected: lock_is_running() is false
-3. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects stale lock from dead PID")
 lock_sys_setup()
 # PID 99999999 almost certainly doesn't exist
 lock_write(99999999)
@@ -165,20 +124,20 @@ lock_sys_cleanup()
 
 #### acquires over stale lock
 
-1. lock sys setup
-2. lock write
+- acquires over stale lock
    - Expected: pid equals `our_pid`
    - Expected: lock_read_pid() equals `our_pid`
-3. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("acquires over stale lock")
 lock_sys_setup()
 lock_write(99999999)
 # On Windows rt_process_exists may report invalid PIDs differently
@@ -194,20 +153,19 @@ lock_sys_cleanup()
 
 #### detects our own lock as active
 
-1. lock sys setup
-2. lock acquire
+- detects our own lock as active
    - Expected: lock_is_running() is true
-3. lock sys cleanup
-4. print "SKIP: rt process exists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("detects our own lock as active")
 if _can_run:
     lock_sys_setup()
     lock_acquire()
@@ -223,20 +181,21 @@ else:
 
 #### releases and removes lock file
 
-1. lock sys setup
+- releases and removes lock file
    - Expected: rt_file_exists(lock_get_file()) is true
    - Expected: ok is true
    - Expected: rt_file_exists(lock_get_file()) is false
-2. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("releases and removes lock file")
 lock_sys_setup()
 val pid = lock_acquire()
 expect(rt_file_exists(lock_get_file())).to_equal(true)
@@ -250,20 +209,20 @@ lock_sys_cleanup()
 
 #### refuses release with wrong PID
 
-1. lock sys setup
-2. lock acquire
+- refuses release with wrong PID
    - Expected: ok is false
    - Expected: rt_file_exists(lock_get_file()) is true
-3. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("refuses release with wrong PID")
 lock_sys_setup()
 lock_acquire()
 val ok = lock_release(99999999)
@@ -278,19 +237,19 @@ lock_sys_cleanup()
 
 #### reacquires after release
 
-1. lock sys setup
-2. lock release
+- reacquires after release
    - Expected: pid2 equals `pid1`
-3. lock sys cleanup
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reacquires after release")
 lock_sys_setup()
 val pid1 = lock_acquire()
 lock_release(pid1)
@@ -303,20 +262,19 @@ lock_sys_cleanup()
 
 #### blocks reacquisition when held
 
-1. lock sys setup
-2. lock acquire
+- blocks reacquisition when held
    - Expected: pid2 equals `-1`
-3. lock sys cleanup
-4. print "SKIP: rt process exists
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("blocks reacquisition when held")
 if _can_run:
     lock_sys_setup()
     lock_acquire()
@@ -330,6 +288,25 @@ else:
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering DaemonLock System, real lock acquisition, stale lock detection, lock release, reacquisition.
+- DaemonLock System
+- real lock acquisition
+- stale lock detection
+- lock release
+- reacquisition
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -342,3 +319,54 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `11b7f415dd8b1838db74f5d550253f0472ff93a376f2688d6f95a975f0cb70e6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `11b7f415dd8b1838db74f5d550253f0472ff93a376f2688d6f95a975f0cb70e6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `11b7f415dd8b1838db74f5d550253f0472ff93a376f2688d6f95a975f0cb70e6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl
+mirror: doc/06_spec/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl:119:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'acquires lock with our PID' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl:129:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'writes correct PID to lock file' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/daemon_sdk/daemon_sdk_lock_system_spec.spl:139:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects our own process as alive' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

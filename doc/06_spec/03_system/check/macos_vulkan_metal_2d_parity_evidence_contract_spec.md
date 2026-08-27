@@ -24,7 +24,7 @@ Documents and locks the fail-closed aggregate that compares completed native Vul
 | Design | doc/05_design/engine2d_four_backend_capture.md |
 | Research | doc/01_research/local/engine2d_four_backend_capture.md |
 | Source | `test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl` |
-| Updated | 2026-07-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -68,8 +68,10 @@ sh scripts/check/check-macos-vulkan-metal-2d-parity-evidence.shs \
 ### REQ-E2D4-005: compare completed backend evidence
 
 #### should fail closed for a missing, invalid, failed, or stale lane
+#### should reject canonical input and output path aliases before writing
 
-- Inspect the aggregate lane admission contract
+- should reject canonical input and output path aliases before writing
+- Inspect canonical path and alias rejection guards
 
 
 <details>
@@ -79,34 +81,8 @@ Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Inspect the aggregate lane admission contract")
-val source = file_read(CHECKER)
-for marker in [
-    "usage-two-evidence-env-paths-required",
-    "vulkan-evidence-missing",
-    "metal-evidence-missing",
-    "vulkan-lane-not-pass",
-    "metal-lane-not-pass",
-    "capture-sha256-stale",
-    "capture-newer-than-evidence"
-]:
-    expect(source).to_contain(marker)
-```
-
-</details>
-
-#### should reject canonical input and output path aliases before writing
-
-- Inspect canonical path and alias rejection guards
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 10 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject canonical input and output path aliases before writing")
 step("Inspect canonical path and alias rejection guards")
 val source = file_read(CHECKER)
 for marker in [
@@ -123,6 +99,7 @@ for marker in [
 
 #### should require equal dimensions, DPI, font, events, bounds, and revision
 
+- should require equal dimensions, DPI, font, events, bounds, and revision
 - Inspect exact metadata and event equality gates
    - Expected: source does not contain `eval `
 
@@ -130,10 +107,12 @@ for marker in [
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require equal dimensions, DPI, font, events, bounds, and revision")
 step("Inspect exact metadata and event equality gates")
 val source = file_read(CHECKER)
 for marker in [
@@ -168,16 +147,19 @@ expect(source).to_contain(
 
 #### should compare raw PPM payload bytes and report exact pixel metrics
 
+- should compare raw PPM payload bytes and report exact pixel metrics
 - Inspect the raw PPM pixel comparison contract
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should compare raw PPM payload bytes and report exact pixel metrics")
 step("Inspect the raw PPM pixel comparison contract")
 val source = file_read(CHECKER)
 expect(source).to_contain("payload_sha256")
@@ -193,16 +175,19 @@ expect(source).to_contain("pixel-payload-mismatch")
 
 #### should require exact Draw IR and semantic transition evidence
 
+- should require exact Draw IR and semantic transition evidence
 - Inspect Draw IR and semantic equality gates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require exact Draw IR and semantic transition evidence")
 step("Inspect Draw IR and semantic equality gates")
 val source = file_read(CHECKER)
 for field in [
@@ -251,16 +236,19 @@ expect(source).to_contain("[ \"$semantic_event\" = \"focus\" ]")
 
 #### should require equal 24 point 300 DPI font metrics and provider hashes
 
+- should require equal 24 point 300 DPI font metrics and provider hashes
 - Inspect font sizing and provider identity parity gates
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should require equal 24 point 300 DPI font metrics and provider hashes")
 step("Inspect font sizing and provider identity parity gates")
 val source = file_read(CHECKER)
 for field in [
@@ -294,6 +282,7 @@ expect(source).to_contain("[ \"$font_pixel_size\" = 100 ]")
 
 #### should gate metadata and events before the zero-tolerance pixel result
 
+- should gate metadata and events before the zero-tolerance pixel result
 - Inspect fail-fast ordering and fixed tolerance
    - Expected: source does not contain `tolerance=1`
    - Expected: source does not contain `blur`
@@ -302,10 +291,12 @@ expect(source).to_contain("[ \"$font_pixel_size\" = 100 ]")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should gate metadata and events before the zero-tolerance pixel result")
 step("Inspect fail-fast ordering and fixed tolerance")
 val source = file_read(CHECKER)
 val metadata_gate = source.find("metadata-mismatch")
@@ -338,3 +329,80 @@ expect(source.contains("blur")).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-E2D4-005`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1b085a61727504b2f94dad2e4a0a2c42dce3326960cd8447840b9dcf55a59e6f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1b085a61727504b2f94dad2e4a0a2c42dce3326960cd8447840b9dcf55a59e6f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1b085a61727504b2f94dad2e4a0a2c42dce3326960cd8447840b9dcf55a59e6f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **70/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl
+mirror: doc/06_spec/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.md (current)
+findings: 14 blockers: 2
+  narrative=100 structure=60 oracle=50
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=70; blocker cap makes effective=49
+doc/06_spec/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:53:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should fail closed for a missing, invalid, failed, or stale lane' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:53:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should fail closed for a missing, invalid, failed, or stale lane' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:71:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject canonical input and output path aliases before writing' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:71:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject canonical input and output path aliases before writing' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:85:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require equal dimensions, DPI, font, events, bounds, and revision' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:85:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should require equal dimensions, DPI, font, events, bounds, and revision' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:117:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should compare raw PPM payload bytes and report exact pixel metrics' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should compare raw PPM payload bytes and report exact pixel metrics' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:130:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require exact Draw IR and semantic transition evidence' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/check/macos_vulkan_metal_2d_parity_evidence_contract_spec.spl:176:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should require equal 24 point 300 DPI font metrics and provider hashes' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

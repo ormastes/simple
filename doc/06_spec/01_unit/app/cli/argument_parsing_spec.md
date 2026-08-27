@@ -1,29 +1,6 @@
 # Argument Parsing Specification
 
-> 1. expect flag starts with
-
-<!-- sdn-diagram:id=argument_parsing_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=argument_parsing_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-argument_parsing_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=argument_parsing_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Flag Parsing, Subcommand Parsing, Argument Validation, Flag Combinations, Command Construction, Error Handling.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,17 +17,22 @@ argument_parsing_spec
 
 #### recognizes double-dash flags
 
-1. expect flag starts with
-2. expect is flag
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- recognizes double-dash flags
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("recognizes double-dash flags")
 val flag = "--gc-log"
 expect flag.starts_with("--")
 expect is_flag(flag)
@@ -60,17 +42,18 @@ expect is_flag(flag)
 
 #### recognizes single-dash flags
 
-1. expect flag starts with
-2. expect is flag
+- recognizes single-dash flags
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("recognizes single-dash flags")
 val flag = "-v"
 expect flag.starts_with("-")
 expect is_flag(flag)
@@ -80,13 +63,18 @@ expect is_flag(flag)
 
 #### extracts flag name
 
+- extracts flag name
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("extracts flag name")
 val flag = "--gc-log"
 match parse_flag(flag):
     case Some(name):
@@ -99,13 +87,18 @@ match parse_flag(flag):
 
 #### handles boolean flags
 
+- handles boolean flags
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles boolean flags")
 val flags = CliFlags {
     gc_log: true,
     gc_off: false,
@@ -123,13 +116,18 @@ expect flags.gc_off == false
 
 #### identifies subcommand name
 
+- identifies subcommand name
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("identifies subcommand name")
 val cmd = CliCommand {
     name: "test",
     args: ["path/to/test"],
@@ -148,13 +146,18 @@ expect cmd.name == "test"
 
 #### parses test subcommand
 
+- parses test subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses test subcommand")
 val subcommand = "test"
 expect subcommand == "test"
 ```
@@ -163,13 +166,18 @@ expect subcommand == "test"
 
 #### parses compile subcommand
 
+- parses compile subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses compile subcommand")
 val subcommand = "compile"
 expect subcommand == "compile"
 ```
@@ -178,13 +186,18 @@ expect subcommand == "compile"
 
 #### parses run subcommand
 
+- parses run subcommand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses run subcommand")
 val subcommand = "run"
 expect subcommand == "run"
 ```
@@ -195,16 +208,18 @@ expect subcommand == "run"
 
 #### validates file paths
 
-1. expect path ends with
+- validates file paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates file paths")
 val path = "test.spl"
 expect path.ends_with(".spl")
 ```
@@ -213,16 +228,18 @@ expect path.ends_with(".spl")
 
 #### validates directory paths
 
-1. expect path ends with
+- validates directory paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates directory paths")
 val path = "test/"
 expect path.ends_with("/")
 ```
@@ -231,16 +248,18 @@ expect path.ends_with("/")
 
 #### handles empty arguments
 
-1. expect args len
+- handles empty arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles empty arguments")
 val args: [text] = []
 expect args.len() == 0
 ```
@@ -249,16 +268,18 @@ expect args.len() == 0
 
 #### handles multiple arguments
 
-1. expect args len
+- handles multiple arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles multiple arguments")
 val args = ["arg1", "arg2", "arg3"]
 expect args.len() == 3
 expect args[0] == "arg1"
@@ -270,13 +291,18 @@ expect args[0] == "arg1"
 
 #### enables multiple flags
 
+- enables multiple flags
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("enables multiple flags")
 val flags = CliFlags {
     gc_log: true,
     gc_off: false,
@@ -291,13 +317,18 @@ expect flags.gc_log and flags.verbose
 
 #### detects conflicting flags
 
+- detects conflicting flags
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects conflicting flags")
 val verbose = true
 val quiet = true
 
@@ -309,13 +340,18 @@ expect verbose and quiet # Both set incorrectly
 
 #### applies default values
 
+- applies default values
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("applies default values")
 val flags = CliFlags {
     gc_log: false,
     gc_off: false,
@@ -333,16 +369,18 @@ expect not flags.gc_off
 
 #### builds test command
 
-1. expect cmd args len
+- builds test command
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds test command")
 val cmd = CliCommand {
     name: "test",
     args: ["test/unit/"],
@@ -363,16 +401,18 @@ expect cmd.flags.verbose
 
 #### builds compile command
 
-1. expect cmd args len
+- builds compile command
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("builds compile command")
 val cmd = CliCommand {
     name: "compile",
     args: ["input.spl", "-o", "output"],
@@ -394,16 +434,18 @@ expect cmd.args.len() == 3
 
 #### detects unknown flags
 
-1. expect flag starts with
+- detects unknown flags
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects unknown flags")
 val flag = "--unknown-flag"
 expect flag.starts_with("--")
 # In real implementation, should check against known flags
@@ -413,16 +455,18 @@ expect flag.starts_with("--")
 
 #### detects invalid paths
 
-1. expect not path ends with
+- detects invalid paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("detects invalid paths")
 val path = "nonexistent.xyz"
 expect not path.ends_with(".spl")
 ```
@@ -431,16 +475,18 @@ expect not path.ends_with(".spl")
 
 #### handles missing required arguments
 
-1. expect args len
+- handles missing required arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles missing required arguments")
 val args: [text] = []
 expect args.len() == 0
 # Should require at least one argument for some commands
@@ -455,12 +501,12 @@ expect args.len() == 0
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/cli/argument_parsing_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Flag Parsing, Subcommand Parsing, Argument Validation, Flag Combinations, Command Construction, Error Handling.
 - Flag Parsing
 - Subcommand Parsing
 - Argument Validation
@@ -480,3 +526,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `3b7071861a9f1ba3b71a85144cb2d7fc91ec30c07827985f4de12446de56cefe`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `3b7071861a9f1ba3b71a85144cb2d7fc91ec30c07827985f4de12446de56cefe`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `3b7071861a9f1ba3b71a85144cb2d7fc91ec30c07827985f4de12446de56cefe`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/cli/argument_parsing_spec.spl
+mirror: doc/06_spec/01_unit/app/cli/argument_parsing_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/cli/argument_parsing_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/cli/argument_parsing_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/cli/argument_parsing_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recognizes double-dash flags' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli/argument_parsing_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'recognizes single-dash flags' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/cli/argument_parsing_spec.spl:59:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extracts flag name' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

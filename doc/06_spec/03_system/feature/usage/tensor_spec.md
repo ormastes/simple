@@ -2,29 +2,6 @@
 
 > Tensor operations for mathematical computing:
 
-<!-- sdn-diagram:id=tensor_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=tensor_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-tensor_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=tensor_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 55 | 55 | 0 | 0 |
@@ -44,7 +21,7 @@ Tensor operations for mathematical computing:
 | Category | Syntax / Stdlib |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/tensor_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Tensor operations for mathematical computing:
@@ -61,13 +38,18 @@ Tensor operations for mathematical computing:
 
 #### is alias for Tensor<T, 2>
 
+- is alias for Tensor<T, 2>
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is alias for Tensor<T, 2>")
 val A = zeros<f64>([3, 4], Device.cpu())
 expect A.ndim == 2
 ```
@@ -78,13 +60,18 @@ expect A.ndim == 2
 
 #### is alias for Tensor<T, 1>
 
+- is alias for Tensor<T, 1>
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is alias for Tensor<T, 1>")
 val x = zeros<f64>([5], Device.cpu())
 expect x.ndim == 1
 ```
@@ -98,13 +85,18 @@ expect x.ndim == 1
 
 #### provides Mat as Matrix<f64>
 
+- provides Mat as Matrix<f64>
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides Mat as Matrix<f64>")
 val A = zeros<f64>([2, 3], Device.cpu())
 expect A.shape == [2, 3]
 ```
@@ -116,13 +108,18 @@ expect A.shape == [2, 3]
 
 #### provides Vec as Vector<f64>
 
+- provides Vec as Vector<f64>
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("provides Vec as Vector<f64>")
 val x = ones<f64>([4], Device.cpu())
 expect x.shape == [4]
 ```
@@ -138,13 +135,18 @@ expect x.shape == [4]
 
 #### transposes 2D matrix
 
+- transposes 2D matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("transposes 2D matrix")
 val A = [[1, 2, 3], [4, 5, 6]]
 val At = A.T
 expect At.shape == [3, 2]
@@ -159,16 +161,18 @@ expect At[0][1] == 4
 
 #### is equivalent to .t()
 
-1. expect A T == A t
+- is equivalent to .t()
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("is equivalent to .t()")
 val A = [[1, 2], [3, 4]]
 expect A.T == A.t()
 ```
@@ -182,13 +186,18 @@ expect A.T == A.t()
 
 #### transposes matrix
 
+- transposes matrix
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("transposes matrix")
 val A = [[1, 2], [3, 4]]
 val At = m{ A' }
 expect At == [[1, 3], [2, 4]]
@@ -197,6 +206,8 @@ expect At == [[1, 3], [2, 4]]
 <details>
 <summary>Rendered scenario source</summary>
 
+> # @req REQ-SSPEC-SYSTEM<br>
+> step("transposes matrix")<br>
 > val A = [[1, 2], [3, 4]]<br>
 > val At = $A^{T}$<br>
 > expect At == [[1, 3], [2, 4]]
@@ -210,13 +221,18 @@ expect At == [[1, 3], [2, 4]]
 
 #### chains with matmul
 
+- chains with matmul
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("chains with matmul")
 val A = [[1, 2], [3, 4]]
 val x = [1, 1]
 val y = m{ A' @ x }
@@ -226,6 +242,8 @@ expect y == [4, 6]
 <details>
 <summary>Rendered scenario source</summary>
 
+> # @req REQ-SSPEC-SYSTEM<br>
+> step("chains with matmul")<br>
 > val A = [[1, 2], [3, 4]]<br>
 > val x = [1, 1]<br>
 > val y = $A^{T}$<br>
@@ -237,13 +255,18 @@ expect y == [4, 6]
 
 #### works in complex expressions
 
+- works in complex expressions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("works in complex expressions")
 val A = [[1, 0], [0, 1]]
 val b = [1, 2]
 # (A'A)^-1 A'b for A=I is just b
@@ -254,6 +277,8 @@ expect result == [1, 2]
 <details>
 <summary>Rendered scenario source</summary>
 
+> # @req REQ-SSPEC-SYSTEM<br>
+> step("works in complex expressions")<br>
 > val A = [[1, 0], [0, 1]]<br>
 > val b = [1, 2]<br>
 > # (A'A)^-1 A'b for A=I is just b<br>
@@ -268,13 +293,18 @@ expect result == [1, 2]
 
 #### swaps specified dimensions
 
+- swaps specified dimensions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("swaps specified dimensions")
 val T = zeros<f64>([2, 3, 4])
 val Tt = T.transpose(0, 2)
 expect Tt.shape == [4, 3, 2]
@@ -284,13 +314,18 @@ expect Tt.shape == [4, 3, 2]
 
 #### permutes multiple dimensions
 
+- permutes multiple dimensions
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("permutes multiple dimensions")
 val T = zeros<f64>([2, 3, 4, 5])
 val Tp = T.permute([3, 1, 2, 0])
 expect Tp.shape == [5, 3, 4, 2]
@@ -304,13 +339,18 @@ expect Tp.shape == [5, 3, 4, 2]
 
 #### sums all elements
 
+- sums all elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums all elements")
 val x = [1.0, 2.0, 3.0, 4.0]
 expect x.sum == 10.0
 ```
@@ -322,13 +362,18 @@ expect x.sum == 10.0
 
 #### sums matrix elements
 
+- sums matrix elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums matrix elements")
 val A = [[1, 2], [3, 4]]
 expect A.sum == 10
 ```
@@ -342,13 +387,18 @@ expect A.sum == 10
 
 #### computes mean
 
+- computes mean
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes mean")
 val x = [1.0, 2.0, 3.0, 4.0]
 expect x.mean == 2.5
 ```
@@ -359,13 +409,18 @@ expect x.mean == 2.5
 
 #### multiplies all elements
 
+- multiplies all elements
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiplies all elements")
 val x = [1.0, 2.0, 3.0, 4.0]
 expect x.prod == 24.0
 ```
@@ -376,13 +431,18 @@ expect x.prod == 24.0
 
 #### finds minimum
 
+- finds minimum
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds minimum")
 val x = [3.0, 1.0, 4.0, 1.0, 5.0]
 expect x.min == 1.0
 ```
@@ -391,13 +451,18 @@ expect x.min == 1.0
 
 #### finds maximum
 
+- finds maximum
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds maximum")
 val x = [3.0, 1.0, 4.0, 1.0, 5.0]
 expect x.max == 5.0
 ```
@@ -408,16 +473,18 @@ expect x.max == 5.0
 
 #### computes std
 
-1. expect x std approx
+- computes std
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes std")
 val x = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
 expect x.std.approx(2.0, epsilon: 0.1)
 ```
@@ -428,16 +495,18 @@ expect x.std.approx(2.0, epsilon: 0.1)
 
 #### computes var
 
-1. expect x var approx
+- computes var
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes var")
 val x = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
 expect x.var.approx(4.0, epsilon: 0.1)
 ```
@@ -448,16 +517,18 @@ expect x.var.approx(4.0, epsilon: 0.1)
 
 #### computes L2 norm
 
-1. expect x norm
+- computes L2 norm
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes L2 norm")
 val x = [3.0, 4.0]
 expect x.norm() == 5.0
 ```
@@ -466,16 +537,18 @@ expect x.norm() == 5.0
 
 #### computes L1 norm
 
-1. expect x norm
+- computes L1 norm
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes L1 norm")
 val x = [3.0, -4.0]
 expect x.norm(1) == 7.0
 ```
@@ -488,16 +561,18 @@ expect x.norm(1) == 7.0
 
 #### sums columns (axis=0)
 
-1. expect A sum
+- sums columns (axis=0)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums columns (axis=0)")
 val A = [[1, 2], [3, 4], [5, 6]]
 expect A.sum(axis: 0) == [9, 12]
 ```
@@ -506,16 +581,18 @@ expect A.sum(axis: 0) == [9, 12]
 
 #### sums rows (axis=1)
 
-1. expect A sum
+- sums rows (axis=1)
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums rows (axis=1)")
 val A = [[1, 2], [3, 4], [5, 6]]
 expect A.sum(axis: 1) == [3, 7, 11]
 ```
@@ -524,13 +601,18 @@ expect A.sum(axis: 1) == [3, 7, 11]
 
 #### keeps dimension with keepdim
 
+- keeps dimension with keepdim
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps dimension with keepdim")
 val A = [[1, 2], [3, 4]]
 val s = A.sum(axis: 0, keepdim: true)
 expect s.shape == [1, 2]
@@ -542,16 +624,18 @@ expect s.shape == [1, 2]
 
 #### means columns
 
-1. expect A mean
+- means columns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("means columns")
 val A = [[1.0, 2.0], [3.0, 4.0]]
 expect A.mean(axis: 0) == [2.0, 3.0]
 ```
@@ -562,13 +646,18 @@ expect A.mean(axis: 0) == [2.0, 3.0]
 
 #### finds min with indices
 
+- finds min with indices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds min with indices")
 val A = [[3, 1], [4, 2]]
 val (vals, idx) = A.min(axis: 1)
 expect vals == [1, 2]
@@ -579,13 +668,18 @@ expect idx == [1, 1]
 
 #### finds max with indices
 
+- finds max with indices
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("finds max with indices")
 val A = [[3, 1], [4, 2]]
 val (vals, idx) = A.max(axis: 1)
 expect vals == [3, 4]
@@ -598,16 +692,18 @@ expect idx == [0, 0]
 
 #### returns indices of min
 
-1. expect A argmin
+- returns indices of min
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns indices of min")
 val A = [[3, 1, 4], [1, 5, 9]]
 expect A.argmin(axis: 1) == [1, 0]
 ```
@@ -616,16 +712,18 @@ expect A.argmin(axis: 1) == [1, 0]
 
 #### returns indices of max
 
-1. expect A argmax
+- returns indices of max
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("returns indices of max")
 val A = [[3, 1, 4], [1, 5, 9]]
 expect A.argmax(axis: 1) == [2, 2]
 ```
@@ -638,13 +736,18 @@ expect A.argmax(axis: 1) == [2, 2]
 
 #### slices first axis
 
+- slices first axis
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("slices first axis")
 val A = [[1, 2, 3], [4, 5, 6]]
 expect A[0] == [1, 2, 3]
 ```
@@ -653,16 +756,18 @@ expect A[0] == [1, 2, 3]
 
 #### slices second axis
 
-1. expect A column
+- slices second axis
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("slices second axis")
 val A = [[1, 2, 3], [4, 5, 6]]
 expect A.column(0) == [1, 4]
 ```
@@ -673,16 +778,18 @@ expect A.column(0) == [1, 4]
 
 #### slices range on both axes
 
-1. expect A[0:2] map
+- slices range on both axes
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("slices range on both axes")
 val A = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
 expect A[0:2].map(_1[1:3]) == [[2, 3], [5, 6]]
 ```
@@ -693,16 +800,18 @@ expect A[0:2].map(_1[1:3]) == [[2, 3], [5, 6]]
 
 #### expands to fill dimensions
 
-1. expect T map
+- expands to fill dimensions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("expands to fill dimensions")
 val T = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]  # 2x2x2
 expect T.map(_1.column(0)) == [[1, 3], [5, 7]]
 expect T[0] == [[1, 2], [3, 4]]
@@ -714,30 +823,40 @@ expect T[0] == [[1, 2], [3, 4]]
 
 #### takes every nth element
 
+- takes every nth element
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("takes every nth element")
 val x = [0, 1, 2, 3, 4, 5]
 expect x[::2] == [0, 2, 4]
 ```
 
 </details>
 
-#### reverses with negative step
+#### reverses via .reversed(), not a negative-step slice
+
+- reverses via .reversed(), not a negative-step slice
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reverses via .reversed(), not a negative-step slice")
 val x = [0, 1, 2, 3, 4, 5]
-expect x[::-1] == [5, 4, 3, 2, 1, 0]
+expect x.reversed() == [5, 4, 3, 2, 1, 0]
 ```
 
 </details>
@@ -748,17 +867,18 @@ expect x[::-1] == [5, 4, 3, 2, 1, 0]
 
 #### reshapes to new dimensions
 
-1. expect A reshape
-2. expect A reshape
+- reshapes to new dimensions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reshapes to new dimensions")
 val A = [[1, 2, 3], [4, 5, 6]]
 expect A.reshape([6]).shape == [6]
 expect A.reshape([3, 2]).shape == [3, 2]
@@ -768,17 +888,18 @@ expect A.reshape([3, 2]).shape == [3, 2]
 
 #### infers dimension with -1
 
-1. expect A reshape
-2. expect A reshape
+- infers dimension with -1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("infers dimension with -1")
 val A = [[1, 2, 3], [4, 5, 6]]
 expect A.reshape([-1]).shape == [6]
 expect A.reshape([3, -1]).shape == [3, 2]
@@ -790,16 +911,18 @@ expect A.reshape([3, -1]).shape == [3, 2]
 
 #### removes size-1 dimensions
 
-1. expect A squeeze
+- removes size-1 dimensions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("removes size-1 dimensions")
 val A = zeros<f64>([1, 3, 1, 4])
 expect A.squeeze().shape == [3, 4]
 ```
@@ -808,16 +931,18 @@ expect A.squeeze().shape == [3, 4]
 
 #### removes specific dimension
 
-1. expect A squeeze
+- removes specific dimension
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("removes specific dimension")
 val A = zeros<f64>([1, 3, 1, 4])
 expect A.squeeze(0).shape == [3, 1, 4]
 ```
@@ -828,17 +953,18 @@ expect A.squeeze(0).shape == [3, 1, 4]
 
 #### adds dimension at position
 
-1. expect x unsqueeze
-2. expect x unsqueeze
+- adds dimension at position
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("adds dimension at position")
 val x = [1, 2, 3]
 expect x.unsqueeze(0).shape == [1, 3]
 expect x.unsqueeze(1).shape == [3, 1]
@@ -852,13 +978,18 @@ expect x.unsqueeze(1).shape == [3, 1]
 
 #### creates zero tensor
 
+- creates zero tensor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates zero tensor")
 val A = zeros<f64>([2, 3])
 expect A.sum == 0.0
 ```
@@ -867,13 +998,18 @@ expect A.sum == 0.0
 
 #### creates ones tensor
 
+- creates ones tensor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates ones tensor")
 val A = ones<f64>([2, 3])
 expect A.sum == 6.0
 ```
@@ -887,16 +1023,18 @@ expect A.sum == 6.0
 
 #### creates identity matrix
 
-1. expect I trace
+- creates identity matrix
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates identity matrix")
 val I = eye<f64>(3)
 expect I[0][0] == 1.0
 expect I[0][1] == 0.0
@@ -912,13 +1050,18 @@ expect I.trace() == 3.0
 
 #### creates range tensor
 
+- creates range tensor
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates range tensor")
 val x = arange(0, 5, 1)
 expect x == [0, 1, 2, 3, 4]
 ```
@@ -927,13 +1070,18 @@ expect x == [0, 1, 2, 3, 4]
 
 #### creates stepped range
 
+- creates stepped range
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates stepped range")
 val x = arange(0, 10, 2)
 expect x == [0, 2, 4, 6, 8]
 ```
@@ -944,16 +1092,18 @@ expect x == [0, 2, 4, 6, 8]
 
 #### creates linearly spaced values
 
-1. expect x len
+- creates linearly spaced values
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("creates linearly spaced values")
 val x = linspace(0.0, 1.0, 5)
 expect x[0] == 0.0
 expect x[4] == 1.0
@@ -968,16 +1118,18 @@ expect x.len() == 5
 
 #### computes absolute value
 
-1. expect x abs
+- computes absolute value
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes absolute value")
 val x = [-1.0, 2.0, -3.0]
 expect x.abs() == [1.0, 2.0, 3.0]
 ```
@@ -986,16 +1138,18 @@ expect x.abs() == [1.0, 2.0, 3.0]
 
 #### computes square root
 
-1. expect x sqrt
+- computes square root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes square root")
 val x = [1.0, 4.0, 9.0]
 expect x.sqrt() == [1.0, 2.0, 3.0]
 ```
@@ -1004,17 +1158,18 @@ expect x.sqrt() == [1.0, 2.0, 3.0]
 
 #### computes exponential
 
-1. expect x exp
-2. expect x exp
+- computes exponential
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes exponential")
 val x = [0.0, 1.0]
 expect x.exp()[0].approx(1.0)
 expect x.exp()[1].approx(2.718, epsilon: 0.01)
@@ -1026,17 +1181,18 @@ expect x.exp()[1].approx(2.718, epsilon: 0.01)
 
 #### computes sin/cos
 
-1. expect x sin
-2. expect x cos
+- computes sin/cos
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes sin/cos")
 val x = [0.0]
 expect x.sin()[0].approx(0.0)
 expect x.cos()[0].approx(1.0)
@@ -1048,16 +1204,18 @@ expect x.cos()[0].approx(1.0)
 
 #### clamps to range
 
-1. expect x clamp
+- clamps to range
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("clamps to range")
 val x = [-1.0, 0.5, 2.0]
 expect x.clamp(min: 0.0, max: 1.0) == [0.0, 0.5, 1.0]
 ```
@@ -1070,16 +1228,18 @@ expect x.clamp(min: 0.0, max: 1.0) == [0.0, 0.5, 1.0]
 
 #### computes 2x2 determinant
 
-1. expect A det
+- computes 2x2 determinant
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes 2x2 determinant")
 val A = [[1.0, 2.0], [3.0, 4.0]]
 expect A.det().approx(-2.0)
 ```
@@ -1093,17 +1253,18 @@ expect A.det().approx(-2.0)
 
 #### computes matrix inverse
 
-1. expect I[0][0] approx
-2. expect I[0][1] approx
+- computes matrix inverse
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("computes matrix inverse")
 val A = [[1.0, 2.0], [3.0, 4.0]]
 val Ainv = A.inv()
 val I = A @ Ainv
@@ -1120,17 +1281,18 @@ expect I[0][1].approx(0.0)
 
 #### solves linear system
 
-1. expect
-2. expect
+- solves linear system
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("solves linear system")
 val A = [[2.0, 1.0], [1.0, 3.0]]
 val b = [4.0, 5.0]
 val x = A.solve(b)
@@ -1144,16 +1306,18 @@ expect (A @ x)[1].approx(5.0)
 
 #### sums diagonal elements
 
-1. expect A trace
+- sums diagonal elements
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("sums diagonal elements")
 val A = [[1, 2], [3, 4]]
 expect A.trace() == 5
 ```
@@ -1172,3 +1336,51 @@ expect A.trace() == 5
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `35ad47d4da77f7b7c60623e0e167ea1a022d6f643fe2b624cf37b813b4a4a755`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `35ad47d4da77f7b7c60623e0e167ea1a022d6f643fe2b624cf37b813b4a4a755`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `35ad47d4da77f7b7c60623e0e167ea1a022d6f643fe2b624cf37b813b4a4a755`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/tensor_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/tensor_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/tensor_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/tensor_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/tensor_spec.spl:29:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is alias for Tensor<T, 2>' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/tensor_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'is alias for Tensor<T, 1>' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/tensor_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'provides Mat as Matrix<f64>' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

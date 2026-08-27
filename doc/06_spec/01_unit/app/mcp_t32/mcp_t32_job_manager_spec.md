@@ -1,29 +1,6 @@
 # Mcp T32 Job Manager Specification
 
-> <details>
-
-<!-- sdn-diagram:id=mcp_t32_job_manager_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=mcp_t32_job_manager_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-mcp_t32_job_manager_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=mcp_t32_job_manager_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering T32 Job Lifecycle, T32 Job Manager Operations, T32 Background Execution Model, T32 Job Timeout Policy, T32 Job Manager Edge Cases.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -42,13 +19,21 @@ mcp_t32_job_manager_spec
 
 #### creates job with valid id
 
+- creates job with valid id
+   - Expected: job.job_id equals `job_1`
+   - Expected: job.session_id equals `session_a`
+   - Expected: job.tool_name equals `t32_cmm_run`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates job with valid id")
 val job = make_job("job_1", "session_a", "t32_cmm_run")
 expect(job.job_id).to_equal("job_1")
 expect(job.session_id).to_equal("session_a")
@@ -59,13 +44,19 @@ expect(job.tool_name).to_equal("t32_cmm_run")
 
 #### starts in queued status
 
+- starts in queued status
+   - Expected: job.status equals `queued`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("starts in queued status")
 val job = make_job("job_2", "session_a", "t32_cmd_run")
 expect(job.status).to_equal("queued")
 ```
@@ -76,13 +67,19 @@ expect(job.status).to_equal("queued")
 
 #### transitions queued to running
 
+- transitions queued to running
+   - Expected: running.status equals `running`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions queued to running")
 val job = make_job("job_3", "s1", "t32_cmm_run")
 val running = try_transition(job, "running")
 expect(running.status).to_equal("running")
@@ -92,18 +89,19 @@ expect(running.status).to_equal("running")
 
 #### transitions running to completed
 
-1. var job = make job
-2. job = try transition
+- transitions running to completed
    - Expected: done.status equals `completed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions running to completed")
 var job = make_job("job_4", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 val done = try_transition(job, "completed")
@@ -114,8 +112,7 @@ expect(done.status).to_equal("completed")
 
 #### transitions running to failed with error message
 
-1. var job = make job
-2. job = try transition
+- transitions running to failed with error message
    - Expected: failed.status equals `failed`
    - Expected: failed.error_message equals `PRACTICE script error at line 42`
 
@@ -123,10 +120,12 @@ expect(done.status).to_equal("completed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions running to failed with error message")
 var job = make_job("job_5", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 val failed = try_transition_with_error(job, "failed", "PRACTICE script error at line 42")
@@ -138,18 +137,19 @@ expect(failed.error_message).to_equal("PRACTICE script error at line 42")
 
 #### transitions running to timed_out
 
-1. var job = make job
-2. job = try transition
+- transitions running to timed_out
    - Expected: timed.status equals `timed_out`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions running to timed_out")
 var job = make_job("job_6", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 val timed = try_transition(job, "timed_out")
@@ -160,18 +160,19 @@ expect(timed.status).to_equal("timed_out")
 
 #### transitions running to cancelled
 
-1. var job = make job
-2. job = try transition
+- transitions running to cancelled
    - Expected: cancelled.status equals `cancelled`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions running to cancelled")
 var job = make_job("job_7", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 val cancelled = try_transition(job, "cancelled")
@@ -182,18 +183,19 @@ expect(cancelled.status).to_equal("cancelled")
 
 #### transitions running to waiting_target
 
-1. var job = make job
-2. job = try transition
+- transitions running to waiting_target
    - Expected: waiting.status equals `waiting_target`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions running to waiting_target")
 var job = make_job("job_8", "s1", "t32_cmd_run")
 job = try_transition(job, "running")
 val waiting = try_transition(job, "waiting_target")
@@ -204,19 +206,19 @@ expect(waiting.status).to_equal("waiting_target")
 
 #### transitions waiting_target back to running
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- transitions waiting_target back to running
    - Expected: resumed.status equals `running`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions waiting_target back to running")
 var job = make_job("job_9", "s1", "t32_cmd_run")
 job = try_transition(job, "running")
 job = try_transition(job, "waiting_target")
@@ -228,18 +230,19 @@ expect(resumed.status).to_equal("running")
 
 #### transitions running to waiting_practice
 
-1. var job = make job
-2. job = try transition
+- transitions running to waiting_practice
    - Expected: waiting.status equals `waiting_practice`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("transitions running to waiting_practice")
 var job = make_job("job_10", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 val waiting = try_transition(job, "waiting_practice")
@@ -252,19 +255,19 @@ expect(waiting.status).to_equal("waiting_practice")
 
 #### rejects completed to running
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- rejects completed to running
    - Expected: invalid.status equals `completed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects completed to running")
 var job = make_job("job_11", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "completed")
@@ -276,19 +279,19 @@ expect(invalid.status).to_equal("completed")
 
 #### rejects failed to running
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- rejects failed to running
    - Expected: invalid.status equals `failed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects failed to running")
 var job = make_job("job_12", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "failed")
@@ -300,19 +303,19 @@ expect(invalid.status).to_equal("failed")
 
 #### rejects timed_out to running
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- rejects timed_out to running
    - Expected: invalid.status equals `timed_out`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects timed_out to running")
 var job = make_job("job_13", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "timed_out")
@@ -324,19 +327,19 @@ expect(invalid.status).to_equal("timed_out")
 
 #### rejects cancelled to running
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- rejects cancelled to running
    - Expected: invalid.status equals `cancelled`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects cancelled to running")
 var job = make_job("job_14", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "cancelled")
@@ -348,13 +351,19 @@ expect(invalid.status).to_equal("cancelled")
 
 #### rejects queued to completed directly
 
+- rejects queued to completed directly
+   - Expected: invalid.status equals `queued`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects queued to completed directly")
 val job = make_job("job_15", "s1", "t32_cmm_run")
 val invalid = try_transition(job, "completed")
 expect(invalid.status).to_equal("queued")
@@ -364,13 +373,19 @@ expect(invalid.status).to_equal("queued")
 
 #### allows queued to cancelled
 
+- allows queued to cancelled
+   - Expected: cancelled.status equals `cancelled`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("allows queued to cancelled")
 val job = make_job("job_16", "s1", "t32_cmm_run")
 val cancelled = try_transition(job, "cancelled")
 expect(cancelled.status).to_equal("cancelled")
@@ -384,7 +399,7 @@ expect(cancelled.status).to_equal("cancelled")
 
 #### creates job and increments counter
 
-1. var mgr = make manager
+- creates job and increments counter
    - Expected: result1[0] equals `job_1`
    - Expected: result1[1] equals `ok`
    - Expected: result2[0] equals `job_2`
@@ -394,10 +409,12 @@ expect(cancelled.status).to_equal("cancelled")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("creates job and increments counter")
 var mgr = make_manager()
 val result1 = manager_create_job(mgr, "s1", "t32_cmm_run", false)
 expect(result1[0]).to_equal("job_1")
@@ -411,34 +428,7 @@ expect(result2[1]).to_equal("ok")
 
 #### assigns unique ids across sessions
 
-1. var mgr = make manager
-   - Expected: r1[0] == r2[0] is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var mgr = make_manager()
-val r1 = manager_create_job(mgr, "s1", "t32_cmm_run", false)
-val r2 = manager_create_job(mgr, "s2", "t32_cmm_run", false)
-expect(r1[0] == r2[0]).to_equal(false)
-```
-
-</details>
-
-#### listing jobs
-
-#### lists all active jobs
-
-1. var mgr = make manager
-2. manager create job
-3. manager create job
-4. manager create job
-   - Expected: active.len() equals `3`
+- assigns unique ids across sessions
 
 
 <details>
@@ -448,6 +438,33 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("assigns unique ids across sessions")
+var mgr = make_manager()
+val r1 = manager_create_job(mgr, "s1", "t32_cmm_run", false)
+val r2 = manager_create_job(mgr, "s2", "t32_cmm_run", false)
+expect(r1[0]).to_not_equal(r2[0])
+```
+
+</details>
+
+#### listing jobs
+
+#### lists all active jobs
+
+- lists all active jobs
+   - Expected: active.len() equals `3`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("lists all active jobs")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 manager_create_job(mgr, "s1", "t32_cmd_run", false)
@@ -460,10 +477,7 @@ expect(active.len()).to_equal(3)
 
 #### filters jobs by session_id
 
-1. var mgr = make manager
-2. manager create job
-3. manager create job
-4. manager create job
+- filters jobs by session_id
    - Expected: s1_jobs.len() equals `2`
    - Expected: s1_jobs[0].session_id equals `s1`
    - Expected: s1_jobs[1].session_id equals `s1`
@@ -472,10 +486,12 @@ expect(active.len()).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("filters jobs by session_id")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 manager_create_job(mgr, "s2", "t32_cmd_run", false)
@@ -490,11 +506,7 @@ expect(s1_jobs[1].session_id).to_equal("s1")
 
 #### excludes terminal jobs from active list
 
-1. var mgr = make manager
-2. manager create job
-3. manager create job
-4. mgr jobs[1] = try transition
-5. mgr jobs[1] = try transition
+- excludes terminal jobs from active list
    - Expected: active.len() equals `1`
    - Expected: active[0].job_id equals `job_1`
 
@@ -502,10 +514,12 @@ expect(s1_jobs[1].session_id).to_equal("s1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("excludes terminal jobs from active list")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 manager_create_job(mgr, "s1", "t32_cmd_run", false)
@@ -523,9 +537,7 @@ expect(active[0].job_id).to_equal("job_1")
 
 #### returns correct job by id
 
-1. var mgr = make manager
-2. manager create job
-3. manager create job
+- returns correct job by id
    - Expected: job.job_id equals `job_2`
    - Expected: job.session_id equals `s2`
    - Expected: job.tool_name equals `t32_cmd_run`
@@ -534,10 +546,12 @@ expect(active[0].job_id).to_equal("job_1")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns correct job by id")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 manager_create_job(mgr, "s2", "t32_cmd_run", false)
@@ -551,7 +565,7 @@ expect(job.tool_name).to_equal("t32_cmd_run")
 
 #### returns not_found sentinel for nonexistent id
 
-1. var mgr = make manager
+- returns not_found sentinel for nonexistent id
    - Expected: job.job_id equals ``
    - Expected: job.status equals `not_found`
 
@@ -559,10 +573,12 @@ expect(job.tool_name).to_equal("t32_cmd_run")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns not_found sentinel for nonexistent id")
 var mgr = make_manager()
 val job = manager_get_job(mgr, "job_999")
 expect(job.job_id).to_equal("")
@@ -575,8 +591,7 @@ expect(job.status).to_equal("not_found")
 
 #### cancels a queued job
 
-1. var mgr = make manager
-2. manager create job
+- cancels a queued job
    - Expected: ok is true
    - Expected: job.status equals `cancelled`
 
@@ -584,10 +599,12 @@ expect(job.status).to_equal("not_found")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cancels a queued job")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 val ok = manager_cancel_job(mgr, "job_1")
@@ -600,9 +617,7 @@ expect(job.status).to_equal("cancelled")
 
 #### cancels a running job
 
-1. var mgr = make manager
-2. manager create job
-3. mgr jobs[0] = try transition
+- cancels a running job
    - Expected: ok is true
    - Expected: job.status equals `cancelled`
 
@@ -610,10 +625,12 @@ expect(job.status).to_equal("cancelled")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cancels a running job")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 mgr.jobs[0] = try_transition(mgr.jobs[0], "running")
@@ -627,17 +644,19 @@ expect(job.status).to_equal("cancelled")
 
 #### rejects cancel on completed job
 
-1. var mgr = make manager with completed job
+- rejects cancel on completed job
    - Expected: ok is false
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects cancel on completed job")
 var mgr = make_manager_with_completed_job()
 val ok = manager_cancel_job(mgr, "job_1")
 expect(ok).to_equal(false)
@@ -649,7 +668,7 @@ expect(ok).to_equal(false)
 
 #### enforces max 16 concurrent jobs
 
-1. var mgr = make manager
+- enforces max 16 concurrent jobs
    - Expected: r[1] equals `ok`
    - Expected: overflow[0] equals ``
    - Expected: overflow[1] equals `error:max_concurrent_exceeded`
@@ -658,10 +677,12 @@ expect(ok).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("enforces max 16 concurrent jobs")
 var mgr = make_manager()
 var i = 0
 while i < 16:
@@ -677,17 +698,19 @@ expect(overflow[1]).to_equal("error:max_concurrent_exceeded")
 
 #### allows new jobs after terminal transitions free slots
 
-1. var mgr = make manager with 16 jobs first completed
+- allows new jobs after terminal transitions free slots
    - Expected: r[1] equals `ok`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("allows new jobs after terminal transitions free slots")
 var mgr = make_manager_with_16_jobs_first_completed()
 val r = manager_create_job(mgr, "s1", "t32_cmm_run", false)
 expect(r[1]).to_equal("ok")
@@ -699,17 +722,19 @@ expect(r[1]).to_equal("ok")
 
 #### removes expired terminal jobs
 
-1. var mgr = make manager with expired completed job
+- removes expired terminal jobs
    - Expected: removed equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("removes expired terminal jobs")
 var mgr = make_manager_with_expired_completed_job()
 val removed = manager_cleanup(mgr, 400000)
 expect(removed).to_equal(1)
@@ -719,8 +744,7 @@ expect(removed).to_equal(1)
 
 #### preserves active jobs during cleanup
 
-1. var mgr = make manager
-2. manager create job
+- preserves active jobs during cleanup
    - Expected: removed equals `0`
    - Expected: mgr.jobs.len() equals `1`
 
@@ -728,10 +752,12 @@ expect(removed).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("preserves active jobs during cleanup")
 var mgr = make_manager()
 manager_create_job(mgr, "s1", "t32_cmm_run", false)
 # Job stays queued (active)
@@ -748,7 +774,7 @@ expect(mgr.jobs.len()).to_equal(1)
 
 #### background true returns immediately with job_id
 
-1. var mgr = make manager
+- background true returns immediately with job_id
    - Expected: result[0] equals `job_1`
    - Expected: result[1] equals `ok`
    - Expected: job.background is true
@@ -758,10 +784,12 @@ expect(mgr.jobs.len()).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("background true returns immediately with job_id")
 var mgr = make_manager()
 val result = manager_create_job(mgr, "s1", "t32_cmm_run", true)
 expect(result[0]).to_equal("job_1")
@@ -775,7 +803,7 @@ expect(job.status).to_equal("queued")
 
 #### foreground job also gets job_id for timeout continuation
 
-1. var mgr = make manager
+- foreground job also gets job_id for timeout continuation
    - Expected: result[0] equals `job_1`
    - Expected: job.background is false
 
@@ -783,10 +811,12 @@ expect(job.status).to_equal("queued")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("foreground job also gets job_id for timeout continuation")
 var mgr = make_manager()
 val result = manager_create_job(mgr, "s1", "t32_cmm_run", false)
 expect(result[0]).to_equal("job_1")
@@ -800,46 +830,8 @@ expect(job.background).to_equal(false)
 
 #### poll returns pending for queued job
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 2 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val job = make_job("job_1", "s1", "t32_cmm_run")
-expect(poll_status(job)).to_equal("pending")
-```
-
-</details>
-
-#### poll returns pending for running job
-
-1. var job = make job
-2. job = try transition
+- poll returns pending for queued job
    - Expected: poll_status(job) equals `pending`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var job = make_job("job_1", "s1", "t32_cmm_run")
-job = try_transition(job, "running")
-expect(poll_status(job)).to_equal("pending")
-```
-
-</details>
-
-#### poll returns completed for finished job
-
-1. var job = make job
-2. job = try transition
-3. job = try transition
-   - Expected: poll_status(job) equals `completed`
 
 
 <details>
@@ -849,6 +841,51 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("poll returns pending for queued job")
+val job = make_job("job_1", "s1", "t32_cmm_run")
+expect(poll_status(job)).to_equal("pending")
+```
+
+</details>
+
+#### poll returns pending for running job
+
+- poll returns pending for running job
+   - Expected: poll_status(job) equals `pending`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("poll returns pending for running job")
+var job = make_job("job_1", "s1", "t32_cmm_run")
+job = try_transition(job, "running")
+expect(poll_status(job)).to_equal("pending")
+```
+
+</details>
+
+#### poll returns completed for finished job
+
+- poll returns completed for finished job
+   - Expected: poll_status(job) equals `completed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("poll returns completed for finished job")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "completed")
@@ -859,19 +896,19 @@ expect(poll_status(job)).to_equal("completed")
 
 #### poll returns failed for error job
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- poll returns failed for error job
    - Expected: poll_status(job) equals `failed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("poll returns failed for error job")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "failed")
@@ -884,10 +921,7 @@ expect(poll_status(job)).to_equal("failed")
 
 #### result available after completion
 
-1. var job = make job
-2. job = try transition
-3. job = set result
-4. job = try transition
+- result available after completion
    - Expected: result_available(job) is true
    - Expected: job.result_text equals `Flash programming complete`
 
@@ -895,10 +929,12 @@ expect(poll_status(job)).to_equal("failed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("result available after completion")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = set_result(job, "Flash programming complete")
@@ -911,32 +947,8 @@ expect(job.result_text).to_equal("Flash programming complete")
 
 #### result not available while running
 
-1. var job = make job
-2. job = try transition
+- result not available while running
    - Expected: result_available(job) is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var job = make_job("job_1", "s1", "t32_cmm_run")
-job = try_transition(job, "running")
-expect(result_available(job)).to_equal(false)
-```
-
-</details>
-
-#### result available after failure with error
-
-1. var job = make job
-2. job = try transition
-3. job = try transition with error
-   - Expected: result_available(job) is true
-   - Expected: job.error_message equals `connection lost`
 
 
 <details>
@@ -946,6 +958,31 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("result not available while running")
+var job = make_job("job_1", "s1", "t32_cmm_run")
+job = try_transition(job, "running")
+expect(result_available(job)).to_equal(false)
+```
+
+</details>
+
+#### result available after failure with error
+
+- result available after failure with error
+   - Expected: result_available(job) is true
+   - Expected: job.error_message equals `connection lost`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-APP
+step("result available after failure with error")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition_with_error(job, "failed", "connection lost")
@@ -959,13 +996,19 @@ expect(job.error_message).to_equal("connection lost")
 
 #### produces correct resource URI format
 
+- produces correct resource URI format
+   - Expected: uri equals `t32://jobs/job_42`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("produces correct resource URI format")
 val uri = job_resource_uri("job_42")
 expect(uri).to_equal("t32://jobs/job_42")
 ```
@@ -974,13 +1017,18 @@ expect(uri).to_equal("t32://jobs/job_42")
 
 #### URI starts with t32 scheme
 
+- URI starts with t32 scheme
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("URI starts with t32 scheme")
 val uri = job_resource_uri("job_1")
 expect(uri).to_start_with("t32://")
 ```
@@ -989,13 +1037,18 @@ expect(uri).to_start_with("t32://")
 
 #### URI contains jobs path
 
+- URI contains jobs path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("URI contains jobs path")
 val uri = job_resource_uri("job_123")
 expect(uri).to_contain("/jobs/")
 ```
@@ -1008,13 +1061,19 @@ expect(uri).to_contain("/jobs/")
 
 #### cmm_run has 60s default timeout
 
+- cmm_run has 60s default timeout
+   - Expected: default_timeout_for_tool("t32_cmm_run") equals `60000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cmm_run has 60s default timeout")
 expect(default_timeout_for_tool("t32_cmm_run")).to_equal(60000)
 ```
 
@@ -1022,13 +1081,19 @@ expect(default_timeout_for_tool("t32_cmm_run")).to_equal(60000)
 
 #### cmd_run has 10s default timeout
 
+- cmd_run has 10s default timeout
+   - Expected: default_timeout_for_tool("t32_cmd_run") equals `10000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("cmd_run has 10s default timeout")
 expect(default_timeout_for_tool("t32_cmd_run")).to_equal(10000)
 ```
 
@@ -1036,13 +1101,19 @@ expect(default_timeout_for_tool("t32_cmd_run")).to_equal(10000)
 
 #### eval has 3s default timeout
 
+- eval has 3s default timeout
+   - Expected: default_timeout_for_tool("t32_eval") equals `3000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("eval has 3s default timeout")
 expect(default_timeout_for_tool("t32_eval")).to_equal(3000)
 ```
 
@@ -1050,13 +1121,19 @@ expect(default_timeout_for_tool("t32_eval")).to_equal(3000)
 
 #### window_capture has 5s default timeout
 
+- window_capture has 5s default timeout
+   - Expected: default_timeout_for_tool("t32_window_capture") equals `5000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("window_capture has 5s default timeout")
 expect(default_timeout_for_tool("t32_window_capture")).to_equal(5000)
 ```
 
@@ -1064,13 +1141,19 @@ expect(default_timeout_for_tool("t32_window_capture")).to_equal(5000)
 
 #### screenshot has 10s default timeout
 
+- screenshot has 10s default timeout
+   - Expected: default_timeout_for_tool("t32_screenshot") equals `10000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("screenshot has 10s default timeout")
 expect(default_timeout_for_tool("t32_screenshot")).to_equal(10000)
 ```
 
@@ -1078,13 +1161,19 @@ expect(default_timeout_for_tool("t32_screenshot")).to_equal(10000)
 
 #### flash_program has 120s default timeout
 
+- flash_program has 120s default timeout
+   - Expected: default_timeout_for_tool("t32_flash_program") equals `120000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("flash_program has 120s default timeout")
 expect(default_timeout_for_tool("t32_flash_program")).to_equal(120000)
 ```
 
@@ -1092,13 +1181,19 @@ expect(default_timeout_for_tool("t32_flash_program")).to_equal(120000)
 
 #### unknown tool gets default 10s timeout
 
+- unknown tool gets default 10s timeout
+   - Expected: default_timeout_for_tool("t32_unknown") equals `10000`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("unknown tool gets default 10s timeout")
 expect(default_timeout_for_tool("t32_unknown")).to_equal(10000)
 ```
 
@@ -1108,7 +1203,7 @@ expect(default_timeout_for_tool("t32_unknown")).to_equal(10000)
 
 #### custom timeout_ms overrides default
 
-1. var job = make job
+- custom timeout_ms overrides default
    - Expected: custom_job.timeout_ms equals `30000`
    - Expected: default_timeout_for_tool("t32_cmm_run") equals `60000`
 
@@ -1116,10 +1211,12 @@ expect(default_timeout_for_tool("t32_unknown")).to_equal(10000)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("custom timeout_ms overrides default")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 # Simulate custom timeout
 val custom_job = T32Job(
@@ -1144,19 +1241,19 @@ expect(default_timeout_for_tool("t32_cmm_run")).to_equal(60000)
 
 #### timed out status set correctly on timeout
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- timed out status set correctly on timeout
    - Expected: job.status equals `timed_out`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("timed out status set correctly on timeout")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "timed_out")
@@ -1167,9 +1264,7 @@ expect(job.status).to_equal("timed_out")
 
 #### timeout does not affect background job flag
 
-1. var job = make bg job
-2. job = try transition
-3. job = try transition
+- timeout does not affect background job flag
    - Expected: job.status equals `timed_out`
    - Expected: job.background is true
 
@@ -1177,10 +1272,12 @@ expect(job.status).to_equal("timed_out")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("timeout does not affect background job flag")
 var job = make_bg_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "timed_out")
@@ -1192,19 +1289,19 @@ expect(job.background).to_equal(true)
 
 #### timed_out is a terminal state
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
+- timed_out is a terminal state
    - Expected: invalid.status equals `timed_out`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("timed_out is a terminal state")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "timed_out")
@@ -1221,20 +1318,19 @@ expect(invalid.status).to_equal("timed_out")
 
 #### waiting_practice can complete directly
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
-4. job = try transition
+- waiting_practice can complete directly
    - Expected: job.status equals `completed`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("waiting_practice can complete directly")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "waiting_practice")
@@ -1246,10 +1342,7 @@ expect(job.status).to_equal("completed")
 
 #### waiting_practice can fail
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
-4. job = try transition with error
+- waiting_practice can fail
    - Expected: job.status equals `failed`
    - Expected: job.error_message equals `PRACTICE error`
 
@@ -1257,10 +1350,12 @@ expect(job.status).to_equal("completed")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("waiting_practice can fail")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition(job, "waiting_practice")
@@ -1273,20 +1368,19 @@ expect(job.error_message).to_equal("PRACTICE error")
 
 #### waiting_target can time out
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
-4. job = try transition
+- waiting_target can time out
    - Expected: job.status equals `timed_out`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("waiting_target can time out")
 var job = make_job("job_1", "s1", "t32_cmd_run")
 job = try_transition(job, "running")
 job = try_transition(job, "waiting_target")
@@ -1298,20 +1392,19 @@ expect(job.status).to_equal("timed_out")
 
 #### waiting_target can be cancelled
 
-1. var job = make job
-2. job = try transition
-3. job = try transition
-4. job = try transition
+- waiting_target can be cancelled
    - Expected: job.status equals `cancelled`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("waiting_target can be cancelled")
 var job = make_job("job_1", "s1", "t32_cmd_run")
 job = try_transition(job, "running")
 job = try_transition(job, "waiting_target")
@@ -1325,10 +1418,7 @@ expect(job.status).to_equal("cancelled")
 
 #### handles multiple sessions independently
 
-1. var mgr = make manager
-2. manager create job
-3. manager create job
-4. manager create job
+- handles multiple sessions independently
    - Expected: a_jobs.len() equals `2`
    - Expected: b_jobs.len() equals `1`
    - Expected: a_jobs[0].tool_name equals `t32_cmm_run`
@@ -1339,10 +1429,12 @@ expect(job.status).to_equal("cancelled")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("handles multiple sessions independently")
 var mgr = make_manager()
 manager_create_job(mgr, "session_a", "t32_cmm_run", true)
 manager_create_job(mgr, "session_b", "t32_cmd_run", false)
@@ -1362,10 +1454,7 @@ expect(b_jobs[0].tool_name).to_equal("t32_cmd_run")
 
 #### result persists through completion
 
-1. var job = make job
-2. job = try transition
-3. job = set result
-4. job = try transition
+- result persists through completion
    - Expected: job.result_text equals `DO flash_program.cmm completed successfully`
    - Expected: job.status equals `completed`
 
@@ -1373,10 +1462,12 @@ expect(b_jobs[0].tool_name).to_equal("t32_cmd_run")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("result persists through completion")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = set_result(job, "DO flash_program.cmm completed successfully")
@@ -1389,18 +1480,18 @@ expect(job.status).to_equal("completed")
 
 #### error message persists on failure
 
-1. var job = make job
-2. job = try transition
-3. job = try transition with error
+- error message persists on failure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("error message persists on failure")
 var job = make_job("job_1", "s1", "t32_cmm_run")
 job = try_transition(job, "running")
 job = try_transition_with_error(job, "failed", "T4101: Command timed out after 60000ms")
@@ -1417,12 +1508,12 @@ expect(job.error_message).to_contain("60000ms")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering T32 Job Lifecycle, T32 Job Manager Operations, T32 Background Execution Model, T32 Job Timeout Policy, T32 Job Manager Edge Cases.
 - T32 Job Lifecycle
 - T32 Job Manager Operations
 - T32 Background Execution Model
@@ -1441,3 +1532,55 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-APP`
+- `REQ-SSPEC-APP)`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `892482a184f1fbdc53e07a92c11652e9cfdd13c494b60068076fac5328b6bc6b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `892482a184f1fbdc53e07a92c11652e9cfdd13c494b60068076fac5328b6bc6b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `892482a184f1fbdc53e07a92c11652e9cfdd13c494b60068076fac5328b6bc6b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.spl
+mirror: doc/06_spec/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 17 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.spl:361:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates job with valid id' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.spl:369:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'starts in queued status' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/mcp_t32/mcp_t32_job_manager_spec.spl:376:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'transitions queued to running' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

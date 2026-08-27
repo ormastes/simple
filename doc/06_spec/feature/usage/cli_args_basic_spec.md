@@ -1,17 +1,17 @@
 # CLI Args Basic Specification
 
-> Tests for the `cli` keyword basic functionality: bool flags, string options, int options, and default values. The `cli` keyword provides declarative command-line argument parsing integrated into the language.
+> Exercises the `cli` keyword's argument parsing behavior (bool flags, string options, int options, default values) through the real parser (std.nogc_sync_mut.cli.cli_parser) instead of commented-out pseudo-code.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # CLI Args Basic Specification
 
-Tests for the `cli` keyword basic functionality: bool flags, string options, int options, and default values. The `cli` keyword provides declarative command-line argument parsing integrated into the language.
+Exercises the `cli` keyword's argument parsing behavior (bool flags, string options, int options, default values) through the real parser (std.nogc_sync_mut.cli.cli_parser) instead of commented-out pseudo-code.
 
 ## At a Glance
 
@@ -19,16 +19,16 @@ Tests for the `cli` keyword basic functionality: bool flags, string options, int
 |-------|-------|
 | Feature IDs | #CLI-001 |
 | Category | Language \| CLI |
-| Status | Draft |
+| Status | Implemented |
 | Source | `test/feature/usage/cli_args_basic_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests for the `cli` keyword basic functionality: bool flags, string options,
-int options, and default values. The `cli` keyword provides declarative
-command-line argument parsing integrated into the language.
+Exercises the `cli` keyword's argument parsing behavior (bool flags, string
+options, int options, default values) through the real parser
+(std.nogc_sync_mut.cli.cli_parser) instead of commented-out pseudo-code.
 
 ## Syntax
 
@@ -45,218 +45,128 @@ cli:
 
 #### bool flags
 
-#### parses bool flag default
+#### bool flag defaults to false and --verbose/-v set it true
 
-- parses bool flag default
-   - Expected: expected is false
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("parses bool flag default")
-# cli:
-#     verbose: false
-# val args = cli.parse([])
-# expect(args.verbose).to_equal(false)
-val expected = false
-expect(expected).to_equal(false)
-```
-
-</details>
-
-#### parses bool flag when set
-
-- parses bool flag when set
-   - Expected: expected is true
+- Verify: flag default false, long and short forms set true
+   - Expected: parsed_flag(parse_cli_args(spec, []), "verbose") is false
+   - Expected: parsed_flag(parse_cli_args(spec, ["--verbose"]), "verbose") is true
+   - Expected: parsed_flag(parse_cli_args(spec, ["-v"]), "verbose") is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("parses bool flag when set")
-# cli:
-#     verbose: false
-# val args = cli.parse(["--verbose"])
-# expect(args.verbose).to_equal(true)
-val expected = true
-expect(expected).to_equal(true)
+step("Verify: flag default false, long and short forms set true")
+val spec = cli_spec_flag(cli_spec(), "verbose", "v", "verbose output")
+expect(parsed_flag(parse_cli_args(spec, []), "verbose")).to_equal(false)  # oracle: unset flag is false
+expect(parsed_flag(parse_cli_args(spec, ["--verbose"]), "verbose")).to_equal(true)  # oracle: long form sets flag
+expect(parsed_flag(parse_cli_args(spec, ["-v"]), "verbose")).to_equal(true)  # oracle: short form sets flag
 ```
 
 </details>
 
 #### string options
 
-#### parses string option default
+#### string option keeps its default and accepts --key=value and --key value
 
-- parses string option default
-   - Expected: expected equals `result.txt`
+- Verify: option default, = form, and space form
+   - Expected: parsed_option(parse_cli_args(spec, []), "output") equals `out.txt`
+   - Expected: parsed_option(parse_cli_args(spec, ["--output=a.txt"]), "output") equals `a.txt`
+   - Expected: parsed_option(parse_cli_args(spec, ["--output", "b.txt"]), "output") equals `b.txt`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("parses string option default")
-# cli:
-#     output: "result.txt"
-# val args = cli.parse([])
-# expect(args.output).to_equal("result.txt")
-val expected = "result.txt"
-expect(expected).to_equal("result.txt")
+step("Verify: option default, = form, and space form")
+val spec = cli_spec_option(cli_spec(), "output", "o", "output path", "out.txt", [])
+expect(parsed_option(parse_cli_args(spec, []), "output")).to_equal("out.txt")  # oracle: default retained
+expect(parsed_option(parse_cli_args(spec, ["--output=a.txt"]), "output")).to_equal("a.txt")  # oracle: = form parsed
+expect(parsed_option(parse_cli_args(spec, ["--output", "b.txt"]), "output")).to_equal("b.txt")  # oracle: space form parsed
 ```
 
 </details>
 
-#### parses string option with value
+#### unrelated string option is unaffected by flag parsing
 
-- parses string option with value
-   - Expected: expected equals `custom.txt`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("parses string option with value")
-# cli:
-#     output: "result.txt"
-# val args = cli.parse(["--output", "custom.txt"])
-# expect(args.output).to_equal("custom.txt")
-val expected = "custom.txt"
-expect(expected).to_equal("custom.txt")
-```
-
-</details>
-
-#### parses string option with equals syntax
-
-- parses string option with equals syntax
-   - Expected: expected equals `custom.txt`
+- Verify: parsing a flag leaves a sibling option at its default
+   - Expected: parsed_option(parse_cli_args(spec, ["-q"]), "mode") equals `release`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("parses string option with equals syntax")
-# cli:
-#     output: "result.txt"
-# val args = cli.parse(["--output=custom.txt"])
-# expect(args.output).to_equal("custom.txt")
-val expected = "custom.txt"
-expect(expected).to_equal("custom.txt")
+step("Verify: parsing a flag leaves a sibling option at its default")
+val spec = cli_spec_option(cli_spec(), "mode", "m", "run mode", "release", [])
+expect(parsed_option(parse_cli_args(spec, ["-q"]), "mode")).to_equal("release")  # oracle: unknown flag does not clobber options
 ```
 
 </details>
 
 #### int options
 
-#### parses int option default
+#### int option parses as a numeric string with default
 
-- parses int option default
-   - Expected: expected equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-SSPEC-FEATURE
-step("parses int option default")
-# cli:
-#     count: 1
-# val args = cli.parse([])
-# expect(args.count).to_equal(1)
-val expected = 1
-expect(expected).to_equal(1)
-```
-
-</details>
-
-#### parses int option with value
-
-- parses int option with value
-   - Expected: expected equals `5`
+- Verify: count option default 1 and parsed value round-trips to int
+   - Expected: parsed_option(parse_cli_args(spec, []), "count").to_i64() equals `1`
+   - Expected: parsed_option(parse_cli_args(spec, ["--count=3"]), "count").to_i64() equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("parses int option with value")
-# cli:
-#     count: 1
-# val args = cli.parse(["--count", "5"])
-# expect(args.count).to_equal(5)
-val expected = 5
-expect(expected).to_equal(5)
+step("Verify: count option default 1 and parsed value round-trips to int")
+val spec = cli_spec_option(cli_spec(), "count", "c", "repeat count", "1", [])
+expect(parsed_option(parse_cli_args(spec, []), "count").to_i64()).to_equal(1)  # oracle: default is numeric 1
+expect(parsed_option(parse_cli_args(spec, ["--count=3"]), "count").to_i64()).to_equal(3)  # oracle: parsed int option
 ```
 
 </details>
 
 #### multiple options together
 
-#### handles multiple options together
+#### parses flags and options together without cross-talk
 
-- handles multiple options together
-   - Expected: verbose is true
-   - Expected: output equals `result.txt`
-   - Expected: count equals `3`
+- Verify: verbose flag, output option, and count option in one argv
+   - Expected: parsed_flag(parsed, "verbose") is true
+   - Expected: parsed_option(parsed, "count").to_i64() equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-FEATURE
-step("handles multiple options together")
-# cli:
-#     verbose: false
-#     output: "out.txt"
-#     count: 1
-# val args = cli.parse(["--verbose", "--output", "result.txt", "--count", "3"])
-# expect(args.verbose).to_equal(true)
-# expect(args.output).to_equal("result.txt")
-# expect(args.count).to_equal(3)
-val verbose = true
-val output = "result.txt"
-val count = 3
-expect(verbose).to_equal(true)
-expect(output).to_equal("result.txt")
-expect(count).to_equal(3)
+step("Verify: verbose flag, output option, and count option in one argv")
+val spec = cli_spec_option(
+    cli_spec_flag(cli_spec(), "verbose", "v", "verbose output"),
+    "count", "c", "repeat count", "1", [])
+val parsed = parse_cli_args(spec, ["--verbose", "--count=3"])
+expect(parsed_flag(parsed, "verbose")).to_equal(true)  # oracle: flag set alongside options
+expect(parsed_option(parsed, "count").to_i64()).to_equal(3)  # oracle: option parsed alongside flag
 ```
 
 </details>
@@ -265,8 +175,8 @@ expect(count).to_equal(3)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -285,46 +195,42 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3e1ef0856991d86b717c2bfd40e2c631ebdd3a492f916fed045b617e771ee739`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `de9c2933dd71b2add9434b86a5a8c9c90f55ef2b99820cedc2a4e0a396291b4b`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3e1ef0856991d86b717c2bfd40e2c631ebdd3a492f916fed045b617e771ee739`.
+Source SHA-256: `de9c2933dd71b2add9434b86a5a8c9c90f55ef2b99820cedc2a4e0a396291b4b`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3e1ef0856991d86b717c2bfd40e2c631ebdd3a492f916fed045b617e771ee739`  
+Source SHA-256: `de9c2933dd71b2add9434b86a5a8c9c90f55ef2b99820cedc2a4e0a396291b4b`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 91/100
 source: test/feature/usage/cli_args_basic_spec.spl
 mirror: doc/06_spec/feature/usage/cli_args_basic_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=20
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/feature/usage/cli_args_basic_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/feature/usage/cli_args_basic_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/feature/usage/cli_args_basic_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario compares only locally constructed arithmetic or literals
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/feature/usage/cli_args_basic_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/feature/usage/cli_args_basic_spec.spl:45:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses bool flag default' has no retained capture or evidence
+test/feature/usage/cli_args_basic_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/feature/usage/cli_args_basic_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'bool flag defaults to false and --verbose/-v set it true' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/cli_args_basic_spec.spl:55:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses bool flag when set' has no retained capture or evidence
+test/feature/usage/cli_args_basic_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'string option keeps its default and accepts --key=value and --key value' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/feature/usage/cli_args_basic_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses string option default' has no retained capture or evidence
+test/feature/usage/cli_args_basic_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unrelated string option is unaffected by flag parsing' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

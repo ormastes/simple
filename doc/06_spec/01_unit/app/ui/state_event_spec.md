@@ -1,30 +1,6 @@
 # State Event Specification
 
-> <details>
-
-<!-- sdn-diagram:id=state_event_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=state_event_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-state_event_spec -> std
-state_event_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=state_event_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering init_state, init_state_with_mode, focus navigation, quit detection, keypress normal mode, escape key handling, mode_name, mode switching via events.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -41,13 +17,23 @@ state_event_spec -> common
 
 #### creates state with Normal mode
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- creates state with Normal mode
+   - Expected: state.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates state with Normal mode")
 val tree = make_test_tree()
 val state = init_state(tree)
 expect(state.mode_name()).to_equal("NORMAL")
@@ -57,13 +43,19 @@ expect(state.mode_name()).to_equal("NORMAL")
 
 #### sets focused_id to first widget id
 
+- sets focused_id to first widget id
+   - Expected: state.focused_id equals `first_id`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets focused_id to first widget id")
 val tree = make_test_tree()
 val state = init_state(tree)
 # all_widget_ids returns root first
@@ -77,13 +69,19 @@ expect(state.focused_id).to_equal(first_id)
 
 #### sets Command mode when given command string
 
+- sets Command mode when given command string
+   - Expected: state.mode_name() equals `COMMAND`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets Command mode when given command string")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "command")
 expect(state.mode_name()).to_equal("COMMAND")
@@ -93,13 +91,19 @@ expect(state.mode_name()).to_equal("COMMAND")
 
 #### sets Insert mode when given insert string
 
+- sets Insert mode when given insert string
+   - Expected: state.mode_name() equals `INSERT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets Insert mode when given insert string")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "insert")
 expect(state.mode_name()).to_equal("INSERT")
@@ -109,13 +113,19 @@ expect(state.mode_name()).to_equal("INSERT")
 
 #### sets Menu mode when given menu string
 
+- sets Menu mode when given menu string
+   - Expected: state.mode_name() equals `MENU`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("sets Menu mode when given menu string")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "menu")
 expect(state.mode_name()).to_equal("MENU")
@@ -125,13 +135,19 @@ expect(state.mode_name()).to_equal("MENU")
 
 #### defaults to Normal mode for unknown string
 
+- defaults to Normal mode for unknown string
+   - Expected: state.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("defaults to Normal mode for unknown string")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "unknown")
 expect(state.mode_name()).to_equal("NORMAL")
@@ -143,13 +159,19 @@ expect(state.mode_name()).to_equal("NORMAL")
 
 #### advances focused_id on FocusNext
 
+- advances focused_id on FocusNext
+   - Expected: s2.focused_id equals `ids[1]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("advances focused_id on FocusNext")
 val tree = make_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
@@ -162,13 +184,19 @@ expect(s2.focused_id).to_equal(ids[1])
 
 #### retreats focused_id on FocusPrev
 
+- retreats focused_id on FocusPrev
+   - Expected: s3.focused_id equals `ids[0]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("retreats focused_id on FocusPrev")
 val tree = make_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
@@ -182,17 +210,19 @@ expect(s3.focused_id).to_equal(ids[0])
 
 #### wraps around at end of list
 
-1. s = update state
+- wraps around at end of list
    - Expected: s.focused_id equals `ids[0]`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wraps around at end of list")
 val tree = make_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
@@ -210,13 +240,19 @@ expect(s.focused_id).to_equal(ids[0])
 
 #### wraps around at beginning of list
 
+- wraps around at beginning of list
+   - Expected: s2.focused_id equals `ids[ids.len() - 1]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("wraps around at beginning of list")
 val tree = make_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
@@ -231,13 +267,19 @@ expect(s2.focused_id).to_equal(ids[ids.len() - 1])
 
 #### is_quit_event returns true for Quit
 
+- is_quit_event returns true for Quit
+   - Expected: is_quit_event(UIEvent.Quit) is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is_quit_event returns true for Quit")
 expect(is_quit_event(UIEvent.Quit)).to_equal(true)
 ```
 
@@ -245,13 +287,19 @@ expect(is_quit_event(UIEvent.Quit)).to_equal(true)
 
 #### is_quit_event returns false for FocusNext
 
+- is_quit_event returns false for FocusNext
+   - Expected: is_quit_event(UIEvent.FocusNext) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is_quit_event returns false for FocusNext")
 expect(is_quit_event(UIEvent.FocusNext)).to_equal(false)
 ```
 
@@ -259,13 +307,19 @@ expect(is_quit_event(UIEvent.FocusNext)).to_equal(false)
 
 #### is_quit_event returns false for KeyPress
 
+- is_quit_event returns false for KeyPress
+   - Expected: is_quit_event(UIEvent.KeyPress(key: "q")) is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("is_quit_event returns false for KeyPress")
 expect(is_quit_event(UIEvent.KeyPress(key: "q"))).to_equal(false)
 ```
 
@@ -275,13 +329,19 @@ expect(is_quit_event(UIEvent.KeyPress(key: "q"))).to_equal(false)
 
 #### j triggers focus next
 
+- j triggers focus next
+   - Expected: s2.focused_id equals `ids[1]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("j triggers focus next")
 val tree = make_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
@@ -293,13 +353,19 @@ expect(s2.focused_id).to_equal(ids[1])
 
 #### k triggers focus prev
 
+- k triggers focus prev
+   - Expected: s3.focused_id equals `ids[0]`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("k triggers focus prev")
 val tree = make_test_tree()
 val state = init_state(tree)
 val ids = tree.all_widget_ids()
@@ -313,13 +379,19 @@ expect(s3.focused_id).to_equal(ids[0])
 
 #### colon switches to Command mode
 
+- colon switches to Command mode
+   - Expected: s2.mode_name() equals `COMMAND`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("colon switches to Command mode")
 val tree = make_test_tree()
 val state = init_state(tree)
 val s2 = update_state(state, UIEvent.KeyPress(key: ":"))
@@ -330,13 +402,19 @@ expect(s2.mode_name()).to_equal("COMMAND")
 
 #### i switches to Insert mode
 
+- i switches to Insert mode
+   - Expected: s2.mode_name() equals `INSERT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("i switches to Insert mode")
 val tree = make_test_tree()
 val state = init_state(tree)
 val s2 = update_state(state, UIEvent.KeyPress(key: "i"))
@@ -349,13 +427,19 @@ expect(s2.mode_name()).to_equal("INSERT")
 
 #### escape in Command mode returns to Normal
 
+- escape in Command mode returns to Normal
+   - Expected: s2.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escape in Command mode returns to Normal")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "command")
 val s2 = update_state(state, UIEvent.KeyPress(key: "escape"))
@@ -366,13 +450,19 @@ expect(s2.mode_name()).to_equal("NORMAL")
 
 #### escape in Insert mode returns to Normal
 
+- escape in Insert mode returns to Normal
+   - Expected: s2.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escape in Insert mode returns to Normal")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "insert")
 val s2 = update_state(state, UIEvent.KeyPress(key: "escape"))
@@ -383,13 +473,19 @@ expect(s2.mode_name()).to_equal("NORMAL")
 
 #### escape in Menu mode returns to Normal
 
+- escape in Menu mode returns to Normal
+   - Expected: s2.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("escape in Menu mode returns to Normal")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "menu")
 val s2 = update_state(state, UIEvent.KeyPress(key: "escape"))
@@ -402,13 +498,19 @@ expect(s2.mode_name()).to_equal("NORMAL")
 
 #### returns NORMAL for Normal mode
 
+- returns NORMAL for Normal mode
+   - Expected: state.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns NORMAL for Normal mode")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "normal")
 expect(state.mode_name()).to_equal("NORMAL")
@@ -418,13 +520,19 @@ expect(state.mode_name()).to_equal("NORMAL")
 
 #### returns COMMAND for Command mode
 
+- returns COMMAND for Command mode
+   - Expected: state.mode_name() equals `COMMAND`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns COMMAND for Command mode")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "command")
 expect(state.mode_name()).to_equal("COMMAND")
@@ -434,13 +542,19 @@ expect(state.mode_name()).to_equal("COMMAND")
 
 #### returns INSERT for Insert mode
 
+- returns INSERT for Insert mode
+   - Expected: state.mode_name() equals `INSERT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns INSERT for Insert mode")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "insert")
 expect(state.mode_name()).to_equal("INSERT")
@@ -450,13 +564,19 @@ expect(state.mode_name()).to_equal("INSERT")
 
 #### returns MENU for Menu mode
 
+- returns MENU for Menu mode
+   - Expected: state.mode_name() equals `MENU`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("returns MENU for Menu mode")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "menu")
 expect(state.mode_name()).to_equal("MENU")
@@ -468,13 +588,19 @@ expect(state.mode_name()).to_equal("MENU")
 
 #### CommandMode event switches to Command
 
+- CommandMode event switches to Command
+   - Expected: s2.mode_name() equals `COMMAND`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("CommandMode event switches to Command")
 val tree = make_test_tree()
 val state = init_state(tree)
 val s2 = update_state(state, UIEvent.CommandMode)
@@ -485,13 +611,19 @@ expect(s2.mode_name()).to_equal("COMMAND")
 
 #### InsertMode event switches to Insert
 
+- InsertMode event switches to Insert
+   - Expected: s2.mode_name() equals `INSERT`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("InsertMode event switches to Insert")
 val tree = make_test_tree()
 val state = init_state(tree)
 val s2 = update_state(state, UIEvent.InsertMode)
@@ -502,13 +634,19 @@ expect(s2.mode_name()).to_equal("INSERT")
 
 #### NormalMode event switches to Normal
 
+- NormalMode event switches to Normal
+   - Expected: s2.mode_name() equals `NORMAL`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("NormalMode event switches to Normal")
 val tree = make_test_tree()
 val state = init_state_with_mode(tree, "command")
 val s2 = update_state(state, UIEvent.NormalMode)
@@ -524,12 +662,12 @@ expect(s2.mode_name()).to_equal("NORMAL")
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/ui/state_event_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering init_state, init_state_with_mode, focus navigation, quit detection, keypress normal mode, escape key handling, mode_name, mode switching via events.
 - init_state
 - init_state_with_mode
 - focus navigation
@@ -551,3 +689,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f6d143d52f7f133c84b1027c3128d45bd954f10c01cacf7f2d5856093f4efb84`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f6d143d52f7f133c84b1027c3128d45bd954f10c01cacf7f2d5856093f4efb84`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f6d143d52f7f133c84b1027c3128d45bd954f10c01cacf7f2d5856093f4efb84`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/ui/state_event_spec.spl
+mirror: doc/06_spec/01_unit/app/ui/state_event_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/ui/state_event_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/ui/state_event_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/ui/state_event_spec.spl:39:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates state with Normal mode' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/state_event_spec.spl:46:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets focused_id to first widget id' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/ui/state_event_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'sets Command mode when given command string' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,6 +1,6 @@
-# Selected Devanagari Specification
+# Selected Devanagari Shaping
 
-> <details>
+> Proves the pinned Noto Sans and Serif Devanagari faces shape the selected Hindi
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,22 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Selected Devanagari Specification
+# Selected Devanagari Shaping
+
+Proves the pinned Noto Sans and Serif Devanagari faces shape the selected Hindi
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/skia/selected_devanagari_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Proves the pinned Noto Sans and Serif Devanagari faces shape the selected Hindi
+witnesses to the exact HarfBuzz oracles. The Sans case also rejects font-data drift.
 
 ## Scenarios
 
@@ -17,24 +32,23 @@
 
 #### should match the HarfBuzz oracle and reject bound OpenType blob drift
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should match the HarfBuzz oracle and reject bound OpenType blob drift
 - Shape selected Unicode scripts with the pinned face
-- expect shaped run to font glyph run
-- var discretionary = parse offset table
-- shaper with ot face
-- expect shaped run to font glyph run
-- var inactive = parse offset table
-- shaper with ot face
-- expect shaped run to font glyph run
-- free font
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should match the HarfBuzz oracle and reject bound OpenType blob drift")
 step("Shape selected Unicode scripts with the pinned face")
 val path = "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
 val loaded = load_font(path)
@@ -99,18 +113,19 @@ free_font(handle)
 
 #### should match the Noto Serif Devanagari HarfBuzz oracle
 
+- should match the Noto Serif Devanagari HarfBuzz oracle
 - Shape selected Unicode scripts with the pinned face
-- expect shaped run to font glyph run
-- free font
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("should match the Noto Serif Devanagari HarfBuzz oracle")
 step("Shape selected Unicode scripts with the pinned face")
 val path = "assets/fonts/google-fonts/ofl/notoserifdevanagari/NotoSerifDevanagari[wdth,wght].ttf"
 val loaded = load_font(path)
@@ -141,21 +156,6 @@ free_font(handle)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/01_unit/lib/skia/selected_devanagari_spec.spl` |
-| Updated | 2026-07-19 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- selected Hindi dev2 shaping
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -168,3 +168,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1d605503eb4c16dcea754a7feeef8e64dd6ca74b02d640e1f9c8cc1b31775a0f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1d605503eb4c16dcea754a7feeef8e64dd6ca74b02d640e1f9c8cc1b31775a0f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1d605503eb4c16dcea754a7feeef8e64dd6ca74b02d640e1f9c8cc1b31775a0f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/lib/skia/selected_devanagari_spec.spl
+mirror: doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=90 oracle=100
+  traceability=100 evidence=80 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/skia/selected_devanagari_spec.spl:26:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should match the HarfBuzz oracle and reject bound OpenType blob drift' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/skia/selected_devanagari_spec.spl:26:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should match the HarfBuzz oracle and reject bound OpenType blob drift' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/skia/selected_devanagari_spec.spl:89:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should match the Noto Serif Devanagari HarfBuzz oracle' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/lib/skia/selected_devanagari_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should match the Noto Serif Devanagari HarfBuzz oracle' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

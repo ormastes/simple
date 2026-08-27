@@ -2,30 +2,6 @@
 
 > Verifies that the TextEditor undo stack correctly captures line snapshots before each mutating operation and restores them on undo, bounded at 50 entries (oldest dropped when full).
 
-<!-- sdn-diagram:id=editor_undo_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=editor_undo_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-editor_undo_spec -> std
-editor_undo_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=editor_undo_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -46,7 +22,7 @@ Verifies that the TextEditor undo stack correctly captures line snapshots before
 | Difficulty | 2/5 |
 | Status | Implemented |
 | Source | `test/01_unit/app/editor/editor_undo_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -61,21 +37,23 @@ entries (oldest dropped when full).
 
 #### insert then undo restores original state
 
-1. var ed = TextEditor new
-2. ed insert char
-3. ed insert char
-4. ed undo
-5. ed undo
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- insert then undo restores original state
    - Expected: ed.lines[0] equals `before`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("insert then undo restores original state")
 var ed = TextEditor.new()
 # initial state: one empty line
 val before = ed.lines[0]
@@ -90,18 +68,19 @@ expect(ed.lines[0]).to_equal(before)
 
 #### undo on empty stack shows message
 
-1. var ed = TextEditor new
-2. ed undo
+- undo on empty stack shows message
    - Expected: ed.status_message equals `Already at oldest change`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("undo on empty stack shows message")
 var ed = TextEditor.new()
 ed.undo()
 expect(ed.status_message).to_equal("Already at oldest change")
@@ -111,17 +90,18 @@ expect(ed.status_message).to_equal("Already at oldest change")
 
 #### undo stack bounded at 50 entries
 
-1. var ed = TextEditor new
-2. ed insert char
+- undo stack bounded at 50 entries
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("undo stack bounded at 50 entries")
 var ed = TextEditor.new()
 var i = 0
 while i < 60:
@@ -135,21 +115,19 @@ expect(ed.undo_stack.len()).to_be_less_than(51)
 
 #### undo after delete_char restores line
 
-1. var ed = TextEditor new
-2. ed insert char
-3. ed insert char
-4. ed delete char
-5. ed undo
+- undo after delete_char restores line
    - Expected: ed.lines[0] equals `before_delete`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("undo after delete_char restores line")
 var ed = TextEditor.new()
 ed.insert_char("h")
 ed.insert_char("i")
@@ -175,3 +153,51 @@ expect(ed.lines[0]).to_equal(before_delete)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `52a77c4f924fe71e4c8067452a16e58912d054bd6cf87b034b4a7b6d1e4fe498`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `52a77c4f924fe71e4c8067452a16e58912d054bd6cf87b034b4a7b6d1e4fe498`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `52a77c4f924fe71e4c8067452a16e58912d054bd6cf87b034b4a7b6d1e4fe498`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/app/editor/editor_undo_spec.spl
+mirror: doc/06_spec/01_unit/app/editor/editor_undo_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/app/editor/editor_undo_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/editor/editor_undo_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/editor/editor_undo_spec.spl:31:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'insert then undo restores original state' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/editor/editor_undo_spec.spl:43:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'undo on empty stack shows message' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/editor/editor_undo_spec.spl:50:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'undo stack bounded at 50 entries' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

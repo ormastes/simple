@@ -2,32 +2,6 @@
 
 > Traits define shared behavior that types can implement, enabling polymorphism and code reuse. They are similar to interfaces in other languages but support default implementations, associated types, and trait bounds for generics.
 
-<!-- sdn-diagram:id=traits_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=traits_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-traits_spec -> HasData
-traits_spec -> Identified
-traits_spec -> Sized
-traits_spec -> Scored
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=traits_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 17 | 17 | 0 | 0 |
@@ -48,7 +22,7 @@ Traits define shared behavior that types can implement, enabling polymorphism an
 | Difficulty | 3/5 |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/traits_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -61,6 +35,8 @@ default implementations, associated types, and trait bounds for generics.
 
 ```simple
 trait Printable:
+use std.spec.step
+
 fn print(self)
 
 trait Addable:
@@ -98,18 +74,18 @@ print("({x}, {y})")
 
 #### implements trait for struct
 
-1. fn sum
-2. fn sum
-3. expect p sum
+- implements trait for struct
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("implements trait for struct")
 trait Summable:
     fn sum(self):
         return 0
@@ -130,18 +106,18 @@ expect p.sum() == 30
 
 #### implements trait with arguments
 
-1. fn add
-2. fn add
-3. expect c add
+- implements trait with arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("implements trait with arguments")
 trait Calculator:
     fn add(self, n):
         return 0
@@ -163,19 +139,18 @@ expect c.add(25) == 75
 
 #### allows multiple types to implement same trait
 
-1. fn value
-2. fn value
-3. fn value
-4. expect c value
+- allows multiple types to implement same trait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows multiple types to implement same trait")
 trait Valuable:
     fn value(self):
         return 0
@@ -205,21 +180,18 @@ expect c.value() + b.value() == 205
 
 #### type implements two different traits
 
-1. fn get name
-2. fn get score
-3. fn get name
-4. fn get score
-5. expect p get name
-6. expect p get score
+- type implements two different traits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("type implements two different traits")
 trait Nameable:
     fn get_name(self) -> text:
         return ""
@@ -249,24 +221,18 @@ expect p.get_score() == 99
 
 #### type implements three traits
 
-1. fn id
-2. fn label
-3. fn priority
-4. fn id
-5. fn label
-6. fn priority
-7. expect t id
-8. expect t label
-9. expect t priority
+- type implements three traits
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 33 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("type implements three traits")
 trait HasId:
     fn id(self) -> i64:
         return 0
@@ -308,19 +274,18 @@ expect t.priority() == 5
 
 #### uses default trait method when not overridden
 
-1. fn greet
-2. fn farewell
-3. fn greet
-4. expect p farewell
+- uses default trait method when not overridden
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses default trait method when not overridden")
 trait Greeter:
     fn greet(self) -> i64
     fn farewell(self) -> i64:
@@ -341,20 +306,18 @@ expect p.farewell() == 99
 
 #### allows overriding default trait method
 
-1. fn greet
-2. fn farewell
-3. fn greet
-4. fn farewell
-5. expect p farewell
+- allows overriding default trait method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows overriding default trait method")
 trait Greeter:
     fn greet(self) -> i64
     fn farewell(self) -> i64:
@@ -377,19 +340,18 @@ expect p.farewell() == 7
 
 #### default method can call abstract method
 
-1. fn compute
-2. fn double
-3. fn compute
-4. expect v double
+- default method can call abstract method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("default method can call abstract method")
 trait Calculator:
     fn compute(self) -> i64
     fn double(self) -> i64:
@@ -410,22 +372,18 @@ expect v.double() == 42
 
 #### default method can call other default method
 
-1. fn base
-2. fn step
-3. fn final val
-4. fn base
-5. expect u base
-6. expect u step
-7. expect u final val
+- default method can call other default method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("default method can call other default method")
 trait Chainable:
     fn base(self) -> i64:
         return 1
@@ -453,18 +411,18 @@ expect u.final_val() == 35
 
 #### coerces concrete type to dyn Trait via let binding
 
-1. fn draw
-2. fn draw
-3. expect drawable draw
+- coerces concrete type to dyn Trait via let binding
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("coerces concrete type to dyn Trait via let binding")
 trait Drawable:
     fn draw(self) -> i64
 
@@ -484,19 +442,18 @@ expect drawable.draw() == 21
 
 #### passes concrete type to dyn Trait parameter
 
-1. fn area
-2. fn area
-3. fn process shape
-4. expect process shape
+- passes concrete type to dyn Trait parameter
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("passes concrete type to dyn Trait parameter")
 trait Shape:
     fn area(self) -> i64
 
@@ -518,20 +475,18 @@ expect process_shape(sq) == 36
 
 #### handles multiple types via dyn Trait
 
-1. fn value
-2. fn value
-3. fn value
-4. fn get value
-5. expect get value
+- handles multiple types via dyn Trait
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 25 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles multiple types via dyn Trait")
 trait Describable:
     fn value(self) -> i64
 
@@ -561,20 +516,18 @@ expect get_value(a) + get_value(b) == 157
 
 #### dyn Trait with default method
 
-1. fn hello
-2. fn custom
-3. fn custom
-4. expect dg hello
-5. expect dg custom
+- dyn Trait with default method
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dyn Trait with default method")
 trait Greetable:
     fn hello(self) -> i64:
         return 42
@@ -599,18 +552,18 @@ expect dg.custom() == 7
 
 #### trait impl accesses mixin fields
 
-1. fn compute
-2. fn compute
-3. expect w compute
+- trait impl accesses mixin fields
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("trait impl accesses mixin fields")
 trait Computable:
     fn compute(self) -> i64:
         return 0
@@ -634,21 +587,18 @@ expect w.compute() == 21
 
 #### multiple traits on class with mixin
 
-1. fn get label
-2. fn get rank
-3. fn get label
-4. fn get rank
-5. expect h get label
-6. expect h get rank
+- multiple traits on class with mixin
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiple traits on class with mixin")
 trait Labelable:
     fn get_label(self) -> text:
         return ""
@@ -682,19 +632,18 @@ expect h.get_rank() == 95
 
 #### dyn Trait dispatch on mixin class
 
-1. fn measure
-2. fn measure
-3. fn get measure
-4. expect get measure
+- dyn Trait dispatch on mixin class
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dyn Trait dispatch on mixin class")
 trait Measurable:
     fn measure(self) -> i64:
         return 0
@@ -721,20 +670,18 @@ expect get_measure(r) == 40
 
 #### mixin method and trait method coexist
 
-1. fn tag
-2. fn get score
-3. fn tag
-4. expect e get score
-5. expect e tag
+- mixin method and trait method coexist
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mixin method and trait method coexist")
 trait Taggable:
     fn tag(self) -> text:
         return ""
@@ -772,3 +719,51 @@ expect e.tag() == "gold"
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c5a92f66c8985ee24380651bfc800f167ee404c2aa113b76161a0e3d4f6f36f6`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c5a92f66c8985ee24380651bfc800f167ee404c2aa113b76161a0e3d4f6f36f6`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c5a92f66c8985ee24380651bfc800f167ee404c2aa113b76161a0e3d4f6f36f6`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/traits_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/traits_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/traits_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/traits_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/traits_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'implements trait for struct' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/traits_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'implements trait with arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/traits_spec.spl:113:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'allows multiple types to implement same trait' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,29 +2,6 @@
 
 > End-to-end test of the remote JIT pipeline on real STM32H7 hardware. Compiles ARM Thumb-2 code on the host, uploads to SRAM via OpenOCD telnet, executes on the Cortex-M7, and verifies the result register.
 
-<!-- sdn-diagram:id=stm32h7_e2e_jit_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=stm32h7_e2e_jit_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-stm32h7_e2e_jit_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=stm32h7_e2e_jit_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 4 | 4 | 0 | 0 |
@@ -45,7 +22,7 @@ End-to-end test of the remote JIT pipeline on real STM32H7 hardware. Compiles AR
 | Difficulty | 4/5 |
 | Status | Implemented |
 | Source | `test/02_integration/remote_jit/stm32h7_e2e_jit_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -72,7 +49,11 @@ support ARM architecture (gdb-multiarch not installed).
 
 #### detects hardware availability _(slow)_
 
-1. print "SKIP: {skip reason
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- detects hardware availability
    - Expected: openocd_available() is true
    - Expected: cross_tools_available() is true
    - Expected: stlink_probe_detected() is true
@@ -81,10 +62,12 @@ support ARM architecture (gdb-multiarch not installed).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("detects hardware availability")
 if not hardware_ready():
     print "SKIP: {skip_reason()}"
 else:
@@ -103,20 +86,18 @@ else:
 
 #### connects to STM32H7 via OpenOCD and reads SRAM _(slow)_
 
-1. print "SKIP: {skip reason
-2. var pid = ocd start
-3. ocd cmd
-4. ocd cmd
-5. ocd stop
+- connects to STM32H7 via OpenOCD and reads SRAM
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("connects to STM32H7 via OpenOCD and reads SRAM")
 if not hardware_ready():
     print "SKIP: {skip_reason()}"
 else:
@@ -146,16 +127,20 @@ else:
 
 #### compiles ARM Thumb-2 binary on host _(slow)_
 
-1. shell
+- compiles ARM Thumb-2 binary on host
+   - Expected: size equals `4`
+   - Expected: hex_out.stdout.trim() equals `2a2000be`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("compiles ARM Thumb-2 binary on host")
 if not cross_tools_available():
     print "SKIP: cross-compilation tools not available"
 else:
@@ -185,27 +170,30 @@ else:
 
 #### executes ARM code on STM32H7 and returns 42 in R0 _(slow)_
 
-1. print "SKIP: {skip reason
-2. var pid = ocd start
-3. ocd cmd
-4. ocd cmd
-5. ocd cmd
-6. ocd cmd
-7. ocd cmd
-8. shell
-9. print "E2E PASS: r0={r0 after trim
-10. ocd cmd
-11. ocd stop
-12. shell
+- executes ARM code on STM32H7 and returns 42 in R0
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 69 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("executes ARM code on STM32H7 and returns 42 in R0")
+"""
+Full E2E pipeline:
+1. Compile ARM Thumb-2 on host (movs r0, #42; bkpt)
+2. Start OpenOCD, connect to STM32H7
+3. Reset and halt CPU
+4. Write compiled bytes to SRAM at 0x24010000
+5. Read back and verify memory contents
+6. Clear R0, set PC and SP
+7. Resume execution
+8. Wait for BKPT halt
+9. Read R0 -- should be 42
+"""
 if not hardware_ready():
     print "SKIP: {skip_reason()}"
 else:
@@ -280,3 +268,54 @@ else:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `31c1106960d2cea5970460a932e8717016f444843886de4a1d6e10b92dd3f796`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `31c1106960d2cea5970460a932e8717016f444843886de4a1d6e10b92dd3f796`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `31c1106960d2cea5970460a932e8717016f444843886de4a1d6e10b92dd3f796`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **90/100**; effective score: **90/100**; blockers: **0**.
+
+SSpec documentization score: 90/100
+source: test/02_integration/remote_jit/stm32h7_e2e_jit_spec.spl
+mirror: doc/06_spec/02_integration/remote_jit/stm32h7_e2e_jit_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=90
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/remote_jit/stm32h7_e2e_jit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/remote_jit/stm32h7_e2e_jit_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/remote_jit/stm32h7_e2e_jit_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/remote_jit/stm32h7_e2e_jit_spec.spl:294:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'detects hardware availability' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/remote_jit/stm32h7_e2e_jit_spec.spl:304:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'connects to STM32H7 via OpenOCD and reads SRAM' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/remote_jit/stm32h7_e2e_jit_spec.spl:325:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compiles ARM Thumb-2 binary on host' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

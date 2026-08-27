@@ -1,29 +1,6 @@
 # Database Core Specification
 
-> <details>
-
-<!-- sdn-diagram:id=database_core_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=database_core_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-database_core_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=database_core_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering StringInterner, SdnRow, SdnTable, SdnDatabase, Database Integration.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -43,18 +20,24 @@ database_core_spec
 
 #### interns same string to same ID _(slow)_
 
-1. var interner = StringInterner
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- interns same string to same ID
    - Expected: id1 equals `id2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("interns same string to same ID")
+var interner = StringInterner.empty()
 
 val id1 = interner.intern("test")
 val id2 = interner.intern("test")
@@ -72,23 +55,24 @@ expect(id1).to_equal(id2)
 
 #### interns different strings to different IDs _(slow)_
 
-1. var interner = StringInterner
-   - Expected: id1 == id2 is false
+- interns different strings to different IDs
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("interns different strings to different IDs")
+var interner = StringInterner.empty()
 
 val id1 = interner.intern("first")
 val id2 = interner.intern("second")
 
-expect(id1 == id2).to_equal(false)
+expect(id1).to_not_equal(id2)
 ```
 
 </details>
@@ -101,24 +85,26 @@ expect(id1 == id2).to_equal(false)
 
 #### lookups strings by ID _(slow)_
 
-1. var interner = StringInterner
-   - Expected: result.? is true
+- lookups strings by ID
+   - Expected: result == nil is false
    - Expected: result? equals `lookup_test`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("lookups strings by ID")
+var interner = StringInterner.empty()
 
 val id = interner.intern("lookup_test")
 val result = interner.lookup(id)
 
-expect(result.?).to_equal(true)
+expect(result == nil).to_equal(false)
 expect(result?).to_equal("lookup_test")
 ```
 
@@ -132,24 +118,26 @@ expect(result?).to_equal("lookup_test")
 
 #### lookups IDs by string _(slow)_
 
-1. var interner = StringInterner
-   - Expected: result.? is true
+- lookups IDs by string
+   - Expected: result == nil is false
    - Expected: result? equals `id`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("lookups IDs by string")
+var interner = StringInterner.empty()
 
 val id = interner.intern("reverse_lookup")
 val result = interner.get_id("reverse_lookup")
 
-expect(result.?).to_equal(true)
+expect(result == nil).to_equal(false)
 expect(result?).to_equal(id)
 ```
 
@@ -163,17 +151,23 @@ expect(result?).to_equal(id)
 
 #### returns None for unknown ID _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- returns None for unknown ID
+   - Expected: result == nil is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("returns None for unknown ID")
+val interner = StringInterner.empty()
 
 val result = interner.lookup(999)
-expect(result.?).to_equal(false)
+expect(result == nil).to_equal(true)
 ```
 
 </details>
@@ -186,17 +180,23 @@ expect(result.?).to_equal(false)
 
 #### returns None for unknown string _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- returns None for unknown string
+   - Expected: result == nil is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("returns None for unknown string")
+val interner = StringInterner.empty()
 
 val result = interner.get_id("nonexistent")
-expect(result.?).to_equal(false)
+expect(result == nil).to_equal(true)
 ```
 
 </details>
@@ -209,24 +209,26 @@ expect(result.?).to_equal(false)
 
 #### handles empty strings _(slow)_
 
-1. var interner = StringInterner
-   - Expected: result.? is true
+- handles empty strings
+   - Expected: result == nil is false
    - Expected: result? equals ``
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("handles empty strings")
+var interner = StringInterner.empty()
 
 val id = interner.intern("")
 val result = interner.lookup(id)
 
-expect(result.?).to_equal(true)
+expect(result == nil).to_equal(false)
 expect(result?).to_equal("")
 ```
 
@@ -240,24 +242,26 @@ expect(result?).to_equal("")
 
 #### handles unicode strings _(slow)_
 
-1. var interner = StringInterner
-   - Expected: result.? is true
-   - Expected: value contains `世界"`
+- handles unicode strings
+   - Expected: result == nil is false
+   - Expected: value contains `世界`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("handles unicode strings")
+var interner = StringInterner.empty()
 
 val id = interner.intern("Hello 世界 🌍")
 val result = interner.lookup(id)
 
-expect(result.?).to_equal(true)
+expect(result == nil).to_equal(false)
 val value = result ?? ""
 expect(value.contains("世界")).to_equal(true)
 ```
@@ -272,39 +276,35 @@ expect(value.contains("世界")).to_equal(true)
 
 #### increments ID counter _(slow)_
 
-1. var interner = StringInterner
-   - Expected: interner.next_id equals `0`
-
-2. interner intern
-   - Expected: interner.next_id equals `1`
-
-3. interner intern
-   - Expected: interner.next_id equals `2`
-
-4. interner intern
-   - Expected: interner.next_id equals `2`
+- increments ID counter
+   - Expected: interner.next_id.value equals `0`
+   - Expected: interner.next_id.value equals `1`
+   - Expected: interner.next_id.value equals `2`
+   - Expected: interner.next_id.value equals `2`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("increments ID counter")
+var interner = StringInterner.empty()
 
-expect(interner.next_id).to_equal(0)
+expect(interner.next_id.value).to_equal(0)
 
 interner.intern("first")
-expect(interner.next_id).to_equal(1)
+expect(interner.next_id.value).to_equal(1)
 
 interner.intern("second")
-expect(interner.next_id).to_equal(2)
+expect(interner.next_id.value).to_equal(2)
 
 # Interning same string doesn't increment
 interner.intern("first")
-expect(interner.next_id).to_equal(2)
+expect(interner.next_id.value).to_equal(2)
 ```
 
 </details>
@@ -319,15 +319,21 @@ expect(interner.next_id).to_equal(2)
 
 #### creates empty row _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- creates empty row
+   - Expected: row.fields.keys().len() equals `0`
 
-Runnable source: 2 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val row = SdnRow(fields: {})
-expect(row.fields.len()).to_equal(0)
+# @req REQ-SSPEC-INTEGRATION
+step("creates empty row")
+val row = SdnRow(fields: {}, _version: 0)
+expect(row.fields.keys().len()).to_equal(0)
 ```
 
 </details>
@@ -340,23 +346,21 @@ expect(row.fields.len()).to_equal(0)
 
 #### sets and gets field values _(slow)_
 
-1. var row = SdnRow
-
-2. row set
-
-3. row set
+- sets and gets field values
    - Expected: row.get("name")? equals `Alice`
    - Expected: row.get("age")? equals `30`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var row = SdnRow(fields: {})
+# @req REQ-SSPEC-INTEGRATION
+step("sets and gets field values")
+var row = SdnRow(fields: {}, _version: 0)
 
 row.set("name", "Alice")
 row.set("age", "30")
@@ -375,17 +379,23 @@ expect(row.get("age")?).to_equal("30")
 
 #### returns None for missing field _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- returns None for missing field
+   - Expected: result == nil is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val row = SdnRow(fields: {})
+# @req REQ-SSPEC-INTEGRATION
+step("returns None for missing field")
+val row = SdnRow(fields: {}, _version: 0)
 val result = row.get("nonexistent")
 
-expect(result.?).to_equal(false)
+expect(result == nil).to_equal(true)
 ```
 
 </details>
@@ -398,25 +408,25 @@ expect(result.?).to_equal(false)
 
 #### gets field as i64 _(slow)_
 
-1. var row = SdnRow
-
-2. row set
-   - Expected: result.? is true
+- gets field as i64
+   - Expected: result == nil is false
    - Expected: result? equals `42`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var row = SdnRow(fields: {})
+# @req REQ-SSPEC-INTEGRATION
+step("gets field as i64")
+var row = SdnRow(fields: {}, _version: 0)
 row.set("count", "42")
 
 val result = row.get_i64("count")
-expect(result.?).to_equal(true)
+expect(result == nil).to_equal(false)
 expect(result?).to_equal(42)
 ```
 
@@ -430,23 +440,21 @@ expect(result?).to_equal(42)
 
 #### gets field as bool _(slow)_
 
-1. var row = SdnRow
-
-2. row set
-
-3. row set
+- gets field as bool
    - Expected: row.get_bool("flag")? is true
    - Expected: row.get_bool("other")? is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var row = SdnRow(fields: {})
+# @req REQ-SSPEC-INTEGRATION
+step("gets field as bool")
+var row = SdnRow(fields: {}, _version: 0)
 row.set("flag", "true")
 row.set("other", "false")
 
@@ -464,20 +472,20 @@ expect(row.get_bool("other")?).to_equal(false)
 
 #### handles large field values _(slow)_
 
-1. var row = SdnRow
-
-2. row set
+- handles large field values
    - Expected: result.len() equals `10000`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var row = SdnRow(fields: {})
+# @req REQ-SSPEC-INTEGRATION
+step("handles large field values")
+var row = SdnRow(fields: {}, _version: 0)
 
 val large_text = "x".repeat(10000)
 row.set("large", large_text)
@@ -496,22 +504,20 @@ expect(result.len()).to_equal(10000)
 
 #### overwrites existing field _(slow)_
 
-1. var row = SdnRow
-
-2. row set
-
-3. row set
+- overwrites existing field
    - Expected: row.get("key")? equals `new_value`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var row = SdnRow(fields: {})
+# @req REQ-SSPEC-INTEGRATION
+step("overwrites existing field")
+var row = SdnRow(fields: {}, _version: 0)
 
 row.set("key", "old_value")
 row.set("key", "new_value")
@@ -531,13 +537,21 @@ expect(row.get("key")?).to_equal("new_value")
 
 #### creates table with schema _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- creates table with schema
+   - Expected: table.name equals `users`
+   - Expected: table.columns.len() equals `3`
+   - Expected: table.rows.len() equals `0`
 
-Runnable source: 5 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("creates table with schema")
 val table = SdnTable(name: "users", columns: ["id", "name", "email"], rows: [], index: {})
 
 expect(table.name).to_equal("users")
@@ -555,28 +569,22 @@ expect(table.rows.len()).to_equal(0)
 
 #### adds row to table _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
+- adds row to table
    - Expected: table.rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("adds row to table")
 var table = SdnTable(name: "items", columns: ["id", "value"], rows: [], index: {})
 
-var row = SdnRow(fields: {})
+var row = SdnRow(fields: {}, _version: 0)
 row.set("id", "1")
 row.set("value", "test")
 
@@ -594,29 +602,23 @@ expect(table.rows.len()).to_equal(1)
 
 #### adds multiple rows _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
+- adds multiple rows
    - Expected: table.rows.len() equals `5`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("adds multiple rows")
 var table = SdnTable(name: "data", columns: ["key", "value"], rows: [], index: {})
 
 for i in 0..5:
-    var row = SdnRow(fields: {})
+    var row = SdnRow(fields: {}, _version: 0)
     row.set("key", "key_{i}")
     row.set("value", "value_{i}")
     table.add_row(row)
@@ -634,36 +636,30 @@ expect(table.rows.len()).to_equal(5)
 
 #### gets row by ID _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
-   - Expected: result.? is true
+- gets row by ID
+   - Expected: result == nil is false
    - Expected: data equals `test_data`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("gets row by ID")
 var table = SdnTable(name: "records", columns: ["id", "data"], rows: [], index: {})
 
-var row = SdnRow(fields: {})
+var row = SdnRow(fields: {}, _version: 0)
 row.set("id", "record_123")
 row.set("data", "test_data")
 table.add_row(row)
 
 val result = table.get_row("record_123")
-expect(result.?).to_equal(true)
-val r1 = result ?? SdnRow(fields: {})
+expect(result == nil).to_equal(false)
+val r1 = result ?? SdnRow(fields: {}, _version: 0)
 val data = r1.get("data") ?? ""
 expect(data).to_equal("test_data")
 ```
@@ -678,17 +674,23 @@ expect(data).to_equal("test_data")
 
 #### returns None for missing row ID _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- returns None for missing row ID
+   - Expected: result == nil is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("returns None for missing row ID")
 val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
 val result = table.get_row("nonexistent")
 
-expect(result.?).to_equal(false)
+expect(result == nil).to_equal(true)
 ```
 
 </details>
@@ -701,13 +703,18 @@ expect(result.?).to_equal(false)
 
 #### marks row as deleted _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- marks row as deleted
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("marks row as deleted")
 # SKIP: mark_deleted modifies rows via self.rows[i].set() but
 # SdnRow is value-typed, so mutation on array element does not persist
 print "SKIP: mark_deleted does not persist due to value-type SdnRow in array"
@@ -723,30 +730,24 @@ print "SKIP: mark_deleted does not persist due to value-type SdnRow in array"
 
 #### filters valid rows only _(slow)_
 
-1. var table = SdnTable
-
-2. var row = SdnRow
-
-3. row set
-
-4. row set
-
-5. table add row
+- filters valid rows only
    - Expected: valid_rows.len() equals `3)  # Rows 0, 2, 4`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters valid rows only")
 var table = SdnTable(name: "mixed", columns: ["id", "valid"], rows: [], index: {})
 
 # Add some valid and invalid rows
 for i in 0..5:
-    var row = SdnRow(fields: {})
+    var row = SdnRow(fields: {}, _version: 0)
     row.set("id", "row_{i}")
     val valid_str = if i % 2 == 0: "true" else: "false"
     row.set("valid", valid_str)
@@ -766,13 +767,21 @@ expect(valid_rows.len()).to_equal(3)  # Rows 0, 2, 4
 
 #### handles empty table _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- handles empty table
+   - Expected: table.rows.len() equals `0`
+   - Expected: empty_valid.len() equals `0`
+   - Expected: result == nil is true
 
-Runnable source: 8 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles empty table")
 val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
 
 expect(table.rows.len()).to_equal(0)
@@ -780,7 +789,7 @@ val empty_valid = table.valid_rows()
 expect(empty_valid.len()).to_equal(0)
 
 val result = table.get_row("any_id")
-expect(result.?).to_equal(false)
+expect(result == nil).to_equal(true)
 ```
 
 </details>
@@ -795,14 +804,20 @@ expect(result.?).to_equal(false)
 
 #### creates new database _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- creates new database
+   - Expected: db.tables.len() equals `0`
 
-Runnable source: 3 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val db = SdnDatabase(path: "/tmp/test_new_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("creates new database")
+val db = SdnDatabase(path: "/tmp/test_new_db.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 expect(db.tables.len()).to_equal(0)
 ```
@@ -817,21 +832,21 @@ expect(db.tables.len()).to_equal(0)
 
 #### adds table to database _(slow)_
 
-1. var db = SdnDatabase
-
-2. db set table
+- adds table to database
    - Expected: db.tables.len() equals `1`
    - Expected: db.tables.has("test_table") is true
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_add_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("adds table to database")
+var db = SdnDatabase(path: "/tmp/test_add_table.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 val table = SdnTable(name: "test_table", columns: ["id", "value"], rows: [], index: {})
 db.set_table("test_table", table)
@@ -850,27 +865,27 @@ expect(db.tables.has("test_table")).to_equal(true)
 
 #### gets table from database _(slow)_
 
-1. var db = SdnDatabase
-
-2. db set table
-   - Expected: result.? is true
+- gets table from database
+   - Expected: result == nil is false
    - Expected: tbl.name equals `my_table`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_get_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("gets table from database")
+var db = SdnDatabase(path: "/tmp/test_get_table.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 val table = SdnTable(name: "my_table", columns: ["col1", "col2"], rows: [], index: {})
 db.set_table("my_table", table)
 
 val result = db.get_table("my_table")
-expect(result.?).to_equal(true)
+expect(result == nil).to_equal(false)
 val tbl = result ?? SdnTable(name: "", columns: [], rows: [], index: {})
 expect(tbl.name).to_equal("my_table")
 ```
@@ -885,40 +900,30 @@ expect(tbl.name).to_equal("my_table")
 
 #### gets mutable table _(slow)_
 
-1. var db = SdnDatabase
-
-2. db set table
-
-3. var table opt = db get table mut
-   - Expected: table_opt.? is true
-
-4. var row = SdnRow
-
-5. row set
-
-6. mut table add row
-
-7. db set table
+- gets mutable table
+   - Expected: table_opt == nil is false
    - Expected: final_table.rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_mut_table.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("gets mutable table")
+var db = SdnDatabase(path: "/tmp/test_mut_table.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 val table = SdnTable(name: "mut_table", columns: ["id"], rows: [], index: {})
 db.set_table("mut_table", table)
 
 var table_opt = db.get_table_mut("mut_table")
-expect(table_opt.?).to_equal(true)
+expect(table_opt == nil).to_equal(false)
 
 var mut_table = table_opt?
-var row = SdnRow(fields: {})
+var row = SdnRow(fields: {}, _version: 0)
 row.set("id", "test")
 mut_table.add_row(row)
 
@@ -940,17 +945,23 @@ expect(final_table.rows.len()).to_equal(1)
 
 #### returns None for missing table _(slow)_
 
-<details>
-<summary>Executable SPipe</summary>
+- returns None for missing table
+   - Expected: result == nil is true
 
-Runnable source: 4 lines folded for reproduction.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val db = SdnDatabase(path: "/tmp/test_missing.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("returns None for missing table")
+val db = SdnDatabase(path: "/tmp/test_missing.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 val result = db.get_table("nonexistent")
-expect(result.?).to_equal(false)
+expect(result == nil).to_equal(true)
 ```
 
 </details>
@@ -963,23 +974,21 @@ expect(result.?).to_equal(false)
 
 #### replaces existing table _(slow)_
 
-1. var db = SdnDatabase
-
-2. db set table
-
-3. db set table
+- replaces existing table
    - Expected: result.columns.len() equals `1`
    - Expected: result.columns[0] equals `new_col`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_replace.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("replaces existing table")
+var db = SdnDatabase(path: "/tmp/test_replace.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 # Add initial table
 val table1 = SdnTable(name: "replaceable", columns: ["old_col"], rows: [], index: {})
@@ -1005,16 +1014,18 @@ expect(result.columns[0]).to_equal("new_col")
 
 #### saves and loads database _(slow)_
 
-1. print "SKIP: SdnDatabase stub load
+- saves and loads database
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("saves and loads database")
 # SKIP: SdnDatabase stub load() returns nil - real impl needed for save/load roundtrip
 print "SKIP: SdnDatabase stub load() always returns nil in this test"
 ```
@@ -1029,21 +1040,21 @@ print "SKIP: SdnDatabase stub load() always returns nil in this test"
 
 #### handles multiple tables _(slow)_
 
-1. var db = SdnDatabase
-
-2. db set table
+- handles multiple tables
    - Expected: db.tables.len() equals `5`
-   - Expected: table_opt.? is true
+   - Expected: table_opt == nil is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("handles multiple tables")
+var db = SdnDatabase(path: "/tmp/test_multi_tables.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 # Add multiple tables
 for i in 0..5:
@@ -1055,7 +1066,7 @@ expect(db.tables.len()).to_equal(5)
 # Verify all tables accessible
 for i in 0..5:
     val table_opt = db.get_table("table_{i}")
-    expect(table_opt.?).to_equal(true)
+    expect(table_opt == nil).to_equal(false)
 ```
 
 </details>
@@ -1068,22 +1079,22 @@ for i in 0..5:
 
 #### preserves table order _(slow)_
 
-1. var db = SdnDatabase
-
-2. db set table
-   - Expected: db.get_table("first").? is true
-   - Expected: db.get_table("second").? is true
-   - Expected: db.get_table("third").? is true
+- preserves table order
+   - Expected: db.get_table("first") == nil is false
+   - Expected: db.get_table("second") == nil is false
+   - Expected: db.get_table("third") == nil is false
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_table_order.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("preserves table order")
+var db = SdnDatabase(path: "/tmp/test_table_order.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 
 val names = ["first", "second", "third"]
 for name in names:
@@ -1091,9 +1102,9 @@ for name in names:
     db.set_table(name, table)
 
 # Tables should be accessible in any order
-expect(db.get_table("first").?).to_equal(true)
-expect(db.get_table("second").?).to_equal(true)
-expect(db.get_table("third").?).to_equal(true)
+expect(db.get_table("first") == nil).to_equal(false)
+expect(db.get_table("second") == nil).to_equal(false)
+expect(db.get_table("third") == nil).to_equal(false)
 ```
 
 </details>
@@ -1108,33 +1119,21 @@ expect(db.get_table("third").?).to_equal(true)
 
 #### combines interner with database _(slow)_
 
-1. var db = SdnDatabase
-
-2. var interner = StringInterner
-
-3. var table = SdnTable
-
-4. var row = SdnRow
-
-5. row set
-
-6. row set
-
-7. table add row
-
-8. db set table
+- combines interner with database
    - Expected: saved_table.rows.len() equals `1`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_interner_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
-var interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+# @req REQ-SSPEC-INTEGRATION
+step("combines interner with database")
+var db = SdnDatabase(path: "/tmp/test_interner_db.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
+var interner = StringInterner.empty()
 
 # Intern column names
 val col_id = interner.intern("id")
@@ -1144,7 +1143,7 @@ val col_name = interner.intern("name")
 var table = SdnTable(name: "users", columns: ["id", "name"], rows: [], index: {})
 
 # Add row
-var row = SdnRow(fields: {})
+var row = SdnRow(fields: {}, _version: 0)
 row.set(interner.lookup(col_id)?, "user_1")
 row.set(interner.lookup(col_name)?, "Alice")
 table.add_row(row)
@@ -1166,36 +1165,26 @@ expect(saved_table.rows.len()).to_equal(1)
 
 #### handles large number of rows efficiently _(slow)_
 
-1. var db = SdnDatabase
-
-2. var table = SdnTable
-
-3. var row = SdnRow
-
-4. row set
-
-5. row set
-
-6. table add row
-
-7. db set table
+- handles large number of rows efficiently
    - Expected: result.rows.len() equals `1000`
    - Expected: row_500.get("data")? equals `data_500`
 
 
 <details>
-<summary>Executable SPipe</summary>
+<summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-var db = SdnDatabase(path: "/tmp/test_large_db.sdn", tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+# @req REQ-SSPEC-INTEGRATION
+step("handles large number of rows efficiently")
+var db = SdnDatabase(path: "/tmp/test_large_db.sdn", tables: {}, interner: StringInterner.empty(), modified: false)
 var table = SdnTable(name: "large", columns: ["id", "data"], rows: [], index: {})
 
 # Add 1000 rows
 for i in 0..1000:
-    var row = SdnRow(fields: {})
+    var row = SdnRow(fields: {}, _version: 0)
     row.set("id", "row_{i}")
     row.set("data", "data_{i}")
     table.add_row(row)
@@ -1223,12 +1212,12 @@ expect(row_500.get("data")?).to_equal("data_500")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/database_core_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering StringInterner, SdnRow, SdnTable, SdnDatabase, Database Integration.
 - StringInterner
 - SdnRow
 - SdnTable
@@ -1247,3 +1236,54 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `d91e8ff84847029d714937203811ee91bb898cc736b722398bdc1a206020ea82`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `d91e8ff84847029d714937203811ee91bb898cc736b722398bdc1a206020ea82`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `d91e8ff84847029d714937203811ee91bb898cc736b722398bdc1a206020ea82`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/02_integration/lib/database_core_spec.spl
+mirror: doc/06_spec/02_integration/lib/database_core_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/lib/database_core_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/lib/database_core_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/lib/database_core_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 20 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/02_integration/lib/database_core_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'interns same string to same ID' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_core_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'interns different strings to different IDs' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/lib/database_core_spec.spl:89:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lookups strings by ID' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

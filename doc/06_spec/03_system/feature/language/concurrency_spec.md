@@ -2,29 +2,6 @@
 
 > This spec covers Simple's concurrency model: actor-based message passing, async-by-default functions, stackless coroutines, futures/promises, and runtime guards for blocking calls and thread isolation.
 
-<!-- sdn-diagram:id=concurrency_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=concurrency_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-concurrency_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=concurrency_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 24 | 24 | 0 | 0 |
@@ -46,7 +23,7 @@ This spec covers Simple's concurrency model: actor-based message passing, async-
 | Type | Extracted Examples (Category B) |
 | Reference | concurrency.md |
 | Source | `test/03_system/feature/language/concurrency_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -147,16 +124,22 @@ Chain of async operations with intermediate results:
 
 #### actors_processes_1
 
-1. check
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- actors_processes_1
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("actors_processes_1")
 val actor_name = spawn_actor("worker")
 check(actor_name == "worker")
 ```
@@ -165,16 +148,18 @@ check(actor_name == "worker")
 
 #### actors_processes_2
 
-1. check
+- actors_processes_2
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("actors_processes_2")
 val count = send_message(2)
 check(count == 3)
 ```
@@ -183,16 +168,18 @@ check(count == 3)
 
 #### actors_processes_3
 
-1. check
+- actors_processes_3
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("actors_processes_3")
 val message = receive_message("alpha")
 check(message == "alpha")
 ```
@@ -201,16 +188,18 @@ check(message == "alpha")
 
 #### actors_processes_ping_pong
 
-1. check
+- actors_processes_ping_pong
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("actors_processes_ping_pong")
 val rounds = ping_pong_rounds(2)
 check(rounds == 4)
 ```
@@ -219,16 +208,18 @@ check(rounds == 4)
 
 #### async_effects_and_stackless_coroutine_actors_5
 
-1. check
+- async_effects_and_stackless_coroutine_actors_5
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async_effects_and_stackless_coroutine_actors_5")
 check(non_blocking_async_step())
 ```
 
@@ -236,16 +227,18 @@ check(non_blocking_async_step())
 
 #### async_effects_and_stackless_coroutine_actors_6
 
-1. check
+- async_effects_and_stackless_coroutine_actors_6
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async_effects_and_stackless_coroutine_actors_6")
 check(bounded_loop(5) == 5)
 ```
 
@@ -253,16 +246,18 @@ check(bounded_loop(5) == 5)
 
 #### async_effects_and_stackless_coroutine_actors_7
 
-1. check
+- async_effects_and_stackless_coroutine_actors_7
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async_effects_and_stackless_coroutine_actors_7")
 val total = counter_after_deltas(1, 2)
 check(total == 3)
 ```
@@ -271,16 +266,18 @@ check(total == 3)
 
 #### async_effects_and_stackless_coroutine_actors_8
 
-1. check
+- async_effects_and_stackless_coroutine_actors_8
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async_effects_and_stackless_coroutine_actors_8")
 val token = parse_stream("tok1", "tok2")
 check(token == "tok2")
 ```
@@ -289,16 +286,18 @@ check(token == "tok2")
 
 #### isolated_threads_9
 
-1. check
+- isolated_threads_9
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("isolated_threads_9")
 val value = copy_text("isolated")
 check(value == "isolated")
 ```
@@ -307,16 +306,18 @@ check(value == "isolated")
 
 #### isolated_threads_10
 
-1. check
+- isolated_threads_10
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("isolated_threads_10")
 val sum = producer_consumer_roundtrip(10, 20)
 check(sum == 30)
 ```
@@ -325,16 +326,18 @@ check(sum == 30)
 
 #### futures_and_promises_11
 
-1. check
+- futures_and_promises_11
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_11")
 val result = promise_complete(42)
 check(result == 42)
 ```
@@ -343,16 +346,18 @@ check(result == 42)
 
 #### futures_and_promises_12
 
-1. check
+- futures_and_promises_12
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_12")
 val workers = thread_pool_size(4)
 check(workers == 4)
 ```
@@ -361,16 +366,18 @@ check(workers == 4)
 
 #### futures_and_promises_13
 
-1. check
+- futures_and_promises_13
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_13")
 val mode = manual_mode_label()
 check(mode == "Manual")
 ```
@@ -379,16 +386,18 @@ check(mode == "Manual")
 
 #### futures_and_promises_14
 
-1. check
+- futures_and_promises_14
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_14")
 val state = future_state_label()
 check(state == "Pending")
 ```
@@ -397,16 +406,18 @@ check(state == "Pending")
 
 #### futures_and_promises_15
 
-1. check
+- futures_and_promises_15
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_15")
 val value = resolved_future_value(99)
 check(value == 99)
 ```
@@ -415,16 +426,18 @@ check(value == 99)
 
 #### futures_and_promises_16
 
-1. check
+- futures_and_promises_16
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_16")
 val value = fetch_data(5)
 check(value == 12)
 ```
@@ -433,16 +446,18 @@ check(value == 12)
 
 #### futures_and_promises_17
 
-1. check
+- futures_and_promises_17
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_17")
 val value = future_map_then(10)
 check(value == 30)
 ```
@@ -451,16 +466,18 @@ check(value == 30)
 
 #### futures_and_promises_18
 
-1. check
+- futures_and_promises_18
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_18")
 val result = data_service_request(7)
 check(result == 107)
 ```
@@ -469,16 +486,18 @@ check(result == 107)
 
 #### futures_and_promises_19
 
-1. check
+- futures_and_promises_19
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("futures_and_promises_19")
 val result = data_service_request(3)
 check(result == 103)
 ```
@@ -487,17 +506,18 @@ check(result == 103)
 
 #### runtime_guards_20
 
-1. check
-2. check
+- runtime_guards_20
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("runtime_guards_20")
 check(tls_context_enabled(true))
 check(blocking_api_allowed(false) == false)
 ```
@@ -506,16 +526,18 @@ check(blocking_api_allowed(false) == false)
 
 #### runtime_guards_21
 
-1. check
+- runtime_guards_21
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 1 line folded for reproduction.
+Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("runtime_guards_21")
 check(blocking_api_allowed(false) == false)
 ```
 
@@ -523,16 +545,18 @@ check(blocking_api_allowed(false) == false)
 
 #### failure_handling_22
 
-1. check
+- failure_handling_22
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("failure_handling_22")
 val status = process_status()
 check(status == "failed")
 ```
@@ -541,16 +565,18 @@ check(status == "failed")
 
 #### failure_handling_23
 
-1. check
+- failure_handling_23
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("failure_handling_23")
 val restarts = supervisor_restart_count()
 check(restarts == 2)
 ```
@@ -559,16 +585,18 @@ check(restarts == 2)
 
 #### note_on_semantic_types_24
 
-1. check
+- note_on_semantic_types_24
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("note_on_semantic_types_24")
 val message = typed_message("text:hello")
 check(message == "text:hello")
 ```
@@ -587,3 +615,51 @@ check(message == "text:hello")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c81fe02ce5d5f3bc6e8f076d5393a5d0e7bfd5f913eec8e2a2d7f3bd935ab7a4`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c81fe02ce5d5f3bc6e8f076d5393a5d0e7bfd5f913eec8e2a2d7f3bd935ab7a4`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c81fe02ce5d5f3bc6e8f076d5393a5d0e7bfd5f913eec8e2a2d7f3bd935ab7a4`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/language/concurrency_spec.spl
+mirror: doc/06_spec/03_system/feature/language/concurrency_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/language/concurrency_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/language/concurrency_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/language/concurrency_spec.spl:193:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'actors_processes_1' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/concurrency_spec.spl:199:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'actors_processes_2' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/language/concurrency_spec.spl:205:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'actors_processes_3' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

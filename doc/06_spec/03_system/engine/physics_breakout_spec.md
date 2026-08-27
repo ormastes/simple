@@ -1,29 +1,6 @@
 # Physics Breakout Specification
 
-> 1. var world = make breakout world
-
-<!-- sdn-diagram:id=physics_breakout_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=physics_breakout_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-physics_breakout_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=physics_breakout_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering Physics2 Breakout System.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -40,20 +17,23 @@ physics_breakout_spec -> std
 
 #### ball moves after launch
 
-1. var world = make breakout world
-2. world apply impulse
-3. step n
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- ball moves after launch
    - Expected: pos.y > 1.5 is true
-4. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ball moves after launch")
 var world = make_breakout_world()
 world.apply_impulse(make_node(0), 2.0, 4.0)
 step_n(world, 20)
@@ -66,22 +46,21 @@ world.destroy()
 
 #### ball stays within world bounds
 
-1. var world = make breakout world
-2. world apply impulse
-3. step n
+- ball stays within world bounds
    - Expected: pos.x > -6.0 is true
    - Expected: pos.x < 6.0 is true
    - Expected: pos.y < 8.0 is true
-4. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ball stays within world bounds")
 var world = make_breakout_world()
 world.apply_impulse(make_node(0), 3.0, 4.0)
 step_n(world, 80)
@@ -96,20 +75,19 @@ world.destroy()
 
 #### ball speed approximately preserved
 
-1. var world = make breakout world
-2. world apply impulse
-3. step n
+- ball speed approximately preserved
    - Expected: speed_after > 1.0 is true
-4. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("ball speed approximately preserved")
 var world = make_breakout_world()
 world.apply_impulse(make_node(0), 0.5, 4.0)
 step_n(world, 30)
@@ -122,19 +100,20 @@ world.destroy()
 
 #### BVH active with many colliders
 
-1. var world = make breakout world
+- BVH active with many colliders
    - Expected: world.colliders.count > 4 is true
    - Expected: world.use_bvh is true
-2. world destroy
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("BVH active with many colliders")
 var world = make_breakout_world()
 expect(world.colliders.count > 4).to_equal(true)
 expect(world.use_bvh).to_equal(true)
@@ -145,26 +124,7 @@ world.destroy()
 
 #### deterministic simulation
 
-1. var config = default physics config 2d
-2. config gravity = Vec2
-3. var w1 = PhysicsWorld2D create
-4. w1 add dynamic body
-5. w1 add circle collider
-6. w1 add static body
-7. w1 add box collider
-8. w1 apply impulse
-9. step n
-10. w1 destroy
-11. var config2 = default physics config 2d
-12. config2 gravity = Vec2
-13. var w2 = PhysicsWorld2D create
-14. w2 add dynamic body
-15. w2 add circle collider
-16. w2 add static body
-17. w2 add box collider
-18. w2 apply impulse
-19. step n
-20. w2 destroy
+- deterministic simulation
    - Expected: p1.x equals `p2.x`
    - Expected: p1.y equals `p2.y`
 
@@ -172,10 +132,12 @@ world.destroy()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("deterministic simulation")
 var config = default_physics_config_2d()
 config.gravity = Vec2(x: 0.0, y: 0.0)
 config.restitution = 1.0
@@ -215,12 +177,12 @@ expect(p1.y).to_equal(p2.y)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/engine/physics_breakout_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Tests covering:
+Tests covering Physics2 Breakout System.
 - Physics2 Breakout System
 
 ## Scenario Summary
@@ -235,3 +197,51 @@ Tests covering:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `f5de326e33e344c53b017f023aa8d885a754e7c70a71b7d1b90d768fb73b314f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `f5de326e33e344c53b017f023aa8d885a754e7c70a71b7d1b90d768fb73b314f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `f5de326e33e344c53b017f023aa8d885a754e7c70a71b7d1b90d768fb73b314f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/engine/physics_breakout_spec.spl
+mirror: doc/06_spec/03_system/engine/physics_breakout_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/engine/physics_breakout_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/engine/physics_breakout_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/engine/physics_breakout_spec.spl:66:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ball moves after launch' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/engine/physics_breakout_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ball stays within world bounds' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/engine/physics_breakout_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'ball speed approximately preserved' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -2,29 +2,6 @@
 
 > requires [pure, io]
 
-<!-- sdn-diagram:id=effect_system_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=effect_system_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-effect_system_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=effect_system_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 32 | 32 | 0 | 0 |
@@ -44,7 +21,7 @@ requires [pure, io]
 | Category | Type System \| Effects |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/effect_system_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Effect Types
@@ -67,6 +44,8 @@ requires [pure, io]
 requires [pure, io]
 
 @pure
+use std.spec.step
+
 fn add(x: i64, y: i64) -> i64:
 x + y
 
@@ -83,17 +62,22 @@ data
 
 #### pure function can do computation
 
-1. fn add
-2. expect add
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- pure function can do computation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure function can do computation")
 @pure
 fn add(x: i64, y: i64) -> i64:
     x + y
@@ -105,19 +89,18 @@ expect add(20, 22) == 42
 
 #### pure function can call other pure functions
 
-1. fn double
-2. fn quadruple
-3. double
-4. expect quadruple
+- pure function can call other pure functions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure function can call other pure functions")
 @pure
 fn double(x: i64) -> i64:
     x * 2
@@ -133,13 +116,18 @@ expect quadruple(10) == 40
 
 #### pure function blocks print
 
+- pure function blocks print
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure function blocks print")
 # This would be a compile error:
 # @pure
 # fn bad():
@@ -153,17 +141,18 @@ expect true  # Compile-time check
 
 #### io function can do computation
 
-1. fn compute and return
-2. expect compute and return
+- io function can do computation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("io function can do computation")
 @io
 fn compute_and_return(x: i64) -> i64:
     x * 2
@@ -177,17 +166,18 @@ expect compute_and_return(21) == 42
 
 #### async decorator syntax works
 
-1. fn compute
-2. expect compute
+- async decorator syntax works
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async decorator syntax works")
 @async
 fn compute(x: i64) -> i64:
     x * 2
@@ -199,18 +189,18 @@ expect compute(21) == 42
 
 #### async allows non-blocking io
 
-1. fn greet
-2. print
-3. expect greet
+- async allows non-blocking io
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async allows non-blocking io")
 @async
 fn greet() -> i64:
     print("hello")
@@ -225,17 +215,18 @@ expect greet() == 42
 
 #### fs function can do computation
 
-1. fn compute fs
-2. expect compute fs
+- fs function can do computation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("fs function can do computation")
 @fs
 fn compute_fs(x: i64) -> i64:
     x * 2
@@ -249,17 +240,18 @@ expect compute_fs(21) == 42
 
 #### net function can do computation
 
-1. fn compute net
-2. expect compute net
+- net function can do computation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("net function can do computation")
 @net
 fn compute_net(x: i64) -> i64:
     x * 2
@@ -273,17 +265,18 @@ expect compute_net(21) == 42
 
 #### unsafe function can do computation
 
-1. fn compute unsafe
-2. expect compute unsafe
+- unsafe function can do computation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unsafe function can do computation")
 @unsafe
 fn compute_unsafe(x: i64) -> i64:
     x * 2
@@ -297,17 +290,18 @@ expect compute_unsafe(21) == 42
 
 #### pure and async together
 
-1. fn fast compute
-2. expect fast compute
+- pure and async together
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure and async together")
 @pure
 @async
 fn fast_compute(x: i64) -> i64:
@@ -320,17 +314,18 @@ expect fast_compute(21) == 42
 
 #### io and net together
 
-1. fn network logger
-2. expect network logger
+- io and net together
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("io and net together")
 @io
 @net
 fn network_logger(x: i64) -> i64:
@@ -343,17 +338,18 @@ expect network_logger(21) == 42
 
 #### all effects together
 
-1. fn full access
-2. expect full access
+- all effects together
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all effects together")
 @io
 @net
 @fs
@@ -367,17 +363,18 @@ expect full_access(21) == 42
 
 #### all effects parsed
 
-1. fn all effects
-2. expect all effects
+- all effects parsed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all effects parsed")
 @pure
 @io
 @net
@@ -395,17 +392,18 @@ expect all_effects(42) == 42
 
 #### effects with inline attribute
 
-1. fn attributed pure
-2. expect attributed pure
+- effects with inline attribute
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("effects with inline attribute")
 @inline
 @pure
 fn attributed_pure(x: i64) -> i64:
@@ -420,17 +418,18 @@ expect attributed_pure(21) == 42
 
 #### unrestricted function works
 
-1. fn do anything
-2. expect do anything
+- unrestricted function works
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unrestricted function works")
 fn do_anything(x: i64) -> i64:
     x * 2
 
@@ -443,13 +442,18 @@ expect do_anything(21) == 42
 
 #### pure cannot call io
 
+- pure cannot call io
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure cannot call io")
 # This would be a compile error:
 # @io fn log_value(x: i64) -> i64: ...
 # @pure fn compute(x: i64) -> i64: log_value(x) * 2  # Error
@@ -460,13 +464,18 @@ expect true  # Compile-time check
 
 #### pure cannot call net
 
+- pure cannot call net
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure cannot call net")
 # This would be a compile error:
 # @net fn fetch_data() -> i64: ...
 # @pure fn process() -> i64: fetch_data() * 2  # Error
@@ -477,13 +486,18 @@ expect true  # Compile-time check
 
 #### pure cannot call fs
 
+- pure cannot call fs
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure cannot call fs")
 # This would be a compile error:
 # @fs fn read_config() -> i64: ...
 # @pure fn get_value() -> i64: read_config() + 10  # Error
@@ -494,13 +508,18 @@ expect true  # Compile-time check
 
 #### pure cannot call unsafe
 
+- pure cannot call unsafe
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("pure cannot call unsafe")
 # This would be a compile error:
 # @unsafe fn dangerous() -> i64: ...
 # @pure fn safe_wrapper() -> i64: dangerous() + 1  # Error
@@ -511,19 +530,18 @@ expect true  # Compile-time check
 
 #### io can call pure
 
-1. fn calculate
-2. fn log and compute
-3. calculate
-4. expect log and compute
+- io can call pure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("io can call pure")
 @pure
 fn calculate(x: i64) -> i64:
     x * 2
@@ -539,19 +557,18 @@ expect log_and_compute(20) == 50
 
 #### io can call io
 
-1. fn helper
-2. fn caller
-3. helper
-4. expect caller
+- io can call io
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("io can call io")
 @io
 fn helper(x: i64) -> i64:
     x * 2
@@ -567,22 +584,18 @@ expect caller(20) == 50
 
 #### unrestricted can call anything
 
-1. fn io func
-2. fn net func
-3. fn fs func
-4. fn pure func
-5. fn unrestricted
-6. io func
-7. expect unrestricted
+- unrestricted can call anything
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unrestricted can call anything")
 @io
 fn io_func() -> i64:
     10
@@ -611,17 +624,18 @@ expect unrestricted() == 65
 
 #### basic capability parsing
 
-1. fn compute
-2. expect compute
+- basic capability parsing
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("basic capability parsing")
 requires [pure]
 
 @pure
@@ -635,17 +649,18 @@ expect compute(21) == 42
 
 #### multiple capabilities
 
-1. fn compute
-2. expect compute
+- multiple capabilities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiple capabilities")
 requires [pure, io, net]
 
 @pure
@@ -659,17 +674,18 @@ expect compute(21) == 42
 
 #### all capabilities
 
-1. fn compute
-2. expect compute
+- all capabilities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("all capabilities")
 requires [pure, io, net, fs, unsafe, gc]
 
 fn compute(x: i64) -> i64:
@@ -682,17 +698,18 @@ expect compute(21) == 42
 
 #### trailing comma allowed
 
-1. fn compute
-2. expect compute
+- trailing comma allowed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("trailing comma allowed")
 requires [pure, io,]
 
 @pure
@@ -706,17 +723,18 @@ expect compute(21) == 42
 
 #### empty requires list
 
-1. fn compute
-2. expect compute
+- empty requires list
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("empty requires list")
 requires []
 
 fn compute(x: i64) -> i64:
@@ -731,17 +749,18 @@ expect compute(21) == 42
 
 #### effect matches capability
 
-1. fn add
-2. expect add
+- effect matches capability
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("effect matches capability")
 requires [pure]
 
 @pure
@@ -755,13 +774,18 @@ expect add(20, 22) == 42
 
 #### io effect blocked by pure-only module
 
+- io effect blocked by pure-only module
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("io effect blocked by pure-only module")
 # This would be a compile error:
 # requires [pure]
 # @io fn log_value(x: i64) -> i64: x  # Error: @io not in [pure]
@@ -772,17 +796,18 @@ expect true  # Compile-time check
 
 #### async always allowed
 
-1. fn compute
-2. expect compute
+- async always allowed
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("async always allowed")
 requires [pure]
 
 @async
@@ -796,17 +821,18 @@ expect compute(21) == 42
 
 #### multiple effects with matching capabilities
 
-1. fn process
-2. expect process
+- multiple effects with matching capabilities
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("multiple effects with matching capabilities")
 requires [pure, io]
 
 @pure
@@ -821,17 +847,18 @@ expect process(21) == 42
 
 #### unrestricted module allows all
 
-1. fn do everything
-2. expect do everything
+- unrestricted module allows all
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("unrestricted module allows all")
 @io
 @net
 @fs
@@ -856,3 +883,51 @@ expect do_everything(21) == 42
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `374ec66dd6898239f03a42485ae5a5f1ca8bf16b4105e161ddbb859c56d8e7ac`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `374ec66dd6898239f03a42485ae5a5f1ca8bf16b4105e161ddbb859c56d8e7ac`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `374ec66dd6898239f03a42485ae5a5f1ca8bf16b4105e161ddbb859c56d8e7ac`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/effect_system_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/effect_system_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/effect_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/effect_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/effect_system_spec.spl:64:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pure function can do computation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/effect_system_spec.spl:73:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pure function can call other pure functions' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/effect_system_spec.spl:86:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'pure function blocks print' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

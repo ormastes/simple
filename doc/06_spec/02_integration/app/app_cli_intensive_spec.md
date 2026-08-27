@@ -1,29 +1,6 @@
-# CLI Application Intensive Tests
+# App Cli Intensive Specification
 
-> End-to-end testing of CLI commands: build, test, lint, fmt, and other tools. Tests complete command workflows with real project files.
-
-<!-- sdn-diagram:id=app_cli_intensive_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=app_cli_intensive_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-app_cli_intensive_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=app_cli_intensive_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering CLI Build Command - Intensive, CLI Test Command - Intensive, CLI Format Command - Intensive, CLI Stats Command - Intensive, CLI TODO Scanner - Intensive, CLI Bug Tracking - Intensive, CLI Release Command - Intensive, CLI Command Dispatch - Intensive, CLI Help System - Intensive.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -32,47 +9,7 @@ app_cli_intensive_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# CLI Application Intensive Tests
-
-End-to-end testing of CLI commands: build, test, lint, fmt, and other tools. Tests complete command workflows with real project files.
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #1021-1030 |
-| Category | Testing |
-| Difficulty | 4/5 |
-| Status | Implemented |
-| Source | `test/02_integration/app/app_cli_intensive_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-End-to-end testing of CLI commands: build, test, lint, fmt, and other tools.
-Tests complete command workflows with real project files.
-
-## Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| CLI Testing | Command-line interface validation |
-| Tool Integration | Build/test/lint workflows |
-| File Operations | Reading, writing, analyzing files |
-
-## Related Specifications
-
-- [CLI](../../src/app/cli/) - Command dispatcher
-- [Build](../../src/app/build/) - Build system
-- [Test Runner](../../src/app/test_runner_new/) - Test execution
-
-## Examples
-
-```simple
-# CLI command simulation
-val result = execute_command("build", ["--release"])
-```
+# App Cli Intensive Specification
 
 ## Scenarios
 
@@ -85,17 +22,18 @@ val result = execute_command("build", ["--release"])
 
 #### validates build command structure _(slow)_
 
-1. check
-2. check
+- validates build command structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("validates build command structure")
 var commands = ["build", "build --release", "build lint", "build fmt"]
 
 for cmd in commands:
@@ -113,16 +51,18 @@ for cmd in commands:
 
 #### handles build arguments _(slow)_
 
-1. check
+- handles build arguments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles build arguments")
 val args = ["--release", "--debug", "--verbose", "--quiet"]
 
 for arg in args:
@@ -141,17 +81,18 @@ for arg in args:
 
 #### processes linter commands _(slow)_
 
-1. check
-2. check
+- processes linter commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("processes linter commands")
 val lint_targets = [
     "src/compiler/10.frontend/core/lexer.spl",
     "src/lib/common/text.spl",
@@ -177,18 +118,18 @@ for target in lint_targets:
 
 #### discovers test patterns _(slow)_
 
-1. check
-2. check
-3. check
+- discovers test patterns
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("discovers test patterns")
 val test_patterns = [
     "test/unit/std/*_spec.spl",
     "test/integration/*_spec.spl",
@@ -211,16 +152,18 @@ for pattern in test_patterns:
 
 #### handles test filters _(slow)_
 
-1. check
+- handles test filters
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles test filters")
 val filters = [
     "--tag=unit",
     "--tag=integration",
@@ -244,16 +187,18 @@ for filter in filters:
 
 #### simulates running 100 test files _(slow)_
 
-1. check
+- simulates running 100 test files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("simulates running 100 test files")
 var executed = 0
 
 for i in 0..100:
@@ -274,18 +219,18 @@ check(executed == 100)
 
 #### tracks test results _(slow)_
 
-1. results = results append
-2. check
-3. check
+- tracks test results
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("tracks test results")
 var results = []
 
 for i in 0..50:
@@ -319,17 +264,18 @@ check(failed == 10)
 
 #### identifies files needing formatting _(slow)_
 
-1. spl files = spl files append
-2. check
+- identifies files needing formatting
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("identifies files needing formatting")
 val files = [
     "src/compiler/10.frontend/core/lexer.spl",
     "src/compiler/10.frontend/core/parser.spl",
@@ -354,16 +300,18 @@ check(spl_files.len() == 3)
 
 #### handles format options _(slow)_
 
-1. check
+- handles format options
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles format options")
 val options = [
     "--check",
     "--dry-run",
@@ -389,16 +337,18 @@ for opt in options:
 
 #### counts lines in files _(slow)_
 
-1. check
+- counts lines in files
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("counts lines in files")
 val file_sizes = [
     100, 250, 500, 1000, 2000
 ]
@@ -420,17 +370,18 @@ check(total_lines == 3850)
 
 #### analyzes file types _(slow)_
 
-1. check
-2. check
+- analyzes file types
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("analyzes file types")
 val files = [
     "file.spl", "file.smf", "file.sdn",
     "test.spl", "doc.md", "config.sdn"
@@ -464,17 +415,18 @@ check(sdn_count == 2)
 
 #### finds TODO comments in code _(slow)_
 
-1. check
-2. check
+- finds TODO comments in code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("finds TODO comments in code")
 val code_samples = [
     "# TODO: implement this",
     "# FIXME: broken logic",
@@ -506,19 +458,18 @@ check(fixme_count == 1)
 
 #### scans 200 code lines for TODOs _(slow)_
 
-1. lines = lines append
-2. lines = lines append
-3. todos = todos append
-4. check
+- scans 200 code lines for TODOs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("scans 200 code lines for TODOs")
 var lines = []
 for i in 0..200:
     if i % 20 == 0:
@@ -548,17 +499,18 @@ check(todos.len() == 10)
 
 #### simulates adding 50 bugs _(slow)_
 
-1. bugs = bugs append
-2. check
+- simulates adding 50 bugs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("simulates adding 50 bugs")
 var bugs = []
 
 for i in 0..50:
@@ -579,18 +531,18 @@ check(bugs.len() == 50)
 
 #### filters bugs by status _(slow)_
 
-1. all bugs = all bugs append
-2. check
-3. check
+- filters bugs by status
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("filters bugs by status")
 var all_bugs = []
 
 for i in 0..100:
@@ -624,16 +576,18 @@ check(closed_bugs == 50)
 
 #### validates version strings _(slow)_
 
-1. check
+- validates version strings
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("validates version strings")
 val versions = [
     "0.5.0",
     "0.5.1-rc.1",
@@ -655,17 +609,18 @@ for version in versions:
 
 #### handles version increments _(slow)_
 
-1. check
-2. check
+- handles version increments
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles version increments")
 val base_version = "0.5.0"
 val parts = base_version.split(".")
 
@@ -685,17 +640,18 @@ check(parts[0] == "0")
 
 #### prepares release artifacts _(slow)_
 
-1. check
-2. check
+- prepares release artifacts
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("prepares release artifacts")
 val artifacts = [
     "simple-linux-x64.tar.gz",
     "simple-macos-arm64.tar.gz",
@@ -721,17 +677,18 @@ for artifact in artifacts:
 
 #### parses 100 different commands _(slow)_
 
-1. commands = commands append
-2. check
+- parses 100 different commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("parses 100 different commands")
 var commands = []
 
 var cmds = ["build", "test", "lint", "fmt", "run"]
@@ -752,16 +709,18 @@ check(commands.len() == 100)
 
 #### handles command aliases _(slow)_
 
-1. check
+- handles command aliases
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("handles command aliases")
 val aliases = {
     "t": "test",
     "b": "build",
@@ -785,17 +744,18 @@ check(keys.len() == 4)
 
 #### processes complex argument combinations _(slow)_
 
-1. check
-2. check
+- processes complex argument combinations
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("processes complex argument combinations")
 val arg_sets = [
     ["build", "--release", "--verbose"],
     ["test", "--tag=unit", "--fail-fast"],
@@ -821,17 +781,18 @@ for args in arg_sets:
 
 #### generates help for all commands _(slow)_
 
-1. help texts = help texts append
-2. check
+- generates help for all commands
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("generates help for all commands")
 var commands = [
     "build", "test", "lint", "fmt",
     "run", "doc-gen", "todo-scan", "bug-add"
@@ -855,16 +816,18 @@ check(help_texts.len() == 8)
 
 #### validates help text format _(slow)_
 
-1. check
+- validates help text format
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-INTEGRATION
+step("validates help text format")
 val help_sections = [
     "Usage:",
     "Options:",
@@ -881,6 +844,29 @@ for section in help_sections:
 
 </details>
 
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/02_integration/app/app_cli_intensive_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering CLI Build Command - Intensive, CLI Test Command - Intensive, CLI Format Command - Intensive, CLI Stats Command - Intensive, CLI TODO Scanner - Intensive, CLI Bug Tracking - Intensive, CLI Release Command - Intensive, CLI Command Dispatch - Intensive, CLI Help System - Intensive.
+- CLI Build Command - Intensive
+- CLI Test Command - Intensive
+- CLI Format Command - Intensive
+- CLI Stats Command - Intensive
+- CLI TODO Scanner - Intensive
+- CLI Bug Tracking - Intensive
+- CLI Release Command - Intensive
+- CLI Command Dispatch - Intensive
+- CLI Help System - Intensive
+
 ## Scenario Summary
 
 | Metric | Count |
@@ -893,3 +879,51 @@ for section in help_sections:
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-INTEGRATION`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `9a1a24e0c2558dcec450be519f31f66e7800cb9ab0e5b8a99e8f8a1d3e9f305b`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `9a1a24e0c2558dcec450be519f31f66e7800cb9ab0e5b8a99e8f8a1d3e9f305b`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `9a1a24e0c2558dcec450be519f31f66e7800cb9ab0e5b8a99e8f8a1d3e9f305b`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/02_integration/app/app_cli_intensive_spec.spl
+mirror: doc/06_spec/02_integration/app/app_cli_intensive_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/02_integration/app/app_cli_intensive_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/02_integration/app/app_cli_intensive_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/02_integration/app/app_cli_intensive_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'validates build command structure' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/app_cli_intensive_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'handles build arguments' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/02_integration/app/app_cli_intensive_spec.spl:78:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'processes linter commands' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

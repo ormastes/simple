@@ -2,30 +2,6 @@
 
 > Package unfold allows marking a package as a namespace container only. When a package is unfolded, direct imports of that package become lint/compile errors, forcing users to import specific subpackages instead.
 
-<!-- sdn-diagram:id=package_unfold_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=package_unfold_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-package_unfold_spec -> a
-package_unfold_spec -> unfold declarations
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=package_unfold_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 72 | 72 | 0 | 0 |
@@ -46,7 +22,7 @@ Package unfold allows marking a package as a namespace container only. When a pa
 | Difficulty | 3/5 |
 | Status | Draft |
 | Source | `test/01_unit/spec/package_unfold_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -108,17 +84,18 @@ error[E0501]: cannot import unfolded package 'a' directly
 
 #### parses single subpackage unfold
 
-1. expect decl subpackages len
-2. fail
+- parses single subpackage unfold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses single subpackage unfold")
 val source = r"unfold {b}"
 match parse_unfold(source):
     case ParseResult.Ok(decl):
@@ -132,19 +109,18 @@ match parse_unfold(source):
 
 #### parses two subpackages unfold
 
-1. expect decl subpackages len
-2. expect decl has subpackage
-3. expect decl has subpackage
-4. fail
+- parses two subpackages unfold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses two subpackages unfold")
 val source = r"unfold {b, c}"
 match parse_unfold(source):
     case ParseResult.Ok(decl):
@@ -159,20 +135,18 @@ match parse_unfold(source):
 
 #### parses three or more subpackages
 
-1. expect decl subpackages len
-2. expect decl has subpackage
-3. expect decl has subpackage
-4. expect decl has subpackage
-5. fail
+- parses three or more subpackages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses three or more subpackages")
 val source = r"unfold {b, c, d}"
 match parse_unfold(source):
     case ParseResult.Ok(decl):
@@ -188,19 +162,18 @@ match parse_unfold(source):
 
 #### parses with trailing comma
 
-1. expect decl subpackages len
-2. expect decl has subpackage
-3. expect decl has subpackage
-4. fail
+- parses with trailing comma
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses with trailing comma")
 val source = r"unfold {b, c,}"
 match parse_unfold(source):
     case ParseResult.Ok(decl):
@@ -215,17 +188,18 @@ match parse_unfold(source):
 
 #### parses with extra whitespace
 
-1. expect decl subpackages len
-2. fail
+- parses with extra whitespace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("parses with extra whitespace")
 val source = r"unfold {  b  ,  c  }"
 match parse_unfold(source):
     case ParseResult.Ok(decl):
@@ -240,17 +214,18 @@ match parse_unfold(source):
 
 #### errors on empty unfold
 
-1. fail
-2. expect e message contains
+- errors on empty unfold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on empty unfold")
 val source = r"unfold {}"
 match parse_unfold(source):
     case ParseResult.Ok(_):
@@ -263,17 +238,18 @@ match parse_unfold(source):
 
 #### errors on invalid identifier
 
-1. fail
-2. expect e message contains
+- errors on invalid identifier
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on invalid identifier")
 val source = r"unfold {123}"
 match parse_unfold(source):
     case ParseResult.Ok(_):
@@ -286,17 +262,18 @@ match parse_unfold(source):
 
 #### errors on duplicate subpackages
 
-1. fail
-2. expect e message contains
+- errors on duplicate subpackages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on duplicate subpackages")
 val source = r"unfold {b, b}"
 match parse_unfold(source):
     case ParseResult.Ok(_):
@@ -309,17 +286,18 @@ match parse_unfold(source):
 
 #### errors on missing closing brace
 
-1. fail
-2. expect e message contains
+- errors on missing closing brace
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on missing closing brace")
 val source = r"unfold {b, c"
 match parse_unfold(source):
     case ParseResult.Ok(_):
@@ -332,17 +310,18 @@ match parse_unfold(source):
 
 #### errors on missing unfold keyword
 
-1. fail
-2. expect e message contains
+- errors on missing unfold keyword
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on missing unfold keyword")
 val source = r"{b, c}"
 match parse_unfold(source):
     case ParseResult.Ok(_):
@@ -359,16 +338,18 @@ match parse_unfold(source):
 
 #### accepts unfold matching existing subdirs
 
-1. expect errors len
+- accepts unfold matching existing subdirs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("accepts unfold matching existing subdirs")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl", "a/b/__init__.spl", "a/c/__init__.spl"],
     ["a", "a/b", "a/c"]
@@ -382,16 +363,18 @@ expect errors.len() == 0
 
 #### accepts nested directory structures
 
-1. expect errors len
+- accepts nested directory structures
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("accepts nested directory structures")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl", "a/b/__init__.spl", "a/b/c/__init__.spl"],
     ["a", "a/b", "a/b/c"]
@@ -405,16 +388,18 @@ expect errors.len() == 0
 
 #### accepts deeply nested paths
 
-1. expect errors len
+- accepts deeply nested paths
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("accepts deeply nested paths")
 val fs = MockFileSystem.from_structure(
     ["x/__init__.spl", "x/y/__init__.spl", "x/y/z/__init__.spl"],
     ["x", "x/y", "x/y/z"]
@@ -430,17 +415,18 @@ expect errors.len() == 0
 
 #### errors when subpackage directory does not exist
 
-1. expect errors len
-2. expect errors[0] contains
+- errors when subpackage directory does not exist
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors when subpackage directory does not exist")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl"],
     ["a"]
@@ -455,17 +441,18 @@ expect errors[0].contains("does not exist")
 
 #### errors when subpackage has no __init__.spl
 
-1. expect errors len
-2. expect errors[0] contains
+- errors when subpackage has no __init__.spl
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors when subpackage has no __init__.spl")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl"],
     ["a", "a/b"]  # Directory exists but no __init__.spl
@@ -480,16 +467,18 @@ expect errors[0].contains("no __init__.spl")
 
 #### reports multiple validation errors
 
-1. expect errors len
+- reports multiple validation errors
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reports multiple validation errors")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl"],
     ["a"]
@@ -503,16 +492,18 @@ expect errors.len() == 3
 
 #### errors when unfold is in file-based module
 
-1. expect errors len
+- errors when unfold is in file-based module
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors when unfold is in file-based module")
 # File-based modules (foo.spl) cannot have subpackages
 val fs = MockFileSystem.from_structure(
     ["a.spl"],  # File module, not directory
@@ -529,16 +520,18 @@ expect errors.len() > 0
 
 #### validates only declared subpackages
 
-1. expect errors len
+- validates only declared subpackages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("validates only declared subpackages")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl", "a/b/__init__.spl", "a/c/__init__.spl", "a/d/__init__.spl"],
     ["a", "a/b", "a/c", "a/d"]
@@ -557,18 +550,18 @@ expect errors.len() == 0
 
 #### errors on direct import of unfolded package
 
-1. mod a set unfold
-2. expect subpkgs len
-3. fail
+- errors on direct import of unfolded package
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on direct import of unfolded package")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b", "c"])
 val import_stmt = ImportStmt.simple("a")
@@ -585,21 +578,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### includes all valid subpackages in error
 
-1. mod a set unfold
-2. expect subpkgs len
-3. expect subpkgs contains
-4. expect subpkgs contains
-5. expect subpkgs contains
-6. fail
+- includes all valid subpackages in error
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("includes all valid subpackages in error")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["x", "y", "z"])
 val import_stmt = ImportStmt.simple("a")
@@ -620,18 +610,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### allows import of valid subpackage
 
-1. mod a set unfold
-2. mod a add child
-3. fail
+- allows import of valid subpackage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows import of valid subpackage")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b", "c"])
 val mod_b = Module.dir_module("b", "a/b/__init__.spl")
@@ -649,17 +639,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### allows import with alias from subpackage
 
-1. mod a set unfold
-2. fail
+- allows import with alias from subpackage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows import with alias from subpackage")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 val import_stmt = ImportStmt.with_alias("a.b", "alias_b")
@@ -675,17 +666,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### allows nested item import from subpackage
 
-1. mod a set unfold
-2. fail
+- allows nested item import from subpackage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows nested item import from subpackage")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 val import_stmt = ImportStmt.simple("a.b.item")
@@ -703,17 +695,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### errors on wildcard import of unfolded package
 
-1. mod a set unfold
-2. fail
+- errors on wildcard import of unfolded package
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on wildcard import of unfolded package")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b", "c"])
 val import_stmt = ImportStmt.wildcard("a")
@@ -729,17 +722,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### allows wildcard import from subpackage
 
-1. mod a set unfold
-2. fail
+- allows wildcard import from subpackage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows wildcard import from subpackage")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 val import_stmt = ImportStmt.wildcard("a.b")
@@ -757,16 +751,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### allows direct import of non-unfolded package
 
-1. fail
+- allows direct import of non-unfolded package
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows direct import of non-unfolded package")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 # No unfold declaration
 val import_stmt = ImportStmt.simple("a")
@@ -784,18 +780,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### correctly identifies unfolded among multiple packages
 
-1. mod a set unfold
-2. fail
-3. fail
+- correctly identifies unfolded among multiple packages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("correctly identifies unfolded among multiple packages")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["x"])
 val mod_b = Module.dir_module("b", "b/__init__.spl")
@@ -822,17 +818,18 @@ match resolve_import(ImportStmt.simple("b"), [mod_a, mod_b]):
 
 #### errors on relative import of unfolded package
 
-1. mod a set unfold
-2. fail
+- errors on relative import of unfolded package
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on relative import of unfolded package")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 # Simulating relative import "super.a" that resolves to just "a"
@@ -851,17 +848,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### errors on crate.pkg when pkg is unfolded
 
-1. mod a set unfold
-2. fail
+- errors on crate.pkg when pkg is unfolded
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors on crate.pkg when pkg is unfolded")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 # Simulating "crate.a" that resolves to "a"
@@ -882,19 +880,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### handles a unfolds to b, b unfolds to c,d
 
-1. mod a set unfold
-2. mod b set unfold
-3. mod a add child
-4. fail
+- handles a unfolds to b, b unfolds to c,d
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles a unfolds to b, b unfolds to c,d")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -914,18 +911,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### provides correct suggestions at each level
 
-1. mod a set unfold
-2. expect subpkgs contains
-3. fail
+- provides correct suggestions at each level
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("provides correct suggestions at each level")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -942,21 +939,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles deeply nested unfolds
 
-1. mod a set unfold
-2. mod b set unfold
-3. mod a add child
-4. mod c set unfold
-5. mod b add child
-6. fail
+- handles deeply nested unfolds
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles deeply nested unfolds")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -982,18 +976,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### allows import when only parent is unfolded
 
-1. mod a set unfold
-2. mod a add child
-3. fail
+- allows import when only parent is unfolded
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows import when only parent is unfolded")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -1015,21 +1009,18 @@ match resolve_import(ImportStmt.simple("a.b"), [mod_a]):
 
 #### handles mix of unfolded and non-unfolded children
 
-1. mod a set unfold
-2. mod internal set unfold
-3. mod a add child
-4. mod a add child
-5. expect subpkgs contains
-6. fail
+- handles mix of unfolded and non-unfolded children
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles mix of unfolded and non-unfolded children")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["internal"])  # Only internal is unfolded
 
@@ -1059,18 +1050,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### allows public modules alongside unfold
 
-1. mod a set unfold
-2. expect subpkgs len
-3. fail
+- allows public modules alongside unfold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows public modules alongside unfold")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["internal"])
 
@@ -1088,20 +1079,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### supports pub mod api + unfold {impl} pattern
 
-1. mod lib set unfold
-2. mod lib add child
-3. mod lib add child
-4. expect subpkgs contains
-5. fail
+- supports pub mod api + unfold {impl} pattern
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("supports pub mod api + unfold {impl} pattern")
 val mod_lib = Module.dir_module("lib", "lib/__init__.spl")
 mod_lib.set_unfold(["impl"])
 
@@ -1125,17 +1114,18 @@ match resolve_import(ImportStmt.simple("lib"), [mod_lib]):
 
 #### handles re-export pattern from unfolded package
 
-1. mod a set unfold
-2. fail
+- handles re-export pattern from unfolded package
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles re-export pattern from unfolded package")
 # Pattern: a/__init__.spl re-exports from a.internal
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["internal"])
@@ -1157,17 +1147,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles empty package with only unfold
 
-1. mod a set unfold
-2. fail
+- handles empty package with only unfold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles empty package with only unfold")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 # Package has only unfold, no other content
@@ -1183,18 +1174,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles single subpackage unfold
 
-1. mod a set unfold
-2. expect subpkgs len
-3. fail
+- handles single subpackage unfold
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles single subpackage unfold")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["only_child"])
 
@@ -1212,17 +1203,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles very long subpackage names
 
-1. mod a set unfold
-2. fail
+- handles very long subpackage names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles very long subpackage names")
 val long_name = "very_long_subpackage_name_that_is_quite_lengthy"
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold([long_name])
@@ -1238,19 +1230,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles subpackage names with underscores
 
-1. mod a set unfold
-2. expect subpkgs contains
-3. expect subpkgs contains
-4. fail
+- handles subpackage names with underscores
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles subpackage names with underscores")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["sub_pkg", "another_sub"])
 
@@ -1266,18 +1257,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles single-character subpackage names
 
-1. mod a set unfold
-2. expect subpkgs len
-3. fail
+- handles single-character subpackage names
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles single-character subpackage names")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["x", "y", "z"])
 
@@ -1294,13 +1285,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles unfold not at top of file
 
+- handles unfold not at top of file
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles unfold not at top of file")
 # This tests that unfold can appear after other declarations
 # In practice, parser should find it regardless of position
 val source = "# comment\nimport other\n" + r"unfold {b}"
@@ -1314,13 +1310,18 @@ expect true  # Placeholder - real test would check AST
 
 #### errors when unfold used in file module
 
+- errors when unfold used in file module
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors when unfold used in file module")
 val mod_a = Module.file_module("a", "a.spl")  # File, not directory
 # Cannot have unfold in file module
 expect not mod_a.is_directory
@@ -1330,19 +1331,18 @@ expect not mod_a.is_directory
 
 #### handles unfold in test module
 
-1. mod test set unfold
-2. expect subpkgs contains
-3. expect subpkgs contains
-4. fail
+- handles unfold in test module
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles unfold in test module")
 val mod_test = Module.dir_module("test", "test/__init__.spl")
 mod_test.set_unfold(["unit", "integration"])
 
@@ -1362,16 +1362,18 @@ match resolve_import(ImportStmt.simple("test"), [mod_test]):
 
 #### creates I001 diagnostic for unfold violation
 
-1. expect diagnostic message contains
+- creates I001 diagnostic for unfold violation
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("creates I001 diagnostic for unfold violation")
 val diagnostic = create_unfold_lint("mypackage", ["sub1", "sub2"])
 
 expect diagnostic.code == "I001"
@@ -1383,19 +1385,18 @@ expect diagnostic.severity == "error"
 
 #### includes all valid subpackages in suggestions
 
-1. expect diagnostic suggestions len
-2. expect diagnostic suggestions[0] contains
-3. expect diagnostic suggestions[1] contains
-4. expect diagnostic suggestions[2] contains
+- includes all valid subpackages in suggestions
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("includes all valid subpackages in suggestions")
 val diagnostic = create_unfold_lint("pkg", ["a", "b", "c"])
 
 expect diagnostic.suggestions.len() == 3
@@ -1408,13 +1409,18 @@ expect diagnostic.suggestions[2].contains("pkg.c")
 
 #### formats suggestion as valid import statement
 
+- formats suggestion as valid import statement
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats suggestion as valid import statement")
 val diagnostic = create_unfold_lint("mylib", ["core"])
 
 expect diagnostic.suggestions[0] == "use mylib.core"
@@ -1426,21 +1432,18 @@ expect diagnostic.suggestions[0] == "use mylib.core"
 
 #### formats error with correct structure
 
-1. expect msg contains
-2. expect msg contains
-3. expect msg contains
-4. expect msg contains
-5. expect msg contains
-6. expect msg contains
+- formats error with correct structure
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("formats error with correct structure")
 val span = Span.at("src/main.spl", 3, 5)
 val msg = format_unfold_error("a", ["b", "c"], span)
 
@@ -1456,19 +1459,18 @@ expect msg.contains("use a.c")
 
 #### includes help section with all alternatives
 
-1. expect msg contains
-2. expect msg contains
-3. expect msg contains
-4. expect msg contains
+- includes help section with all alternatives
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("includes help section with all alternatives")
 val span = Span.at("test.spl", 1, 1)
 val msg = format_unfold_error("pkg", ["x", "y", "z"], span)
 
@@ -1484,23 +1486,7 @@ expect msg.contains("use pkg.z")
 
 #### reports correct span location
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val diagnostic = create_unfold_lint("a", ["b"])
-# Span should point to the import statement
-expect diagnostic.span.?
-```
-
-</details>
-
-#### provides machine-readable suggestion
-
-1. expect suggestion starts with
+- reports correct span location
 
 
 <details>
@@ -1510,6 +1496,29 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reports correct span location")
+val diagnostic = create_unfold_lint("a", ["b"])
+# Span should point to the import statement
+expect diagnostic.span.?
+```
+
+</details>
+
+#### provides machine-readable suggestion
+
+- provides machine-readable suggestion
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("provides machine-readable suggestion")
 val diagnostic = create_unfold_lint("lib", ["api"])
 
 # Suggestions should be valid replacement text
@@ -1525,13 +1534,18 @@ for suggestion in diagnostic.suggestions:
 
 #### continues parsing after unfold syntax error
 
+- continues parsing after unfold syntax error
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("continues parsing after unfold syntax error")
 val source = r"unfold {invalid!}" + "\nfn foo(): pass"
 # Should report error but not crash
 match parse_unfold(source):
@@ -1545,16 +1559,18 @@ match parse_unfold(source):
 
 #### handles malformed unfold gracefully
 
-1. fail
+- handles malformed unfold gracefully
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles malformed unfold gracefully")
 val source = "unfold"  # Missing braces entirely
 match parse_unfold(source):
     case ParseResult.Err(e):
@@ -1569,16 +1585,18 @@ match parse_unfold(source):
 
 #### reports all unfold violations, not just first
 
-1. expect errors len
+- reports all unfold violations, not just first
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reports all unfold violations, not just first")
 val fs = MockFileSystem.from_structure(
     ["a/__init__.spl"],
     ["a"]
@@ -1594,18 +1612,18 @@ expect errors.len() == 3
 
 #### does not cascade errors to unrelated code
 
-1. mod a set unfold
-2. fail
-3. fail
+- does not cascade errors to unrelated code
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("does not cascade errors to unrelated code")
 # An unfold error in package 'a' should not affect 'b'
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["x"])
@@ -1634,16 +1652,18 @@ match resolve_import(ImportStmt.simple("b"), [mod_a, mod_b]):
 
 #### errors when importing symbol from unfolded package
 
-1. mod a set unfold
+- errors when importing symbol from unfolded package
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("errors when importing symbol from unfolded package")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -1661,17 +1681,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### allows qualified access after valid subpackage import
 
-1. mod a set unfold
-2. fail
+- allows qualified access after valid subpackage import
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("allows qualified access after valid subpackage import")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -1691,17 +1712,18 @@ match resolve_import(import_stmt, [mod_a]):
 
 #### reports errors for multiple unfolded imports in same file
 
-1. mod a set unfold
-2. mod b set unfold
+- reports errors for multiple unfolded imports in same file
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("reports errors for multiple unfolded imports in same file")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["x"])
 val mod_b = Module.dir_module("b", "b/__init__.spl")
@@ -1729,18 +1751,18 @@ expect error_count == 2
 
 #### handles import with glob then specific import
 
-1. mod a set unfold
-2. fail
-3. fail
+- handles import with glob then specific import
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles import with glob then specific import")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b", "c"])
 
@@ -1767,18 +1789,18 @@ match resolve_import(ImportStmt.simple("a.b"), [mod_a]):
 
 #### unfold respects pub visibility
 
-1. mod a set unfold
-2. expect subpkgs contains
-3. fail
+- unfold respects pub visibility
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("unfold respects pub visibility")
 # public subpackage should be accessible
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["pub_subpkg"])
@@ -1794,17 +1816,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### unfold with private subpackage
 
-1. mod a set unfold
-2. fail
+- unfold with private subpackage
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("unfold with private subpackage")
 # Private subpackage in unfold list
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["private_impl"])
@@ -1823,18 +1846,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### unfold in conditionally compiled module
 
-1. mod test set unfold
-2. expect subpkgs contains
-3. fail
+- unfold in conditionally compiled module
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("unfold in conditionally compiled module")
 # Test module might have different unfold in test vs prod
 val mod_test = Module.dir_module("mylib", "mylib/__init__.spl")
 mod_test.set_unfold(["test_internal"])
@@ -1852,17 +1875,18 @@ match resolve_import(ImportStmt.simple("mylib"), [mod_test]):
 
 #### re-export with unfold source
 
-1. mod a set unfold
-2. fail
+- re-export with unfold source
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("re-export with unfold source")
 # Module re-exports from unfolded subpackage
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["core"])
@@ -1879,19 +1903,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### chained re-exports through unfolded
 
-1. mod a set unfold
-2. mod b set unfold
-3. mod a add child
-4. fail
+- chained re-exports through unfolded
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("chained re-exports through unfolded")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
 
@@ -1915,16 +1938,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### suggestions are sorted alphabetically
 
-1. expect diagnostic suggestions len
+- suggestions are sorted alphabetically
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("suggestions are sorted alphabetically")
 val diagnostic = create_unfold_lint("pkg", ["zebra", "alpha", "beta"])
 
 # Suggestions should be in some consistent order
@@ -1935,17 +1960,18 @@ expect diagnostic.suggestions.len() == 3
 
 #### suggestion preserves original case
 
-1. expect diagnostic suggestions[0] contains
-2. expect diagnostic suggestions[0] contains
+- suggestion preserves original case
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("suggestion preserves original case")
 val diagnostic = create_unfold_lint("MyPackage", ["SubPkg"])
 
 expect diagnostic.suggestions[0].contains("MyPackage")
@@ -1956,16 +1982,18 @@ expect diagnostic.suggestions[0].contains("SubPkg")
 
 #### handles many subpackages gracefully
 
-1. expect diagnostic suggestions len
+- handles many subpackages gracefully
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles many subpackages gracefully")
 val many_subpkgs = ["a", "b", "c", "d", "e", "f", "g", "h"]
 val diagnostic = create_unfold_lint("pkg", many_subpkgs)
 
@@ -1978,16 +2006,18 @@ expect diagnostic.suggestions.len() == 8
 
 #### error points to package name in import
 
-1. expect msg contains
+- error points to package name in import
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("error points to package name in import")
 val span = Span.at("src/main.spl", 5, 10)
 val msg = format_unfold_error("mymod", ["sub"], span)
 
@@ -1998,16 +2028,18 @@ expect msg.contains("5:10")
 
 #### error includes correct file path
 
-1. expect msg contains
+- error includes correct file path
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("error includes correct file path")
 val span = Span.at("src/deep/nested/file.spl", 100, 1)
 val msg = format_unfold_error("a", ["b"], span)
 
@@ -2022,18 +2054,18 @@ expect msg.contains("src/deep/nested/file.spl")
 
 #### handles package with many unfolded subpackages
 
-1. mod a set unfold
-2. expect returned subpkgs len
-3. fail
+- handles package with many unfolded subpackages
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles package with many unfolded subpackages")
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 val subpkgs = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10"]
 mod_a.set_unfold(subpkgs)
@@ -2051,17 +2083,18 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 #### handles 5-level deep unfold chain
 
-1. mod a set unfold
-2. fail
+- handles 5-level deep unfold chain
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-UNIT
+step("handles 5-level deep unfold chain")
 # a -> b -> c -> d -> e
 val mod_a = Module.dir_module("a", "a/__init__.spl")
 mod_a.set_unfold(["b"])
@@ -2087,3 +2120,51 @@ match resolve_import(ImportStmt.simple("a"), [mod_a]):
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `599c24bb85f4359df7e96def10ecf7c73957ebe6e1103b931dfae0a3c4896c2c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `599c24bb85f4359df7e96def10ecf7c73957ebe6e1103b931dfae0a3c4896c2c`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `599c24bb85f4359df7e96def10ecf7c73957ebe6e1103b931dfae0a3c4896c2c`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/spec/package_unfold_spec.spl
+mirror: doc/06_spec/01_unit/spec/package_unfold_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/spec/package_unfold_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/spec/package_unfold_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/spec/package_unfold_spec.spl:321:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses single subpackage unfold' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/spec/package_unfold_spec.spl:332:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses two subpackages unfold' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/spec/package_unfold_spec.spl:344:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses three or more subpackages' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

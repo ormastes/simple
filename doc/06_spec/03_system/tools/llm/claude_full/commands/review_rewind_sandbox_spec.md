@@ -20,7 +20,7 @@ Checks modern SSpec parity for review helpers, rewind, and sandbox toggle.
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Checks modern SSpec parity for review helpers, rewind, and sandbox toggle.
@@ -44,6 +44,44 @@ runtime-blocked tranche.
 ### REQ-LLM-CARET-HIDDEN-008: review and ultrareview gates
 
 #### should expose review entitlement and overage boundaries
+
+- should expose review entitlement and overage boundaries
+- Check review ultrareview entitlement and overage boundary behavior
+   - Expected: reviewCommandName() equals `review`
+   - Expected: reviewPrompt("diff") equals `Review these changes: diff`
+   - Expected: ultrareviewCommandName() equals `ultrareview`
+   - Expected: ultrareviewPrompt("workspace") equals `Run ultra review for workspace`
+   - Expected: ultrareviewOverageMessage(above) equals `Ultra review usage 11/10`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-LLM-CARET-HIDDEN-008 REQ-SSPEC-SYSTEM
+step("should expose review entitlement and overage boundaries")
+step("Check review ultrareview entitlement and overage boundary behavior")
+expect(reviewCommandName()).to_equal("review")
+expect(reviewPrompt("diff")).to_equal("Review these changes: diff")
+expect(ultrareviewCommandName()).to_equal("ultrareview")
+expect(ultrareviewPrompt("workspace")).to_equal("Run ultra review for workspace")
+expect(ultrareviewEnabled(true, true)).to_be(true)
+expect(ultrareviewEnabled(true, false)).to_be(false)
+expect(ultrareviewEnabled(false, true)).to_be(false)
+val below = UltrareviewOverage.new(9, 10)
+val equal = UltrareviewOverage.new(10, 10)
+val above = UltrareviewOverage.new(11, 10)
+expect(ultrareviewIsOverLimit(below)).to_be(false)
+expect(ultrareviewIsOverLimit(equal)).to_be(false)
+expect(ultrareviewIsOverLimit(above)).to_be(true)
+expect(ultrareviewOverageMessage(above)).to_equal("Ultra review usage 11/10")
+```
+
+</details>
+
 ### supporting rewind sandbox and source parity
 
 #### should model rewind and sandbox toggle behavior
@@ -145,27 +183,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `5fbd59cd91960aa0f2814c034a43497c6c8ab827d1aaf9970dfee65f740f5c46`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `0556474ae9f058c0929a1e9a87657fac3d34a160cfd6eaf34856e4295be04837`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `5fbd59cd91960aa0f2814c034a43497c6c8ab827d1aaf9970dfee65f740f5c46`.
+Source SHA-256: `0556474ae9f058c0929a1e9a87657fac3d34a160cfd6eaf34856e4295be04837`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `5fbd59cd91960aa0f2814c034a43497c6c8ab827d1aaf9970dfee65f740f5c46`  
+Source SHA-256: `0556474ae9f058c0929a1e9a87657fac3d34a160cfd6eaf34856e4295be04837`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **76/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl
 mirror: doc/06_spec/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.md (current)
-findings: 11 blockers: 1
-  narrative=100 structure=75 oracle=70
-  traceability=60 evidence=80 coverage=80 maintainability=70
+findings: 10 blockers: 0
+  narrative=100 structure=85 oracle=70
+  traceability=100 evidence=70 coverage=80 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=76; blocker cap makes effective=49
 doc/06_spec/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -178,25 +215,22 @@ test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:1:1
 test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:48:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should expose review entitlement and overage boundaries' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:48:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose review entitlement and overage boundaries' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:70:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model rewind and sandbox toggle behavior' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:70:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model rewind and sandbox toggle behavior' has no retained capture or evidence
+test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose review entitlement and overage boundaries' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:84:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose review rewind and sandbox source parity' describes the test rather than its outcome
+test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:68:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should model rewind and sandbox toggle behavior' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose review rewind and sandbox source parity' has no retained capture or evidence
+test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should model rewind and sandbox toggle behavior' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:82:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should expose review rewind and sandbox source parity' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/tools/llm/claude_full/commands/review_rewind_sandbox_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should expose review rewind and sandbox source parity' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

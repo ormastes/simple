@@ -2,30 +2,6 @@
 
 > This system spec exercises the hosted SimpleOS contract for multicore green work: logical green tasks enqueue onto carrier CPUs, remote enqueue uses the SMP reschedule IPI surface, and the real `Scheduler` records green execution state separately from normal OS task ids. It also proves the hosted SimpleOS lane routes runtime, timer, and compiler preemption safepoints through named scheduler-owned green carrier adapters.
 
-<!-- sdn-diagram:id=simpleos_multicore_green_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simpleos_multicore_green_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simpleos_multicore_green_spec -> std
-simpleos_multicore_green_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simpleos_multicore_green_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 7 | 7 | 0 | 0 |
@@ -49,7 +25,7 @@ This system spec exercises the hosted SimpleOS contract for multicore green work
 | Design | doc/04_architecture/runtime/multicore_green.md |
 | Research | doc/01_research/local/multicore_green.md |
 | Source | `test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -168,7 +144,7 @@ This is hosted model evidence; live QEMU/AP execution remains covered by
 ## TUI Capture
 
 ```text
-Simple Test Runner v1.0.0-beta
+Simple Test Runner v1.0.0-RC
 Running: test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl
 SimpleOS multicore green contract PASSED
 Files: 1
@@ -182,10 +158,13 @@ Failed: 0
 
 #### routes remote green enqueue through the SimpleOS reschedule IPI surface
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- routes remote green enqueue through the SimpleOS reschedule IPI surface
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Bring up a remote application processor
-- smp bringup ap
 - Create carrier run queues for four CPUs
 - Plan a green task for a remote carrier CPU
 - Apply the enqueue decision through the SimpleOS carrier queues
@@ -197,10 +176,12 @@ Failed: 0
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes remote green enqueue through the SimpleOS reschedule IPI surface")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Bring up a remote application processor")
@@ -223,12 +204,10 @@ expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 
 #### dispatches green work into scheduler-owned multicore execution state
 
+- dispatches green work into scheduler-owned multicore execution state
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Bring up a remote application processor
-- smp bringup ap
 - Create a scheduler with four CPU slots
-- var scheduler = Scheduler new with cpu count
 - Create carrier queues and enqueue green work for CPU one
 - Dispatch the next green task from CPU one carrier queue
 - Apply the dispatched green scheduler intent
@@ -242,10 +221,12 @@ expect(smp_take_ipi(1u32)).to_equal(smp_ipi_resched())
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("dispatches green work into scheduler-owned multicore execution state")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Bring up a remote application processor")
@@ -273,11 +254,9 @@ expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 
 #### extends green scheduler slots when SimpleOS topology grows
 
+- extends green scheduler slots when SimpleOS topology grows
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Create a bootstrap scheduler and grow it to four CPUs
-- var scheduler = Scheduler new bootstrap
-- scheduler set topology
 - Create carrier queues and enqueue green work for CPU three
 - Dispatch and apply the CPU three green scheduler intent
 - Verify the grown scheduler records CPU three green execution
@@ -288,10 +267,12 @@ expect(scheduler.get_current_on_cpu(1u32).id).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("extends green scheduler slots when SimpleOS topology grows")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Create a bootstrap scheduler and grow it to four CPUs")
@@ -315,11 +296,9 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 
 #### routes SimpleOS preemption safepoints through active green carriers
 
+- routes SimpleOS preemption safepoints through active green carriers
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Create a scheduler with one active green carrier
-- var scheduler = Scheduler new with cpu count
-- scheduler set green carrier parallelism
 - Enqueue green work on CPU zero
 - Run an active carrier pass
 - Poll the named runtime safepoint adapter through active green carriers
@@ -340,10 +319,12 @@ expect(scheduler.green_context_switches_on_cpu(3u32)).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes SimpleOS preemption safepoints through active green carriers")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Create a scheduler with one active green carrier")
@@ -382,11 +363,9 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### routes compiler safepoints through the named SimpleOS green adapter
 
+- routes compiler safepoints through the named SimpleOS green adapter
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Create a scheduler with one active green carrier
-- var scheduler = Scheduler new with cpu count
-- scheduler set green carrier parallelism
 - Enqueue compiler-yieldable green work on CPU zero
 - Run an active carrier pass
 - Poll the compiler safepoint before the time slice expires
@@ -408,10 +387,12 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("routes compiler safepoints through the named SimpleOS green adapter")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Create a scheduler with one active green carrier")
@@ -450,11 +431,9 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 
 #### rejects bad SimpleOS preemption source without ticking carriers
 
+- rejects bad SimpleOS preemption source without ticking carriers
 - Initialize the hosted SimpleOS SMP model
-- smp init
 - Create a scheduler with one active green carrier
-- var scheduler = Scheduler new with cpu count
-- scheduler set green carrier parallelism
 - Enqueue green work on CPU zero
 - Run an active carrier pass
 - Poll an invalid SimpleOS preemption source
@@ -470,10 +449,12 @@ expect(scheduler.green_current_task_on_cpu(0u32)).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("rejects bad SimpleOS preemption source without ticking carriers")
 step("Initialize the hosted SimpleOS SMP model")
 smp_init()
 step("Create a scheduler with one active green carrier")
@@ -502,6 +483,7 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 
 #### keeps hosted and live-QEMU evidence boundaries current
 
+- keeps hosted and live-QEMU evidence boundaries current
 - Read the hosted SimpleOS multicore-green spec and linked evidence docs
 - Verify hosted evidence does not claim to be the live AP or final handoff lane
    - Expected: absent_in_text(self_doc, "guest-visible AP execution is available") equals `1`
@@ -523,10 +505,12 @@ expect(scheduler.green_ticks_remaining_on_cpu(0u32)).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 62 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps hosted and live-QEMU evidence boundaries current")
 step("Read the hosted SimpleOS multicore-green spec and linked evidence docs")
 val self_doc = rt_file_read_text("test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl") ?? ""
 val plan = rt_file_read_text("doc/03_plan/sys_test/multicore_green.md") ?? ""
@@ -604,10 +588,61 @@ expect(blocker).to_contain("Final Ring/User Handoff PASS")
 
 ## Related Documentation
 
-- **Requirements:** [doc/02_requirements/feature/multicore_green.md](doc/02_requirements/feature/multicore_green.md)
-- **Plan:** [doc/03_plan/sys_test/multicore_green.md](doc/03_plan/sys_test/multicore_green.md)
-- **Design:** [doc/04_architecture/runtime/multicore_green.md](doc/04_architecture/runtime/multicore_green.md)
-- **Research:** [doc/01_research/local/multicore_green.md](doc/01_research/local/multicore_green.md)
+- **Requirements:** `doc/02_requirements/feature/multicore_green.md`
+- **Plan:** `doc/03_plan/sys_test/multicore_green.md`
+- **Design:** `doc/04_architecture/runtime/multicore_green.md`
+- **Research:** `doc/01_research/local/multicore_green.md`
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `128452a5dca45eb26a5022454ed89468d1f5e241ed99b0496535d1b9716d27bb`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `128452a5dca45eb26a5022454ed89468d1f5e241ed99b0496535d1b9716d27bb`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `128452a5dca45eb26a5022454ed89468d1f5e241ed99b0496535d1b9716d27bb`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl
+mirror: doc/06_spec/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/os/simpleos/feature/simpleos_multicore_green_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 33 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl:162:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes remote green enqueue through the SimpleOS reschedule IPI surface' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl:182:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'dispatches green work into scheduler-owned multicore execution state' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/os/simpleos/feature/simpleos_multicore_green_spec.spl:207:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'extends green scheduler slots when SimpleOS topology grows' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

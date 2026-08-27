@@ -1,29 +1,6 @@
 # Struct Field Shorthand Specification
 
-> val point = Point(x: x, y: y)
-
-<!-- sdn-diagram:id=struct_shorthand_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=struct_shorthand_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-struct_shorthand_spec
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=struct_shorthand_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> use std.spec.step
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -34,7 +11,7 @@ struct_shorthand_spec
 
 # Struct Field Shorthand Specification
 
-val point = Point(x: x, y: y)
+use std.spec.step
 
 ## At a Glance
 
@@ -44,13 +21,15 @@ val point = Point(x: x, y: y)
 | Category | Syntax |
 | Status | Implemented |
 | Source | `test/03_system/feature/usage/struct_shorthand_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Syntax
 
 ```simple
 # Without shorthand (verbose)
+use std.spec.step
+
 val point = Point(x: x, y: y)
 
 # With shorthand (when variable names match field names)
@@ -75,13 +54,18 @@ val point = Point(x, y: computed_y)
 
 #### uses shorthand for matching variable names
 
+- uses shorthand for matching variable names
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses shorthand for matching variable names")
 struct Point:
     x: i64
     y: i64
@@ -96,13 +80,18 @@ expect point.y == 20
 
 #### constructs struct with all shorthand fields
 
+- constructs struct with all shorthand fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("constructs struct with all shorthand fields")
 struct Person:
     name: text
     age: i64
@@ -119,13 +108,18 @@ expect person.age == 30
 
 #### mixes shorthand with explicit named argument
 
+- mixes shorthand with explicit named argument
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mixes shorthand with explicit named argument")
 struct Point:
     x: i64
     y: i64
@@ -139,13 +133,18 @@ expect point.y == 20
 
 #### uses explicit then shorthand
 
+- uses explicit then shorthand
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses explicit then shorthand")
 struct Point:
     x: i64
     y: i64
@@ -159,13 +158,18 @@ expect point.y == 20
 
 #### mixes in complex struct
 
+- mixes in complex struct
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("mixes in complex struct")
 struct Config:
     host: text
     port: i64
@@ -184,13 +188,18 @@ expect config.timeout == 30
 
 #### uses shorthand after computation
 
+- uses shorthand after computation
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses shorthand after computation")
 struct Rectangle:
     width: i64
     height: i64
@@ -205,17 +214,18 @@ expect rect.height == 6
 
 #### uses shorthand from function return
 
-1. fn get x
-2. fn get y
+- uses shorthand from function return
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses shorthand from function return")
 struct Point:
     x: i64
     y: i64
@@ -236,13 +246,18 @@ expect point.y == 200
 
 #### handles text fields
 
+- handles text fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles text fields")
 struct Message:
     sender: text
     content: text
@@ -257,13 +272,18 @@ expect msg.content == "Hello!"
 
 #### handles boolean fields
 
+- handles boolean fields
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles boolean fields")
 struct Flags:
     enabled: bool
     visible: bool
@@ -278,13 +298,18 @@ expect flags.visible == false
 
 #### handles mixed types
 
+- handles mixed types
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("handles mixed types")
 struct Record:
     id: i64
     name: text
@@ -304,13 +329,18 @@ expect record.active == true
 
 #### uses shorthand when nesting
 
+- uses shorthand when nesting
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses shorthand when nesting")
 struct Point:
     x: i64
     y: i64
@@ -334,13 +364,18 @@ expect line.endpoint.x == 10
 
 #### allows fully explicit construction
 
+- allows fully explicit construction
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows fully explicit construction")
 struct Point:
     x: i64
     y: i64
@@ -355,13 +390,18 @@ expect point.y == 200
 
 #### allows equals syntax explicitly
 
+- allows equals syntax explicitly
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("allows equals syntax explicitly")
 struct Point:
     x: i64
     y: i64
@@ -376,16 +416,18 @@ expect point.y == 40
 
 #### uses shorthand in list of structs
 
-1. points = points append
+- uses shorthand in list of structs
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses shorthand in list of structs")
 struct Point:
     x: i64
     y: i64
@@ -403,13 +445,18 @@ expect points[2].x == 20
 
 #### uses shorthand with map
 
+- uses shorthand with map
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("uses shorthand with map")
 struct Point:
     x: i64
     y: i64
@@ -438,3 +485,51 @@ expect points[1].y == 4
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `ea5b2edc2ba84716679f7d0d85eb0a6d91980f8da865a86d6e311a5e05ccf070`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `ea5b2edc2ba84716679f7d0d85eb0a6d91980f8da865a86d6e311a5e05ccf070`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `ea5b2edc2ba84716679f7d0d85eb0a6d91980f8da865a86d6e311a5e05ccf070`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/03_system/feature/usage/struct_shorthand_spec.spl
+mirror: doc/06_spec/03_system/feature/usage/struct_shorthand_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/feature/usage/struct_shorthand_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/feature/usage/struct_shorthand_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/feature/usage/struct_shorthand_spec.spl:51:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses shorthand for matching variable names' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/struct_shorthand_spec.spl:63:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'constructs struct with all shorthand fields' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/feature/usage/struct_shorthand_spec.spl:76:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mixes shorthand with explicit named argument' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

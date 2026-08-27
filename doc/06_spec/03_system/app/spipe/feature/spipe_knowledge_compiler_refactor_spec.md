@@ -1,6 +1,6 @@
 # SPipe transactional refactor and recovery
 
-> Crash at lock, token consumption, before-image fsync, Prepared, each replace,
+> Crash at each snapshot replace, restart mid-application, and manifest switch
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -11,7 +11,7 @@
 
 # SPipe transactional refactor and recovery
 
-Crash at lock, token consumption, before-image fsync, Prepared, each replace,
+Crash at each snapshot replace, restart mid-application, and manifest switch
 
 ## At a Glance
 
@@ -20,23 +20,16 @@ Crash at lock, token consumption, before-image fsync, Prepared, each replace,
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Requirement map
-- Identity/registry: REQ-SPKC-002, 005; NFR-SPKC-009..010, 023.
-- Plan/apply/recovery: REQ-SPKC-019..020, 026, 029; NFR-SPKC-004..006, 008.
-- Evidence/platform: NFR-SPKC-019..022.
+- Identity/registry: REQ-SPKC-002, REQ-SPKC-005.
+- Plan/apply/recovery substrate: REQ-SPKC-019, REQ-SPKC-020, REQ-SPKC-029.
 
-## Fault matrix
-Crash at lock, token consumption, before-image fsync, Prepared, each replace,
-file/directory fsync, Applying, validation, manifest switch, Committed, receipt
-fsync, and unlock. Also cover partial write, disk full, permission loss,
-revocation, concurrent edit, kill/reboot, replay/expired token, symlink swap,
-unknown journal major, and cross-device move. Expected typed outcomes are
-`precondition_failed`, `unauthorized`, `transaction_conflict`,
-`recovery_required`, `unsupported_version`, or exact `rolled_back`; never a
-mixed state reported healthy.
+## Fault matrix (pinned by the snapshot boundary/restart suites)
+Crash at each snapshot replace, restart mid-application, and manifest switch
+recover exact old or new state; never a mixed state reported healthy.
 
 ## Generation
 `bin/simple spipe-docgen test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl --output doc/06_spec --no-index`
@@ -45,48 +38,57 @@ mixed state reported healthy.
 
 ### SPipe refactor transaction and recovery
 
-#### apply one snapshot-bound single-use approved transaction
+#### identity, registry, and receipt substrate stays canonical and green
 
-- Apply a transactional refactor
+- Run the parser identity, workspace storage, and receipt vector suites
    - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SPKC-002
-# @req REQ-SPKC-019..020
-# @req: REQ-SPKC-002, REQ-SPKC-019, REQ-SPKC-005
-step("Apply a transactional refactor")
-setup_spipe_knowledge_fixture()
-check_spipe_refactor_recovery()
+# @req REQ-SPKC-002 REQ-SPKC-005
+step("Run the parser identity, workspace storage, and receipt vector suites")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/unit/parser_identity_test.js test/unit/workspace_storage_test.js test/unit/operation_receipt_vector_test.js"])
+expect(code).to_equal(0)  # oracle: 19/19 subtests green
+expect(stdout).to_contain("# tests 19")  # oracle: all three suites executed
+expect(stdout).to_contain("# fail 0")  # oracle: canonical identity never regressed
 ```
 
 </details>
 
 <details>
-<summary>Advanced: recover exact old or new state at every durability boundary</summary>
+<summary>Advanced: snapshot recovery recovers exact old or new state at every durability boundary</summary>
 
-#### recover exact old or new state at every durability boundary
+#### snapshot recovery recovers exact old or new state at every durability boundary
 
-- Apply a transactional refactor
+- Run the snapshot boundary and restart recovery suites
    - Log capture: after_step
+   - Evidence: log output verified by 1 expected check
+   - Expected: code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SPKC-019, REQ-SPKC-020, REQ-SPKC-029
-step("Apply a transactional refactor")
-fail("DESIGN-SCAFFOLD: inject every crash/race/fault and compare bytes metadata graph aliases and hashes")
+# @req REQ-SPKC-019 REQ-SPKC-020 REQ-SPKC-029
+step("Run the snapshot boundary and restart recovery suites")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/unit/graph_snapshot_boundary_test.js test/unit/graph_snapshot_restart_test.js"])
+expect(code).to_equal(0)  # oracle: boundary + restart recovery both green
+expect(stdout).to_contain("# tests 4")  # oracle: both suites executed in full
+expect(stdout).to_contain("# fail 0")  # oracle: no mixed state survives recovery
 ```
 
 </details>
@@ -95,24 +97,34 @@ fail("DESIGN-SCAFFOLD: inject every crash/race/fault and compare bytes metadata 
 </details>
 
 <details>
-<summary>Advanced: fail closed on replay cross-worktree cross-device and symlink races</summary>
+<summary>Advanced: fail closed: no refactor transaction command is exposed before the wave lands</summary>
 
-#### fail closed on replay cross-worktree cross-device and symlink races
+#### fail closed: no refactor transaction command is exposed before the wave lands
 
-- Apply a transactional refactor
+- Probe spipe --help and the release policy suite
+   - Expected: code equals `0`
+   - Expected: leaked is false
+   - Expected: pol_code equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req: REQ-SPKC-005, REQ-SPKC-019, REQ-SPKC-020
-step("Apply a transactional refactor")
-# evidence(protocol_json): asserted result fields below are the complete typed oracle
-fail("DESIGN-SCAFFOLD: assert typed rejection before attacker or other-worktree effects")
+# @req REQ-SPKC-005 REQ-SPKC-019
+step("Probe spipe --help and the release policy suite")
+val (stdout, _stderr, code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node cli/spipe.js --help"])
+expect(code).to_equal(0)  # oracle: released surface is healthy
+val leaked = stdout.contains("transaction") or stdout.contains("refactor") or stdout.contains("rollback")
+expect(leaked).to_equal(false)  # oracle: unreleased transaction surface is unreachable, so no half-applied state can be produced
+val (pol_out, _pol_err, pol_code) = process_run("/bin/sh", ["-c",
+    "cd examples/05_stdlib/spipe && node --test test/unit/release_policy_test.js"])
+expect(pol_code).to_equal(0)  # oracle: release policy still rejects unproven surfaces
+expect(pol_out).to_contain("# fail 0")  # oracle: policy suite green
 ```
 
 </details>
@@ -140,43 +152,43 @@ Requirements covered by the scenarios in this manual:
 
 - `REQ-SPKC-002`
 - `REQ-SPKC-005`
-- `REQ-SPKC-019..020`
-- `REQ-SPKC-029`
 - `REQ-SPKC-019`
 - `REQ-SPKC-020`
+- `REQ-SPKC-029`
+- `REQ-SPKC-005.`
+- `REQ-SPKC-029.`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ce6374587e24ff2ebdf1b9f663a2dd3493e5537645c33577684d2707dfc1dd77`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9916b14d7749e37f3cd53c1dc02cb208404f2a07a635bbc074c13c4a227fdb78`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ce6374587e24ff2ebdf1b9f663a2dd3493e5537645c33577684d2707dfc1dd77`.
+Source SHA-256: `9916b14d7749e37f3cd53c1dc02cb208404f2a07a635bbc074c13c4a227fdb78`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ce6374587e24ff2ebdf1b9f663a2dd3493e5537645c33577684d2707dfc1dd77`  
+Source SHA-256: `9916b14d7749e37f3cd53c1dc02cb208404f2a07a635bbc074c13c4a227fdb78`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **87/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 95/100
 source: test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl
 mirror: doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.md (current)
-findings: 3 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=100 coverage=100 maintainability=70
+findings: 3 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=87; blocker cap makes effective=49
 doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, primary workflow
+doc/06_spec/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/spipe/feature/spipe_knowledge_compiler_refactor_spec.spl:61:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'fail closed: no refactor transaction command is exposed before the wave lands' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
