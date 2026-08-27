@@ -92,9 +92,12 @@ for relative in $surfaces; do
     fi
 done
 
-# GitHub rejects an oversized inline `run` template before it creates any job;
-# the resulting push run has the workflow path as its name and no diagnostics.
-# Stay below the provider's 21,000-character template boundary with headroom.
+# GitHub rejects an oversized inline expression before it creates any job; the
+# resulting push run has the workflow path as its name and no jobs. A `run`
+# block containing `${{ ... }}` is internally expression-encoded, so its
+# service length can exceed 21,000 while the raw YAML is only about 10,500
+# bytes. Keep interpolated blocks below 9,000 bytes; untemplated shell blocks
+# retain the existing 20,000-byte source limit.
 candidate_workflow="$root/.github/workflows/candidate.yml"
 if test -f "$candidate_workflow"; then
     if ! grep -Fxq 'name: Build and qualify immutable candidate' "$candidate_workflow" ||
@@ -107,9 +110,10 @@ if test -f "$candidate_workflow"; then
     fi
     if ! awk '
         function finish() {
-            if (active && bytes > 20000) oversized = 1
+            if (active && (bytes > 20000 || (templated && bytes > 9000))) oversized = 1
             active = 0
             bytes = 0
+            templated = 0
         }
         {
             indent = match($0, /[^ ]/) - 1
@@ -123,6 +127,8 @@ if test -f "$candidate_workflow"; then
             }
             if (active)
                 bytes += length($0) + 1
+            if (active && $0 ~ /\$\{\{/)
+                templated = 1
         }
         END {
             finish()
