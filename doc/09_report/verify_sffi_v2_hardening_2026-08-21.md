@@ -522,3 +522,15 @@ a claim that SFFI v2 is complete.
   additional provider call was introduced. No runtime benchmark was run.
 - FAIL (global admission): this provider has no artifact-bound ABI/ownership
   verification receipt or trusted signature, so these paths remain unsafe-only.
+
+## Follow-up: untagged-SFFI source backlog (2026-08-27)
+
+- PASS (tooling): `sffi-unsafe-backlog.shs` validates the ledger schema and
+  emits each untagged owned Simple declaration with its location, symbol,
+  signature fingerprint, and declared contract/provider state. Its first
+  source-only run found 9,191 untagged declaration rows.
+- PASS (performance shape): this is an audit-time source scan only and has no
+  runtime allocation, copying, call, dispatch, lookup, lock, or retry cost.
+- FAIL (global admission): the backlog deliberately reports no admission
+  evidence. An untagged row is neither safe, verified, nor signed; the tool
+  must not be used as an ABI/ownership/provider proof.

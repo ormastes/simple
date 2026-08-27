@@ -440,3 +440,7 @@ passing placeholder.
     call count, and lexical scopes. Do not add temporary allocation, copying,
     helper dispatch, lookup, lock, retry, or extra provider invocation; source
     containment does not establish ABI verification or artifact signing.
+81. Use `sffi-unsafe-backlog.shs` as the canonical source-only queue for
+    untagged owned Simple extern declarations. It must emit file, line, symbol,
+    signature fingerprint, tag/contract/provider state, and never call an
+    untagged declaration safe, verified, or signed. Keep it audit-time only.
