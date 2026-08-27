@@ -82,6 +82,15 @@ Build and bind are separate actions: provider targets produce artifacts; config 
 
 `build-explain` returns `Exact`, `Compatible`, `Unknown`, or `Incompatible`, the selected closure, digest deltas, reuse counts, and a typed bootstrap reason. `Unknown` never authorizes reuse. Only seed failure/unsupported target, required bootstrap language/runtime/artifact/core incompatibility, or explicit convergence/trust/DDC targets can select full bootstrap. Normal feature targets have no dependency on convergence or DDC.
 
+For an authorized full bootstrap, the compatibility control plane consumes the
+existing immutable Stage-2 smoke-admission receipt as a typed speculative edge.
+Stage 3 may build concurrently with Stage-2 qualification, but remains
+quarantined. Every scheduled task binds a generation lease; only an unchanged,
+untainted lease plus a qualified ancestor chain can admit Stage 4 or acquire the
+exclusive deploy token. Correctness/unknown failure or input drift recursively
+invalidates descendants while preserving their evidence. The existing stage
+engine remains the producer/trust owner; the scheduler cannot mint admission.
+
 ## Startup and hot paths
 
 Core startup maps/reads one SCI, validates it once, constructs section indexes once, and resolves command/app records by indexed identity. `--help` uses SCI summary metadata and does not load providers. Dispatch performs one binding lookup, artifact admission, generation lookup/query when not already active, and one coarse operation call. No hot path scans the repository, rereads text config, merges overlays, or spawns build subprocesses.

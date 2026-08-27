@@ -5,6 +5,21 @@ Review Admission`. It governs protected PR integration only. It does not grant
 release-environment approval, candidate admission, signing, publication, or a
 GitHub provider Approve review.
 
+## What the GitHub status means
+
+GitHub forbids a pull-request author from submitting an `APPROVED` review on
+their own PR. SPipe does not bypass or imitate that provider rule. After an
+eligible exact-head self-review, the trusted workflow creates the required
+`SPipe Self Review Admission` **check status** instead. A green check therefore
+means the scoped SPipe policy admitted the bound head/base/diff for ten minutes;
+it never means the author, GitHub, or an independent reviewer approved the PR.
+
+For ordinary code and text, eligibility is default allow when the authenticated
+external database is valid and no matching `deny` or `constrain` record narrows
+the request. This default does not broaden any authority: branch rules, other
+required checks, candidate admission, release environments, signing, merging,
+and publication remain separate gates.
+
 ## Storage and default
 
 Store UTF-8 JSONL outside the repository and provide its exact bytes through
@@ -86,6 +101,24 @@ default is read-only and the intended emitter is gated by the
 `self-review-admission` environment, but those controls do not turn the generic
 App into a distinct broker identity. Replace it with a dedicated App if an
 independent security boundary is required.
+
+## Rejection and invalidation remediation
+
+Read the decision `reason` (and CLI `remediation`) before retrying. Never try to
+repair this gate by asking the PR author to submit `APPROVED`; GitHub rejects
+that operation and SPipe deliberately claims no provider approval.
+
+| Reason class | Required remediation |
+|---|---|
+| Push, head/base/merge-base/diff drift, retarget, ruleset or policy change, or expiry | Resolve the current provider state, run a new high-capability review at `high` effort or above with zero P0/P1 on that exact head, then dispatch `SPipe Self Review Admission` again. |
+| Matching operator `deny` | Stop. The external policy owner must deliberately replace or expire the exact signed deny record, or the PR must use a separately eligible independent-review route. A caller cannot override it. |
+| `constrain` does not cover every path, or a deny scope matches | Reduce/move the change into the allowed scope or ask the external policy owner to issue a new exact constraint. Then review the new exact head and redispatch. |
+| Credential/secret semantics, restricted name, traversal, alias, symlink, submodule, unsupported type, or non-UTF-8 path | Remove the unsafe material or object from the PR; rotate any exposed credential; create a clean head; review and redispatch. Do not widen a scope to admit it. |
+| Missing, malformed, unauthenticated, stale, or broken-chain policy/evidence | Restore the authenticated external JSONL or exact evidence binding, preserving the hash chain and TTL, then rerun from a fresh provider snapshot. |
+| Author/reviewer, model/effort, verdict, or P0/P1 mismatch | Use the exact PR author identity, a high-capability model at `high` effort or above, and an honest exact-head `PASS:0:0`; otherwise use an eligible independent reviewer. |
+
+Every retry creates a new decision. Reusing a stale check, editing provider
+approval text, or weakening another protected gate is not remediation.
 
 ## Applying the GitHub projection
 

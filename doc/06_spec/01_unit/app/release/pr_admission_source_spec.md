@@ -1,0 +1,205 @@
+# Pr Admission Source Specification
+
+> Tests covering provider-authenticated PR admission source contract.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Pr Admission Source Specification
+
+## Scenarios
+
+### provider-authenticated PR admission source contract
+
+#### derives integration, review, check, and classification facts instead of trusting dispatch assertions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 57 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val admission = read_file_text(".github/workflows/pr-admission.yml") ?? ""
+
+expect(admission).to_contain("integration_pr_number:")
+expect(admission).to_contain("INTEGRATION_PR_NUMBER")
+expect(admission).to_contain("/check-runs?per_page=100")
+expect(admission).to_contain(".merged == true")
+expect(admission).to_contain(".base.ref == $release_ref")
+expect(admission).to_contain(".merge_commit_sha == $candidate")
+expect(admission).to_contain("test \"$parents\" = \"$base_sha $head_sha\"")
+expect(admission).to_contain("authority_class:")
+expect(admission).to_contain("options: [external_broker, owner_attested_actions]")
+expect(admission).to_contain("test \"$OWNER_ATTESTATION\" = 'NO-VERIFY:OWNER-PROOF'")
+expect(admission).to_contain(".actor.id == 2378857 and .triggering_actor.id == 2378857")
+expect(admission).to_contain("inputs.authority_class == 'owner_attested_actions' && 'main'")
+expect(admission).to_contain("scripts/release/github-policy.shs verify-live")
+expect(admission).to_contain(".user.id == $owner and .merged_by.id == $owner")
+expect(admission).to_contain("else .user.login != .merged_by.login end")
+expect(admission).to_contain("verification_performed:false")
+expect(admission).to_contain("github_pr_approval_claimed:false")
+expect(admission).to_contain("verifier-unavailability-proof.json")
+expect(admission).to_contain("expires_at=$(date -u -d '+8 hours'")
+expect(admission).to_contain("required_status_checks")
+expect(admission).to_contain(".name == $check.context")
+expect(admission).to_contain(".app.id == $check.integration_id")
+expect(admission).to_contain(".conclusion == \"success\"")
+expect(admission.contains(".conclusion == \"neutral\"")).to_be(false)
+expect(admission.contains(".conclusion == \"skipped\"")).to_be(false)
+expect(admission).to_contain(".github/release-convergence-manifest.json")
+expect(admission).to_contain("simple-release-convergence-manifest/2")
+expect(admission).to_contain("simple-release-convergence/3")
+expect(admission).to_contain("release_inventory_head_sha")
+expect(admission).to_contain(".main_head_sha == $main")
+expect(admission).to_contain("commits after release_inventory_head_sha must update only the reviewed manifest")
+expect(admission).to_contain("reviewed_manifest_blob_sha")
+expect(admission).to_contain("classification_receipt_sha256")
+expect(admission).to_contain("fromdateiso8601 > now")
+expect(admission).to_contain("reason:$reason,owner:$owner")
+expect(admission).to_contain("expires_at:$expires_at")
+expect(admission).to_contain(".main_to_release.backports")
+expect(admission).to_contain("backports:$backports")
+expect(admission).to_contain("backport-evidence.json")
+expect(admission).to_contain("backport result is not stable patch-id equivalent to its source")
+expect(admission).to_contain("git merge-base --is-ancestor \"$result\" \"$inventory_head\"")
+expect(admission).to_contain("forward_ports:$forward_ports")
+expect(admission).to_contain("result_commit_sha:$evidence.result_commit_sha")
+expect(admission).to_contain("git patch-id --stable")
+expect(admission).to_contain("test \"$source_patch_id\" = \"$result_patch_id\"")
+expect(admission).to_contain("git merge-base --is-ancestor \"$release_sha\" \"$main_sha\"")
+expect(admission).to_contain("git merge-base --is-ancestor \"$main_sha\" \"$release_sha\"")
+expect(admission.contains("inputs.review_summary_sha256")).to_be(false)
+expect(admission.contains("inputs.evidence_receipt_sha256")).to_be(false)
+expect(admission.contains("inputs.integration_receipt_sha256")).to_be(false)
+expect(admission.contains("inputs.main_shared_fix_shas")).to_be(false)
+expect(admission.contains("inputs.main_selected_shas")).to_be(false)
+expect(admission.contains("inputs.release_shared_fix_shas")).to_be(false)
+expect(admission.contains("inputs.release_forward_ported_shas")).to_be(false)
+expect(admission.contains("inputs.forward_port_receipt_sha256s")).to_be(false)
+```
+
+</details>
+
+#### replays provider bindings before candidate convergence admission
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val candidate = read_file_text(".github/workflows/candidate.yml") ?? ""
+
+expect(candidate).to_contain("sha256sum build/convergence-receipt/integration-evidence.json")
+expect(candidate).to_contain("sha256sum build/convergence-receipt/review-evidence.json")
+expect(candidate).to_contain("sha256sum build/convergence-receipt/check-evidence.json")
+expect(candidate).to_contain("artifact-ids:")
+expect(candidate).to_contain(".digest == $digest and .expired == false")
+expect(candidate).to_contain("--signer-workflow")
+expect(candidate.contains("--cert-identity")).to_be(false)
+expect(candidate).to_contain("--signer-digest \"$run_head\"")
+expect(candidate).to_contain("--source-ref refs/heads/main")
+expect(candidate).to_contain("--deny-self-hosted-runners")
+expect(candidate).to_contain("verificationResult.signature.certificate")
+expect(candidate).to_contain("$certificate.subjectAlternativeName == $identity")
+expect(candidate).to_contain("$certificate.buildSignerURI == $identity")
+expect(candidate).to_contain("$certificate.runnerEnvironment == \"github-hosted\"")
+expect(candidate).to_contain("live_candidate=$(gh api")
+expect(candidate).to_contain("scripts/release/github-policy.shs verify-live")
+expect(candidate).to_contain("<= 28800")
+expect(candidate).to_contain(".verification_performed == false and .github_pr_approval_claimed == false")
+expect(candidate).to_contain(".user.id == 2378857 and .merged_by.id == 2378857")
+expect(candidate).to_contain("reviewed-convergence-manifest.actual")
+expect(candidate).to_contain("provider.reviewed_manifest_blob_sha")
+expect(candidate).to_contain("integration_pr_number=$(jq")
+expect(candidate).to_contain("test \"$parents\" = \"$integration_base_sha $integration_head_sha\"")
+expect(candidate).to_contain("git merge-base --is-ancestor \"$release_sha\" \"$main_sha\"")
+expect(candidate).to_contain("--release-classified=")
+expect(candidate).to_contain("--release-classification-kinds=")
+expect(candidate).to_contain("--release-classification-receipts=")
+expect(candidate).to_contain("--main-backported=")
+expect(candidate).to_contain("--main-backport-results=")
+expect(candidate).to_contain("--main-backport-targets=")
+expect(candidate).to_contain("--backport-receipts=")
+expect(candidate).to_contain("--release-forward-port-results=")
+expect(candidate).to_contain("--release-forward-port-targets=")
+expect(candidate).to_contain("classification-evidence.json")
+expect(candidate).to_contain("forward-port-evidence.json")
+expect(candidate).to_contain("scripts/release/verify-forward-port-authority.shs")
+expect(candidate.contains("broker_app=$(jq -er 'select(")).to_be(false)
+expect(candidate).to_contain("backport-evidence.json")
+expect(candidate).to_contain("simple-release-convergence-manifest/2")
+expect(candidate).to_contain("(.main_to_release.selected_shas | sort) ==")
+expect(candidate).to_contain("any(.main_to_release.backports[];")
+expect(candidate).to_contain("grep -Fxq -- \"$result\" build/release-to-main.actual")
+expect(candidate).to_contain("git patch-id --stable")
+expect(candidate).to_contain(".stable_patch_id == $patch_id")
+expect(candidate).to_contain("release_inventory_head_sha")
+expect(candidate).to_contain("--graph-independent")
+```
+
+</details>
+
+#### keeps branch policy aligned with the provider evidence contract
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val release_rules = read_file_text(".github/rulesets/spipe-vcs-v3-release-lines.json") ?? ""
+val main_rules = read_file_text(".github/rulesets/spipe-vcs-v3-main.json") ?? ""
+val workflow = read_file_text(".github/workflows/repo-hygiene.yml") ?? ""
+
+expect(release_rules).to_contain("\"allowed_merge_methods\": [\"merge\"]")
+expect(release_rules.contains("\"squash\"")).to_be(false)
+expect(release_rules).to_contain("Code Idiom & Structural Ratchet Gates")
+expect(release_rules).to_contain("\"integration_id\": 15368")
+expect(main_rules).to_contain("Code Idiom & Structural Ratchet Gates")
+expect(workflow).to_contain("'release/**'")
+
+val policy = read_file_text(".spipe/policy/vcs.sdn") ?? ""
+val parity = read_file_text("scripts/check/check-github-policy-projection.shs") ?? ""
+expect(policy).to_contain("approving_reviews: 0")
+expect(policy).to_contain("current_mode: independent_environment_review")
+expect(policy).to_contain("integration_id: 15368")
+expect(parity).to_contain("review/check projection does not match canonical protected policy")
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/release/pr_admission_source_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering provider-authenticated PR admission source contract.
+- provider-authenticated PR admission source contract
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

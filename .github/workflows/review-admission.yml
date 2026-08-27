@@ -7,6 +7,10 @@ on:
         description: Pull request number; all provider state is resolved server-side
         required: true
         type: number
+      expected_head_sha:
+        description: Exact PR head SHA that received the completed high-effort review
+        required: true
+        type: string
       session_id:
         description: Exact audited SPipe development session identifier
         required: true
@@ -62,7 +66,7 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?check_name=SPipe%20Self%20Review%20Admission&per_page=100" \
             --jq '.check_runs[] | select(.conclusion == "success") | .id' |
           while read -r check_id; do
-            jq -cn --arg action "$EVENT_ACTION" '{status:"completed",conclusion:"action_required",output:{title:"Exact-state self-review invalidated",summary:("Pull request event " + $action + " changed merge-relevant state. Dispatch a new exact-state evaluation.")}}' >"$RUNNER_TEMP/check-event-invalidated.json"
+            jq -cn --arg action "$EVENT_ACTION" '{status:"completed",conclusion:"action_required",output:{title:"Exact-state self-review invalidated",summary:("Invalidation reason: pull_request_target event " + $action + " changed merge-relevant state. Remediation: review the current exact head with zero P0/P1 and dispatch SPipe Self Review Admission again. GitHub forbids PR authors from submitting an APPROVED review; this required status is not provider approval.")}}' >"$RUNNER_TEMP/check-event-invalidated.json"
             gh api --method PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check_id" --input "$RUNNER_TEMP/check-event-invalidated.json" >/dev/null
           done
 
@@ -79,13 +83,10 @@ jobs:
       - name: Reset expired successful checks
         env:
           GH_TOKEN: ${{ github.token }}
+          INVALIDATION_ACTION: ${{ github.event.action }}
         run: |
           set -Eeuo pipefail
           now=$(date -u +%s)
-          invalidate_all=false
-          if [[ "$GITHUB_EVENT_NAME" == repository_dispatch || "$GITHUB_EVENT_NAME" == push ]]; then
-            invalidate_all=true
-          fi
           gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
             --jq '.[] | [.number,.head.sha,("refs/heads/" + .base.ref),.base.sha] | @tsv' |
           while IFS=$'\t' read -r pr_number head_sha current_base_ref current_base_sha; do
@@ -97,23 +98,39 @@ jobs:
               [[ "$expires_at" =~ ^[1-9][0-9]*$ ]] || expires_at=0
               ruleset_id=${bound_ruleset#github:ruleset:}
               invalid=false
-              if [[ "$invalidate_all" == true || "$bound_pr" != "$pr_number" || "$bound_base_ref" != "$current_base_ref" ||
-                    "$bound_base_sha" != "$current_base_sha" ]] || (( now >= expires_at )); then
+              invalid_reason=
+              if [[ "$GITHUB_EVENT_NAME" == repository_dispatch ]]; then
                 invalid=true
+                invalid_reason="trusted repository_dispatch $INVALIDATION_ACTION requires policy/ruleset reevaluation"
+              elif [[ "$GITHUB_EVENT_NAME" == push ]]; then
+                invalid=true
+                invalid_reason='protected-base push requires exact base/diff reevaluation'
+              elif [[ "$bound_pr" != "$pr_number" || "$bound_base_ref" != "$current_base_ref" ||
+                      "$bound_base_sha" != "$current_base_sha" ]]; then
+                invalid=true
+                invalid_reason='bound PR or protected-base identity changed'
+              elif (( now >= expires_at )); then
+                invalid=true
+                invalid_reason='ten-minute self-review decision expired'
               elif ! current_ruleset=$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" 2>/dev/null); then
                 invalid=true
+                invalid_reason='bound protected ruleset is unavailable'
               elif [[ "$(jq -er '.name' <<<"$current_ruleset")" != "$bound_ruleset_version" ]]; then
                 invalid=true
+                invalid_reason='bound protected ruleset version changed'
               elif ! jq -e '(.enforcement == "active") and any(.rules[]; .type == "required_status_checks" and .parameters.strict_required_status_checks_policy == true and any(.parameters.required_status_checks[]; .context == "SPipe Self Review Admission"))' <<<"$current_ruleset" >/dev/null; then
                 invalid=true
+                invalid_reason='protected ruleset is inactive, non-strict, or no longer requires SPipe Self Review Admission'
               elif [[ "$(jq -Sc '{id,name,target,enforcement,conditions,rules}' <<<"$current_ruleset" | sha256sum | awk '{print $1}')" != "$bound_ruleset_sha256" ]]; then
                 invalid=true
+                invalid_reason='normalized protected ruleset digest changed'
               elif ! gh api "repos/$GITHUB_REPOSITORY/rules/branches/${current_base_ref#refs/heads/}" |
                 jq -e --argjson id "$ruleset_id" 'any(.[]; .ruleset_id == $id)' >/dev/null; then
                 invalid=true
+                invalid_reason='bound ruleset no longer applies to the protected base'
               fi
               if [[ "$invalid" == true ]]; then
-                jq -cn '{status:"completed",conclusion:"action_required",output:{title:"Scoped self-review is no longer current",summary:"Expiry or protected policy, ruleset, base, or PR state changed. Dispatch a new exact-state evaluation."}}' >"$RUNNER_TEMP/check-expired.json"
+                jq -cn --arg reason "$invalid_reason" '{status:"completed",conclusion:"action_required",output:{title:"Scoped self-review is no longer current",summary:("Invalidation reason: " + $reason + ". Remediation: resolve current provider state, review the current exact head with zero P0/P1, and dispatch SPipe Self Review Admission again. Do not reuse this check or attempt an author APPROVED review.")}}' >"$RUNNER_TEMP/check-expired.json"
                 gh api --method PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check_id" --input "$RUNNER_TEMP/check-expired.json" >/dev/null
               fi
             done
@@ -143,6 +160,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
           SESSION_ID: ${{ inputs.session_id }}
           REVIEWER_MODEL: ${{ inputs.reviewer_model }}
           REVIEWER_EFFORT: ${{ inputs.reviewer_effort }}
@@ -154,6 +172,7 @@ jobs:
           set -Eeuo pipefail
           check_id=
           check_head=
+          failure_stage='workflow input/configuration precondition failed'
           audit_dir="$RUNNER_TEMP/self-review-audit"
           mkdir -p "$audit_dir"
           finish_check() {
@@ -162,11 +181,18 @@ jobs:
               if [[ $result -eq 0 ]]; then
                 conclusion=success
                 title='Scoped self-review admitted temporarily'
-                summary='Exact provider state and explicit self-attestation passed. This is neither independent review nor provider Approve.'
+                summary='Required status check only: exact provider state and explicit self-attestation passed. Ordinary code/text is eligible absent operator deny/constrain. GitHub forbids PR authors from submitting an APPROVED review; this is neither independent review nor provider approval.'
               else
                 conclusion=failure
                 title='Scoped self-review rejected'
-                summary='Exact policy, identity, protected target, base, merge-base, diff, or self-attestation failed closed.'
+                rejection_reason=$failure_stage
+                for decision_file in "$audit_dir/current-decision.json" "$audit_dir/decision.json"; do
+                  if [[ -s "$decision_file" ]] && jq -e '.reason | type == "string" and length > 0' "$decision_file" >/dev/null 2>&1; then
+                    rejection_reason=$(jq -r '.reason' "$decision_file")
+                    break
+                  fi
+                done
+                summary="Rejection reason: $rejection_reason. Remediation: correct the reported exact-state/policy/scope/review binding, then review the new exact head and dispatch again. A deny needs external policy-owner action; unsafe material must be removed. Do not attempt an author APPROVED review."
               fi
               jq -cn --arg conclusion "$conclusion" --arg title "$title" --arg summary "$summary" '{status:"completed",conclusion:$conclusion,output:{title:$title,summary:$summary}}' >"$RUNNER_TEMP/check-finish.json"
               gh api --method PATCH "repos/$GITHUB_REPOSITORY/check-runs/$check_id" --input "$RUNNER_TEMP/check-finish.json" >/dev/null || true
@@ -176,6 +202,7 @@ jobs:
           trap finish_check EXIT
 
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SESSION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]
           [[ "$REVIEWER_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]
           [[ "$REVIEWER_EFFORT" =~ ^(high|xhigh|max|ultra)$ ]]
@@ -202,6 +229,11 @@ jobs:
           resolve_pr() { gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"; }
           provider_pr=$(resolve_pr)
           head_sha=$(jq -er '.head.sha' <<<"$provider_pr")
+          failure_stage='reviewed head SHA is no longer the live PR head'
+          if [[ "$head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
+            echo "self-review admission: expected reviewed head $EXPECTED_HEAD_SHA but live PR head is $head_sha; review the live head and dispatch again" >&2
+            exit 1
+          fi
           base_sha=$(jq -er '.base.sha' <<<"$provider_pr")
           base_ref_name=$(jq -er '.base.ref' <<<"$provider_pr")
           base_ref="refs/heads/$base_ref_name"
@@ -228,9 +260,10 @@ jobs:
             jq -e --argjson id "$target_ruleset_id" 'any(.[]; .ruleset_id == $id)' >/dev/null
           check_head=$head_sha
 
-          jq -cn --arg name 'SPipe Self Review Admission' --arg head "$head_sha" --arg details "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{name:$name,head_sha:$head,status:"in_progress",details_url:$details,output:{title:"Scoped self-review evaluation",summary:"Resolving exact protected target, base, merge-base, and diff."}}' >"$RUNNER_TEMP/check-start.json"
+          jq -cn --arg name 'SPipe Self Review Admission' --arg head "$head_sha" --arg details "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '{name:$name,head_sha:$head,status:"in_progress",details_url:$details,output:{title:"Scoped self-review required-status evaluation",summary:"Resolving exact protected target, base, merge-base, diff, and external deny/constraint policy. This is not a GitHub author APPROVED review."}}' >"$RUNNER_TEMP/check-start.json"
           check_id=$(gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input "$RUNNER_TEMP/check-start.json" --jq '.id')
 
+          failure_stage='provider fetch or exact changed-manifest binding failed'
           git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/origin/self-review/$PR_NUMBER/head" "+refs/heads/$base_ref_name:refs/remotes/origin/self-review/$PR_NUMBER/base"
           test "$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/head)" = "$head_sha"
           test "$(git rev-parse refs/remotes/origin/self-review/$PR_NUMBER/base)" = "$base_sha"
@@ -250,11 +283,14 @@ jobs:
           policy_sha256=$(sha256sum "$policy_path" | awk '{print $1}')
           now_unix=$(date -u +%s)
           expires_at_unix=$((now_unix + 600))
+          failure_stage='external policy or exact-head self-review evaluation failed'
           SPIPE_SELF_REVIEW_POLICY_DB="$policy_path" bin/simple release self-review-plan --json --policy-db="$policy_path" --changed-manifest="$audit_dir/changed-paths.sdn" --repository-provider=github --repository-id="$repository_id" --repository-node-id="$repository_node_id" --repository="$repository_name" --pull-request-number="$PR_NUMBER" --head-sha="$head_sha" --session-id="$SESSION_ID" --author-provider=github --author-identity="$author_id" --reviewer-provider=github --reviewer-identity="$actor_id" --reviewer-model="$REVIEWER_MODEL" --reviewer-tier=high_capability --reviewer-effort="$REVIEWER_EFFORT" --now-unix="$now_unix" --expires-at-unix="$expires_at_unix" --review-verdict=PASS --review-p0-count=0 --review-p1-count=0 --review-evidence-mode=self_attested --review-evidence-sha256="$review_evidence_sha256" --policy-db-sha256="$policy_sha256" --target-repository-id="$base_repository_id" --target-ref="$base_ref" --target-ruleset-id="github:ruleset:$target_ruleset_id" --target-ruleset-version="$expected_ruleset" --target-ruleset-sha256="$target_ruleset_sha256" --base-sha="$base_sha" --merge-base-sha="$merge_base_sha" --diff-sha256="$diff_sha256" --policy-db-authenticated --changed-manifest-authenticated --self-attestation-authorized --provider-resolution-authenticated --strict-up-to-date --protected-target >"$audit_dir/decision.json"
 
           # Re-resolve every mutable provider fact immediately before emission.
+          failure_stage='provider head/base/diff/ruleset revalidation failed'
           current_pr=$(resolve_pr)
           test "$(jq -er '.head.sha' <<<"$current_pr")" = "$head_sha"
+          test "$head_sha" = "$EXPECTED_HEAD_SHA"
           test "$(jq -er '.base.sha' <<<"$current_pr")" = "$base_sha"
           test "refs/heads/$(jq -er '.base.ref' <<<"$current_pr")" = "$base_ref"
           test "$(resolve_ruleset)" = "$target_ruleset_id"
@@ -274,6 +310,7 @@ jobs:
           test "$current_now_unix" -lt "$expires_at_unix"
           # Re-read external policy and re-run the pure current-decision consumer
           # after all provider facts are re-resolved, immediately before emission.
+          failure_stage='current external policy decision or final exact-state assertion failed'
           SPIPE_SELF_REVIEW_POLICY_DB="$policy_path" bin/simple release self-review-plan --json --policy-db="$policy_path" --changed-manifest="$audit_dir/revalidated-changed-paths.sdn" --repository-provider=github --repository-id="$repository_id" --repository-node-id="$repository_node_id" --repository="$repository_name" --pull-request-number="$PR_NUMBER" --head-sha="$head_sha" --session-id="$SESSION_ID" --author-provider=github --author-identity="$author_id" --reviewer-provider=github --reviewer-identity="$actor_id" --reviewer-model="$REVIEWER_MODEL" --reviewer-tier=high_capability --reviewer-effort="$REVIEWER_EFFORT" --now-unix="$current_now_unix" --expires-at-unix="$expires_at_unix" --review-verdict=PASS --review-p0-count=0 --review-p1-count=0 --review-evidence-mode=self_attested --review-evidence-sha256="$review_evidence_sha256" --policy-db-sha256="$policy_sha256" --target-repository-id="$base_repository_id" --target-ref="$base_ref" --target-ruleset-id="github:ruleset:$target_ruleset_id" --target-ruleset-version="$expected_ruleset" --target-ruleset-sha256="$current_ruleset_sha256" --base-sha="$base_sha" --merge-base-sha="$merge_base_sha" --diff-sha256="$diff_sha256" --policy-db-authenticated --changed-manifest-authenticated --self-attestation-authorized --provider-resolution-authenticated --strict-up-to-date --protected-target >"$audit_dir/current-decision.json"
           jq -e --arg head "$head_sha" --arg base "$base_sha" --arg merge "$merge_base_sha" --arg diff "$diff_sha256" --arg ruleset "github:ruleset:$target_ruleset_id" --arg ruleset_version "$expected_ruleset" --arg ruleset_sha "$target_ruleset_sha256" '.decision_schema == "spipe-self-review-decision/1" and .status == "ok" and .allowed == true and .head_sha == $head and .base_sha == $base and .merge_base_sha == $merge and .diff_sha256 == $diff and .target_ruleset_id == $ruleset and .target_ruleset_version == $ruleset_version and .target_ruleset_sha256 == $ruleset_sha and .strict_up_to_date == true and .protected_target == true and .review_evidence_mode == "self_attested" and .provider_approval_claimed == false' "$audit_dir/current-decision.json" >/dev/null
 

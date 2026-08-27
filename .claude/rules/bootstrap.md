@@ -298,6 +298,27 @@ SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple native-build \
   --entry src/app/cli/bootstrap_main.spl -o build/bootstrap/stage2/<triple>/simple
 ```
 
+### Coordinated strategy supervisor
+
+Ordinary `--strategy=normal|full` runs now enter the compatibility scheduler in
+`scripts/bootstrap/bootstrap-strategy.sh`. The existing stage engine remains the
+only compiler/admission authority. At immutable Stage-2 smoke admission it
+continues immediately into Stage 3 while a reserved-resource task runs the
+broader Stage-2 hello-world native-build qualification. Descendants remain
+quarantined until the parent and engine receipts pass under the same generation
+lease. Late parent failure recursively invalidates Stage 2/3/4/deploy/release
+and preserves artifacts as tainted evidence.
+
+Do not bypass a scheduler failure by copying or deploying its Stage-3/4 output.
+Read `OUTPUT/scheduler/current.env`, then the named generation's
+`failure-manifest.env` and `invalidations/*.env`. Repair and mint a new planner
+receipt/generation. `--strategy=adhoc` is the explicit legacy/recovery route;
+coordinated `--clean-release` and `--mode=one-binary` currently fail closed
+rather than pretending their monolithic cache semantics are isolated.
+
+Full contract and evidence map:
+`doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
+
 ## Redeploy #79 Key Findings (2026-07-11)
 
 **Parse-Error Gate False Positives:** The phase-2 parse-error gate (checking

@@ -108,6 +108,11 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: build
   the smallest named target/provider/SCI projection, retain its compatibility
   receipt, and never infer full bootstrap from a compiler path.
+- If compatibility evidence selects full bootstrap, use the canonical
+  `bootstrap-from-scratch.sh --strategy=normal|full` scheduler path and require
+  its unchanged generation lease plus qualified lineage receipt. A
+  `failure-manifest.env` or any recursive invalidation forbids descendant
+  deployment. See `doc/07_guide/tooling/bootstrap_speculative_scheduler.md`.
 - Focused compiler/interpreter/loader work may use an admitted Stage 2 or 3
   binary per that guide. Record path/hash/stage/provenance/commands, isolate
   output/cache, fail closed, and label evidence by stage; never promote it to

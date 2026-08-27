@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const releaseSchemas = Object.freeze({ vcs_policy: "spipe-vcs/3", session: "spipe-session/1", release: "spipe-release/1", candidate: "spipe-candidate/1" });
-export const releaseCapabilities = Object.freeze({ isolated_sessions: true, reviewed_beta_backports: true, immutable_release_candidates: true, promote_without_rebuild: true, operational_release_planning: true, main_fix_discovery_planning: true, release_first_forward_port_validation: true, external_release_mutation: false });
+export const releaseCapabilities = Object.freeze({ isolated_sessions: true, reviewed_beta_backports: true, immutable_release_candidates: true, promote_without_rebuild: true, operational_release_planning: true, main_fix_discovery_planning: true, release_first_forward_port_validation: true, scoped_self_review_guidance: true, external_release_mutation: false });
 
 export const releaseProjectionContract = Object.freeze([
   ["isolated-session", "one isolated release session owns one work branch and one non-main worktree"],
@@ -15,7 +15,11 @@ export const releaseProjectionContract = Object.freeze([
   ["build-once", "build and qualify the exact candidate once and reject required failures or fallback artifacts"],
   ["promote-without-rebuild", "promotion reuses admitted artifacts without rebuilding and pushes exactly one signed annotated tag"],
   ["whole-confirmation", "release admission requires focused failures to reach zero followed by one clean whole-suite confirmation"],
-  ["non-destructive-release-identity", "withdrawal preserves published tags assets and history and corrections use a new version"]
+  ["non-destructive-release-identity", "withdrawal preserves published tags assets and history and corrections use a new version"],
+  ["self-review-status", "protected PR self review uses a required status check because GitHub forbids an author APPROVED review and never claims provider approval"],
+  ["self-review-scopes", "ordinary code and text are eligible by default absent an operator deny or constrain record with code, text, file, directory_files, and directory_recursive scopes"],
+  ["self-review-invalidation", "push, retarget, base, diff, ruleset, policy, or expiry invalidation requires a fresh exact-head review and a new self-review admission dispatch"],
+  ["self-review-remediation", "rejection remediation follows the exact reason without broadening protected integration, candidate, release, signing, or publication authority"]
 ]);
 
 // These three field lists mirror Simple's CandidateManifest,

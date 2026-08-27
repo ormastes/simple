@@ -1,5 +1,13 @@
 # SPipe Phase 8: Ship -- Release Manager
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For protected GitHub PR `self approve`, `approve PR`, or `author cannot
+approve`, run `spipe self-review-guide`. GitHub forbids author `APPROVED`; use
+the guide's exact-head `SPipe Self Review Admission` status workflow and poll
+the same head. A deny, missing workflow, stale head, or failed check blocks
+ship.
+
 **Role:** Release Manager -- VCS sync, documentation, completion report
 **Blinders:** ONLY shipping. No code changes, no new tests, no refactoring.
 **Context budget:** sub-40% -- load only state file + VCS status.

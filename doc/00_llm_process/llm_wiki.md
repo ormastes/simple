@@ -901,6 +901,27 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## Protected GitHub PR handoff
 
+Search aliases: `self approve`, `approve PR`, and `author cannot approve` all
+mean: run `spipe self-review-guide` (or
+`node .spipe/spipe/cli/spipe.js self-review-guide`). GitHub forbids author
+`APPROVED`; the supported action is the distinct `SPipe Self Review Admission`
+required status. The guide prints one copy/paste dispatch and the exact-head
+poll/remediation steps.
+
+If `spipe` is absent or reports `unknown command: self-review-guide`, the
+installed/global SPipe is stale. Use the repository-pinned implementation:
+
+```bash
+git submodule update --init .spipe/spipe
+node .spipe/spipe/cli/spipe.js self-review-guide
+```
+
+Do not fall back to author `gh pr review --approve`. Refresh the pinned
+submodule/plugin and rerun the guide. DevHub's same-author redirect and the
+SPipe MCP `spipe_self_review_privilege_evaluate` then
+`spipe_self_review_approve` sequence are alternate front doors to the same
+policy boundary.
+
 When branch protection requires a pull request, push the reviewed branch and
 open or update its PR rather than pushing directly to `main`. Record whether it
 is `unverified`, `REVIEW_REQUIRED`, `awaiting-self-review-admission`,

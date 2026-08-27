@@ -92,6 +92,107 @@ for relative in $surfaces; do
     fi
 done
 
+# GitHub rejects an oversized inline expression before it creates any job; the
+# resulting push run has the workflow path as its name and no jobs. A `run`
+# block containing `${{ ... }}` is internally expression-encoded, so its
+# service length can exceed 21,000 while the raw YAML is only about 10,500
+# bytes. Keep interpolated blocks below 9,000 bytes; untemplated shell blocks
+# retain the existing 20,000-byte source limit.
+candidate_workflow="$root/.github/workflows/candidate.yml"
+if test -f "$candidate_workflow"; then
+    if ! grep -Fxq 'name: Build and qualify immutable candidate' "$candidate_workflow" ||
+       ! grep -Fxq 'on:' "$candidate_workflow" ||
+       ! grep -Fxq '  workflow_dispatch:' "$candidate_workflow" ||
+       ! grep -Fxq 'jobs:' "$candidate_workflow" ||
+       ! grep -Fxq '  qualify-linux:' "$candidate_workflow"; then
+        echo "release-policy-parity: candidate workflow name/dispatch/job contract is missing" >&2
+        failed=1
+    fi
+    if ! awk '
+        function finish() {
+            if (active && (bytes > 20000 || (templated && bytes > 9000))) oversized = 1
+            active = 0
+            bytes = 0
+            templated = 0
+        }
+        {
+            indent = match($0, /[^ ]/) - 1
+            if (active && $0 !~ /^[[:space:]]*$/ && indent <= start_indent)
+                finish()
+            if ($0 ~ /^[[:space:]]+run:[[:space:]]*\|[[:space:]]*$/) {
+                finish()
+                active = 1
+                start_indent = indent
+                next
+            }
+            if (active)
+                bytes += length($0) + 1
+            if (active && $0 ~ /\$\{\{/)
+                templated = 1
+        }
+        END {
+            finish()
+            exit oversized
+        }
+    ' "$candidate_workflow"; then
+        echo "release-policy-parity: candidate workflow contains an oversized inline run template" >&2
+        failed=1
+    fi
+fi
+
+checkpoint_workflow="$root/.github/workflows/release-convergence-checkpoint.yml"
+checkpoint_script="$root/scripts/release/convergence-checkpoint.shs"
+if test ! -f "$checkpoint_workflow" || test ! -f "$checkpoint_script"; then
+    echo "release-policy-parity: scheduled/operator convergence checkpoint is missing" >&2
+    failed=1
+else
+    grep -Fxq '  workflow_dispatch:' "$checkpoint_workflow" || {
+        echo "release-policy-parity: convergence checkpoint lacks operator dispatch" >&2
+        failed=1
+    }
+    grep -Fxq '  schedule:' "$checkpoint_workflow" || {
+        echo "release-policy-parity: convergence checkpoint lacks bounded schedule" >&2
+        failed=1
+    }
+    grep -Fq 'scripts/release/convergence-checkpoint.shs' "$checkpoint_workflow" || {
+        echo "release-policy-parity: convergence checkpoint workflow does not invoke its checker" >&2
+        failed=1
+    }
+    grep -Fq 'simple-release-source-convergence-observation/1' "$checkpoint_script" &&
+    grep -Fq 'deployed_runtime_used: false' "$checkpoint_script" &&
+    grep -Fq 'release_admission_eligible: false' "$checkpoint_script" || {
+        echo "release-policy-parity: convergence checkpoint overstates its source-only boundary" >&2
+        failed=1
+    }
+    if grep -Eq 'git[^#]*(push|cherry-pick|merge[[:space:]])' "$checkpoint_script"; then
+        echo "release-policy-parity: convergence checkpoint contains a prohibited Git mutation" >&2
+        failed=1
+    fi
+fi
+
+if ! sh "$root/scripts/check/test-release-fresh-checkout-boundaries.shs"; then
+    echo "release-policy-parity: fresh-checkout release boundary contract failed" >&2
+    failed=1
+fi
+
+release_cli="$root/src/app/release/main.spl"
+if test -f "$release_cli"; then
+    if grep -Fq 'blocked until the promote-only provider and live-policy verifier exist' "$release_cli" ||
+       grep -Fq 'promote-only provider and live-policy verification are not implemented' "$release_cli" ||
+       grep -Fq 'Publication is unavailable until a provider is bound' "$release_cli"; then
+        echo "release-policy-parity: release CLI still reports implemented provider surfaces as missing" >&2
+        failed=1
+    fi
+    grep -Fq 'Candidate qualification and promote-only provider workflows are implemented.' "$release_cli" || {
+        echo "release-policy-parity: release CLI does not report the current provider implementation boundary" >&2
+        failed=1
+    }
+    grep -Fq 'external signed review broker remain unavailable' "$release_cli" || {
+        echo "release-policy-parity: release CLI does not retain the current fail-closed broker boundary" >&2
+        failed=1
+    }
+fi
+
 if test "$failed" -ne 0; then
     exit 1
 fi

@@ -35,6 +35,24 @@ Do not automatically discover or cherry-pick “all fixes.” Do not accept feat
 
 Use `simple release version-check`, `beta-prepare`, `backport-check`, `candidate-check`, `promote-check`, and `withdraw-check` to validate each boundary before provider mutation. Use `spipe release-guide` and `spipe release-capabilities` to inspect this plugin’s policy surface.
 
+## Scoped self-review status and remediation
+
+GitHub forbids a PR author from submitting an `APPROVED` review on their own
+PR. `SPipe Self Review Admission` is the required status-check alternative; it
+does not claim provider or independent approval. Ordinary code/text is eligible
+by default only when authenticated external policy has no matching deny or
+constrain record. Scope kinds are `code`, `text`, exact `file`, immediate
+`directory_files`, and recursive `directory_recursive`.
+
+Read the exact rejection/invalidation reason. Push, retarget, base/diff/ruleset
+or policy drift, and expiry require a fresh exact-head high-effort review with
+zero P0/P1 and a new dispatch. A deny requires external policy-owner action or
+an eligible independent-review route; uncovered scope requires a smaller diff
+or new exact constraint; unsafe/secret material must be removed and exposed
+credentials rotated. Never attempt author `APPROVED`, reuse a stale status, or
+weaken protected integration, candidate, release, signing, or publication
+authority.
+
 ## External authority
 
 Live ruleset changes, signing, protected pushes, GitHub publication, and registry publication require explicit authority. A local plan PASS is not a live release PASS.
@@ -53,3 +71,7 @@ Live ruleset changes, signing, protected pushes, GitHub publication, and registr
 - Promotion reuses admitted artifacts without rebuilding and pushes exactly one signed annotated tag.
 - Release admission requires focused failures to reach zero followed by one clean whole-suite confirmation.
 - Withdrawal preserves published tags assets and history and corrections use a new version.
+- Protected PR self review uses a required status check because GitHub forbids an author APPROVED review and never claims provider approval.
+- Ordinary code and text are eligible by default absent an operator deny or constrain record with code, text, file, directory_files, and directory_recursive scopes.
+- Push, retarget, base, diff, ruleset, policy, or expiry invalidation requires a fresh exact-head review and a new self-review admission dispatch.
+- Rejection remediation follows the exact reason without broadening protected integration, candidate, release, signing, or publication authority.

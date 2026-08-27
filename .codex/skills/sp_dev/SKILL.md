@@ -60,6 +60,37 @@ complete when workflow/tooling behavior changed and the matching guide, skill,
 agent, command, or generated/manual spec docs are still stale. Update the docs
 first, then run focused verification evidence once.
 
+## Protected PR self-review handoff
+
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+If the user or an agent says `self approve`, `approve PR`, or `author cannot
+approve`, run `spipe self-review-guide` (or
+`node .spipe/spipe/cli/spipe.js self-review-guide`) and follow its exact-head
+review, protected dispatch, and exact-head poll. This is the canonical
+discovery entry point.
+
+If `spipe` is absent or returns `unknown command: self-review-guide`, initialize
+the pinned plugin with `git submodule update --init .spipe/spipe` and run the
+`node .spipe/spipe/cli/spipe.js self-review-guide` form. The unknown command
+means a stale installation; it does not authorize falling back to author
+`gh pr review --approve`.
+
+When a lane reaches protected PR integration, tell the operator and future LLM
+that GitHub forbids a PR author from submitting an `APPROVED` review on their
+own PR. `SPipe Self Review Admission` is a short-lived required status check,
+not provider or independent approval. Ordinary code/text is eligible by default
+absent an external operator deny/constrain; exact scopes are `code`, `text`,
+`file`, immediate `directory_files`, and descendant `directory_recursive`.
+
+Record the exact rejection/invalidation reason and remediation in the lane log.
+State drift or expiry requires a fresh exact-head high-effort review with zero
+P0/P1 and a new dispatch. A deny requires policy-owner action or an eligible
+independent route; uncovered scope requires a smaller diff or new constraint;
+unsafe/secret material must be removed and exposed credentials rotated. Never
+attempt author `APPROVED`, reuse a stale check, or weaken candidate, release,
+merge, signing, or publication authority.
+
 For every acceptance criterion, record one passing result and do not rerun the
 same unchanged green command. Stop after three verify/fix cycles for one
 feature and report any remaining failure; convergence ends the lane instead of

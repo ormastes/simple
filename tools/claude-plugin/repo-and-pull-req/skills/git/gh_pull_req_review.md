@@ -1,5 +1,13 @@
 # GitHub Pull Request Review Skill
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+Canonical same-author help: `spipe self-review-guide`. Searches for `self
+approve`, `approve PR`, or `author cannot approve` route there. On preflight
+same-author detection or a rejected author `APPROVE`, print its exact-head
+review, one protected dispatch command, and exact-head poll/remediation steps;
+never retry provider approval.
+
 Autonomous PR review. Checks PR status, processes review comments,
 fixes code or replies, then branches by `--level`:
 
@@ -33,6 +41,7 @@ PR_STATUS=$(gh pr view "${PR_NUMBER}" --json state,reviewDecision,reviews,url,he
 STATE=$(echo "$PR_STATUS" | jq -r .state)
 REVIEW_DECISION=$(echo "$PR_STATUS" | jq -r .reviewDecision)
 BRANCH=$(echo "$PR_STATUS" | jq -r .headRefName)
+HEAD_SHA=$(gh pr view "${PR_NUMBER}" --repo "${REPO}" --json headRefOid --jq .headRefOid)
 ```
 
 - If `STATE == "MERGED"` or `STATE == "CLOSED"`: exit, run post-merge cleanup
@@ -41,6 +50,12 @@ BRANCH=$(echo "$PR_STATUS" | jq -r .headRefName)
   scoped self-review dispatch or provider approval, required-check polling, and
   merge-state handling. A clean L1 PR must likewise reach its opportunistic
   merge decision.
+
+For same-author L2 admission, review exactly `HEAD_SHA`. The Simple hosted
+workflow is valid only when `REPO == ormastes/simple`; its dispatch must include
+`-f expected_head_sha="$HEAD_SHA"`. For every other repository, use the generic
+SPipe evaluate-then-approve path or fail closed—never dispatch a same-number
+Simple PR.
 
 ### Step 2 — Fetch Review Comments
 
@@ -182,17 +197,24 @@ polling, no bot-approve, no checks-wait.
    If `ACTOR_ID == AUTHOR_ID`, never call `gh pr review --approve`. Require the
    reviewer result to bind `HEAD_SHA`, use effort `high|xhigh|max|ultra`, and
    report `p0_count=0` and `p1_count=0`. Require non-empty `SESSION_ID` and
-   `REVIEWER_MODEL`, then dispatch the trusted default-branch workflow once for
-   the exact `HEAD_SHA:BASE_SHA` scope:
+   `REVIEWER_MODEL`. Only when `REPO == ormastes/simple`, dispatch that
+   repository's trusted default-branch workflow once for the exact
+   `HEAD_SHA:BASE_SHA` scope:
 
    ```bash
    gh workflow run review-admission.yml --repo "$REPO" --ref main \
      -f pull_request_number="$PR_NUMBER" \
+     -f expected_head_sha="$HEAD_SHA" \
      -f session_id="$SESSION_ID" \
      -f reviewer_model="$REVIEWER_MODEL" \
      -f reviewer_effort="$REVIEWER_EFFORT" \
      -f self_attestation='PASS:0:0'
    ```
+
+   For every other `REPO`, do not run this hosted workflow: invoke
+   `spipe_self_review_privilege_evaluate` for the closed exact-head request and
+   invoke `spipe_self_review_approve` only on allow. If that protected generic
+   route is unavailable or denies, fail closed.
 
    Persist `admission_dispatched=true`, `admission_scope=HEAD_SHA:BASE_SHA`, and
    `status=awaiting-self-review-admission`. While that scope is pending, poll;

@@ -38,7 +38,10 @@ When installed as an npm-style package, the binaries are `spipe` and
 Protected release policy is available through `release-guide` and
 `release-capabilities`. These are inspection commands, not release mutation
 commands: signing, protected-ref updates, and publication remain external,
-explicitly authorized operations.
+explicitly authorized operations. The guide also explains why GitHub authors
+cannot submit an `APPROVED` review, how the separate `SPipe Self Review
+Admission` required status works, its five scope kinds, and the exact
+remediation class for rejection or invalidation.
 
 The CLI also owns the reusable LLM fine-tune process. It can initialize host
 attempt registries, record data downloads, model research, base-model choice,

@@ -115,8 +115,9 @@ commands, one per host.
 ### `github` (alias `gh`)
 
 Thin wrapper around the real `gh` CLI: `list` gets reformatted into a table
-(or `--json`/`--jq`); every other verb is a **verbatim passthrough** to `gh`
-(all remaining flags go straight through, uninterpreted).
+(or `--json`/`--jq`). Most other verbs pass through to `gh`; `pr review
+--approve` and `pr review -a` first resolve the PR number and author so an
+author credential can be redirected to the protected SPipe admission status.
 
 | Verb | Passthrough target |
 |---|---|
@@ -137,6 +138,11 @@ Requires: `gh` installed and authenticated.
 
 #### Protected PR handoff
 
+For `self approve`, `approve PR`, or `author cannot approve`, run
+`spipe self-review-guide`. The `devhub github pr review <PR> --approve` path now
+detects a same-author credential before submission and prints that canonical
+workflow; if GitHub rejects author approval, it prints the same redirect.
+
 Use `devhub github pr review <PR> --approve` only from an account that is
 eligible to review that pull request. An author (including an agent acting
 through the author's `gh` credential) must not self-approve. In this repository,
@@ -144,15 +150,31 @@ a high-capability exact-head review at `high` effort or above that reports zero
 P0/P1 findings can request the live scoped gate instead:
 
 ```bash
-gh workflow run review-admission.yml --ref main \
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo ormastes/simple --json headRefOid --jq .headRefOid)
+gh workflow run review-admission.yml --repo ormastes/simple --ref main \
   -f pull_request_number="$PR_NUMBER" \
+  -f expected_head_sha="$HEAD_SHA" \
   -f session_id="$SESSION_ID" \
   -f reviewer_model="$REVIEWER_MODEL" \
   -f reviewer_effort="$REVIEWER_EFFORT" \
   -f self_attestation='PASS:0:0'
 ```
 
-The trusted default-branch workflow resolves the PR head, base, merge base,
+Poll only that captured head:
+
+```bash
+gh api "repos/ormastes/simple/commits/$HEAD_SHA/check-runs?check_name=SPipe%20Self%20Review%20Admission" \
+  --jq ".check_runs[] | select(.head_sha == \"$HEAD_SHA\") | [.status,.conclusion] | @tsv"
+```
+
+This Simple-hosted workflow owns its internal policy evaluation. The generic
+SPipe MCP path is different: call `spipe_self_review_privilege_evaluate`, then
+call `spipe_self_review_approve` only when evaluation allows it. Do not combine
+or reorder those paths.
+
+The reviewed SHA is a binding, not authority: the trusted default-branch
+workflow independently resolves the live PR head and rejects the request if it
+does not equal `expected_head_sha`. It then resolves the base, merge base,
 diff, active protected ruleset, authorized dispatcher, and external policy
 server-side. On success it emits `SPipe Self Review Admission` on that exact
 head for ten minutes. This check is explicitly self-attested: it is neither a
