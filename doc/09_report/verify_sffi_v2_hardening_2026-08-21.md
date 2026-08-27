@@ -739,3 +739,14 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the canonical read and raw argument/write providers
   remain outside artifact-bound ABI/ownership verification and trusted-signature
   admission.
+
+## Follow-up: backend exhaustiveness-validator containment (2026-08-27)
+
+- PASS (static/source): the validator's one raw source-text declaration and
+  direct call are explicitly unsafe/lexical.
+- PASS (performance/semantics shape): direct analysis work is unchanged, with
+  no retry, extra I/O, copy, lookup, lock, or duplicate analysis. No runtime
+  benchmark was run.
+- FAIL (global admission): the raw provider lacks artifact-bound ABI,
+  ownership, verification, and trusted-signature evidence. A typed I/O-error
+  state in the per-file result is needed before safe lifting.

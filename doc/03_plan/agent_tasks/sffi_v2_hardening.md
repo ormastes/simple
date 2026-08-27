@@ -522,3 +522,7 @@ passing placeholder.
     unreadable input must exit nonzero. Retain raw bootstrap-argument and
     generated-output-write operations as lexical unsafe calls, with exactly one
     normal argument read, source read, and output write and no retries/copies.
+100. Keep backend exhaustiveness-validator source reads explicitly unsafe until
+    its per-file result can carry typed I/O error. Preserve one direct lexical
+     read with no retry, extra I/O, copy, lookup, lock, or duplicate analysis;
+     never convert unreadable backend source to an empty successful validation.
