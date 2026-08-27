@@ -105,11 +105,23 @@ and `release/*` self-review rulesets together with those workflow defaults and
 environment. An unconfigured `broker_signed` mode fails closed; the dedicated
 candidate/release broker remains a separate unsupported lane.
 
+The mutating command must run from a clean checkout whose `HEAD` is the exact
+provider-resolved `main` head. It does not derive check names or App IDs from
+mutable broker JSON. Instead it generates the complete canonical normalized
+`main` and `release/*` rulesets with literal protected-ref conditions,
+deletion/non-fast-forward guards, review-thread and create-time enforcement,
+merge methods, and the exact `Code Idiom & Structural Ratchet Gates` and
+`SPipe Self Review Admission` checks from GitHub Actions App ID 15368. Generated
+bytes must match the pinned normalized SHA-256 values and the checked-in
+manifests before any API write.
+
 The command finishes by reading the live rulesets, environments, workflow
-defaults, and immutable-release setting back from GitHub. Every normalized
-projection must match before it prints the deterministic live projection
-SHA-256. A digest is post-apply configuration evidence, not review, candidate,
-or release admission. Run `verify-live` separately for read-only inspection.
+defaults, and immutable-release setting back from GitHub. PUT payloads and
+post-apply comparisons use the same frozen canonical snapshot, so concurrent
+local projection drift cannot redefine success. Every normalized projection
+must match before it prints the deterministic live projection SHA-256. A digest
+is post-apply configuration evidence, not review, candidate, or release
+admission. Run `verify-live` separately for read-only inspection.
 
 Immediately before success, the workflow re-resolves the PR/base/ruleset and
 regenerates the merge-base diff and compares the normalized active-ruleset
