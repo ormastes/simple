@@ -4,6 +4,13 @@
 
 
 
+"""
+## Purpose and audience
+Purpose: Verify the futex-backed fsync mutex lock/unlock state transitions and
+address independence.
+Audience: runtime engineers who own std.nogc_async_mut.fsync.
+"""
+
 # @cover src/lib/nogc_async_mut/fsync/fsync.spl
 
 use std.spec.step
@@ -11,7 +18,8 @@ use std.spec.step
 use std.spec
 use std.nogc_async_mut.fsync.fsync.{
     fsync_mutex_lock,
-    fsync_mutex_unlock
+    fsync_mutex_unlock,
+    fsync_mutex_is_locked
 }
 
 describe "fsync mutex/condvar":
@@ -21,8 +29,10 @@ describe "fsync mutex/condvar":
         step("lock and unlock on address 0 complete without error")
         val addr: u32 = 0
         fsync_mutex_lock(addr)
+        # oracle: interpreter-mode acquisition must mark the futex row locked
+        expect(fsync_mutex_is_locked(addr)).to_equal(true)
         fsync_mutex_unlock(addr)
-        expect(1).to_equal(1)
+        expect(fsync_mutex_is_locked(addr)).to_equal(false)
 
     it "lock and unlock on non-zero address complete without error":
         # @req REQ-SSPEC-LIB
@@ -30,7 +40,8 @@ describe "fsync mutex/condvar":
         val addr: u32 = 42
         fsync_mutex_lock(addr)
         fsync_mutex_unlock(addr)
-        expect(1).to_equal(1)
+        # oracle: release clears the lock state on a real address row
+        expect(fsync_mutex_is_locked(addr)).to_equal(false)
 
     it "multiple lock/unlock pairs on different addresses do not interfere":
         # @req REQ-SSPEC-LIB
@@ -39,6 +50,8 @@ describe "fsync mutex/condvar":
         val b: u32 = 2
         fsync_mutex_lock(a)
         fsync_mutex_lock(b)
+        # oracle: address rows are independent — b locked while a locked
+        expect(fsync_mutex_is_locked(b)).to_equal(true)
         fsync_mutex_unlock(b)
         fsync_mutex_unlock(a)
-        expect(1).to_equal(1)
+        expect(fsync_mutex_is_locked(a)).to_equal(false)
