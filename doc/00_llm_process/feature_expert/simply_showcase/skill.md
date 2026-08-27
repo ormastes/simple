@@ -99,9 +99,21 @@ the recursion guards between simply and this repo.
   (`test/01_unit/app/ui/semantic_backend_helpers_spec.spl`) and every later
   file simply never got a verdict. The fix is `--timeout <seconds>`, which
   gives each file its own budget, emits an `UNVERIFIED <path>: TIMEOUT` line,
-  and **continues to the next file**. Do not add `--no-session-daemon`
-  alongside it: with both flags the runner processes only the FIRST path on
-  the command line and exits 0, which looks like a clean short run rather than
-  a broken one. Resume protocol when a sweep dies: diff the file list against
+  and **continues to the next file**. A separate defect — this note previously
+  and wrongly blamed it on combining the two flags — is that `--timeout` is
+  **irrelevant**: `--no-session-daemon` with two or more positional paths runs
+  only the FIRST one and exits 0, which looks like a clean short run rather
+  than a broken one. `parse_child_run` in
+  `src/app/test_runner_new/test_runner_single.spl` did
+  `if not arg.starts_with("-") and path == "": path = arg`, so later paths fell
+  through with no branch, no warning, and no effect on the exit code — even
+  when a dropped spec genuinely FAILS. The lane's greenwash hardening (timeout,
+  signal, zero-executed, truncation) is all per-file, so none of it can fire
+  for a path discarded at parse time. Blast radius is contained: every in-tree
+  caller passes exactly one path, so no CI or gate green was invalidated; the
+  exposure is interactive/agent batching. Record:
+  `doc/08_tracking/bug/test_runner_single_lane_drops_extra_paths_2026-08-27.md`;
+  PR #66 makes the lane fail closed naming the dropped paths and adds
+  `scripts/check/check-test-runner-single-lane-paths.shs`. Resume protocol when a sweep dies: diff the file list against
   `^(PASS|FAIL) ` verdicts, and the first unverdicted file in original order is
   the offender.

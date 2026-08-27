@@ -58,7 +58,15 @@ around: `bin/simple test --json <many files>` stops permanently at the first
 spec that hangs (the run died at file 1,340,
 `test/01_unit/app/ui/semantic_backend_helpers_spec.spl`, and no later file ever
 got a verdict). `--timeout <seconds>` gives each file its own budget, emits
-`UNVERIFIED <path>: TIMEOUT`, and continues. Do not combine it with
-`--no-session-daemon`: with both flags the runner processes only the first path
-and exits 0. The 42 hangs cluster in `lib/crypto/*_kat` and `lib/common/crypto`
+`UNVERIFIED <path>: TIMEOUT`, and continues. Separately — and **not** caused by
+`--timeout`, as this note previously claimed — `--no-session-daemon` with two or
+more positional paths runs only the FIRST one and exits 0: `parse_child_run` in
+`src/app/test_runner_new/test_runner_single.spl` did
+`if not arg.starts_with("-") and path == "": path = arg`, so later paths fell
+through with no branch and no warning, and the lane's greenwash hardening is all
+per-file so none of it could fire for a path discarded at parse time. Every
+in-tree caller passes exactly one path, so no CI or gate green was invalidated;
+the exposure was interactive/agent batching. Record:
+`doc/08_tracking/bug/test_runner_single_lane_drops_extra_paths_2026-08-27.md`;
+fixed to fail closed in PR #66. The 42 hangs cluster in `lib/crypto/*_kat` and `lib/common/crypto`
 perf specs.
