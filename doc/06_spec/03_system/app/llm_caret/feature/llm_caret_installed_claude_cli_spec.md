@@ -21,7 +21,7 @@ Probe the currently installed Claude CLI without sending a prompt or allowing
 | Status | Active |
 | Plan | doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope
@@ -51,6 +51,49 @@ the requirement's direct production-declaration scenarios.
 ### REQ-LLM-CARET-CLI-HARDEN-006: installed Claude CLI contract
 
 #### should resolve the installed executable and recorded provenance
+
+- should resolve the installed executable and recorded provenance
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-LLM-CARET-CLI-HARDEN-006
+step("should resolve the installed executable and recorded provenance")
+step("Load the accepted Claude feature map")
+check_feature_map()
+
+step("Invoke the installed Claude CLI with no prompt or provider credentials")
+val result = probe_current_claude_cli("prerequisites")
+
+step("Check the structured CLI response")
+expect(result.stdout).to_contain(
+    "case=prerequisites status=PASS"
+)
+expect(result.stdout).to_contain("claude_path=")
+expect(result.stdout).to_contain("claude_canonical_target=")
+expect(result.stdout).to_contain("claude_sha256=")
+expect(result.stdout).to_contain("prompt_submitted=false")
+expect(result.stdout).to_contain(
+    "provider_credentials_inherited=false"
+)
+expect(result.stdout).to_contain("evidence_status=PASS")
+expect(result.stdout).to_contain(ARTIFACT_ROOT)
+expect(result.exit_code).to_equal(0)
+check_probe_artifacts("prerequisites")
+```
+
+</details>
+
 #### should record the current version without pinning release drift
 
 - should record the current version without pinning release drift
@@ -271,67 +314,60 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `7c3061ec921c8f36465617970af31c5973275ba135e254226995d45bf017ca7d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `615f0c07677d0ea3e741342dd48a38909f60c02025752f845836bb8cfe38a627`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `7c3061ec921c8f36465617970af31c5973275ba135e254226995d45bf017ca7d`.
+Source SHA-256: `615f0c07677d0ea3e741342dd48a38909f60c02025752f845836bb8cfe38a627`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `7c3061ec921c8f36465617970af31c5973275ba135e254226995d45bf017ca7d`  
+Source SHA-256: `615f0c07677d0ea3e741342dd48a38909f60c02025752f845836bb8cfe38a627`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **74/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 82/100
 source: test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl
 mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md (current)
-findings: 14 blockers: 1
-  narrative=100 structure=60 oracle=70
-  traceability=60 evidence=70 coverage=100 maintainability=70
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=74; blocker cap makes effective=49
 doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
   why: Reviewers need to know why a magic expected value is authoritative.
   improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:79:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should resolve the installed executable and recorded provenance' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
 test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:79:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve the installed executable and recorded provenance' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:106:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should record the current version without pinning release drift' describes the test rather than its outcome
-  why: Outcome names describe product behavior rather than test mechanics.
-  improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should record the current version without pinning release drift' has no retained capture or evidence
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should resolve the installed executable and recorded provenance' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:124:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should advertise every required current flag and variadic allowed tools' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should record the current version without pinning release drift' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:124:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should advertise every required current flag and variadic allowed tools' has no retained capture or evidence
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should record the current version without pinning release drift' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:147:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing print input without a prompt-bearing provider path' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:123:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should advertise every required current flag and variadic allowed tools' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:147:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should reject missing print input without a prompt-bearing provider path' has no retained capture or evidence
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should advertise every required current flag and variadic allowed tools' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:165:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should safely reject the removed maximum-token option' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:146:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing print input without a prompt-bearing provider path' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
-test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:185:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept the hidden maximum-turn option without a prompt' describes the test rather than its outcome
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:164:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should safely reject the removed maximum-token option' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:184:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept the hidden maximum-turn option without a prompt' describes the test rather than its outcome
   why: Outcome names describe product behavior rather than test mechanics.
   improve: Rename it to the observable product outcome.
 <!-- sspec-maintain:scorecard:end -->

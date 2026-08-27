@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -15,32 +15,58 @@
 
 ### serial proxy baud guard
 
-#### guards malformed baud values
+#### valid baud values
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+#### parses decimal baud rates
 
-
-- guards malformed baud values
-   - Expected: source does not contain `val baud = args[1].to_int()`
+- call parse_baud_or_zero with valid rates
+   - Expected: parse_baud_or_zero("9600") equals `9600`
+   - Expected: parse_baud_or_zero("115200") equals `115200`
+   - Expected: parse_baud_or_zero(" 57600 ") equals `57600`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-LIB
-step("guards malformed baud values")
-val source = rt_file_read_text("src/lib/nogc_sync_mut/io/serial_proxy.spl") ?? ""
+step("call parse_baud_or_zero with valid rates")
+expect(parse_baud_or_zero("9600")).to_equal(9600)
+expect(parse_baud_or_zero("115200")).to_equal(115200)
+expect(parse_baud_or_zero(" 57600 ")).to_equal(57600)
+```
 
-expect(source).to_contain("fn parse_baud_or_zero(value: text) -> i64")
-expect(source).to_contain("return trimmed.to_int() ?? 0")
-expect(source).to_contain("val baud = parse_baud_or_zero(args[1])")
-expect(source).to_contain("if baud <= 0:")
-expect(source.contains("val baud = args[1].to_int()")).to_equal(false)
+</details>
+
+#### malformed baud values
+
+#### returns zero for non-numeric, negative, empty input
+
+- call parse_baud_or_zero with malformed values
+   - Expected: parse_baud_or_zero("abc") equals `0`
+   - Expected: parse_baud_or_zero("-5") equals `0`
+   - Expected: parse_baud_or_zero("") equals `0`
+   - Expected: parse_baud_or_zero("   ") equals `0`
+   - Expected: parse_baud_or_zero("115k2") equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-LIB
+step("call parse_baud_or_zero with malformed values")
+expect(parse_baud_or_zero("abc")).to_equal(0)
+expect(parse_baud_or_zero("-5")).to_equal(0)
+expect(parse_baud_or_zero("")).to_equal(0)
+expect(parse_baud_or_zero("   ")).to_equal(0)
+expect(parse_baud_or_zero("115k2")).to_equal(0)
 ```
 
 </details>
@@ -52,7 +78,7 @@ expect(source.contains("val baud = args[1].to_int()")).to_equal(false)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -64,8 +90,8 @@ Tests covering serial proxy baud guard.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -84,37 +110,39 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `27d06ae28caa3977e291ba99eead2ec99f9b4b75bdc75100fcec7ee8d5baf9b5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `da3332f3f159c1164077d417318a85d639aa9197c4185f6bf5f6bea3367b3d48`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `27d06ae28caa3977e291ba99eead2ec99f9b4b75bdc75100fcec7ee8d5baf9b5`.
+Source SHA-256: `da3332f3f159c1164077d417318a85d639aa9197c4185f6bf5f6bea3367b3d48`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `27d06ae28caa3977e291ba99eead2ec99f9b4b75bdc75100fcec7ee8d5baf9b5`  
+Source SHA-256: `da3332f3f159c1164077d417318a85d639aa9197c4185f6bf5f6bea3367b3d48`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **85/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 88/100
 source: test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl
 mirror: doc/06_spec/01_unit/lib/io/serial_proxy_baud_guard_spec.md (current)
-findings: 4 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=90 coverage=100 maintainability=70
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=80 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=85; blocker cap makes effective=49
 doc/06_spec/01_unit/lib/io/serial_proxy_baud_guard_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/io/serial_proxy_baud_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/lib/io/serial_proxy_baud_guard_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl:13:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'guards malformed baud values' has no retained capture or evidence
+test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'parses decimal baud rates' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/io/serial_proxy_baud_guard_spec.spl:25:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'returns zero for non-numeric, negative, empty input' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
