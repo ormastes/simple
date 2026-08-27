@@ -376,3 +376,14 @@ a claim that SFFI v2 is complete.
   allocation, lookup, lock, retry, or copy.
 - FAIL (global admission): this source contract is not signed provider
   evidence; global SFFI verification remains unavailable.
+
+## Follow-up: Redis TTL clock ABI repair (2026-08-27)
+
+- PASS (static/source): Redis now uses the shared integer microsecond clock in
+  a lexical unsafe scope. A clock failure breaks the connection loop before
+  TTL-sensitive request dispatch; the existing close path releases the socket.
+- PASS (performance shape): successful chunks retain one clock read and the
+  existing parser/dispatch loop, with no added allocation, copy, lookup, lock,
+  or retry.
+- FAIL (global admission): this does not supply a signed artifact or provider
+  verification receipt; repository-wide SFFI remains unverified.
