@@ -1039,7 +1039,7 @@ authority inventories. Synthetic manifests/maps cannot satisfy W5A-18/19.
 |---|---|---|---|
 | W5A-P commit publisher | `src/core/knowledge_compiler_commit_publisher.js`, materializer, composition-root wiring | exact base/publication input, immutable base snapshot, sealed inventories/manifests, closure permit | W5A-25..27 parity/all-and-only contributor proof |
 | W5A-S authority ports | `src/workspace/registry_authority_v1.js`, `src/storage/snapshot_authority_v1.js`, `src/storage/target_inventory_store.js` | branded revisioned registry/snapshot/inventory construction and store wiring | real owner construction before W5A-P/E |
-| W5A-J publication journal | `src/storage/authority_publication_journal.js` | `AuthorityPublicationRecordV1`, fsynced staged objects/records/parents, atomic durable current-pointer CAS, sole recovery owner | W5A-28..29 fault/restart/concurrent-read/replay proof |
+| W5A-J publication journal | `src/storage/authority_publication_journal.js` | closed `WireHeaderV1`/`ScopeBindingV1` records, append-only objects/terminals, fenced `replaceCurrentIfExactV1`, sole recovery owner | W5A-28a..e forced fault/restart/concurrent-read/replay proof |
 | W5A-E independent oracle | focused production fixtures | real roots/pages/projections and substitution evidence | W5A-30 + highest-capability PASS |
 
 Frozen names: `KnowledgeCompilerCommitPublisherV1`, `CommitInputV1`,
@@ -1063,18 +1063,46 @@ non-production crash/parity proof.
 | Step | Owner | Required deliverable | Admission evidence |
 |---|---|---|---|
 | P1 | W5A-P + W5A-S | closure-branded `TargetInventoryStoreV1` path and canonical replay envelope hash | strings, structural objects, serialized permits, public journals, and caller roots deny |
-| P2 | W5A-J | journal-owned content-addressed inventory/manifest objects, full record fields, atomic state machine | staged objects/record/current pointer survive fsync/rename/CAS/restart and replay exactly |
-| P3 | W5A-J + W5A-E | deep current/recovery verifier and stale-lock/process-crash recovery | readers see only old/new complete record, never null/staged/partial; corruption denies |
+| P2 | W5A-J | journal-owned content-addressed inventory/manifest objects, full record/terminal fields, atomic state machine | staged objects/record/terminal/current pointer survive fsync/replacement/restart and replay exactly |
+| P3 | W5A-J + W5A-E | deep current/recovery verifier, exact predecessor/generation terminal arbiter, and process-crash recovery | readers see only old/new complete record; stale terminal denies; same proposal replays; competing proposal converges one winner; corruption denies |
 | P4 | W5A-P + W5A-E | real clean/incremental publisher parity and sealed directory continuations | W5A-26, W5A-28, W5A-31..35 PASS against production filesystem owners |
 
 `AuthorityPublicationRecordV1` must contain exact workspace/project/worktree/
 revision IDs, expected registry/base/publication IDs, base and authority
 snapshot IDs, ordered project roots, aggregate root, manifest digests, object
 hashes, and canonical replay-envelope digest. The journal alone owns its
-objects, transitions (`staging -> objects_durable -> record_durable ->
-current_cas -> acknowledged`), recovery, and current pointer. W5A-P accepts no
+objects, transitions (`staging -> objects_durable -> record_durable -> terminal_durable ->
+fenced_current -> acknowledged`), recovery, and current pointer. W5A-P accepts no
 parallel shortcut: cursor, URI, projection, MCP, and materialization remain
 blocked until independent highest-capability review reports PASS.
+
+### 10.26 Canonical P3 implementation handoff (2026-08-27)
+
+This handoff supersedes old generic W5A-28 CAS/record language and any
+section-26.4 `H` convention. `G` is the only generation. The implementer owns
+one closed canonical domain: `WireHeaderV1 {type:"spkc.authority-publication",
+version:1,domain:"spkc.authority-publication-v1",
+canonicalization:"spipe-canonical-json-v1"}` and `ScopeBindingV1
+{workspaceUid,projectUidOrNull,worktreeUid,revisionId,registryRevisionId,
+baseSnapshotUidOrNull,authoritySnapshotUid}`. Registry/clock are trusted ports,
+not caller/wire values. Object-set, proposal, record, and terminal digests bind
+in that order; current carries record/terminal digests and no self-digest.
+
+`G=0` alone permits null predecessor. Every `G>0` proposal and record bind exact
+old current-pointer bytes/digest. Byte-identical proposals map to one replayed
+terminal. Distinct valid proposals sharing scope/`G` have one fenced current
+winner; every loser returns the winner terminal. Durable order is object,
+proposal, record, terminal file+parent fsync; fence; exact conditional current replacement;
+current-parent fsync; visible; ack. Objects/terminals are append-only; current is
+the sole replaced name.
+
+The host must advertise `replaceCurrentIfExactV1` on one mount. `EEXIST` and
+`ENOENT` re-read; `EACCES`/`EPERM` deny; `EXDEV` rejects layout;
+`ENOTSUP`/`EOPNOTSUPP` means unsupported durable publication; other errno is
+fatal. No rename fallback. W5A-28a..e force reader, stale, same-proposal,
+competing-proposal, and crash/certificate-clock-revocation schedules, including
+no-reuse proof. Merge owner accepts no P3 source without all five schedules and
+independent highest-capability PASS.
 
 ### 11.2 Wave 5a sealed-publication repair gate (2026-08-26)
 

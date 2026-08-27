@@ -3235,11 +3235,14 @@ URI/MCP/materializer adapters provide neither permit, roots, nor aggregate.
 
 Stage immutable objects, `AuthorityPublicationJournalV1`, and complete `AuthorityPublicationRecordV1`,
 file-fsync every record/object and parent-fsync every containing directory;
-only then executes the one atomic durable current-pointer revision-CAS. The
-pointer contains publication UID, exact registry/base tuple, ordered project
-roots, aggregate root, paired authority snapshot UIDs, and both manifest
-digests. The CAS primitive makes the pointer visible only after its own durable
-write/fsync boundary completes, so readers see old or new complete records only.
+only then take the generation fence and perform the one atomic conditional
+current-pointer replacement. The replacement is conditional on the exact old
+pointer bytes and digest, not merely a revision number. Parent-directory fsync
+follows that replacement; only after it succeeds may the new pointer be visible
+or acknowledged. The pointer contains publication UID, exact registry/base
+tuple, ordered project roots, aggregate root, paired authority snapshot UIDs,
+and both manifest digests. Readers see only an already durable old or new
+complete record.
 Equal `commitId` plus canonical input replays; changed input or stale revision
 denies. Recovery exposes only the preceding complete record or one complete new
 record. Production-oracle evidence must prove all-kind
@@ -3274,7 +3277,7 @@ The replacement must meet these closed rules:
 3. `AuthorityPublicationJournalV1` exclusively persists the content-addressed
    inventory and manifest objects, their object hashes, the complete
    `AuthorityPublicationRecordV1`, and the current pointer. Its durable state
-   machine is `staging -> objects_durable -> record_durable -> current_cas ->
+   machine is `staging -> objects_durable -> record_durable -> terminal_durable -> fenced_current ->
    acknowledged`, with atomic rename, file and parent-directory fsync, stale
    writer-lock recovery, and process-crash recovery at every transition.
 4. A reader never observes `null`, a staged record, or a partially validated
@@ -3321,3 +3324,74 @@ This matrix is additive: it preserves the existing normative sealed
 authority/cursor contracts, raw snapshot APIs, and exact
 `spipe-markdown-token-v1@1` <=6,000 gate. Rejected cursor implementations are
 forensic evidence only and may not weaken, delete, or replace those contracts.
+
+### 43.6 Canonical P3 publication wire, generation, and durable-head contract (2026-08-27)
+
+This section **replaces every conflicting P3 statement in 43.3--43.5**, the
+former section-26.4 `G`/`H` convention, and the earlier W5A-28
+CAS/record wording. `H` is not a second generation or terminal-selection field.
+`G` is the only monotonically increasing generation; no implementation may
+combine this contract with an earlier alternative.
+
+All durable values use one non-circular canonical domain:
+
+```text
+WireHeaderV1 = {type:"spkc.authority-publication", version:1,
+  domain:"spkc.authority-publication-v1", canonicalization:"spipe-canonical-json-v1"}
+ScopeBindingV1 = {workspaceUid, projectUidOrNull, worktreeUid, revisionId,
+  registryRevisionId, baseSnapshotUidOrNull, authoritySnapshotUid}
+```
+
+Every durable value uses exactly this representation: `WireValueV1 =
+{header:WireHeaderV1,scope:ScopeBindingV1,payload:<typed payload>}` and its
+bytes are `spipe-canonical-json-v1(WireValueV1)`. `ObjectV1.payload` is
+`{objectUid,objectKind,objectPayload}`; `objectDigest = SHA-256(ObjectV1
+bytes)`. The object list is sorted by ascending UTF-8 `objectUid` bytes with no
+duplicates, and `objectSetDigest = SHA-256(spipe-canonical-json-v1({header,
+scope,objects:[{objectUid,objectDigest}]}))`. `proposalDigest = SHA-256(
+ProposalV1 bytes)`; `recordDigest = SHA-256(RecordV1 bytes)` where payload
+binds `G`, predecessor pointer bytes digest, proposal digest, and object-set
+digest; `terminalDigest = SHA-256(TerminalV1 bytes)` where payload binds
+proposal, object-set, and record digests. The current pointer binds exact record
+and terminal digests. No digest contains itself. No path, implicit workspace,
+provider registry, or clock is a wire value; `ProviderRegistryV1` and `ClockPort`
+are trusted composition-root validators, never serialized or caller supplied.
+
+`G=0` is the sole initial-publication exception: predecessor pointer bytes and
+digest are null. Every `G>0` proposal/record carries the exact currently durable
+predecessor pointer bytes and SHA-256 digest; any mismatch denies before stage.
+A terminal is keyed by `(ScopeBindingV1,G,proposalDigest)`: byte-identical
+proposal replay returns byte-identical terminal. Competing valid proposals for
+one scope/generation race only for fenced conditional replacement; one wins and
+every loser converges to that winner terminal, never a second winner.
+
+The sole durable order is:
+
+```text
+objects + proposal + record + terminal file fsync -> parent fsync -> acquire generation fence
+-> conditional replace current using exact old pointer bytes/digest
+-> fsync current parent directory -> visible -> ack
+```
+
+`visible`/`ack` are forbidden before current-parent fsync. Object and terminal
+namespaces are append-only; `current` alone is atomically replaced. The Node
+journal needs an advertised `replaceCurrentIfExactV1` capability. On its chosen
+mount, `EEXIST` means competing claim/re-read; `ENOENT` missing expected
+predecessor/re-read; `EACCES`/`EPERM` deny; `EXDEV` invalid mount/layout; and
+`ENOTSUP`/`EOPNOTSUPP` required atomic-condition or directory-fsync unsupported.
+Any other Node errno is fatal. There is no rename fallback, guessed platform
+mapping, or acknowledgement without advertised capability and parent fsync.
+
+W5A-28 is five forced independent-process schedules, not one generic CAS test:
+
+| Case | Forced barrier/fault schedule | Required assertion |
+|---|---|---|
+| W5A-28a | reader at every ordered durability boundary | reader returns only exact old or exact new validated terminal |
+| W5A-28b | stale contender reaches fence after current changes, with its terminal already file+parent durable | stale predecessor rejects; no current-pointer or ack write, and its append-only terminal never becomes the visible winner |
+| W5A-28c | two byte-identical proposals meet at fence | one stored terminal byte sequence; both callers replay it |
+| W5A-28d | two valid different proposals share scope/`G` at fence | one replacement wins; loser returns winner terminal and cannot expose its proposal |
+| W5A-28e | SIGKILL before/after fence, replacement, current-parent fsync, and ack; restart with certificate, clock, and revocation changes | recovery validates certificate/time/revocation, exposes old-or-new only, and never reuses digest/generation/terminal |
+
+These schedules prove certificate rejection, clock-window failure, revocation
+failure, and no-reuse after recovery. They are the sole P3
+publication/recovery acceptance meaning pending independent PASS.

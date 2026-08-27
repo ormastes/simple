@@ -801,7 +801,7 @@ manifest layers; mints the closure permit; and calls
 
 `build` is not caller data: it carries the exact base/registry tuple, ordered
 complete roots, target/section digests, sealed pages, and authority manifest.
-`AuthorityPublicationJournalV1` stages and fsyncs objects, records, and their parent directories,
+`AuthorityPublicationJournalV1` stages and fsyncs objects, records, terminals, and their parent directories,
 then executes one atomic durable current-pointer CAS for a closed
 `AuthorityPublicationRecordV1` with registry/base tuple, ordered project roots,
 aggregate root, paired authority snapshot UIDs, and manifest digests. The CAS
@@ -832,7 +832,7 @@ fixture-only recovery as evidence.
    result; every altered envelope or stale expected tuple denies.
 3. Put every inventory/manifest object and its content hash under
    `AuthorityPublicationJournalV1` ownership. Journal states are `staging`,
-   `objects_durable`, `record_durable`, `current_cas`, `acknowledged`; each
+   `objects_durable`, `record_durable`, `terminal_durable`, `fenced_current`, `acknowledged`; each
    stage uses atomic replacement/rename plus file and parent fsync. Recovery
    handles a dead writer's lock and an actual process crash at every boundary.
 4. Before `openPublishedAuthorityInventoryV1` or recovery returns a head,
@@ -845,7 +845,43 @@ fixture-only recovery as evidence.
    ordering, authenticated continuation, `1..100` limits, and the exact 100
    entries/200 lines/6,000 token limits in those oracles.
 
-### 12.7 Admission remediation matrix and implementation handoff
+### 12.7 Canonical P3 journal contract (2026-08-27)
+
+This section supersedes every conflicting P3 sentence in 12.5--12.6 and the
+former duplicate 12.7 heading; the following matrix is renumbered 12.8. The
+wire grammar is closed: every durable object, proposal, record, terminal, and
+pointer uses byte-identical `WireHeaderV1 {type:"spkc.authority-publication",
+version:1,domain:"spkc.authority-publication-v1",
+canonicalization:"spipe-canonical-json-v1"}` and `ScopeBindingV1
+{workspaceUid,projectUidOrNull,worktreeUid,revisionId,registryRevisionId,
+baseSnapshotUidOrNull,authoritySnapshotUid}`. Every durable value uses exactly
+this representation: `WireValueV1 = {header:WireHeaderV1,scope:ScopeBindingV1,
+payload:<typed payload>}` and its bytes are `spipe-canonical-json-v1(WireValueV1)`.
+`ObjectV1.payload` is `{objectUid,objectKind,objectPayload}`; `objectDigest =
+SHA-256(ObjectV1 bytes)`. The object list is sorted by ascending UTF-8
+`objectUid` bytes with no duplicates, and `objectSetDigest = SHA-256(
+spipe-canonical-json-v1({header,scope,objects:[{objectUid,objectDigest}]}))`.
+`proposalDigest = SHA-256(ProposalV1 bytes)`; `recordDigest = SHA-256(RecordV1
+bytes)` where payload binds `G`, predecessor pointer bytes digest, proposal
+digest, and object-set digest; `terminalDigest = SHA-256(TerminalV1 bytes)`
+where payload binds proposal, object-set, and record digests. The current
+pointer binds exact record and terminal digests. No digest contains itself. No
+path, implicit workspace, provider registry, or clock is a wire value;
+`ProviderRegistryV1` and `ClockPort` are trusted composition-root validators,
+never serialized or caller supplied. `G=0` alone has null predecessor bytes
+and digest. For `G>0`, exact old current-pointer bytes and digest are mandatory.
+Same proposal bytes replay one terminal; competing valid proposals for one
+scope/`G` choose one fenced winner and losers return that winner terminal.
+
+The mandatory order is durable objects/proposal/record/terminal and their parents,
+generation fence, `replaceCurrentIfExactV1(oldPointerBytes,oldPointerDigest)`,
+current-parent fsync, then visibility and acknowledgement. Objects/terminals
+are append-only; only `current` is atomically replaced. Node maps `EEXIST` to
+re-read/retry, `ENOENT` to missing-predecessor/re-read, `EACCES`/`EPERM` to
+deny, `EXDEV` to invalid mount, and `ENOTSUP`/`EOPNOTSUPP` to unsupported
+durable publication; any other errno is fatal. No rename fallback is allowed.
+
+### 12.8 Admission remediation matrix and implementation handoff
 
 | Seal | Interface that must exist first | Required production oracle | No-shortcut rule |
 |---|---|---|---|

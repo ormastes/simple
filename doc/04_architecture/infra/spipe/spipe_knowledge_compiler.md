@@ -1707,7 +1707,7 @@ ordered, schema-complete, and all-and-only registry-selected; all content and
 directory data precedes sealing. The closure permit cannot be serialized or
 provided by adapters. The journal stages immutable objects and the complete
 `AuthorityPublicationRecordV1`, fsyncs every staged file and parent directory,
-then invokes the sole atomic durable current-pointer revision-CAS. That CAS
+then durably writes the terminal and invokes the sole fenced atomic conditional current-pointer replacement. That replacement
 does not expose the new head until its pointer write/fsync boundary completes;
 `openPublishedAuthorityInventoryV1` observes old or new complete records only.
 The pointer contains its publication UID, exact registry/base tuple, ordered
@@ -1738,10 +1738,12 @@ project roots, aggregate root, manifest digests, and content hashes for every
 journal-owned inventory/manifest object.
 
 `AuthorityPublicationJournalV1` is the sole durable state-machine and recovery
-owner: `staging`, `objects_durable`, `record_durable`, `current_cas`, and
-`acknowledged`. It writes immutable content-addressed objects and record before
-one atomic rename/CAS current pointer, fsyncing files and parent directories;
-it recovers stale writer locks and process interruption deterministically.
+owner: `staging`, `objects_durable`, `record_durable`, `terminal_durable`, `fenced_current`, and
+`acknowledged`. It writes immutable content-addressed objects, record, and terminal,
+fsyncs files and their parents, acquires the generation fence, conditionally
+replaces `current` using exact old-pointer bytes/digest, then fsyncs the current
+parent before visibility or acknowledgement. It recovers interruption
+deterministically; generic rename/CAS is not the current-pointer primitive.
 `openPublishedAuthorityInventoryV1` and recovery deep-verify record schema,
 all object hashes, both manifests, project/aggregate roots, exact binding, and
 sealed page roots before returning. Once a head exists, reads return only its
@@ -1787,3 +1789,43 @@ This is an additive boundary order, not a replacement of §21's normative
 authority/cursor ABI, raw snapshot APIs, or the exact
 `spipe-markdown-token-v1@1` <=6,000 token gate. Rejected cursor work is
 forensic evidence only and cannot weaken or delete those contracts.
+
+### 21.8 Canonical P3 publication state machine (2026-08-27)
+
+This section supersedes conflicting P3 generation/terminal/current-pointer
+wording in 21.5--21.7. `G` is the single generation; historical `H` is not a
+second generation or winner field. Every durable proposal, record, terminal,
+and pointer carries exactly `WireHeaderV1 {type:"spkc.authority-publication",
+version:1,domain:"spkc.authority-publication-v1",
+canonicalization:"spipe-canonical-json-v1"}` plus `ScopeBindingV1
+{workspaceUid,projectUidOrNull,worktreeUid,revisionId,registryRevisionId,
+baseSnapshotUidOrNull,authoritySnapshotUid}`. Registry and clock capabilities
+validate these bytes but are not durable inputs.
+
+Every durable value uses exactly this representation: `WireValueV1 =
+{header:WireHeaderV1,scope:ScopeBindingV1,payload:<typed payload>}` and its
+bytes are `spipe-canonical-json-v1(WireValueV1)`. `ObjectV1.payload` is
+`{objectUid,objectKind,objectPayload}`; `objectDigest = SHA-256(ObjectV1
+bytes)`. The object list is sorted by ascending UTF-8 `objectUid` bytes with no
+duplicates, and `objectSetDigest = SHA-256(spipe-canonical-json-v1({header,
+scope,objects:[{objectUid,objectDigest}]}))`. `proposalDigest = SHA-256(
+ProposalV1 bytes)`; `recordDigest = SHA-256(RecordV1 bytes)` where payload
+binds `G`, predecessor pointer bytes digest, proposal digest, and object-set
+digest; `terminalDigest = SHA-256(TerminalV1 bytes)` where payload binds
+proposal, object-set, and record digests. The current pointer binds exact record
+and terminal digests. No digest contains itself. No path, implicit workspace,
+provider registry, or clock is a wire value; `ProviderRegistryV1` and `ClockPort`
+are trusted composition-root validators, never serialized or caller supplied.
+`G=0` alone has null predecessor. At
+`G>0`, proposal and record bind exact durable predecessor pointer bytes/digest.
+Identical proposal bytes replay one terminal; competing proposals use the fence
+and exact conditional current replacement to choose one winner and every loser
+returns that winner terminal.
+
+The implementation port is `replaceCurrentIfExactV1`: object/proposal/record/
+terminal file+parent fsync, fence, conditional replacement, current-parent fsync,
+visible, ack. Objects and terminals are append-only; current alone is mutable.
+`EEXIST` means competing claim and `ENOENT` missing predecessor (re-read);
+`EACCES`/`EPERM` deny; `EXDEV` invalid mount; `ENOTSUP`/`EOPNOTSUPP` unsupported
+required durability; any other Node error is fatal. No fallback rename or
+synthetic capability publishes.

@@ -1645,7 +1645,7 @@ standalone authority primitive are `NOT-EVIDENCE`.
 | W5A-25 | Commit from exact prior base/publication tuple, then supply caller permit/root/aggregate | Only closure permit publishes; adapters cannot choose contributors or infer prior state |
 | W5A-26 | Commit artifacts, sections, directories; compare clean and incremental | Base/authority snapshots, roots, pages, and projections are byte-identical |
 | W5A-27 | Missing/extra/reordered/substituted/incomplete aggregate contributor | Denial before publication; no partial project/aggregate visibility |
-| W5A-28 | Fault stage/write/**AuthorityPublicationJournalV1 publication-journal atomic rename**/file-fsync/parent-fsync/current-pointer-CAS/ack/restart; concurrently read at every boundary | AuthorityPublicationJournalV1 validates one AuthorityPublicationRecordV1; recovery and concurrent reader see only old complete or new complete dual-scope state, never staged/partial state |
+| W5A-28 | Forced W5A-28a..e independent-process schedules: objects/proposal/record/**terminal** file+parent fsync, exact old/new reader barriers, stale-terminal fence, same-proposal fence race, competing-proposal fence race, and SIGKILL/restart at fence/current replacement/current-parent fsync/ack | `replaceCurrentIfExactV1` binds exact predecessor pointer bytes/digest; recovery/concurrent readers see only a complete old or complete new terminal. Certificate/time/revocation rejection and no digest/generation/terminal reuse are mandatory. Generic CAS/rename coverage is superseded and does not satisfy this row. |
 | W5A-29 | Equal commit-ID/exact tuple/input then altered input, stale revision, or changed expected base/publication UID | Equal replay idempotent; altered/stale denies without publication |
 | W5A-30 | Substitute manifest/inventory/snapshot/revision/section/target/directory root | Revalidation denies before lookup or ProjectionPort |
 | W5A-31 | Supply public journal, `instanceof` lookalike, structural permit, serialized permit, or caller aggregate/root | Only TargetInventoryStoreV1's composition-root closure brand publishes; no write or visible record otherwise |
@@ -1659,6 +1659,28 @@ journal, and filesystem owners. They gate W5A-18..24, W5C, URI, MCP, and
 materializer re-attempts.
 W5A-31..35 are additional non-admission gates for the rejected publisher
 implementation; focused or in-memory substitutes do not satisfy them.
+
+#### W5A-28 forced P3 schedules (canonical)
+
+All records use the closed `spkc.authority-publication-v1` wire header and
+`ScopeBindingV1`; `ProviderRegistryV1`/`ClockPort` are trusted test fixtures,
+not wire fields. Object-set -> proposal -> record -> terminal -> current digest
+binding is checked without a self-hash. `G=0` has the only null predecessor;
+every `G>0` input must echo exact old current-pointer bytes/digest.
+
+| Case | Forced process/barrier | Oracle |
+|---|---|---|
+| W5A-28a | Hold readers after each object/proposal/record/terminal file fsync, each parent fsync, fence, conditional replacement, and current-parent fsync | only the exact validated old or new terminal is readable |
+| W5A-28b | Advance current between stale contender validation and fence after contender terminal file+parent fsync | contender gets stale-predecessor denial and performs no current/ack write; its append-only terminal cannot become visible winner |
+| W5A-28c | Two processes submit byte-identical proposal; force both terminal file+parent fsync before same fence | one terminal byte sequence exists durably before replacement; both outcomes replay it |
+| W5A-28d | Two valid different proposals share scope and `G` at same fence | one winner terminal; loser returns that winner and never exposes a second winner |
+| W5A-28e | SIGKILL before/after fence, conditional replacement, current-parent fsync, and ack; restart under certificate/clock/revocation mutations | old-or-new only; invalid certificate/window/revocation denies; no object, generation, or terminal identifier is reused |
+
+The setup asserts append-only object/terminal namespaces and mutable current
+only. Node capability cases are exact: `EEXIST`/`ENOENT` force re-read,
+`EACCES`/`EPERM` deny, `EXDEV` rejects mount layout, and
+`ENOTSUP`/`EOPNOTSUPP` marks durable publication unsupported; every other errno
+is fatal. No fallback rename may be injected.
 
 ### 22.4 Ordered remediation gates (blocking test execution)
 
