@@ -716,3 +716,13 @@ a claim that SFFI v2 is complete.
   overhead was added. No runtime benchmark was run.
 - FAIL (global admission): the raw disk providers lack artifact-bound ABI,
   ownership, verification, and trusted-signature evidence. They remain unsafe.
+
+## Follow-up: SMF hot-reload disk boundary containment (2026-08-27)
+
+- PASS (static/source): the four hot-reload file declarations and their direct
+  disk calls are explicitly unsafe/lexical.
+- PASS (performance/semantics shape): existing `HotReloadResult.IoError` paths
+  remain authoritative. No retry, extra I/O, copy, lookup/lock work, or change
+  to hot-reload/update semantics was introduced. No runtime benchmark was run.
+- FAIL (global admission): raw disk providers lack artifact-bound ABI,
+  ownership, verification, and trusted-signature evidence. They remain unsafe.

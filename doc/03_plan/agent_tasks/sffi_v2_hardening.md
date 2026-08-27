@@ -514,3 +514,7 @@ passing placeholder.
     lexical. Unreadable persistent cache remains a cache miss by design; do
     not add retries, extra I/O, copies, lookup/lock work, or any overhead to
     the in-memory O(1) lookup/store hot path pending provider admission.
+98. Keep SMF hot-reload disk wrappers explicit lexical unsafe boundaries. Their
+    existing `HotReloadResult.IoError` paths must remain authoritative; preserve
+    four direct disk calls with no retries, extra I/O, copies, lookup/lock work,
+    or change to hot-reload/update semantics pending provider admission.
