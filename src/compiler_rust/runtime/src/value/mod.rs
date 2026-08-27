@@ -96,7 +96,8 @@ pub use aes::{
     rt_aes256_encrypt_block_into, rt_aes256_encrypt_block_pure, rt_aes_decrypt_block_with_expanded,
     rt_aes_encrypt_block_with_expanded, rt_aes_rcon, rt_aes_sbox, rt_tls13_aes128_gcm_decrypt,
     rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt, rt_tls13_aes256_gcm_encrypt,
-    rt_ssh_aes256_gcm_decrypt_packet, rt_ssh_aes256_gcm_decrypt_packet_payload_len,
+    rt_ssh_aes256_gcm_decrypt_packet, rt_ssh_aes256_gcm_decrypt_packet_v2,
+    rt_ssh_aes256_gcm_decrypt_packet_payload_len,
 };
 
 // Re-export object types

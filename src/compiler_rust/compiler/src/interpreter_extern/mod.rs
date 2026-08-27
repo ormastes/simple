@@ -2073,12 +2073,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls13_aes256_gcm_decrypt", simd::rt_tls13_aes256_gcm_decrypt);
     insert_simple!("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt);
     insert_simple!(
-        "rt_ssh_aes256_gcm_decrypt_packet",
-        simd::rt_ssh_aes256_gcm_decrypt_packet
-    );
-    insert_simple!(
-        "rt_ssh_aes256_gcm_decrypt_packet_payload_len",
-        simd::rt_ssh_aes256_gcm_decrypt_packet_payload_len
+        "rt_ssh_aes256_gcm_decrypt_packet_v2",
+        simd::rt_ssh_aes256_gcm_decrypt_packet_v2
     );
     insert_simple!("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_torch_available", torch::rt_torch_available);

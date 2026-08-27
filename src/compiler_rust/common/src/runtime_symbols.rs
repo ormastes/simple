@@ -2026,6 +2026,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_thread_local_set",
     "rt_tls13_aes128_gcm_decrypt",
     "rt_ssh_aes256_gcm_decrypt_packet",
+    "rt_ssh_aes256_gcm_decrypt_packet_v2",
     "rt_ssh_aes256_gcm_decrypt_packet_payload_len",
     "rt_tls13_aes256_gcm_decrypt",
     "rt_tls13_aes256_gcm_encrypt",

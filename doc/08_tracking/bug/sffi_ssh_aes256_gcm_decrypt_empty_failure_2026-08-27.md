@@ -1,6 +1,6 @@
 # SSH AES-256-GCM SFFI decrypt collapses failure into an empty byte array
 
-- Status: OPEN
+- Status: PARTIALLY FIXED — v2 contract contained; cross-lane runtime proof blocked
 - Filed: 2026-08-27
 - Severity: security boundary / cross-lane SFFI contract defect
 - Scope: `rt_ssh_aes256_gcm_decrypt_packet`
@@ -54,8 +54,35 @@ migration.  Update all of the following from the same contract definition:
 
 The v2 implementation MUST decrypt/authenticate once per call, retain cached
 typed dispatch, and add neither per-call hashing/signature lookup nor a second
-payload copy beyond the already-required owned Simple result.  It MUST NOT use
-empty arrays, `0`, `false`, or `nil` as failure sentinels.
+payload copy beyond the already-required owned Simple result. A tagged array
+carrier may append the status byte and let the Simple lift wrapper remove it
+in place. It MUST NOT use empty arrays, `0`, `false`, or `nil` as failure
+sentinels.
+
+## Implemented containment (2026-08-27)
+
+`rt_ssh_aes256_gcm_decrypt_packet_v2` now returns a non-empty tagged carrier:
+invalid input is `[0x00]`, authentication failure is `[0x01]`, and success is
+`[payload..., 0x02]`.  The Simple wrapper removes the trailing status with
+in-place `pop()`, retaining the result array without a payload rebuild.  Native
+Rust, the interpreter handler, the interpreter registry, runtime symbol list,
+and JIT/native runtime-function table now name the same v2 symbol.  Legacy
+interpreter registrations were removed, so old Simple source cannot dispatch to
+the empty-array or `-1` handlers.
+
+`sh scripts/audit/ssh-gcm-sffi-v2-authority.shs` passes.  The focused Rust
+test is presently blocked before test execution by unrelated missing imports in
+`src/compiler_rust/compiler/src/interpreter/expr/collections.rs` (`CompileError`
+and `codes`); the workspace-wide formatter is also red from unrelated existing
+formatting drift.  Consequently this is not a full runtime/JIT proof, and the
+provider remains unsigned and unverified.
+
+The SSH-cipher optimizer run reports 110 module-wide existing opportunities
+(45 bounds-check, 27 dead-code, 18 loop-invariant, and 20 general); there is no
+pre-change performance baseline, so it is not a regression claim.  The changed
+success path is one raw invocation followed by O(1) in-place `pop()`.  No
+dedicated SSH-GCM performance benchmark currently exists; add one before a
+throughput or peak-RSS claim.
 
 ## Acceptance evidence
 

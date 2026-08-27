@@ -1801,3 +1801,18 @@ cross-lane owners, and performance acceptance criteria are tracked in
 `doc/08_tracking/bug/sffi_ssh_aes256_gcm_decrypt_empty_failure_2026-08-27.md`.
 No code was changed in this review, so the provider remains unsafe, unsigned,
 and unverified.
+
+### SSH AES-GCM v2 tagged carrier containment (2026-08-27)
+
+The SSH packet decrypt migration now uses
+`rt_ssh_aes256_gcm_decrypt_packet_v2` consistently in the Simple wrapper,
+native Rust runtime, interpreter dispatch, runtime-symbol inventory, and JIT
+runtime-function table.  It returns a mandatory trailing tag: `0x00` invalid
+input, `0x01` authentication failure, or `0x02` success.  The Simple wrapper
+removes the trailing tag with in-place `pop()`, preserving the owned payload
+array with no second decrypt, per-call lookup/hash, or payload copy.  Legacy
+interpreter handlers that fabricated an empty array or `-1` are no longer
+registered.  The dedicated source authority audit passes and the focused
+Simple check passes under the bootstrap seed.  Focused Rust test execution is
+blocked by unrelated missing imports in `interpreter/expr/collections.rs`; do
+not claim full cross-lane verification, signing, or global SFFI safety.

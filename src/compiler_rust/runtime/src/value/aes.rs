@@ -1194,13 +1194,26 @@ pub fn aes256_gcm_decrypt_bytes(
     AesGcmDecryptOutcome::Plaintext(plaintext)
 }
 
-pub fn ssh_aes256_gcm_decrypt_packet_bytes(key: &[u8], iv: &[u8], seq: i64, packet: &[u8]) -> Option<Vec<u8>> {
+pub enum SshAesGcmDecryptOutcome {
+    InvalidInput,
+    AuthenticationFailed,
+    Plaintext(Vec<u8>),
+}
+
+pub fn ssh_aes256_gcm_decrypt_packet_outcome(
+    key: &[u8],
+    iv: &[u8],
+    seq: i64,
+    packet: &[u8],
+) -> SshAesGcmDecryptOutcome {
     if key.len() != AES256_KEY_LEN || iv.len() != 12 || packet.len() < 21 {
-        return None;
+        return SshAesGcmDecryptOutcome::InvalidInput;
     }
-    let body_len = packet.len().checked_sub(20)?;
+    let Some(body_len) = packet.len().checked_sub(20) else {
+        return SshAesGcmDecryptOutcome::InvalidInput;
+    };
     if body_len == 0 {
-        return None;
+        return SshAesGcmDecryptOutcome::InvalidInput;
     }
     let mut nonce = [0u8; 12];
     nonce.copy_from_slice(iv);
@@ -1218,16 +1231,24 @@ pub fn ssh_aes256_gcm_decrypt_packet_bytes(key: &[u8], iv: &[u8], seq: i64, pack
     let tag = &packet[4 + body_len..4 + body_len + AES_BLOCK_LEN];
     let body = match aes256_gcm_decrypt_bytes(key, &nonce, ciphertext, aad, tag) {
         AesGcmDecryptOutcome::Plaintext(body) => body,
-        AesGcmDecryptOutcome::InvalidInput | AesGcmDecryptOutcome::TagMismatch => return None,
+        AesGcmDecryptOutcome::InvalidInput => return SshAesGcmDecryptOutcome::InvalidInput,
+        AesGcmDecryptOutcome::TagMismatch => return SshAesGcmDecryptOutcome::AuthenticationFailed,
     };
     if body.is_empty() {
-        return None;
+        return SshAesGcmDecryptOutcome::InvalidInput;
     }
     let padding_len = body[0] as usize;
     if 1 + padding_len > body.len() {
-        return None;
+        return SshAesGcmDecryptOutcome::InvalidInput;
     }
-    Some(body[1..body.len() - padding_len].to_vec())
+    SshAesGcmDecryptOutcome::Plaintext(body[1..body.len() - padding_len].to_vec())
+}
+
+pub fn ssh_aes256_gcm_decrypt_packet_bytes(key: &[u8], iv: &[u8], seq: i64, packet: &[u8]) -> Option<Vec<u8>> {
+    match ssh_aes256_gcm_decrypt_packet_outcome(key, iv, seq, packet) {
+        SshAesGcmDecryptOutcome::Plaintext(payload) => Some(payload),
+        SshAesGcmDecryptOutcome::InvalidInput | SshAesGcmDecryptOutcome::AuthenticationFailed => None,
+    }
 }
 
 /// Encode an `AesGcmDecryptOutcome` into the status-prefixed `[u8]` shape used
@@ -1303,7 +1324,7 @@ pub unsafe extern "C" fn rt_tls13_aes256_gcm_decrypt(
 }
 
 #[no_mangle]
-pub extern "C" fn rt_ssh_aes256_gcm_decrypt_packet(
+pub unsafe extern "C" fn rt_ssh_aes256_gcm_decrypt_packet(
     key: RuntimeValue,
     iv: RuntimeValue,
     seq: i64,
@@ -1324,8 +1345,45 @@ pub extern "C" fn rt_ssh_aes256_gcm_decrypt_packet(
     runtime_array_from_bytes(&payload)
 }
 
+/// Versioned SSH packet decrypt carrier.  This is intentionally tagged so
+/// malformed input and authentication failure cannot become an ordinary empty
+/// byte array:
+///   [0x00]       -> invalid input / malformed packet
+///   [0x01]       -> authentication failure
+///   [payload.., 0x02] -> authenticated payload (which may be empty by policy)
+///
+/// The payload is produced only once; this does not probe with the legacy
+/// payload-length entry point and therefore does not decrypt twice.
 #[no_mangle]
-pub extern "C" fn rt_ssh_aes256_gcm_decrypt_packet_payload_len(
+pub unsafe extern "C" fn rt_ssh_aes256_gcm_decrypt_packet_v2(
+    key: RuntimeValue,
+    iv: RuntimeValue,
+    seq: i64,
+    packet: RuntimeValue,
+) -> RuntimeValue {
+    let Some(key_bytes) = runtime_array_to_bytes(key) else {
+        return runtime_array_from_bytes(&[0x00]);
+    };
+    let Some(iv_bytes) = runtime_array_to_bytes(iv) else {
+        return runtime_array_from_bytes(&[0x00]);
+    };
+    let Some(packet_bytes) = runtime_array_to_bytes(packet) else {
+        return runtime_array_from_bytes(&[0x00]);
+    };
+    match ssh_aes256_gcm_decrypt_packet_outcome(&key_bytes, &iv_bytes, seq, &packet_bytes) {
+        SshAesGcmDecryptOutcome::InvalidInput => runtime_array_from_bytes(&[0x00]),
+        SshAesGcmDecryptOutcome::AuthenticationFailed => runtime_array_from_bytes(&[0x01]),
+        SshAesGcmDecryptOutcome::Plaintext(payload) => {
+            let mut out = Vec::with_capacity(1 + payload.len());
+            out.extend_from_slice(&payload);
+            out.push(0x02);
+            runtime_array_from_bytes(&out)
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_ssh_aes256_gcm_decrypt_packet_payload_len(
     key: RuntimeValue,
     iv: RuntimeValue,
     seq: i64,
