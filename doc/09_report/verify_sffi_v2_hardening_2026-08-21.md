@@ -672,3 +672,14 @@ a claim that SFFI v2 is complete.
   run.
 - FAIL (global admission): the canonical file-read provider remains outside
   artifact-bound ABI/ownership verification and trusted-signature admission.
+
+## Follow-up: all-file parse-probe file-read migration (2026-08-27)
+
+- PASS (static/source): the parse probe no longer declares/calls raw
+  `rt_file_read_text`; its list and source reads use `read_file_text_result`.
+- PASS (semantics/performance shape): unreadable input now exits nonzero before
+  parsing. Successful operation retains one read per input and one parse per
+  listed source with no retry, extra I/O, copy, lookup, lock, or duplicate
+  parsing. No runtime benchmark was run.
+- FAIL (global admission): the canonical file-read provider remains outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.

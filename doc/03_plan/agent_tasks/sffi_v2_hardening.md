@@ -496,3 +496,7 @@ passing placeholder.
     existing metrics table cannot be read, block the append instead of writing
     a fabricated empty replacement. Preserve one normal read/write per table
     with no retry, extra I/O, copies, lookup, locks, or report-generation pass.
+94. Keep the all-file parse probe on `read_file_text_result`; unreadable list
+    or source input must exit nonzero before parsing. Preserve its normal one
+    read per input and one parse per listed source with no retry, extra I/O,
+    copies, lookup, locks, or duplicate parsing.
