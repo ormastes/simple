@@ -23,17 +23,37 @@ INTERVAL_MS=${STAGE4_MEM_GATE_INTERVAL_MS:-200}
 WORKLOAD_MS=${STAGE4_MEM_GATE_WORKLOAD_MS:-6000}
 FIXTURE="$ROOT/test/fixture/memstat/gate_workload.spl"
 SAMPLER="$ROOT/src/app/memstat/main.spl"
-SIMPLE_BIN="$ROOT/bin/simple"
+# INJECTABLE COMPILER (2026-08-17). Previously hardcoded "$ROOT/bin/simple", so
+# the gate always measured whatever binary happened to be deployed and could not
+# be pointed at the build under test. `SIMPLE_BIN` now overrides it, and the
+# binary's identity is RECORDED in the verdict line — an RSS number is
+# meaningless without knowing which binary produced it, and the deployed symlink
+# is retargeted by other lanes mid-session.
+# See doc/08_tracking/bug/guards_hardcode_stale_seed_binary_census_2026-08-17.md
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+SIMPLE_REAL=$(readlink -f "$SIMPLE_BIN" 2>/dev/null || echo "$SIMPLE_BIN")
+SIMPLE_MTIME=$(date -r "$SIMPLE_REAL" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo unknown)
 
 fail() {
-    echo "stage4-memory-gate: FAIL reason=$1 csv=$CSV threshold_kb=$THRESHOLD_KB"
+    echo "stage4-memory-gate: FAIL reason=$1 csv=$CSV threshold_kb=$THRESHOLD_KB binary=$SIMPLE_REAL mtime=$SIMPLE_MTIME"
     exit 1
 }
 
-[ -x "$SIMPLE_BIN" ] || fail "simple-binary-missing"
-[ -f "$FIXTURE" ] || fail "fixture-missing"
-[ -f "$SAMPLER" ] || fail "sampler-missing"
-mkdir -p "$BUILD_DIR" || fail "build-dir"
+# A MISSING PREREQUISITE IS "NOTHING WAS CHECKED", NOT A FAILURE (2026-08-17).
+# These three used to call fail() -> exit 1 with the same wording as a real
+# threshold breach, so a worktree with no compiler was indistinguishable from a
+# genuine memory regression, and a `set -eu` death here produced ZERO output.
+# Absence of evidence is not evidence: they now use the repo-wide ERROR/exit-2
+# convention.
+oops() {
+    echo "stage4-memory-gate: ERROR — nothing was checked: $1"
+    exit 2
+}
+
+[ -x "$SIMPLE_BIN" ] || oops "no executable compiler at '$SIMPLE_BIN' (set SIMPLE_BIN to override)"
+[ -f "$FIXTURE" ] || oops "fixture missing: $FIXTURE"
+[ -f "$SAMPLER" ] || oops "sampler missing: $SAMPLER"
+mkdir -p "$BUILD_DIR" || oops "cannot create build dir: $BUILD_DIR"
 rm -f "$CSV"
 
 # 1. Launch the fixed workload in the background.
@@ -59,5 +79,5 @@ PEAK_KB=$(awk -F, 'NR>1 && ($2+0) > max { max = $2+0 } END { print max+0 }' "$CS
 [ "$PEAK_KB" -gt 0 ] || fail "rss-not-sampled"
 [ "$PEAK_KB" -le "$THRESHOLD_KB" ] || fail "peak-rss-${PEAK_KB}kb-over-threshold"
 
-echo "stage4-memory-gate: PASS peak_rss_kb=$PEAK_KB threshold_kb=$THRESHOLD_KB data_rows=$((ROWS - 1)) csv=$CSV"
+echo "stage4-memory-gate: PASS peak_rss_kb=$PEAK_KB threshold_kb=$THRESHOLD_KB data_rows=$((ROWS - 1)) csv=$CSV binary=$SIMPLE_REAL mtime=$SIMPLE_MTIME"
 exit 0

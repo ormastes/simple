@@ -10,7 +10,8 @@ ENTRY=src/os/hosted/hosted_entry.spl
 SIMPLE_BIN="${SIMPLE_BIN:-}"
 HOSTED_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted-wm}"
 WINT_LIB="${SIMPLE_WM_WINIT_LIB:-src/runtime/spl_winit/target/release/libspl_winit.so}"
-RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so}"
+RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-}"
+RUNTIME_LIB_EXPECTED_SHA256="${SIMPLE_WM_RUNTIME_LIB_SHA256:-}"
 FONT_ASSET='assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf'
 FONT_ASSET_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
 # Filled from the exact raw RGB crop after the first current-path capture.
@@ -29,34 +30,140 @@ case "${1:-}" in
         ;;
 esac
 
+SELF_TEST_ROOT=""
+BOOTSTRAP_RUNTIME_LIB="$ROOT_DIR/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so"
+if [ "$SELF_TEST" -eq 1 ]; then
+    SELF_TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/linux-hosted-wm-runtime-self-test.XXXXXX")"
+    BUILD_DIR="$SELF_TEST_ROOT"
+    REPORT_PATH="$BUILD_DIR/report.md"
+    trap 'rm -rf "$SELF_TEST_ROOT"' EXIT INT TERM
+fi
+
 LOG_PATH="$BUILD_DIR/stdout.log"
 ERR_PATH="$BUILD_DIR/stderr.log"
-PID_PATH="$BUILD_DIR/pid"
+BUILD_LOG="$BUILD_DIR/native-build.log"
+SNAPSHOT_LIVE="$BUILD_DIR/snapshot.live.json"
+CAPTURE_LIVE="$BUILD_DIR/framebuffer.live.ppm"
+COMMAND_PATH="$BUILD_DIR/evidence.commands"
 WINDOW_ENV="$BUILD_DIR/window.env"
-CAPTURE_PATH="$BUILD_DIR/window.png"
-CAPTURE_METRICS="$BUILD_DIR/capture.metrics"
-TIMEOUT_SECS="${LINUX_HOSTED_WM_LIVE_TIMEOUT_SECS:-25}"
-FORCE_X11="${LINUX_HOSTED_WM_FORCE_X11:-1}"
+WINDOW_PNG="$BUILD_DIR/window.png"
+GLYPH_RGB="$BUILD_DIR/terminal-title.rgb"
+WINDOW_GLYPH_RGB="$BUILD_DIR/window-terminal-title.rgb"
+EVIDENCE_ENV="$BUILD_DIR/evidence.env"
+SOURCE_DIFF="$BUILD_DIR/source.diff"
+SOURCE_MANIFEST="$BUILD_DIR/native-source-manifest.sha256"
+SOURCE_MANIFEST_AFTER="$BUILD_DIR/native-source-manifest.after.sha256"
+SOURCE_MANIFEST_ID='native-build-entry-closure:src/os/hosted/hosted_entry.spl:src/os+src/lib:all-spl:sha256-v1'
+CALIBRATION_RGB="$BUILD_DIR/terminal-title.deliberate-red.rgb"
+BASELINE_SNAPSHOT="$BUILD_DIR/baseline.snapshot.json"
+BASELINE_CAPTURE="$BUILD_DIR/baseline.framebuffer.ppm"
+INPUT_SNAPSHOT="$BUILD_DIR/input.snapshot.json"
+INPUT_CAPTURE="$BUILD_DIR/input.framebuffer.ppm"
+MOVE_SNAPSHOT="$BUILD_DIR/move.snapshot.json"
+MOVE_CAPTURE="$BUILD_DIR/move.framebuffer.ppm"
+MAXIMIZE_SNAPSHOT="$BUILD_DIR/maximize.snapshot.json"
+MAXIMIZE_CAPTURE="$BUILD_DIR/maximize.framebuffer.ppm"
+RESTORE_SNAPSHOT="$BUILD_DIR/restore.snapshot.json"
+RESTORE_CAPTURE="$BUILD_DIR/restore.framebuffer.ppm"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$LOG_PATH" "$ERR_PATH" "$PID_PATH" "$WINDOW_ENV" "$CAPTURE_PATH" "$CAPTURE_METRICS" "$REPORT_PATH"
+rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
+    "$COMMAND_PATH" "$WINDOW_ENV" "$WINDOW_PNG" "$GLYPH_RGB" \
+    "$WINDOW_GLYPH_RGB" "$EVIDENCE_ENV" "$SOURCE_DIFF" "$SOURCE_MANIFEST" \
+    "$SOURCE_MANIFEST_AFTER" "$CALIBRATION_RGB" "$REPORT_PATH" \
+    "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" \
+    "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" \
+    "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE"
 
-GUI_BIN="${GUI_BIN:-}"
-GUI_BIN_SOURCE="${GUI_BIN_SOURCE:-explicit-env}"
-if [ "$GUI_BIN" = "" ]; then
-    GUI_BIN_SOURCE="repo-gui-driver-fallback"
-    for candidate in \
-        "src/compiler_rust/target/gui/debug/simple" \
-        "src/compiler_rust/target/gui/release/simple" \
-        "src/compiler_rust/target/debug/simple" \
-        "src/compiler_rust/target/release/simple"
-    do
-        if [ -x "$candidate" ] && LC_ALL=C grep -aq "rt_winit_event_loop_new" "$candidate"; then
-            GUI_BIN="$candidate"
-            break
-        fi
-    done
-fi
+sha256_file() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+sha256_text() {
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+
+lower_sha256() {
+    [ "${#1}" -eq 64 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+    return 0
+}
+
+canonical_regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    directory="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)" || return 1
+    printf '%s/%s\n' "$directory" "$(basename -- "$1")"
+}
+
+bootstrap_runtime_provider() {
+    case "$1" in
+        */src/compiler_rust/target/bootstrap/*) return 0 ;;
+    esac
+    if [ -f "$BOOTSTRAP_RUNTIME_LIB" ] && [ ! -L "$BOOTSTRAP_RUNTIME_LIB" ]; then
+        [ "$(sha256_file "$1")" = "$(sha256_file "$BOOTSTRAP_RUNTIME_LIB")" ] && return 0
+    fi
+    return 1
+}
+
+admit_runtime_provider() {
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-explicit-required
+    runtime_provider_source_path=""
+    runtime_provider_path=""
+    runtime_provider_sha256=""
+    [ "$RUNTIME_LIB" != "" ] || return 1
+    lower_sha256 "$RUNTIME_LIB_EXPECTED_SHA256" || {
+        runtime_provider_reason=runtime-provider-sha256-invalid
+        return 1
+    }
+    runtime_provider_source_path="$(canonical_regular_file "$RUNTIME_LIB")" || {
+        runtime_provider_reason=runtime-provider-not-canonical-regular-file
+        return 1
+    }
+    if bootstrap_runtime_provider "$runtime_provider_source_path"; then
+        runtime_provider_reason=runtime-provider-bootstrap-forbidden
+        return 1
+    fi
+    runtime_provider_sha256="$(sha256_file "$runtime_provider_source_path")"
+    if [ "$runtime_provider_sha256" != "$RUNTIME_LIB_EXPECTED_SHA256" ]; then
+        runtime_provider_reason=runtime-provider-sha256-mismatch
+        return 1
+    fi
+    runtime_provider_status=pass
+    runtime_provider_reason=pass
+    runtime_provider_build_identity="$(sha256_text "runtime-provider-content-identity-v1
+path=$runtime_provider_source_path
+sha256=$runtime_provider_sha256")"
+}
+
+runtime_provider_source_still_admitted() {
+    current_runtime_path="$(canonical_regular_file "$RUNTIME_LIB")" || return 1
+    [ "$current_runtime_path" = "$runtime_provider_source_path" ] || return 1
+    [ "$(sha256_file "$current_runtime_path")" = "$runtime_provider_sha256" ] || return 1
+    [ "$runtime_provider_sha256" = "$RUNTIME_LIB_EXPECTED_SHA256" ]
+}
+
+stage_admitted_runtime_provider() {
+    runtime_provider_stage_dir="$(mktemp -d "$BUILD_DIR/runtime-provider-admission.XXXXXX")" || return 1
+    chmod 700 "$runtime_provider_stage_dir" || return 1
+    runtime_provider_path="$runtime_provider_stage_dir/$(basename -- "$runtime_provider_source_path")"
+    cp "$runtime_provider_source_path" "$runtime_provider_path.new" || return 1
+    chmod 500 "$runtime_provider_path.new" || return 1
+    mv "$runtime_provider_path.new" "$runtime_provider_path" || return 1
+    [ "$(sha256_file "$runtime_provider_path")" = "$runtime_provider_sha256" ]
+}
+
+runtime_provider_stage_still_admitted() {
+    [ "$runtime_provider_path" != "" ] && [ -f "$runtime_provider_path" ] && [ ! -L "$runtime_provider_path" ] &&
+        [ "$(sha256_file "$runtime_provider_path")" = "$runtime_provider_sha256" ]
+}
+
+open_admitted_runtime_provider() {
+    [ -d /proc/$$/fd ] || return 1
+    exec 9<"$runtime_provider_path"
+    runtime_provider_fd_path="/proc/$$/fd/9"
+    [ "$(sha256_file "$runtime_provider_fd_path")" = "$runtime_provider_sha256" ]
+}
 
 capture_argb_checksum() {
     convert "$1" -depth 8 rgba:- 2>/dev/null \
@@ -154,6 +261,13 @@ emit() {
         echo "linux_hosted_wm_live_window_engine2d_sha256=$engine_sha"
         echo "linux_hosted_wm_live_window_wrapper_sha256=$wrapper_sha"
         echo "linux_hosted_wm_live_window_native_artifact_sha256=$hosted_bin_sha"
+        echo "linux_hosted_wm_live_window_runtime_provider_source_path=$runtime_provider_source_path"
+        echo "linux_hosted_wm_live_window_runtime_provider_path=$runtime_provider_path"
+        echo "linux_hosted_wm_live_window_runtime_provider_sha256=$runtime_provider_sha256"
+        echo "linux_hosted_wm_live_window_runtime_provider_expected_sha256=$RUNTIME_LIB_EXPECTED_SHA256"
+        echo "linux_hosted_wm_live_window_runtime_provider_build_identity=$runtime_provider_build_identity"
+        echo "linux_hosted_wm_live_window_runtime_provider_status=$runtime_provider_status"
+        echo "linux_hosted_wm_live_window_runtime_provider_admission_sha256=$runtime_provider_admission_sha256"
         echo "linux_hosted_wm_live_window_window_marker=$window_marker"
         echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
         echo "linux_hosted_wm_live_window_font_identity=$font_identity"
@@ -170,6 +284,14 @@ emit() {
         echo "linux_hosted_wm_live_window_keyboard_status=$keyboard_status"
         echo "linux_hosted_wm_live_window_text_status=$text_status"
         echo "linux_hosted_wm_live_window_input_receipt_status=$input_receipt_status"
+        echo "linux_hosted_wm_live_window_semantic_status=$semantic_status"
+        echo "linux_hosted_wm_live_window_event_origin=$event_origin"
+        echo "linux_hosted_wm_live_window_event_id=$event_id"
+        echo "linux_hosted_wm_live_window_wm_target_id=$wm_target_id"
+        echo "linux_hosted_wm_live_window_input_compositor_wm_target_id=$input_compositor_wm_target_id"
+        echo "linux_hosted_wm_live_window_semantic_target_id=$semantic_target_id"
+        echo "linux_hosted_wm_live_window_callback_count=$callback_count"
+        echo "linux_hosted_wm_live_window_mutation_revision=$mutation_revision"
         echo "linux_hosted_wm_live_window_replay_rejection_status=$replay_status"
         echo "linux_hosted_wm_live_window_move_status=$move_status"
         echo "linux_hosted_wm_live_window_maximize_status=$maximize_status"
@@ -190,6 +312,15 @@ emit() {
         echo "linux_hosted_wm_live_window_input_backend=$input_backend"
         echo "linux_hosted_wm_live_window_input_readback_source=$input_readback_source"
         echo "linux_hosted_wm_live_window_input_backend_handle=$input_backend_handle"
+        echo "linux_hosted_wm_live_window_input_render_event_id=$input_render_event_id"
+        echo "linux_hosted_wm_live_window_input_render_mutation_revision=$input_render_mutation_revision"
+        echo "linux_hosted_wm_live_window_input_composition_id=$input_composition_id"
+        echo "linux_hosted_wm_live_window_input_web_content_image_count=$input_web_content_image_count"
+        echo "linux_hosted_wm_live_window_input_readback_completed=$input_readback_completed"
+        echo "linux_hosted_wm_live_window_input_readback_width=$input_readback_width"
+        echo "linux_hosted_wm_live_window_input_readback_height=$input_readback_height"
+        echo "linux_hosted_wm_live_window_input_readback_stride=$input_readback_stride"
+        echo "linux_hosted_wm_live_window_input_readback_format=$input_readback_format"
         echo "linux_hosted_wm_live_window_input_capture_sha256=$input_capture_sha"
         echo "linux_hosted_wm_live_window_input_snapshot=$INPUT_SNAPSHOT"
         echo "linux_hosted_wm_live_window_input_capture=$INPUT_CAPTURE"
@@ -235,6 +366,8 @@ emit() {
         echo "- native source manifest: $SOURCE_MANIFEST_ID (${source_manifest_admitted_sha:--}, status=$source_manifest_status)"
         echo "- pure-Simple compiler SHA-256: ${simple_bin_sha:--}"
         echo "- native artifact SHA-256: ${hosted_bin_sha:--}"
+        echo "- runtime provider: ${runtime_provider_path:--} (${runtime_provider_sha256:--}, status=$runtime_provider_status)"
+        echo "- runtime provider admission: ${runtime_provider_admission_sha256:--}"
         echo "- wrapper SHA-256: ${wrapper_sha:--}"
         echo "- font identity: ${font_identity:--}"
         echo "- glyph crop: $GLYPH_RGB (${glyph_sha:--})"
@@ -245,42 +378,8 @@ emit() {
         echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum move=3/$move_revision/$move_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
         echo "- compatibility fallback: $fallback_status"
     } >"$REPORT_PATH"
-    echo "linux_hosted_wm_live_window_status=$status"
-    echo "linux_hosted_wm_live_window_reason=$reason"
-    echo "linux_hosted_wm_live_window_gui_bin=$GUI_BIN"
-    echo "linux_hosted_wm_live_window_gui_bin_source=$GUI_BIN_SOURCE"
-    echo "linux_hosted_wm_live_window_entry=src/os/hosted/hosted_entry.spl"
-    echo "linux_hosted_wm_live_window_window_marker=$window_marker"
-    echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
-    echo "linux_hosted_wm_live_window_capture_status=$capture_status"
-    echo "linux_hosted_wm_live_window_event_status=$event_status"
-    echo "linux_hosted_wm_live_window_force_x11=$FORCE_X11"
-    echo "linux_hosted_wm_live_window_capture_png=$CAPTURE_PATH"
-    echo "linux_hosted_wm_live_window_capture_metrics=$CAPTURE_METRICS"
-    echo "linux_hosted_wm_live_window_report_path=$REPORT_PATH"
+    cat "$EVIDENCE_ENV"
 }
-
-if [ "$GUI_BIN" = "" ]; then
-    emit_report "unavailable" "missing-gui-enabled-driver" "fail" "fail" "not-run" "not-run"
-    exit 1
-fi
-
-set +e
-if [ "$FORCE_X11" = "1" ]; then
-    env WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_LIB="${SIMPLE_LIB:-src}" "$GUI_BIN" run src/os/hosted/hosted_entry.spl >"$LOG_PATH" 2>"$ERR_PATH" &
-else
-    SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_LIB="${SIMPLE_LIB:-src}" "$GUI_BIN" run src/os/hosted/hosted_entry.spl >"$LOG_PATH" 2>"$ERR_PATH" &
-fi
-run_pid=$!
-echo "$run_pid" >"$PID_PATH"
-deadline=$(($(date +%s) + TIMEOUT_SECS))
-while kill -0 "$run_pid" >/dev/null 2>&1 && [ "$(date +%s)" -lt "$deadline" ]; do
-    if grep -Fq "[hosted-wm] warmup-frames-presented count=12" "$LOG_PATH" 2>/dev/null; then
-        break
-    fi
-    sleep 1
-done
-set -e
 
 window_marker=fail
 frame_marker=fail
@@ -297,6 +396,14 @@ pointer_status=fail
 keyboard_status=fail
 text_status=fail
 input_receipt_status=fail
+semantic_status=fail
+event_origin=""
+event_id=""
+wm_target_id=""
+input_compositor_wm_target_id=""
+semantic_target_id=""
+callback_count=""
+mutation_revision=""
 replay_status=fail
 move_status=fail
 maximize_status=fail
@@ -314,6 +421,15 @@ input_frame_checksum=""
 input_backend=""
 input_readback_source=""
 input_backend_handle=""
+input_render_event_id=""
+input_render_mutation_revision=""
+input_composition_id=""
+input_web_content_image_count=""
+input_readback_completed=""
+input_readback_width=""
+input_readback_height=""
+input_readback_stride=""
+input_readback_format=""
 input_capture_sha=""
 move_revision=""
 move_frame_checksum=""
@@ -348,6 +464,16 @@ engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
 simple_bin_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
+runtime_provider_path=""
+runtime_provider_source_path=""
+runtime_provider_sha256=""
+runtime_provider_reason="runtime-provider-not-checked"
+runtime_provider_status=fail
+runtime_provider_admission_sha256=""
+runtime_provider_build_identity=""
+runtime_provider_stage_dir=""
+runtime_provider_fd_path=""
+wint_provider_path=""
 
 resolve_source_provenance || {
     emit fail source-provenance-unavailable
@@ -385,6 +511,51 @@ if [ "$SELF_TEST" -eq 1 ]; then
         exit 1
     fi
     rm -rf "$git_fixture"
+    runtime_fixture_dir="$(mktemp -d "$BUILD_DIR/runtime-provider-self-test.XXXXXX")"
+    runtime_fixture="$runtime_fixture_dir/runtime-provider.so"
+    bootstrap_fixture="$runtime_fixture_dir/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so"
+    bootstrap_copy_fixture="$runtime_fixture_dir/copied-bootstrap-runtime.so"
+    mkdir -p "$(dirname -- "$bootstrap_fixture")"
+    printf 'admitted runtime fixture\n' >"$runtime_fixture"
+    printf 'bootstrap runtime fixture\n' >"$bootstrap_fixture"
+    cp "$bootstrap_fixture" "$bootstrap_copy_fixture"
+    BOOTSTRAP_RUNTIME_LIB="$bootstrap_fixture"
+    RUNTIME_LIB="$runtime_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$runtime_fixture")"
+    admit_runtime_provider
+    runtime_provider_source_still_admitted
+    stage_admitted_runtime_provider
+    runtime_provider_stage_still_admitted
+    RUNTIME_LIB="$bootstrap_fixture"
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    RUNTIME_LIB="$bootstrap_copy_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$bootstrap_copy_fixture")"
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    RUNTIME_LIB="$runtime_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256=0000000000000000000000000000000000000000000000000000000000000000
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$runtime_fixture")"
+    admit_runtime_provider
+    stage_admitted_runtime_provider
+    printf 'changed\n' >>"$runtime_fixture"
+    if runtime_provider_source_still_admitted; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    runtime_provider_stage_still_admitted
+    open_admitted_runtime_provider
+    [ "$(sha256_file "$runtime_provider_fd_path")" = "$runtime_provider_sha256" ]
+    exec 9<&-
+    rm -rf "$runtime_fixture_dir"
     echo "linux_hosted_wm_live_window_self_test_status=pass"
     echo "linux_hosted_wm_live_window_self_test_source_vcs=$source_vcs"
     echo "linux_hosted_wm_live_window_self_test_source_provenance_status=$source_provenance_status"
@@ -394,8 +565,15 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_native_source_manifest=stable"
     echo "linux_hosted_wm_live_window_self_test_git_dirty_dependency=rejected"
     echo "linux_hosted_wm_live_window_self_test_text_receipt=required"
+    echo "linux_hosted_wm_live_window_self_test_semantic_receipt=required"
     echo "linux_hosted_wm_live_window_self_test_exact_readback_fields=required"
     echo "linux_hosted_wm_live_window_self_test_capture_checksum=pass"
+    echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_changed=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_staged=pass"
+    echo "linux_hosted_wm_live_window_self_test_runtime_fd=pass"
     exit 0
 fi
 
@@ -411,8 +589,8 @@ for command in jq xdotool import convert sha256sum cargo Xvfb; do
     }
 done
 
-if [ ! -x "$SIMPLE_BIN" ] || [ ! -s "$RUNTIME_LIB" ]; then
-    emit unavailable missing-pure-simple-or-runtime
+if [ ! -x "$SIMPLE_BIN" ]; then
+    emit unavailable missing-pure-simple
     exit 1
 fi
 simple_bin_sha="$(sha256_file "$SIMPLE_BIN")"
@@ -422,6 +600,11 @@ case "$("$SIMPLE_BIN" --version 2>&1 | tr '[:upper:]' '[:lower:]')" in
         exit 1
         ;;
 esac
+
+if ! admit_runtime_provider; then
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
 
 font_sha="$(sha256_file "$FONT_ASSET" 2>/dev/null || true)"
 if [ "$font_sha" != "$FONT_ASSET_SHA256" ]; then
@@ -435,6 +618,10 @@ if [ ! -s "$WINT_LIB" ] || find src/runtime/spl_winit/src -type f -newer "$WINT_
         exit 1
     }
 fi
+wint_provider_path="$(canonical_regular_file "$WINT_LIB")" || {
+    emit fail winit-provider-not-canonical-regular-file
+    exit 1
+}
 
 write_native_source_manifest "$SOURCE_MANIFEST" || {
     emit fail native-source-manifest-unavailable
@@ -472,6 +659,26 @@ source_manifest_status=pass
     exit 1
 }
 hosted_bin_sha="$(sha256_file "$HOSTED_BIN")"
+if ! runtime_provider_source_still_admitted; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-changed-during-build
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+if ! stage_admitted_runtime_provider; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-stage-failed
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+runtime_provider_admission_sha256="$(sha256_text "runtime-provider-admission-v1
+hosted_artifact_sha256=$hosted_bin_sha
+runtime_provider_sha256=$runtime_provider_sha256
+runtime_provider_build_identity=$runtime_provider_build_identity
+simple_bin_sha256=$simple_bin_sha
+native_source_manifest_sha256=$source_manifest_admitted_sha")"
+export HOSTED_WM_ARTIFACT="$HOSTED_BIN"
+export HOSTED_WM_ARTIFACT_SHA256="$hosted_bin_sha"
 
 x_display=""
 for display_number in 91 92 93 94 95 96 97 98 99; do
@@ -495,16 +702,33 @@ cleanup() {
     fi
     kill "$xvfb_pid" 2>/dev/null || true
     wait "$xvfb_pid" 2>/dev/null || true
+    exec 9<&- 2>/dev/null || true
+    if [ "$runtime_provider_stage_dir" != "" ]; then
+        rm -rf "$runtime_provider_stage_dir"
+    fi
 }
 trap cleanup EXIT INT TERM
 sleep 1
 
 printf '0 idle\n' >"$COMMAND_PATH"
+if ! runtime_provider_stage_still_admitted; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-changed-before-launch
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+if ! open_admitted_runtime_provider; then
+    runtime_provider_status=fail
+    runtime_provider_reason=runtime-provider-fd-admission-failed
+    emit fail "$runtime_provider_reason"
+    exit 1
+fi
+env -u LD_PRELOAD -u LD_AUDIT -u LD_DEBUG -u LD_DEBUG_OUTPUT -u LD_LIBRARY_PATH -u LD_ORIGIN_PATH \
 DISPLAY="$x_display" WAYLAND_DISPLAY= WINIT_UNIX_BACKEND=x11 \
 SIMPLE_HOSTED_WM_LIVE_PROOF=1 SIMPLE_WM_EVIDENCE_SNAPSHOT_PATH="$ROOT_DIR/$SNAPSHOT_LIVE" \
 SIMPLE_WM_EVIDENCE_CAPTURE_PATH="$ROOT_DIR/$CAPTURE_LIVE" \
 SIMPLE_WM_EVIDENCE_INPUT_FIFO="$ROOT_DIR/$COMMAND_PATH" \
-LD_PRELOAD="$ROOT_DIR/$WINT_LIB:$ROOT_DIR/$RUNTIME_LIB${LD_PRELOAD:+:$LD_PRELOAD}" \
+LD_PRELOAD="$wint_provider_path:/proc/self/fd/9" \
     "$HOSTED_BIN" >"$LOG_PATH" 2>"$ERR_PATH" &
 wm_pid=$!
 
@@ -576,19 +800,39 @@ retain_phase() {
     readback_source="$(jq -r '.render.readback_source' "$SNAPSHOT_LIVE")"
     backend_handle="$(jq -r '.render.backend_handle' "$SNAPSHOT_LIVE")"
     frame_checksum="$(jq -r '.render.checksum' "$SNAPSHOT_LIVE")"
+    composition_id="$(jq -r '.render.composition_id' "$SNAPSHOT_LIVE")"
+    scene_key="$(jq -r '.render.scene_key' "$SNAPSHOT_LIVE")"
+    web_content_image_count="$(jq -r '.render.web_content_image_count' "$SNAPSHOT_LIVE")"
+    readback_completed="$(jq -r '.render.readback_completed' "$SNAPSHOT_LIVE")"
+    readback_width="$(jq -r '.render.readback_width' "$SNAPSHOT_LIVE")"
+    readback_height="$(jq -r '.render.readback_height' "$SNAPSHOT_LIVE")"
+    readback_stride="$(jq -r '.render.readback_stride' "$SNAPSHOT_LIVE")"
+    readback_format="$(jq -r '.render.readback_format' "$SNAPSHOT_LIVE")"
+    render_event_id="$(jq -r '.render.semantic_event_id' "$SNAPSHOT_LIVE")"
+    render_mutation_revision="$(jq -r '.render.mutation_revision' "$SNAPSHOT_LIVE")"
     [ "$frame_backend" != "" ] && [ "$frame_backend" != null ] || return 1
     [ "$readback_source" != "" ] && [ "$readback_source" != unavailable ] && [ "$readback_source" != null ] || return 1
-    case "$backend_handle:$frame_checksum" in
+    [ "$composition_id" = wm-composite ] || return 1
+    [ "$scene_key" != "" ] && [ "$scene_key" != null ] || return 1
+    [ "$readback_completed" = true ] || return 1
+    [ "$readback_width" = 1024 ] && [ "$readback_height" = 720 ] || return 1
+    [ "$readback_stride" = 4096 ] && [ "$readback_format" = argb8888 ] || return 1
+    case "$backend_handle:$frame_checksum:$web_content_image_count:$readback_width:$readback_height:$readback_stride:$render_event_id:$render_mutation_revision" in
         *[!0-9:]*|:|*:) return 1 ;;
     esac
+    [ "$web_content_image_count" -gt 0 ] || return 1
     case "$last_issue_ack" in
-        *" revision=$revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum identity="*) ;;
+        *" revision=$revision semantic_event_id=$render_event_id mutation_revision=$render_mutation_revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum;composition_id=$composition_id;scene_key=$scene_key;web_content_image_count=$web_content_image_count;completed=$readback_completed;width=$readback_width;height=$readback_height;stride=$readback_stride;format=$readback_format identity="*) ;;
         *) return 1 ;;
     esac
     jq -e --argjson nonce "$nonce" --argjson revision "$revision" \
         --arg phase "$phase" --arg backend "$frame_backend" \
         --arg source "$readback_source" --argjson handle "$backend_handle" \
-        --argjson checksum "$frame_checksum" \
+        --argjson checksum "$frame_checksum" --arg composition "$composition_id" \
+        --arg scene "$scene_key" --argjson web_images "$web_content_image_count" \
+        --argjson completed "$readback_completed" --argjson width "$readback_width" \
+        --argjson height "$readback_height" --argjson stride "$readback_stride" \
+        --arg format "$readback_format" \
         '.input.nonce == $nonce and .input.phase == $phase and
          .compositor.render_revision == $revision and
          .render.fallback_used == false and
@@ -596,8 +840,31 @@ retain_phase() {
          .render.engine2d_backend == $backend and
          .render.readback_source == $source and
          .render.backend_handle == $handle and
-         .render.checksum == $checksum' \
+         .render.checksum == $checksum and
+         .render.composition_id == $composition and
+         .render.scene_key == $scene and
+         .render.web_content_image_count == $web_images and
+         .render.readback_completed == $completed and
+         .render.readback_width == $width and
+         .render.readback_height == $height and
+         .render.readback_stride == $stride and
+         .render.readback_format == $format' \
         "$SNAPSHOT_LIVE" >/dev/null || return 1
+    if [ "$label" = input ]; then
+        [ "$render_event_id" -gt 0 ] && [ "$render_mutation_revision" -gt 0 ] || return 1
+        input_compositor_wm_target_id="$(jq -r '
+            .input.receipt.wm_target_id as $target |
+            [.compositor.windows[] | select(.id == $target)] |
+            if length == 1 then .[0].id else empty end
+        ' "$SNAPSHOT_LIVE")"
+        case "$input_compositor_wm_target_id" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$input_compositor_wm_target_id" -gt 0 ] || return 1
+        jq -e '.render.semantic_event_id == .input.receipt.event_id and
+               .render.mutation_revision == .input.receipt.mutation_revision' \
+            "$SNAPSHOT_LIVE" >/dev/null || return 1
+    fi
     [ -s "$CAPTURE_LIVE" ] || return 1
     [ "$(convert "$CAPTURE_LIVE" -format '%w %h' info:)" = "1024 720" ] || return 1
     [ "$(capture_argb_checksum "$CAPTURE_LIVE")" = "$frame_checksum" ] || return 1
@@ -619,6 +886,15 @@ retain_phase() {
             input_backend=$frame_backend
             input_readback_source=$readback_source
             input_backend_handle=$backend_handle
+            input_render_event_id=$render_event_id
+            input_render_mutation_revision=$render_mutation_revision
+            input_composition_id=$composition_id
+            input_web_content_image_count=$web_content_image_count
+            input_readback_completed=$readback_completed
+            input_readback_width=$readback_width
+            input_readback_height=$readback_height
+            input_readback_stride=$readback_stride
+            input_readback_format=$readback_format
             input_capture_sha=$capture_sha
             ;;
         move)
@@ -731,7 +1007,7 @@ abs_x="$(sed -n 's/^X=//p' "$WINDOW_ENV")"
 abs_y="$(sed -n 's/^Y=//p' "$WINDOW_ENV")"
 
 DISPLAY="$x_display" xdotool windowfocus --sync "$window_id"
-DISPLAY="$x_display" xdotool mousemove $((abs_x + 150)) $((abs_y + 100))
+DISPLAY="$x_display" xdotool mousemove $((abs_x + 150)) $((abs_y + 120))
 DISPLAY="$x_display" xdotool click 1
 DISPLAY="$x_display" xdotool type --delay 0 z
 DISPLAY="$x_display" xdotool key --clearmodifiers Tab
@@ -757,6 +1033,18 @@ if jq -e '.input.receipt.key_down_count > 0 and
           .input.receipt.last_pointer_y == .compositor.pointer_y and
           .input.receipt.last_pointer_button == 0' "$SNAPSHOT_LIVE" >/dev/null; then
     input_receipt_status=pass
+fi
+event_origin="$(jq -r '.input.receipt.event_origin' "$SNAPSHOT_LIVE")"
+event_id="$(jq -r '.input.receipt.event_id' "$SNAPSHOT_LIVE")"
+wm_target_id="$(jq -r '.input.receipt.wm_target_id' "$SNAPSHOT_LIVE")"
+semantic_target_id="$(jq -r '.input.receipt.semantic_target_id' "$SNAPSHOT_LIVE")"
+callback_count="$(jq -r '.input.receipt.callback_count' "$SNAPSHOT_LIVE")"
+mutation_revision="$(jq -r '.input.receipt.mutation_revision' "$SNAPSHOT_LIVE")"
+if [ "$event_origin" = screen ] && [ "$event_id" -gt 0 ] \
+    && [ "$wm_target_id" -gt 0 ] && [ "$wm_target_id" = "$input_compositor_wm_target_id" ] \
+    && [ "$semantic_target_id" = host-proof ] \
+    && [ "$callback_count" -eq 1 ] && [ "$mutation_revision" -eq 1 ]; then
+    semantic_status=pass
 fi
 [ "$(jq -r '[.compositor.windows[].title == "Typed: z"] | any' "$SNAPSHOT_LIVE")" = true ] && text_status=pass
 [ "$input_focus" != "$initial_focus" ] && [ "$input_receipt_status" = pass ] && keyboard_status=pass
@@ -798,11 +1086,13 @@ if [ "$initial_revision" -lt "$input_revision" ] \
     && [ "$max_revision" -lt "$restore_revision" ] \
     && [ "$baseline_frame_checksum" != "" ] \
     && [ "$input_frame_checksum" != "" ] \
+    && [ "$input_frame_checksum" != "$baseline_frame_checksum" ] \
     && [ "$move_frame_checksum" != "" ] \
     && [ "$maximize_frame_checksum" != "" ] \
     && [ "$restore_frame_checksum" != "" ] \
     && [ "$(sha256_file "$BASELINE_CAPTURE")" = "$baseline_capture_sha" ] \
     && [ "$(sha256_file "$INPUT_CAPTURE")" = "$input_capture_sha" ] \
+    && [ "$input_capture_sha" != "$baseline_capture_sha" ] \
     && [ "$(sha256_file "$MOVE_CAPTURE")" = "$move_capture_sha" ] \
     && [ "$(sha256_file "$MAXIMIZE_CAPTURE")" = "$maximize_capture_sha" ] \
     && [ "$(sha256_file "$RESTORE_CAPTURE")" = "$restore_capture_sha" ] \
@@ -820,7 +1110,8 @@ evidence_except_glyph_complete() {
         && [ "$calibration_status" = pass ] \
         && [ "$focus_status" = pass ] && [ "$pointer_status" = pass ] \
         && [ "$keyboard_status" = pass ] && [ "$text_status" = pass ] \
-        && [ "$input_receipt_status" = pass ] && [ "$replay_status" = pass ] \
+        && [ "$input_receipt_status" = pass ] && [ "$semantic_status" = pass ] \
+        && [ "$replay_status" = pass ] \
         && [ "$move_status" = pass ] \
         && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
         && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]
@@ -830,17 +1121,15 @@ if [ "$glyph_mode" = calibration-only ]; then
     if evidence_except_glyph_complete && [ "$live_glyph_match" = true ]; then
         emit fail "glyph-oracle-calibration-only-$glyph_sha"
     else
-        capture_status=unavailable-no-x11-window
+        emit fail live-font-or-event-evidence-incomplete
     fi
+    exit 1
 fi
 
-kill "$run_pid" >/dev/null 2>&1 || true
-wait "$run_pid" >/dev/null 2>&1 || true
-
-if [ "$window_marker" = pass ] && [ "$frame_marker" = pass ] && [ "$capture_status" = pass ] && [ "$event_status" = pass ]; then
-    emit_report "pass" "linux-windowed-real-capture-and-events" "$window_marker" "$frame_marker" "$capture_status" "$event_status"
+if [ "$glyph_status" = pass ] && evidence_except_glyph_complete; then
+    emit pass linux-live-engine2d-pinned-font-and-events
     exit 0
 fi
 
-emit_report "fail" "missing-real-capture-or-event-evidence" "$window_marker" "$frame_marker" "$capture_status" "$event_status"
+emit fail live-font-or-event-evidence-incomplete
 exit 1

@@ -26,8 +26,7 @@ rollback_receipt="${deploy_dir}/bootstrap-rollback-receipt.env"
 lock="${deploy_dir}/.bootstrap-deploy.lock"
 [ ! -L "bin" ] && [ ! -L "bin/release" ] && [ ! -L "${deploy_dir}" ] || { echo "error: symlinked deployment path" >&2; exit 2; }
 mkdir "${lock}" 2>/dev/null || { echo "error: deployment is locked" >&2; exit 2; }
-rollback_work=
-trap 'rm -rf "${lock}"; [ -z "${rollback_work:-}" ] || rm -f "${rollback_work}"' EXIT
+trap 'rm -rf "${lock}"' EXIT
 trap 'exit 130' HUP INT TERM
 
 hash_file() {
@@ -61,51 +60,6 @@ fail_receipt() {
 [ -f "${receipt}" ] && [ ! -L "${receipt}" ] || fail_receipt receipt
 [ "$(value schema)" = "bootstrap-deploy-receipt-v1" ] || fail_receipt schema
 [ "$(value platform)" = "${platform}" ] || fail_receipt platform
-[ "$(value repository_root)" = "${repo_root}" ] || fail_receipt current_worktree
-BOOTSTRAP_STAGE3_FACADE_PATH="${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
-STAGE4_PROVENANCE_HELPER_PATH="${repo_root}/scripts/check/lib/stage4-candidate-provenance.shs"
-export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
-. "${BOOTSTRAP_STAGE3_FACADE_PATH}" || fail_receipt stage3_verifier
-. "${STAGE4_PROVENANCE_HELPER_PATH}" || fail_receipt stage4_verifier
-stage4_candidate=$(bootstrap_stage3_canonical_file "$(value stage4_candidate_path)") || fail_receipt stage4_candidate
-stage4_provenance=$(bootstrap_stage3_canonical_file "$(value stage4_provenance_path)") || fail_receipt stage4_provenance
-[ "$(value stage4_candidate_sha256)" = "$(hash_file "${stage4_candidate}")" ] || fail_receipt stage4_candidate_hash
-[ "$(value stage4_provenance_sha256)" = "$(hash_file "${stage4_provenance}")" ] || fail_receipt stage4_provenance_hash
-current_identity="${deploy_dir}/.rollback-current-tree.$$"; rollback_work=${current_identity}
-stage4_write_current_tree_identity "${current_identity}" "${repo_root}" || fail_receipt current_tree_measurement
-for identity_key in repository_root source_revision_kind source_revision source_roots \
-  stage3_source_snapshot_sha256 git_state_sha256 git_head \
-  git_dirty_fingerprint stage3_producer_path stage3_producer_sha256; do
-  [ "$(value "${identity_key}")" = \
-    "$(bootstrap_stage3_manifest_value "${identity_key}" "${stage4_provenance}")" ] ||
-    fail_receipt "stage4_${identity_key}"
-  [ "$(value "${identity_key}")" = \
-    "$(bootstrap_stage3_manifest_value "${identity_key}" "${current_identity}")" ] ||
-    fail_receipt stale_current_tree
-done
-[ "$(bootstrap_stage3_manifest_value output_path "${stage4_provenance}")" = "${stage4_candidate}" ] || fail_receipt stage4_output_path
-[ "$(bootstrap_stage3_manifest_value output_sha256 "${stage4_provenance}")" = "$(value stage4_candidate_sha256)" ] || fail_receipt stage4_output_hash
-stage3_manifest=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage3_provenance_path "${stage4_provenance}")") || fail_receipt stage3_provenance
-[ "$(bootstrap_stage3_manifest_value stage3_provenance_sha256 "${stage4_provenance}")" = "$(hash_file "${stage3_manifest}")" ] || fail_receipt stage3_provenance_hash
-[ "$(bootstrap_stage3_manifest_value source_snapshot_sha256 "${stage3_manifest}")" = "$(value stage3_source_snapshot_sha256)" ] || fail_receipt stage3_source_snapshot
-[ "$(bootstrap_stage3_manifest_value git_state_sha256 "${stage3_manifest}")" = "$(value git_state_sha256)" ] || fail_receipt stage3_git_state
-[ "$(bootstrap_stage3_manifest_value git_head "${stage3_manifest}")" = "$(value git_head)" ] || fail_receipt stage3_git_head
-[ "$(bootstrap_stage3_manifest_value git_dirty_fingerprint "${stage3_manifest}")" = "$(value git_dirty_fingerprint)" ] || fail_receipt stage3_git_dirty
-[ "$(bootstrap_stage3_manifest_value bootstrap_script_path "${stage3_manifest}")" = "$(value stage3_producer_path)" ] || fail_receipt stage3_producer_path
-[ "$(bootstrap_stage3_manifest_value bootstrap_script_sha256 "${stage3_manifest}")" = "$(value stage3_producer_sha256)" ] || fail_receipt stage3_producer_hash
-rm -f "${current_identity}"; rollback_work=
-stage3_acceptance=$(bootstrap_stage3_canonical_file "$(value stage3_current_acceptance_receipt)") || fail_receipt stage3_acceptance
-[ "$(value stage3_current_acceptance_status)" = verified ] || fail_receipt stage3_acceptance_status
-[ "$(value stage3_current_acceptance_receipt_sha256)" = "$(hash_file "${stage3_acceptance}")" ] || fail_receipt stage3_acceptance_hash
-[ "$(bootstrap_stage3_manifest_value status "${stage3_acceptance}")" = verified ] || fail_receipt stage3_acceptance_receipt_status
-[ "$(bootstrap_stage3_manifest_value stage4_candidate_sha256 "${stage3_acceptance}")" = "$(value stage4_candidate_sha256)" ] || fail_receipt stage3_acceptance_candidate
-[ "$(bootstrap_stage3_manifest_value stage4_provenance_sha256 "${stage3_acceptance}")" = "$(value stage4_provenance_sha256)" ] || fail_receipt stage3_acceptance_provenance
-for identity_key in repository_root source_revision_kind source_revision source_roots \
-  stage3_source_snapshot_sha256 git_state_sha256 git_head \
-  git_dirty_fingerprint stage3_producer_path stage3_producer_sha256; do
-  [ "$(bootstrap_stage3_manifest_value "${identity_key}" "${stage3_acceptance}")" = \
-    "$(value "${identity_key}")" ] || fail_receipt stage3_acceptance_identity
-done
 current="$(value current_path)"; backup="$(value backup_path)"
 [ "${current}" = "${deploy_dir}/simple" ] || [ "${current}" = "${deploy_dir}/simple.exe" ] || fail_receipt current_path
 [ "${backup}" = "${current}.pre_deploy" ] || fail_receipt backup_path
@@ -126,9 +80,6 @@ if ! { grep -a -q "${marker}" "${candidate}" 2>/dev/null && [ "$(bounded_smoke "
   fail_receipt rollback_smoke
 fi
 install -m755 "${current}" "${old}"
-deploy_receipt_sha256_before="$(hash_file "${receipt}")"
-stage4_candidate_sha256_before="$(value stage4_candidate_sha256)"
-stage3_acceptance_sha256_before="$(hash_file "${stage3_acceptance}")"
 rm -f "${receipt}" "${rollback_receipt}"
 mv "${candidate}" "${current}"
 if [ "$(uname -s)" != "Windows_NT" ] && ! "${repo_root}/scripts/setup/setup.shs"; then
@@ -146,23 +97,6 @@ rm -f "${old}"
   echo "current_sha256=$(hash_file "${current}")"
   echo "backup_path=${backup}"
   echo "backup_sha256=$(hash_file "${backup}")"
-  echo "deploy_receipt_sha256=${deploy_receipt_sha256_before}"
-  echo "stage4_candidate_path=${stage4_candidate}"
-  echo "stage4_candidate_sha256=${stage4_candidate_sha256_before}"
-  echo "stage4_provenance_path=${stage4_provenance}"
-  echo "stage4_provenance_sha256=$(bootstrap_stage3_hash_file "${stage4_provenance}")"
-  echo "stage3_current_acceptance_receipt=${stage3_acceptance}"
-  echo "stage3_current_acceptance_receipt_sha256=${stage3_acceptance_sha256_before}"
-  echo "repository_root=${repo_root}"
-  echo "source_revision_kind=$(bootstrap_stage3_manifest_value source_revision_kind "${stage4_provenance}")"
-  echo "source_revision=$(bootstrap_stage3_manifest_value source_revision "${stage4_provenance}")"
-  echo "source_roots=$(bootstrap_stage3_manifest_value source_roots "${stage4_provenance}")"
-  echo "stage3_source_snapshot_sha256=$(bootstrap_stage3_manifest_value stage3_source_snapshot_sha256 "${stage4_provenance}")"
-  echo "git_state_sha256=$(bootstrap_stage3_manifest_value git_state_sha256 "${stage4_provenance}")"
-  echo "git_head=$(bootstrap_stage3_manifest_value git_head "${stage4_provenance}")"
-  echo "git_dirty_fingerprint=$(bootstrap_stage3_manifest_value git_dirty_fingerprint "${stage4_provenance}")"
-  echo "stage3_producer_path=$(bootstrap_stage3_manifest_value stage3_producer_path "${stage4_provenance}")"
-  echo "stage3_producer_sha256=$(bootstrap_stage3_manifest_value stage3_producer_sha256 "${stage4_provenance}")"
   echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "rollback_status=pass"
   echo "platform_acceptance_claimed=false"

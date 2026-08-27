@@ -4,7 +4,49 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SIMPLE_BINARY="${SIMPLE_BINARY:-src/compiler_rust/target/release/simple}"
+SIMPLE_BINARY_SOURCE="${SIMPLE_BINARY_SOURCE:-explicit-env}"
+SIMPLE_BINARY_STATUS=pass
+
+is_rust_seed_simple_binary() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${SIMPLE_BINARY:-}" = "" ]; then
+    SIMPLE_BINARY_SOURCE="missing-self-hosted"
+    for candidate in \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple" \
+        "bin/simple" \
+        "./bin/simple"
+    do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BINARY="$candidate"
+            SIMPLE_BINARY_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+    if [ "${SIMPLE_BINARY:-}" = "" ] && [ "${ALLOW_PATH_SIMPLE_BINARY:-0}" = "1" ] && command -v simple >/dev/null 2>&1; then
+        SIMPLE_BINARY="$(command -v simple)"
+        SIMPLE_BINARY_SOURCE="path-opt-in"
+    fi
+else
+    SIMPLE_BINARY_SOURCE="${SIMPLE_BINARY_SOURCE:-explicit-env}"
+fi
+SIMPLE_BINARY="${SIMPLE_BINARY:-}"
+if [ "$SIMPLE_BINARY" = "" ]; then
+    SIMPLE_BINARY_STATUS=missing
+elif is_rust_seed_simple_binary "$SIMPLE_BINARY"; then
+    SIMPLE_BINARY_STATUS=forbidden
+    SIMPLE_BINARY_SOURCE="${SIMPLE_BINARY_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BINARY" ]; then
+    SIMPLE_BINARY_STATUS=missing
+    SIMPLE_BINARY_SOURCE="${SIMPLE_BINARY_SOURCE}-missing"
+fi
+export SIMPLE_BINARY SIMPLE_BINARY_SOURCE SIMPLE_BINARY_STATUS
 BUILD_DIR="${BUILD_DIR:-build/gtk_gui_size_speed_baseline}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/gtk_gui_size_speed_baseline_$(date -u +%F).md}"
 SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}"
@@ -29,6 +71,28 @@ if [ "$GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE" = "1" ]; then
 fi
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+if [ "$SIMPLE_BINARY_STATUS" != "pass" ]; then
+    reason="simple-binary-$SIMPLE_BINARY_STATUS"
+    {
+        echo "# GTK GUI Size/Speed Baseline"
+        echo
+        echo "| Field | Value |"
+        echo "|-------|-------|"
+        echo "| status | unavailable |"
+        echo "| reason | $reason |"
+        echo "| simple_binary | $SIMPLE_BINARY |"
+        echo "| simple_binary_source | $SIMPLE_BINARY_SOURCE |"
+        echo "| simple_binary_status | $SIMPLE_BINARY_STATUS |"
+    } >"$REPORT_PATH"
+    echo "report_path=$REPORT_PATH"
+    echo "gtk_benchmark_evidence_status=unavailable"
+    echo "gtk_benchmark_evidence_reason=$reason"
+    echo "simple_binary=$SIMPLE_BINARY"
+    echo "simple_binary_source=$SIMPLE_BINARY_SOURCE"
+    echo "simple_binary_status=$SIMPLE_BINARY_STATUS"
+    exit 1
+fi
 
 if [ "$GTK_EVIDENCE_FALLBACK_PROBE_ONLY" = "1" ]; then
     fallback_reason=forced-vector-font-unavailable
@@ -1091,6 +1155,9 @@ fi
 
 echo "gtk_gui_baseline_ready=true"
 echo "report_path=$REPORT_PATH"
+echo "simple_binary=$SIMPLE_BINARY"
+echo "simple_binary_source=$SIMPLE_BINARY_SOURCE"
+echo "simple_binary_status=$SIMPLE_BINARY_STATUS"
 echo "simple_status=${simple_status:-unavailable}"
 echo "simple_open_total_us=$simple_open_total_us"
 echo "simple_total_us=$simple_total_us"

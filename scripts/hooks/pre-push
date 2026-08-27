@@ -1,5 +1,8 @@
 #!/bin/sh
-set -eu
+# Local pre-push dispatcher installed by install-must-check-hooks.{shs,ps1}.
+# The canonical driver delegates expensive requirements through textual-ledger
+# validation while retaining the bounded committed-tree guards.
+set -u
 
 # --- re-entry guard (OLDGUARD_DEPTH) ---
 # 2026-08-26: a recursive pre-push probe (nicknamed "oldguard" in session
@@ -21,23 +24,10 @@ OLDGUARD_MAX_DEPTH=3
 if [ "$OLDGUARD_DEPTH" -gt "$OLDGUARD_MAX_DEPTH" ]; then
     echo "pre-push dispatcher: OLDGUARD_DEPTH=$OLDGUARD_DEPTH exceeds cap ($OLDGUARD_MAX_DEPTH) — refusing, this hook (or something it calls) is re-entering itself" >&2
     exit 1
-}
-HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null) || exit 1
-case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$ROOT/$HOOKS_DIR" ;; esac
-REFS=$(mktemp) || exit 1
-trap 'rm -f "$REFS"' EXIT INT TERM
-cat > "$REFS"
-
-if [ -x "$HOOKS_DIR/pre-push.local" ]; then
-    "$HOOKS_DIR/pre-push.local" "$@" < "$REFS" || {
-        rc=$?
-        echo "pre-push dispatcher: preserved local hook failed (status $rc)" >&2
-        exit "$rc"
-    }
 fi
 
-if [ ! -x "$SIMPLE" ]; then
-    echo "tracking pre-push: $SIMPLE is not executable" >&2
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "pre-push dispatcher: cannot locate repository root" >&2
     exit 1
 }
 HOOKS_DIR=$(git rev-parse --git-path hooks 2>/dev/null) || exit 1
@@ -45,18 +35,6 @@ case "$HOOKS_DIR" in /*) : ;; *) HOOKS_DIR="$ROOT/$HOOKS_DIR" ;; esac
 REFS=$(mktemp) || exit 1
 trap 'rm -f "$REFS"' EXIT INT TERM
 cat > "$REFS"
-
-if [ -x "$HOOKS_DIR/pre-push.local" ]; then
-    "$HOOKS_DIR/pre-push.local" "$@" < "$REFS" || {
-        rc=$?
-        echo "pre-push dispatcher: preserved local hook failed (status $rc)" >&2
-        exit "$rc"
-    }
-fi
-
-"$SIMPLE" check-dbs --strict
-"$SIMPLE" tracking check --kind=feature
-"$SIMPLE" traceability-check --scope=all
 
 LOCAL_HOOK="$HOOKS_DIR/pre-push.local"
 CANONICAL_GUARD="$ROOT/scripts/check/pre-push-conflict-tree-guard.shs"

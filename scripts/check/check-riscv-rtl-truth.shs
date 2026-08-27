@@ -60,12 +60,20 @@
 #      an instruction field found anywhere in the file. Same `*core*` name
 #      scoping as rule 2, for the same reason.
 #   4. A wrapper instantiates `entity work.NAME` where NAME is not defined
-#      (`entity NAME is`) in ANY of the files scanned this run (the combined
-#      "artifact set" across all present lanes). Applies to every scanned
-#      file. NOTE: if you run this script with `--lane` pointed at a subset
-#      of the tree, a real cross-lane definition can look "dangling" — this
-#      is a known scoping limitation, not a bug; run with no args for the
-#      authoritative full-tree check.
+#      (`entity NAME is`) anywhere in the `work` library. VHDL's `work`
+#      library is flat and repo-wide (not scoped to a lane or to the
+#      instantiating file's own directory), so the defined-entity set used
+#      here is the union of (a) every file scanned this run (the combined
+#      "artifact set" across all present lanes, which also covers
+#      gitignored backend-generated output like build/os/rtl/ when present)
+#      and (b) every git-tracked `*.vhd` file anywhere in the repo. (b) is
+#      resolved via `git ls-files`, not a bare filesystem walk, specifically
+#      so it cannot pick up build/ vendor trees or other agents' parallel
+#      `.claude/worktrees/*` checkouts. Applies to every scanned file. NOTE:
+#      (b) is always repo-wide regardless of `--lane`; only (a) is
+#      lane-scoped, so an untracked generated-only definition outside the
+#      current `--lane` selection can still look "dangling" under a lane
+#      override — run with no args for the authoritative full-tree check.
 #
 # Decode-evidence heuristic (grep/awk-structural, like
 # check-cpu-hotloop-idiom.shs — NOT a VHDL parser, documented limitation):
@@ -81,7 +89,13 @@
 # Self-calibration (mandatory — a checker that cannot fail is not evidence):
 #   sh scripts/check/check-riscv-rtl-truth.shs --lane test/fixtures/riscv_truth
 # MUST exit nonzero. test/fixtures/riscv_truth/fake_step_counter_core.vhd is
-# a deliberately fake step-counter DUT reproducing the smoke_handoff pattern.
+# a deliberately fake step-counter DUT reproducing the smoke_handoff pattern
+# (rules 2/3). test/fixtures/riscv_truth/fake_wrapper_dangling_ref.vhd is a
+# deliberately fake wrapper instantiating `work.totally_undefined_entity_xyz`,
+# an entity defined in NO tracked .vhd file anywhere in the repo (rule 4) —
+# it exists to prove the repo-wide entity-definition union above still
+# rejects a genuinely undefined entity and hasn't been over-broadened into a
+# rule that can no longer fail.
 #
 # Usage:
 #   sh scripts/check/check-riscv-rtl-truth.shs
@@ -100,6 +114,10 @@ if ! command -v rg >/dev/null 2>&1; then
 fi
 if ! command -v awk >/dev/null 2>&1; then
     echo "check-riscv-rtl-truth: awk is required but was not found on PATH" >&2
+    exit 2
+fi
+if ! command -v git >/dev/null 2>&1; then
+    echo "check-riscv-rtl-truth: git is required but was not found on PATH" >&2
     exit 2
 fi
 
@@ -144,6 +162,7 @@ trap 'rm -rf "$SCRATCH_DIR"' EXIT INT TERM
 
 ALL_FILES="$SCRATCH_DIR/all_files.txt"
 ENTITY_DEFS="$SCRATCH_DIR/entity_defs.txt"
+ENTITY_DEF_FILES="$SCRATCH_DIR/entity_def_files.txt"
 AWK_PROG="$SCRATCH_DIR/analyze.awk"
 : >"$ALL_FILES"
 
@@ -217,20 +236,58 @@ END {
 AWK_EOF
 
 # ---------------------------------------------------------------------------
-# Step 3: global entity-definition set ("same artifact set" = all lanes
-# scanned this run) for the rule-4 dangling-instantiation check. `--` comments
-# are stripped first so a commented-out `entity work.X` line can never forge
-# a definition.
+# Step 3: global entity-definition set for the rule-4 dangling-instantiation
+# check. `--` comments are stripped first so a commented-out `entity work.X`
+# line can never forge a definition.
+#
+# VHDL's `work` library is a single FLAT namespace for the whole project, not
+# scoped to a lane directory or to the instantiating wrapper's own directory:
+# an entity compiled from anywhere lands in `work` and can be instantiated
+# from anywhere else. Scanning only the files found under the configured
+# lanes (as this used to do) missed genuinely-defined entities declared in a
+# sibling directory outside every lane — e.g. src/lib/hardware/debug/
+# (bscane2_tap_bridge.vhd, jtag_debug_chain.vhd) is not under any of
+# src/lib/hardware/rv32i_rtl/, rv64gc_rtl/, examples/09_embedded/fpga_riscv/rtl/,
+# or build/os/rtl/ — so a wrapper under examples/09_embedded/fpga_riscv/rtl/
+# instantiating `work.bscane2_tap_bridge` false-positived as "undefined".
+#
+# The fix: resolve the defined-entity set from the UNION of
+#   (a) $ALL_FILES        — the lane-scanned files (Step 1). Keeping this
+#                            source matters because build/os/rtl/ is
+#                            gitignored backend-generated output that may
+#                            exist on disk during a real run without being
+#                            git-tracked; dropping it would newly miss
+#                            entities defined only there.
+#   (b) every git-tracked *.vhd file repo-wide — the actual "union of the
+#                            work library": any tracked VHDL source anywhere
+#                            in the repo is a legitimate `work` member,
+#                            regardless of which lane (if any) contains it.
+# `git ls-files` (not a bare repo-wide `find`) is used deliberately so this
+# never pulls in build/ vendor trees (e.g. build/vendor/Cosmos-plus-OpenSSD's
+# bundled IP cores) or other agents' parallel `.claude/worktrees/*` checkouts
+# — both are on disk under this tree but are gitignored, not part of this
+# repo's own `work` library, and would be non-deterministic noise to key a
+# fail-closed gate on.
+#
+# This widens ONLY the defined-entity set that rule 4 checks membership
+# against; it does not touch what gets scanned/reported/classified (still
+# $ALL_FILES, i.e. the configured lanes) and does not touch rules 1-3.
 # ---------------------------------------------------------------------------
+
+{
+    cat "$ALL_FILES"
+    git ls-files -z -- '*.vhd' | tr '\0' '\n'
+} | sort -u >"$ENTITY_DEF_FILES"
 
 : >"$ENTITY_DEFS"
 while IFS= read -r f; do
     [ -n "$f" ] || continue
+    [ -f "$f" ] || continue
     sed -E 's/--.*//' "$f" \
         | rg -oNI -i '^[[:space:]]*entity[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+is' 2>/dev/null \
         | sed -E 's/^[Ee][Nn][Tt][Ii][Tt][Yy][[:space:]]+//; s/[[:space:]]+[Ii][Ss].*$//' \
         >>"$ENTITY_DEFS"
-done <"$ALL_FILES"
+done <"$ENTITY_DEF_FILES"
 sort -u "$ENTITY_DEFS" -o "$ENTITY_DEFS"
 
 # ---------------------------------------------------------------------------

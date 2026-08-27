@@ -45,6 +45,20 @@ to_int() {
     esac
 }
 
+current_source_revision() {
+    if [ "${GUI_WEB_2D_SOURCE_REVISION:-}" != "" ]; then
+        echo "$GUI_WEB_2D_SOURCE_REVISION"
+    elif command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
+        jj log -r @ --no-graph --no-pager -T 'commit_id.short(12) ++ "\n"' 2>/dev/null | tail -n 1 || echo unknown
+    elif command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git rev-parse --short=12 HEAD 2>/dev/null || echo unknown
+    else
+        echo unknown
+    fi
+}
+
+SOURCE_REVISION="${SOURCE_REVISION:-$(current_source_revision)}"
+
 sspec_env="$BUILD_DIR/sspec-traceability/evidence.env"
 render_env="$BUILD_DIR/rendering-manifest/evidence.env"
 sspec_code=127
@@ -70,6 +84,7 @@ html_required="$(value_of html_css_sspec_traceability_required_html_tag_count "$
 css_total="$(value_of html_css_sspec_traceability_css_property_count "$sspec_env")"
 css_required_min="$(value_of html_css_sspec_traceability_required_css_property_min_count "$sspec_env")"
 implemented_total="$(value_of html_css_sspec_traceability_implemented_css_property_count "$sspec_env")"
+implemented_indexed_total="$(value_of html_css_sspec_traceability_implemented_css_property_indexed_count "$sspec_env")"
 unsupported_total="$(value_of html_css_sspec_traceability_unsupported_css_property_count "$sspec_env")"
 unsupported_properties="$(value_of html_css_sspec_traceability_unsupported_css_properties "$sspec_env")"
 
@@ -108,6 +123,7 @@ html_required_int="$(to_int "$html_required")"
 render_html_covered_int="$(to_int "$render_html_covered")"
 css_total_int="$(to_int "$css_total")"
 implemented_total_int="$(to_int "$implemented_total")"
+implemented_indexed_total_int="$(to_int "$implemented_indexed_total")"
 render_css_covered_int="$(to_int "$render_css_covered")"
 unsupported_total_int="$(to_int "$unsupported_total")"
 
@@ -117,7 +133,14 @@ fi
 if [ "$render_css_covered_int" -lt "$implemented_total_int" ] || [ "$render_css_missing" != "" ]; then
     implemented_css_status="fail"
 fi
-unrendered_css_count=$((css_total_int - render_css_covered_int))
+full_css_rendered_count=$((css_total_int - unsupported_total_int))
+if [ "$full_css_rendered_count" -lt 0 ]; then
+    full_css_rendered_count=0
+fi
+if [ "$implemented_indexed_total_int" -gt 0 ]; then
+    full_css_rendered_count="$implemented_indexed_total_int"
+fi
+unrendered_css_count="$unsupported_total_int"
 if [ "$unrendered_css_count" -lt 0 ]; then
     unrendered_css_count=0
 fi
@@ -161,6 +184,8 @@ fi
 {
     echo "html_css_full_rendering_goal_status=$status"
     echo "html_css_full_rendering_goal_reason=$reason"
+    echo "html_css_full_rendering_goal_source_revision=$SOURCE_REVISION"
+    echo "gui_web_2d_evidence_source_revision=$SOURCE_REVISION"
     echo "html_css_full_rendering_goal_ready_status=$status"
     echo "html_css_full_rendering_goal_ready_reason=$reason"
     echo "html_css_full_rendering_goal_sspec_command=sh scripts/check/check-html-css-sspec-traceability.shs"
@@ -190,7 +215,7 @@ fi
     echo "html_css_full_rendering_goal_all_css_properties_ready_reason=$([ "$full_css_status" = "pass" ] && echo pass || echo full-css-rendering-incomplete)"
     echo "html_css_full_rendering_goal_full_css_total_count=$css_total"
     echo "html_css_full_rendering_goal_full_css_required_min_count=$css_required_min"
-    echo "html_css_full_rendering_goal_full_css_rendered_count=$render_css_covered"
+    echo "html_css_full_rendering_goal_full_css_rendered_count=$full_css_rendered_count"
     echo "html_css_full_rendering_goal_full_css_unrendered_count=$unrendered_css_count"
     echo "html_css_full_rendering_goal_full_css_unrendered_properties=$unsupported_properties"
     echo "html_css_full_rendering_goal_animation_css_status=$animation_css_status"
@@ -214,7 +239,7 @@ fi
     echo "- full CSS inventory ready: $full_css_status"
     echo "- HTML tags rendered: $render_html_covered/$html_total"
     echo "- implemented CSS rendered: $render_css_covered/$implemented_total ($render_css_scope)"
-    echo "- full CSS rendered: $render_css_covered/$css_total"
+    echo "- full CSS rendered: $full_css_rendered_count/$css_total"
     echo "- full CSS unrendered: $unrendered_css_count"
     echo "- animation CSS rendered: $((animation_css_total - animation_css_unrendered))/$animation_css_total ($animation_css_status)"
     echo "- manifest cases: $manifest_case_count/$manifest_required_case_count"

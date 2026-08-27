@@ -35,6 +35,12 @@ sdn_value() {
     sed -n "s/.*${key}: \"\\([^\"]*\\)\".*/\\1/p" "$file" | head -1
 }
 
+sdn_bool_value() {
+    key="$1"
+    file="$2"
+    sed -n "s/.*${key}: \\(true\\|false\\).*/\\1/p" "$file" | head -1
+}
+
 require_value() {
     label="$1"
     expected="$2"
@@ -42,6 +48,23 @@ require_value() {
     if [ "$actual" != "$expected" ]; then
         echo "cpu_simd_render_dpi_contract_status=fail"
         echo "cpu_simd_render_dpi_contract_reason=${label}_expected_${expected}_got_${actual}"
+        exit 1
+    fi
+}
+
+require_positive() {
+    label="$1"
+    actual="$2"
+    case "$actual" in
+        ''|*[!0-9]*)
+            echo "cpu_simd_render_dpi_contract_status=fail"
+            echo "cpu_simd_render_dpi_contract_reason=${label}_not_numeric_${actual}"
+            exit 1
+            ;;
+    esac
+    if [ "$actual" -le 0 ]; then
+        echo "cpu_simd_render_dpi_contract_status=fail"
+        echo "cpu_simd_render_dpi_contract_reason=${label}_not_positive_${actual}"
         exit 1
     fi
 }
@@ -57,6 +80,21 @@ require_value "default_physical_pixels" "32x32" "$(field_value gui_perf_benchmar
 require_value "override_physical_pixels" "32x32" "$(field_value gui_perf_benchmark_physical_pixels "$OUT_DIR/override.sdn")"
 require_value "screen_size_reduced" "false" "$(field_value gui_perf_benchmark_screen_size_reduced "$OUT_DIR/default.sdn")"
 require_value "checksum" "$(sdn_value checksum "$OUT_DIR/default.sdn")" "$(sdn_value checksum "$OUT_DIR/override.sdn")"
+require_value "default_fallback" "false" "$(sdn_bool_value fallback_used "$OUT_DIR/default.sdn")"
+require_value "override_fallback" "false" "$(sdn_bool_value fallback_used "$OUT_DIR/override.sdn")"
+require_value "default_runtime_path" "simple_web_layout_engine2d_cpu_simd" "$(sdn_value runtime_execution_path "$OUT_DIR/default.sdn")"
+require_value "override_runtime_path" "simple_web_layout_engine2d_cpu_simd" "$(sdn_value runtime_execution_path "$OUT_DIR/override.sdn")"
+require_value "default_pixel_proof" "nonzero_pixels:1024" "$(sdn_value pixel_proof "$OUT_DIR/default.sdn")"
+require_value "override_pixel_proof" "nonzero_pixels:1024" "$(sdn_value pixel_proof "$OUT_DIR/override.sdn")"
+default_checksum="$(sdn_value checksum "$OUT_DIR/default.sdn")"
+case "$default_checksum" in
+    sum32:[0-9]*) require_positive "default_checksum" "${default_checksum#sum32:}" ;;
+    *)
+        echo "cpu_simd_render_dpi_contract_status=fail"
+        echo "cpu_simd_render_dpi_contract_reason=default_checksum_bad_prefix"
+        exit 1
+        ;;
+esac
 
 echo "cpu_simd_render_dpi_contract_status=pass"
 echo "cpu_simd_render_dpi_default=300"

@@ -78,8 +78,10 @@
 # shifts no key and re-flags nothing. The gate RATCHETS on counts: for each key,
 # only the amount by which the CURRENT count exceeds the BASELINE count is a NEW
 # violation (a genuinely-added loop matching an existing key still counts as
-# new). Shrink the baseline as loops move onto a bulk idiom or get annotated;
-# never grow a count without a plan note.
+# new). A baseline key or count absent from the current scan is stale and also
+# fails: accepted debt must describe the tree exactly, or key churn can hide a
+# later regression. Shrink the baseline as loops move onto a bulk idiom or get
+# annotated; never grow a count without a plan note.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -193,21 +195,56 @@ fi
 # difference avoids double-counting a single-line header and avoids a fragile
 # "does-not-end-in-colon" regex (trailing-comment case).
 awk -v SF="$loop_single" 'FILENAME==SF { seen[$0]=1; next } !($0 in seen)' "$loop_single" "$loop_all" >"$tmp_dir/loop_multi.txt" || true
-cat "$loop_single" "$tmp_dir/loop_multi.txt" >"$loop_hits" || true
+
+# Multi-line headers key on their FULL header text, not the first line alone.
+# The first line of a `while (\n ... ):` continuation form is just `while (`, so
+# every such loop in a file collapsed to one degenerate key that could not say
+# WHICH loop changed (recorded OPEN as §3.1 of
+# doc/08_tracking/bug/cpu_hotloop_gate_red_key_churn_and_prose_scoring_2026-08-01.md).
+# Join continuation lines up to and including the one that closes with `:`.
+# Bounded at 12 lines so a malformed header cannot run away; if no closing line
+# is found the original first-line content is kept (fail to the old behaviour,
+# never to zero hits). This refines keys only — it adds no hit and drops none,
+# so the scored total is unchanged.
+loop_multi_keyed="$tmp_dir/loop_multi_keyed.txt"
+: >"$loop_multi_keyed"
+while IFS= read -r mhit; do
+    [ -n "$mhit" ] || continue
+    mfile="${mhit%%:*}"
+    mrest="${mhit#*:}"
+    mline="${mrest%%:*}"
+    mcontent="${mrest#*:}"
+    mjoined=$(awk -v start="$mline" '
+        NR < start { next }
+        NR >= start + 12 { exit }
+        {
+            line=$0;
+            gsub(/\t/, " ", line);
+            gsub(/^[ ]+/, "", line);
+            gsub(/[ ]+$/, "", line);
+            out = (out == "" ? line : out " " line);
+            if (line ~ /:[ ]*(#.*)?$/) { print out; exit }
+        }
+    ' "$mfile" 2>/dev/null) || mjoined=""
+    [ -n "$mjoined" ] || mjoined="$mcontent"
+    printf '%s:%s:%s\n' "$mfile" "$mline" "$mjoined" >>"$loop_multi_keyed"
+done <"$tmp_dir/loop_multi.txt"
+
+cat "$loop_single" "$loop_multi_keyed" >"$loop_hits" || true
 
 # Byte-array element reads: names declared `name: [u8]` (as a field or a
-# param), then indexed elsewhere as `name[...]`. Two-pass structural
-# heuristic (collect u8-typed names, then grep their index use) rather than
-# one fragile regex.
-u8_names="$tmp_dir/u8_names.txt"
-sed -E 's/.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*\[u8\].*/\1/' "$u8_decl_hits" \
-    | sort -u | sed '/^$/d' >"$u8_names" || true
+# param), then indexed in that same file as `name[...]`. Keep each name paired
+# with its declaring file: a common identifier in another designated file is
+# unrelated and must not become a false positive.
+u8_file_names="$tmp_dir/u8_file_names.txt"
+sed -E 's/^([^:]+):[0-9]+:.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*\[u8\].*/\1\t\2/' "$u8_decl_hits" \
+    | sort -u | sed '/^$/d' >"$u8_file_names" || true
 
-if [ -s "$u8_names" ] && [ -s "$existing" ]; then
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        xargs rg -n -H -e "\\b${name}\\[[A-Za-z0-9_]" <"$existing" 2>/dev/null || true
-    done <"$u8_names" >"$byte_hits"
+if [ -s "$u8_file_names" ]; then
+    while IFS="$(printf '\t')" read -r file name; do
+        [ -n "$file" ] && [ -n "$name" ] || continue
+        rg -n -H -e "\\b${name}\\[[A-Za-z0-9_]" "$file" 2>/dev/null || true
+    done <"$u8_file_names" >"$byte_hits"
 fi
 
 # Annotation check: a hit is exempt if the SAME line or the line immediately
@@ -257,6 +294,55 @@ collect "BYTE" "$byte_hits"
 collect "SUBSTR" "$substr_hits"
 collect "CHAIN" "$chain_hits"
 
+# Prose guard: the BYTE/SUBSTR/CHAIN patterns are unanchored substring matches,
+# so before this filter they fired on any line MENTIONING the construct — a
+# comment (including one documenting this very rule, e.g.
+# `# Avoid buf.substring(pos, end) in hot loops.`) or a string literal
+# (`val doc = "call .map( to transform"`). Those are prose, not per-element
+# work, and scored as violations. Proven by sabotage probe on
+# backend_emu_adv.spl (2026-08-01): 4 prose-only lines added -> new 158 -> 162.
+#
+# Fix direction is STRICTER-CORRECT, never a relaxation: a hit survives only if
+# its construct still matches after comments and string CONTENT are removed,
+# i.e. only when it is real code. Zero real calls are lost — a genuine
+# `props.substring(pos, line_end)` sanitizes to itself and still matches.
+#
+# LOOP is deliberately NOT re-tested here: it is already line-start anchored
+# (`^[[:space:]]*(while|for)\b`), so a comment can never produce a LOOP hit
+# (verified: `# while comment_only_i < n:` is correctly ignored). Re-running the
+# sanitizer over LOOP is a no-op that would only risk perturbing its 363 hits.
+# Loop headers inside a triple-quoted multi-line string remain out of scope for
+# a line-local filter; that is the same documented grep limitation as recursion.
+filtered_code="$tmp_dir/filtered_code.txt"
+awk -F'\t' '
+    # Strip trailing comment and blank out string contents, so what remains is
+    # the code portion of the line. Quote state is tracked so a `#` inside a
+    # string is not treated as a comment start.
+    function code_only(s,   out, i, ch, n, instr, q) {
+        out = ""; instr = 0; q = ""; n = length(s);
+        for (i = 1; i <= n; i++) {
+            ch = substr(s, i, 1);
+            if (instr) {
+                if (ch == "\\") { i++; continue }
+                if (ch == q) { instr = 0; q = "" }
+                continue;
+            }
+            if (ch == "\"" || ch == "'"'"'") { instr = 1; q = ch; continue }
+            if (ch == "#") break;
+            out = out ch;
+        }
+        return out;
+    }
+    {
+        cls = $1; code = code_only($4);
+        if (cls == "LOOP") { print; next }
+        if (cls == "CHAIN"  && code ~ /\.(for_each|map|each)[ \t]*\(/) { print; next }
+        if (cls == "SUBSTR" && code ~ /\.substring\((pos|i|idx|j)[ \t]*[,+]/) { print; next }
+        if (cls == "BYTE"   && code ~ /\[/) { print; next }
+    }
+' "$filtered" >"$filtered_code"
+mv "$filtered_code" "$filtered"
+
 # Content-key: trim each rawcontent CONSISTENTLY (expand tabs -> single space,
 # strip leading/trailing whitespace, collapse internal whitespace runs) so a
 # key is (CLASS, file, normalized source text). Applied identically at
@@ -285,14 +371,23 @@ fi
 
 # Ratchet on COUNTS. Read baseline (count-keyed) then current (count-keyed);
 # for each key, NEW = max(0, current_count - baseline_count). Report per-key
-# increases and, unless scanning a fixture override, baseline keys whose count
-# shrank (candidates for tightening the baseline).
+# increases and baseline keys whose count shrank. Both directions fail closed:
+# increases are new debt and decreases require tightening the checked-in
+# baseline in the same change.
 report="$tmp_dir/report.txt"
+# A file-list override without a matching baseline override is a partial scan
+# against the repository baseline, so stale reporting would be meaningless.
+# An explicit baseline is a complete caller-owned contract and is validated in
+# both directions; this is what the adversarial fixtures exercise.
+skip_stale=0
+if [ -n "$FILE_LIST_OVERRIDE" ] && [ -z "$BASELINE_OVERRIDE" ]; then
+    skip_stale=1
+fi
 # NOTE: select baseline vs current rows by FILENAME, not `FNR==NR` — the latter
 # misclassifies the current file as the baseline whenever the baseline is empty
 # (e.g. a fresh `--baseline /dev/null` fixture run: an empty first file yields
 # zero records, so awk's FNR resets and the second file matches FNR==NR).
-awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
+awk -F'\t' -v skip_stale="$skip_stale" -v BF="$BASELINE" '
     FILENAME==BF {
         key=$2 SUBSEP $3 SUBSEP $4;
         bcount[key]=$1; bseen[key]=1; btot+=$1; next;
@@ -307,16 +402,18 @@ awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
         }
     }
     END {
-        if (skip_stale == "") {
+        if (skip_stale == 0) {
             for (k in bseen) {
                 c = ccount[k]+0;
                 if (bcount[k] > c) {
                     n=split(k, a, SUBSEP);
                     print "cpu_lane_hotloop_baseline_stale=" a[1] ":" a[2] ":" a[3] " (baseline=" bcount[k] " current=" c ")";
+                    stalec++;
                 }
             }
         }
         print "__NEW__=" newc+0;
+        print "__STALE__=" stalec+0;
         print "__BTOT__=" btot+0;
         print "__CTOT__=" ctot+0;
     }
@@ -324,14 +421,16 @@ awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
 
 grep -v '^__' "$report" || true
 new_count=$(sed -n 's/^__NEW__=//p' "$report"); new_count=${new_count:-0}
+stale_count=$(sed -n 's/^__STALE__=//p' "$report"); stale_count=${stale_count:-0}
 baseline_total=$(sed -n 's/^__BTOT__=//p' "$report"); baseline_total=${baseline_total:-0}
 current_total=$(sed -n 's/^__CTOT__=//p' "$report"); current_total=${current_total:-0}
 
 echo "cpu_lane_hotloop_baselined=$baseline_total"
 echo "cpu_lane_hotloop_current=$current_total"
 echo "cpu_lane_hotloop_new=$new_count"
+echo "cpu_lane_hotloop_stale=$stale_count"
 
-if [ "$new_count" -gt 0 ]; then
+if [ "$new_count" -gt 0 ] || [ "$stale_count" -gt 0 ]; then
     echo "cpu_lane_hotloop_ok=false"
     exit 1
 fi

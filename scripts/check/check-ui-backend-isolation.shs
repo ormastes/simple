@@ -9,9 +9,29 @@
 #
 # Scan roots: src/app examples src/lib/*/ui  (.spl only, vendored excluded).
 # Violation classes:
-#   (a) rt_[a-z0-9_]* — extern-decl or call token for a runtime backend hook
+#   (a) rt_[a-z0-9_]* USED AS CODE — an `extern fn rt_*` declaration, or a
+#       `rt_*(` call. A bare token is NOT enough (see "Why decl-or-call" below).
 #   (b) MetalBackend(/VulkanBackend(/DirectXBackend(/SoftwareBackend( — direct
 #       backend-class construction (should go through Engine2D.create_* instead)
+#
+# Why decl-or-call, and why comments are stripped (2026-08-01):
+# The original rule matched the bare token `\brt_[a-z0-9_]+` anywhere in a .spl
+# file. That mis-scored three distinct classes of NON-violation, each observed
+# in-tree:
+#   * Local variables that merely start with `rt_`. src/app/ide/draw_sdd_sanity.spl
+#     binds `val rt_nodes = again.nodes.len()` — no extern, no FFI, flagged anyway.
+#   * Prose in `#` comments and docstrings. src/app/devhub/retry.spl was flagged
+#     for a comment stating it routes through `std.nogc_sync_mut.sffi.system.
+#     sleep_secs` INSTEAD of calling `rt_sleep_secs` — i.e. flagged for
+#     documenting its own compliance. examples/06_io/ui/wm_widget_showcase_gui.spl
+#     and src/lib/common/ui/draw_ir_v3_backend_enums.spl are comment-only too.
+#   * Runtime names inside user-facing strings, e.g. the error text in
+#     src/app/devhub/cmd_minio.spl explaining what the transport cannot do.
+# Requiring decl-or-call form and ignoring `#`-comment tails removes 63 such
+# files repo-wide (545 -> 482) without dropping a single real declaration or
+# call — every eliminated file was re-read by hand and contained prose only.
+# This makes the gate STRICTER per finding, not weaker: it still fires on every
+# `extern fn rt_*` and every `rt_*(` call site.
 #
 # Existing debt is baselined in ui_backend_isolation_baseline.txt (one
 # "CATEGORY:path" entry per line). The gate RATCHETS: a violating file already
@@ -29,8 +49,35 @@ BASELINE="scripts/check/ui_backend_isolation_baseline.txt"
 # legitimate backend implementation, not an app-layer bypass.
 EXCLUDE_GLOBS="--glob !**/vendor/** --glob !**/node_modules/** --glob !src/app/interpreter/ffi/** --glob !src/lib/nogc_sync_mut/ui/**"
 
-RT_PATTERN='\brt_[a-z0-9_]+'
-BACKEND_PATTERN='\b(MetalBackend|VulkanBackend|DirectXBackend|SoftwareBackend)\('
+RT_PATTERN='(extern\s+fn\s+rt_[a-z0-9_]+|\brt_[a-z0-9_]+\s*\()'
+BACKEND_PATTERN='\b(MetalBackend|VulkanBackend|DirectXBackend|SoftwareBackend)\s*\('
+
+# Post-filter for the rg passes above. rg cannot tell a comment from code, so a
+# candidate line is re-checked after its `#`-comment tail is removed. A `#`
+# inside a double-quoted string does not start a comment, so quoting is tracked.
+# Records stay verbatim ("path:line:content") for the reporter below.
+# $1 = POSIX ERE the comment-stripped code must still match.
+# (Patterns use [(] rather than \( so no backslash survives `awk -v`.)
+CODE_RT_RE='extern[[:blank:]]+fn[[:blank:]]+rt_[a-z0-9_]+|(^|[^A-Za-z0-9_])rt_[a-z0-9_]+[[:blank:]]*[(]'
+CODE_BACKEND_RE='(^|[^A-Za-z0-9_])(MetalBackend|VulkanBackend|DirectXBackend|SoftwareBackend)[[:blank:]]*[(]'
+
+code_only() {
+    awk -v pat="$1" '{
+        orig = $0
+        rest = orig
+        sub(/^[^:]*:[0-9]+:/, "", rest)
+        code = ""
+        inq = 0
+        n = length(rest)
+        for (i = 1; i <= n; i++) {
+            c = substr(rest, i, 1)
+            if (c == "\"") { inq = 1 - inq }
+            if (c == "#" && inq == 0) { break }
+            code = code c
+        }
+        if (code ~ pat) { print orig }
+    }'
+}
 
 UPDATE_BASELINE=0
 SCAN_DIR_OVERRIDE=""
@@ -72,9 +119,9 @@ current="$tmp_dir/current.txt"
 # Single grep pass per pattern over the whole scan-root tree (rg walks the
 # tree once per invocation) — no per-file process spawning.
 # shellcheck disable=SC2086
-rg -n --glob '*.spl' $EXCLUDE_GLOBS -e "$RT_PATTERN" "$@" >"$rt_hits" 2>/dev/null || true
+rg -n --glob '*.spl' $EXCLUDE_GLOBS -e "$RT_PATTERN" "$@" 2>/dev/null | code_only "$CODE_RT_RE" >"$rt_hits" || true
 # shellcheck disable=SC2086
-rg -n --glob '*.spl' $EXCLUDE_GLOBS -e "$BACKEND_PATTERN" "$@" >"$backend_hits" 2>/dev/null || true
+rg -n --glob '*.spl' $EXCLUDE_GLOBS -e "$BACKEND_PATTERN" "$@" 2>/dev/null | code_only "$CODE_BACKEND_RE" >"$backend_hits" || true
 
 : >"$current"
 cut -d: -f1 "$rt_hits" | sort -u | sed '/^$/d;s/^/RT:/' >>"$current"

@@ -15,6 +15,11 @@ BUILD_OUT="build/test-artifacts/nvme_fw_rv32_minimal_build.out"
 BUILD_ERR="build/test-artifacts/nvme_fw_rv32_minimal_build.err"
 TIMEOUT_SECS="${NVME_RV32_BUILD_TIMEOUT_SECS:-90}"
 SIMPLE_BIN="${NVME_RV32_SIMPLE_BIN:-bin/simple}"
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "STATUS: FAIL nvme-rv32-minimal-live missing Simple runtime: $SIMPLE_BIN" >&2
+  echo "Set NVME_RV32_SIMPLE_BIN to a self-hosted Simple binary." >&2
+  exit 127
+fi
 SECTION_LIMIT="${NVME_RV32_MINIMAL_SECTIONS:-}"
 REAL_SECTIONS="${NVME_RV32_REAL_SECTIONS:-0}"
 
@@ -722,7 +727,11 @@ done:
 1:  wfi
     j       1b
 EOF_START
-if ! riscv64-unknown-elf-gcc -march=rv32imafdc -mabi=ilp32d -c "$START_ASM" -o "$START_OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+# ilp32 (soft-float ABI): must match the object the Simple LLVM backend emits
+# for riscv32-unknown-none (soft-float since the FPU DI-toggle work); ilp32d
+# start.o vs ilp32 fw.o is an ld.lld hard error. Soft-float is also the safe
+# ABI for the integer-only rv32 board core.
+if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
   echo "STATUS: FAIL nvme-rv32-minimal-live start-stub out=$BUILD_OUT err=$BUILD_ERR"
   tail -n 40 "$BUILD_ERR" || true
   exit 1
@@ -732,7 +741,10 @@ if ! llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$BUILD_O
   tail -n 40 "$BUILD_ERR" || true
   exit 1
 fi
-if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
+# libgcc supplies the i64 div/mod builtins (__divdi3/__moddi3) the rv32
+# soft-float objects reference; without it the link fails on any i64 division.
+NVME_RV32_LIBGCC="$(riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -print-libgcc-file-name)"
+if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$NVME_RV32_LIBGCC" >>"$BUILD_OUT" 2>>"$BUILD_ERR"; then
   echo "STATUS: FAIL nvme-rv32-minimal-live link out=$BUILD_OUT err=$BUILD_ERR"
   tail -n 40 "$BUILD_ERR" || true
   exit 1

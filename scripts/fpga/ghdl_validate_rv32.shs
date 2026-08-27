@@ -1,78 +1,228 @@
 #!/bin/sh
+# GHDL RV32 validation gate.
+#
+# Verdict convention (.claude/rules/vcs.md § Pre-push guards): the LAST line of
+# stdout is always one of
+#   PASS  — <n> ... checked   exit 0   (n is always > 0)
+#   FAIL  — ...               exit 1
+#   ERROR — nothing was checked   exit 2
+# A run that checked zero things is an ERROR, never a PASS.
+#
+# Two fail-open defects were reproduced here on 2026-08-17 and are fixed below;
+# see doc/08_tracking/bug/riscv_ghdl_validate_rv32_analyze_only_blind_to_semantics_2026-07-28.md
+#
+#   1. Every `ghdl` invocation was written `out="$(ghdl ...)" || true`, which
+#      DISCARDS ghdl's exit status; the verdict then rested solely on grepping
+#      stdout for ":error:". A shim ghdl that exited 1 while printing
+#      "ghdl: cannot open work library" made the gate print "OK" five times and
+#      exit 0. Fixed: rc is assigned on the line AFTER the command (never through
+#      a pipe, whose $? is the last pipeline element's) and a nonzero rc FAILs.
+#   2. PHASE defaulted to --analyze and line 35 did a bare `exit 0`, so the
+#      default invocation returned a full-looking success having never
+#      elaborated or simulated. Fixed: the default phase is now --simulate (the
+#      complete check), --analyze remains available but its verdict states its
+#      limited scope explicitly so it cannot be read as a semantic pass.
+
 set -e
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-cd "$ROOT_DIR"
 
-VHDL_DIR="$ROOT_DIR/build/vhdl/rv32"
-WORK_DIR="$ROOT_DIR/build/ghdl/rv32"
-TB_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
-PHASE="${1:---analyze}"
+VHDL_DIR="${GHDL_RV32_VHDL_DIR:-$ROOT_DIR/build/vhdl/rv32}"
+WORK_DIR="${GHDL_RV32_WORK_DIR:-$ROOT_DIR/build/ghdl/rv32}"
+TB_DIR="${GHDL_RV32_TB_DIR:-$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl}"
 
-command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
-mkdir -p "$WORK_DIR"
+# Number of things actually fed to ghdl. Non-vacuity is absolute: if this is
+# still 0 at the end, the verdict is ERROR.
+CHECKED=0
 
-echo "=== GHDL RV32 Validation ==="
-echo "Phase: $PHASE"
+fail() {
+    echo "FAIL — $*"
+    exit 1
+}
 
-# NOTE: the rv32 core entity is `rv32_exec_core` (build/vhdl/rv32/rv32_exec_core.vhd,
-# emitted by src/lib/hardware/vhdl_gen/generate_main.spl). There is no `rv32_core.vhd`
-# design unit -- that name was never generated nor tracked, and nothing instantiates
-# it, so listing it here made --analyze abort before reaching the real core.
-for file in rv32i_pkg rv32i_decode rv32i_regfile rv32_exec_core soc_top_rv32_sim; do
-    path="$VHDL_DIR/$file.vhd"
-    [ -f "$path" ] || { echo "ERROR missing $path"; exit 1; }
-    printf "  Analyzing %s.vhd ... " "$file"
-    out="$(ghdl -a --std=08 --workdir="$WORK_DIR" "$path" 2>&1)" || true
-    if echo "$out" | grep -q ":error:"; then
-        echo "FAIL"
-        echo "$out" | tail -40
+# run_ghdl <label> <args...>
+# Assigns rc on the line AFTER the command -- never reads it through a pipe.
+run_ghdl() {
+    label="$1"
+    shift
+    printf "  %s ... " "$label"
+    out="$(ghdl "$@" 2>&1)" && rc=0 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "FAILED"
+        printf '%s\n' "$out" | tail -40
+        fail "ghdl exited $rc for $label"
+    fi
+    if printf '%s\n' "$out" | grep -q ":error:"; then
+        echo "FAILED"
+        printf '%s\n' "$out" | tail -40
+        fail "ghdl reported an error for $label"
+    fi
+    CHECKED=$((CHECKED + 1))
+    echo "OK"
+}
+
+validate() {
+    PHASE="$1"
+
+    command -v ghdl >/dev/null 2>&1 || {
+        # Absence of a tool is absence of evidence, never a pass.
+        echo "ERROR — nothing was checked: ghdl not found in PATH"
+        exit 2
+    }
+    mkdir -p "$WORK_DIR"
+
+    echo "=== GHDL RV32 Validation ==="
+    echo "Phase: $PHASE"
+
+    # NOTE: the rv32 core entity is `rv32_exec_core`
+    # (build/vhdl/rv32/rv32_exec_core.vhd, emitted by
+    # src/lib/hardware/vhdl_gen/generate_main.spl). There is no `rv32_core.vhd`
+    # design unit -- that name was never generated nor tracked, and nothing
+    # instantiates it, so listing it here made --analyze abort before reaching
+    # the real core.
+    for file in rv32i_pkg rv32i_decode rv32i_regfile rv32_exec_core soc_top_rv32_sim; do
+        path="$VHDL_DIR/$file.vhd"
+        [ -f "$path" ] || fail "missing $path"
+        run_ghdl "Analyzing $file.vhd" -a --std=08 --workdir="$WORK_DIR" "$path"
+    done
+
+    [ "$CHECKED" -gt 0 ] || { echo "ERROR — nothing was checked: no design units analyzed"; exit 2; }
+
+    if [ "$PHASE" = "--analyze" ]; then
+        # Deliberately explicit about scope: this phase proves the generated
+        # VHDL parses, and NOTHING about its semantics.
+        echo "PASS — $CHECKED design unit(s) analyzed (ANALYZE-ONLY: elaboration and simulation NOT checked)"
+        exit 0
+    fi
+
+    run_ghdl "Elaborating soc_top_rv32_sim" -e --std=08 --workdir="$WORK_DIR" soc_top_rv32_sim
+
+    if [ "$PHASE" = "--elaborate" ]; then
+        echo "PASS — $CHECKED unit(s) checked (ELABORATE-ONLY: simulation NOT checked)"
+        exit 0
+    fi
+
+    tb="$TB_DIR/tb_rv32_wb_soc_smoke.vhd"
+    [ -f "$tb" ] || fail "missing testbench $tb"
+    run_ghdl "Analyzing testbench" -a --std=08 --workdir="$WORK_DIR" "$tb"
+    run_ghdl "Elaborating testbench" -e --std=08 --workdir="$WORK_DIR" tb_rv32_wb_soc_smoke
+
+    printf "  Running simulation ... "
+    sim="$(ghdl -r --std=08 --workdir="$WORK_DIR" tb_rv32_wb_soc_smoke --stop-time=25ms 2>&1)" && rc=0 || rc=$?
+    echo ""
+    printf '%s\n' "$sim" | tail -40
+    if [ "$rc" -ne 0 ]; then
+        fail "simulation exited $rc"
+    fi
+    for marker in RV32_UART_TX_ACTIVITY_SEEN RV32_UART_BYTE_SEEN RV32_UART_MARKER_SEEN; do
+        printf '%s\n' "$sim" | grep -q "$marker" || fail "simulation missing marker $marker"
+        CHECKED=$((CHECKED + 1))
+    done
+    printf '%s\n' "$sim" | grep -q "error" && fail "simulation output contains 'error'"
+
+    echo "PASS — $CHECKED item(s) checked, analyze+elaborate+simulate all clean"
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: fatal, runs before any real scan. Uses shim `ghdl` binaries so it
+# needs no real toolchain and no generated RTL.
+# ---------------------------------------------------------------------------
+selftest() {
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    fails=0
+    n=0
+
+    mk_units() {
+        mkdir -p "$1"
+        for f in rv32i_pkg rv32i_decode rv32i_regfile rv32_exec_core soc_top_rv32_sim; do
+            echo "-- fixture" >"$1/$f.vhd"
+        done
+    }
+
+    # shim <name> <exit> <stdout-text>
+    mk_shim() {
+        mkdir -p "$tmp/$1"
+        {
+            echo '#!/bin/sh'
+            printf 'echo %s\n' "'$3'"
+            echo "exit $2"
+        } >"$tmp/$1/ghdl"
+        chmod +x "$tmp/$1/ghdl"
+    }
+
+    expect() { # expect <desc> <want_rc> <want_verdict_regex> <phase> <shimdir> <vhdldir>
+        n=$((n + 1))
+        got="$(GHDL_RV32_VHDL_DIR="$6" GHDL_RV32_WORK_DIR="$tmp/work$n" \
+               PATH="$tmp/$5:$PATH" sh "$0" "$4" 2>&1)" && rc=0 || rc=$?
+        last="$(printf '%s\n' "$got" | tail -1)"
+        if [ "$rc" != "$2" ]; then
+            echo "  SELFTEST FAIL [$1]: exit $rc, wanted $2 (last line: $last)"
+            fails=$((fails + 1))
+            return
+        fi
+        if ! printf '%s\n' "$last" | grep -qE "$3"; then
+            echo "  SELFTEST FAIL [$1]: last line '$last' does not match /$3/"
+            fails=$((fails + 1))
+            return
+        fi
+        echo "  selftest ok [$1]"
+    }
+
+    mk_units "$tmp/rtl"
+    mk_shim good 0 "analysis clean"
+    # Incident replay: ghdl FAILS but never prints ':error:'. Pre-fix this
+    # printed OK five times and exited 0.
+    mk_shim silentfail 1 "ghdl: cannot open work library"
+    # Classic case: exit 0 but an error diagnostic on stdout.
+    mk_shim errtext 0 "foo.vhd:12:3:error: no declaration for x"
+
+    echo "=== ghdl_validate_rv32 --selftest ==="
+    expect "clean analyze must PASS and state ANALYZE-ONLY" 0 \
+        '^PASS — 5 design unit\(s\) analyzed \(ANALYZE-ONLY' --analyze good "$tmp/rtl"
+    expect "ghdl nonzero exit with no :error: text must FAIL (incident replay)" 1 \
+        '^FAIL — ghdl exited 1' --analyze silentfail "$tmp/rtl"
+    expect "':error:' in output must FAIL even on exit 0" 1 \
+        '^FAIL — ghdl reported an error' --analyze errtext "$tmp/rtl"
+    expect "missing generated RTL must FAIL, not pass vacuously" 1 \
+        '^FAIL — missing ' --analyze good "$tmp/absent"
+
+    # No ghdl at all must be ERROR (exit 2), never a pass.
+    # PATH holds a shell (and the few utilities the script uses) but NO ghdl.
+    mkdir -p "$tmp/emptybin"
+    for u in sh grep tail mkdir printf mktemp rm; do
+        p="$(command -v "$u" 2>/dev/null)" || continue
+        ln -sf "$p" "$tmp/emptybin/$u"
+    done
+    n=$((n + 1))
+    got="$(GHDL_RV32_VHDL_DIR="$tmp/rtl" GHDL_RV32_WORK_DIR="$tmp/work$n" \
+           PATH="$tmp/emptybin" sh "$0" --analyze 2>&1)" && rc=0 || rc=$?
+    last="$(printf '%s\n' "$got" | tail -1)"
+    if [ "$rc" = 2 ] && printf '%s\n' "$last" | grep -q '^ERROR — nothing was checked'; then
+        echo "  selftest ok [absent ghdl must ERROR, never PASS]"
+    else
+        echo "  SELFTEST FAIL [absent ghdl]: exit $rc, last line '$last'"
+        fails=$((fails + 1))
+    fi
+
+    if [ "$fails" -ne 0 ]; then
+        echo "FAIL — selftest: $fails of 5 fixture(s) failed"
         exit 1
     fi
-    echo "OK"
-done
+    echo "PASS — 5 selftest fixture(s) checked"
+    exit 0
+}
 
-[ "$PHASE" = "--analyze" ] && exit 0
-
-printf "  Elaborating soc_top_rv32_sim ... "
-out="$(ghdl -e --std=08 --workdir="$WORK_DIR" soc_top_rv32_sim 2>&1)" || true
-if echo "$out" | grep -q "error"; then
-    echo "FAIL"
-    echo "$out" | tail -40
-    exit 1
-fi
-echo "OK"
-
-[ "$PHASE" = "--elaborate" ] && exit 0
-
-tb="$TB_DIR/tb_rv32_wb_soc_smoke.vhd"
-printf "  Analyzing testbench ... "
-out="$(ghdl -a --std=08 --workdir="$WORK_DIR" "$tb" 2>&1)" || true
-if echo "$out" | grep -q ":error:"; then
-    echo "FAIL"
-    echo "$out" | tail -40
-    exit 1
-fi
-echo "OK"
-
-printf "  Elaborating testbench ... "
-out="$(ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_wb_soc_smoke 2>&1)" || true
-if echo "$out" | grep -q "error"; then
-    echo "FAIL"
-    echo "$out" | tail -40
-    exit 1
-fi
-echo "OK"
-
-printf "  Running simulation ... "
-sim="$(ghdl -r --std=08 --workdir="$WORK_DIR" tb_rv32_wb_soc_smoke --stop-time=25ms 2>&1)" || true
-echo "$sim" | tail -40
-if echo "$sim" | grep -q "RV32_UART_TX_ACTIVITY_SEEN" &&
-    echo "$sim" | grep -q "RV32_UART_BYTE_SEEN" &&
-    echo "$sim" | grep -q "RV32_UART_MARKER_SEEN" &&
-    ! echo "$sim" | grep -q "error"; then
-    echo "Simulation PASSED"
-else
-    echo "Simulation FAILED"
-    exit 1
-fi
+case "${1:-}" in
+    --selftest) selftest ;;
+    # Default is the FULL check. --analyze used to be the default, which handed
+    # every flagless caller a semantically blind pass.
+    "") validate --simulate ;;
+    --analyze | --elaborate | --simulate) validate "$1" ;;
+    *)
+        echo "usage: $0 [--analyze|--elaborate|--simulate|--selftest]"
+        echo "ERROR — nothing was checked: unknown argument '$1'"
+        exit 2
+        ;;
+esac

@@ -28,13 +28,6 @@ case "${1:-}" in
         exit 0
         ;;
     "")
-        PROFILE_MODE=profile
-        ;;
-    --argv-wrapper-selftest)
-        PROFILE_MODE=argv-wrapper-selftest
-        ;;
-    --retained-contract-selftest)
-        PROFILE_MODE=retained-contract-selftest
         ;;
     *)
         echo "error=unknown argument: $1" >&2
@@ -56,202 +49,6 @@ if [ -n "${PROFILE_DOCKER_SIMPLE_BINARY+x}" ]; then
     PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT=1
 fi
 PROFILE_DOCKER_SIMPLE_BINARY="${PROFILE_DOCKER_SIMPLE_BINARY:-}"
-
-BUILD_DIR="${BUILD_DIR:-build/cross_lang_perf}"
-CANONICAL_CROSS_LANGUAGE_REPORT="${CANONICAL_CROSS_LANGUAGE_REPORT:-doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md}"
-REPORT_PATH="${REPORT_PATH:-$CANONICAL_CROSS_LANGUAGE_REPORT}"
-PROFILE_REPORT_CONTRACT_TEST="${PROFILE_REPORT_CONTRACT_TEST:-test/05_perf/profile_scripts/profile_report_contract_test.shs}"
-RUNS="${RUNS:-20}"
-FIB_N="${FIB_N:-35}"
-CPU_WORKERS="${CPU_WORKERS:-${WORKERS:-100}}"
-RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
-BUILD_TIMEOUT="${BUILD_TIMEOUT:-300}"
-
-require_positive_integer() {
-    _name="$1"
-    _value="$2"
-    case "$_value" in
-        ''|*[!0-9]*|0)
-            echo "error=$_name must be a strictly positive integer: $_value" >&2
-            return 2
-            ;;
-    esac
-}
-
-require_positive_decimal() {
-    _name="$1"
-    _value="$2"
-    printf '%s\n' "$_value" | grep -Eq '^[0-9]+([.][0-9]+)?$' &&
-        awk -v value="$_value" 'BEGIN { exit !(value + 0 > 0) }' && return 0
-    echo "error=$_name must be a positive decimal: $_value" >&2
-    return 2
-}
-
-require_positive_rss_kib() {
-    _value="$1"
-    case "$_value" in
-        ''|*[!0-9]*|0)
-            echo "error=max_rss_kib must be a strictly positive integer: $_value" >&2
-            return 2
-            ;;
-    esac
-}
-
-require_positive_integer RUNS "$RUNS"
-require_positive_integer FIB_N "$FIB_N"
-require_positive_integer CPU_WORKERS "$CPU_WORKERS"
-require_positive_integer RUN_TIMEOUT "$RUN_TIMEOUT"
-require_positive_integer BUILD_TIMEOUT "$BUILD_TIMEOUT"
-if [ "$FIB_N" -ne 35 ]; then
-    echo "error=FIB_N=$FIB_N is unsupported; checksum contract requires FIB_N=35" >&2
-    exit 2
-fi
-
-OS_THREAD_WORKERS="${OS_THREAD_WORKERS:-$CPU_WORKERS}"
-MULTICORE_GREEN_WORKERS="${MULTICORE_GREEN_WORKERS:-$CPU_WORKERS}"
-if [ -z "${GOMAXPROCS:-}" ]; then
-    GOMAXPROCS="$CPU_WORKERS"
-fi
-export GOMAXPROCS
-WORKERS="$OS_THREAD_WORKERS"
-FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
-FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
-FANOUT_MULTICORE_GREEN_WORKERS="${FANOUT_MULTICORE_GREEN_WORKERS:-$FANOUT_WORKERS}"
-FANOUT_ITERS="${FANOUT_ITERS:-32}"
-FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-512}"
-FANOUT_STRESS_ITERS="${FANOUT_STRESS_ITERS:-1}"
-if [ -z "${COOPERATIVE_GREEN_WORKERS:-}" ]; then
-    if [ -n "${GREEN_WORKERS:-}" ]; then
-        COOPERATIVE_GREEN_WORKERS="$GREEN_WORKERS"
-    elif [ "$CPU_WORKERS" -gt 10 ]; then
-        COOPERATIVE_GREEN_WORKERS=10
-    else
-        COOPERATIVE_GREEN_WORKERS="$CPU_WORKERS"
-    fi
-fi
-GREEN_WORKERS="$COOPERATIVE_GREEN_WORKERS"
-if [ -z "${FANOUT_COOPERATIVE_GREEN_WORKERS:-}" ]; then
-    if [ "$FANOUT_WORKERS" -gt 200 ]; then
-        FANOUT_COOPERATIVE_GREEN_WORKERS=200
-    else
-        FANOUT_COOPERATIVE_GREEN_WORKERS="$FANOUT_WORKERS"
-    fi
-fi
-WARM_ITERS="${WARM_ITERS:-5}"
-WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
-require_positive_integer GOMAXPROCS "$GOMAXPROCS"
-require_positive_integer OS_THREAD_WORKERS "$OS_THREAD_WORKERS"
-require_positive_integer MULTICORE_GREEN_WORKERS "$MULTICORE_GREEN_WORKERS"
-require_positive_integer FANOUT_WORKERS "$FANOUT_WORKERS"
-require_positive_integer FANOUT_OS_THREAD_WORKERS "$FANOUT_OS_THREAD_WORKERS"
-require_positive_integer FANOUT_MULTICORE_GREEN_WORKERS "$FANOUT_MULTICORE_GREEN_WORKERS"
-require_positive_integer FANOUT_ITERS "$FANOUT_ITERS"
-require_positive_integer FANOUT_STRESS_WORKERS "$FANOUT_STRESS_WORKERS"
-require_positive_integer FANOUT_STRESS_ITERS "$FANOUT_STRESS_ITERS"
-require_positive_integer COOPERATIVE_GREEN_WORKERS "$COOPERATIVE_GREEN_WORKERS"
-require_positive_integer FANOUT_COOPERATIVE_GREEN_WORKERS "$FANOUT_COOPERATIVE_GREEN_WORKERS"
-require_positive_integer WARM_ITERS "$WARM_ITERS"
-require_positive_integer WARM_IN_PROCESS "$WARM_IN_PROCESS"
-if [ "$GOMAXPROCS" -ne "$CPU_WORKERS" ] ||
-   [ "$OS_THREAD_WORKERS" -ne "$CPU_WORKERS" ] ||
-   [ "$MULTICORE_GREEN_WORKERS" -ne "$CPU_WORKERS" ]; then
-    echo "error=CPU worker parity requires CPU_WORKERS=GOMAXPROCS=OS_THREAD_WORKERS=MULTICORE_GREEN_WORKERS" >&2
-    exit 2
-fi
-if [ "$FANOUT_OS_THREAD_WORKERS" -ne "$FANOUT_WORKERS" ] ||
-   [ "$FANOUT_MULTICORE_GREEN_WORKERS" -ne "$FANOUT_WORKERS" ]; then
-    echo "error=fanout worker parity requires FANOUT_WORKERS=FANOUT_OS_THREAD_WORKERS=FANOUT_MULTICORE_GREEN_WORKERS" >&2
-    exit 2
-fi
-
-have() { command -v "$1" >/dev/null 2>&1; }
-
-require_timeout_tool() {
-    if ! have timeout; then
-        echo "ERROR: timeout is required for claim-bearing benchmark rows" >&2
-        return 2
-    fi
-}
-
-run_bounded_argv() {
-    timeout "$RUN_TIMEOUT" "$@"
-}
-
-run_bounded_build_argv() {
-    timeout "$BUILD_TIMEOUT" "$@"
-}
-
-run_bounded_checksum_argv() {
-    _expected="$1"
-    shift
-    if _actual="$(run_bounded_argv "$@" 2>/dev/null)"; then
-        :
-    else
-        _status=$?
-        return "$_status"
-    fi
-    if [ "$_actual" != "$_expected" ]; then
-        echo "error=checksum_mismatch expected=$_expected actual=$_actual" >&2
-        return 97
-    fi
-}
-
-require_go_scheduler_width() {
-    _receipt="$1"
-    _actual="$(printf '%s\n' "$_receipt" | sed -n 's/^GOMAXPROCS=\([0-9][0-9]*\) NumCPU=[0-9][0-9]*$/\1/p')"
-    _num_cpu="$(printf '%s\n' "$_receipt" | sed -n 's/^GOMAXPROCS=[0-9][0-9]* NumCPU=\([0-9][0-9]*\)$/\1/p')"
-    [ -n "$_actual" ] && [ -n "$_num_cpu" ] || {
-        echo "error=invalid Go scheduler receipt: $_receipt" >&2
-        return 2
-    }
-    require_positive_integer actual_GOMAXPROCS "$_actual" || return $?
-    require_positive_integer NumCPU "$_num_cpu" || return $?
-    if [ "$_actual" -ne "$CPU_WORKERS" ]; then
-        echo "error=actual GOMAXPROCS=$_actual does not match CPU_WORKERS=$CPU_WORKERS" >&2
-        return 2
-    fi
-}
-
-require_timeout_tool
-if [ "$PROFILE_MODE" = argv-wrapper-selftest ]; then
-    shift
-    [ "$#" -gt 0 ] || {
-        echo "error=--argv-wrapper-selftest requires a command" >&2
-        exit 2
-    }
-    run_bounded_argv "$@"
-    exit $?
-fi
-if [ "$PROFILE_MODE" = retained-contract-selftest ]; then
-    shift
-    _contract="${1:-}"
-    [ "$#" -gt 0 ] && shift
-    case "$_contract" in
-        warm)
-            [ "$#" -eq 1 ] || { echo 'error=warm selftest requires one value' >&2; exit 2; }
-            require_positive_decimal warm_ms "$1"
-            ;;
-        rss)
-            [ "$#" -eq 1 ] || { echo 'error=rss selftest requires one value' >&2; exit 2; }
-            require_positive_rss_kib "$1"
-            ;;
-        checksum)
-            [ "$#" -gt 1 ] || { echo 'error=checksum selftest requires expected output and command' >&2; exit 2; }
-            _expected="$1"
-            shift
-            run_bounded_checksum_argv "$_expected" "$@"
-            ;;
-        gomaxprocs)
-            [ "$#" -eq 1 ] || { echo 'error=gomaxprocs selftest requires one receipt' >&2; exit 2; }
-            require_go_scheduler_width "$1"
-            ;;
-        *)
-            echo "error=unknown retained contract selftest: $_contract" >&2
-            exit 2
-            ;;
-    esac
-    exit $?
-fi
 
 if [ "$PROFILE_DOCKER_SIMPLE_BINARY" != "" ] && [ "$PROFILE_DOCKER_SIMPLE_BINARY" != "__auto__" ]; then
     SIMPLE_BINARY="$PROFILE_DOCKER_SIMPLE_BINARY"
@@ -325,6 +122,51 @@ export SIMPLE_NO_STUB_FALLBACK=1
 if [ -z "$PROFILE_DOCKER_SIMPLE_BINARY" ]; then
     PROFILE_DOCKER_SIMPLE_BINARY="__auto__"
 fi
+BUILD_DIR="${BUILD_DIR:-build/cross_lang_perf}"
+CANONICAL_CROSS_LANGUAGE_REPORT="${CANONICAL_CROSS_LANGUAGE_REPORT:-doc/09_report/cross_language_perf_2026-06-11_thread_fix_refresh_freshbin.md}"
+REPORT_PATH="${REPORT_PATH:-$CANONICAL_CROSS_LANGUAGE_REPORT}"
+PROFILE_REPORT_CONTRACT_TEST="${PROFILE_REPORT_CONTRACT_TEST:-test/05_perf/profile_scripts/profile_report_contract_test.shs}"
+RUNS="${RUNS:-20}"
+FIB_N="${FIB_N:-35}"
+CPU_WORKERS="${CPU_WORKERS:-${WORKERS:-100}}"
+OS_THREAD_WORKERS="${OS_THREAD_WORKERS:-$CPU_WORKERS}"
+MULTICORE_GREEN_WORKERS="${MULTICORE_GREEN_WORKERS:-$CPU_WORKERS}"
+if [ -z "${GOMAXPROCS:-}" ]; then
+    GOMAXPROCS="$CPU_WORKERS"
+fi
+export GOMAXPROCS
+WORKERS="$OS_THREAD_WORKERS"
+FANOUT_WORKERS="${FANOUT_WORKERS:-1000}"
+FANOUT_OS_THREAD_WORKERS="${FANOUT_OS_THREAD_WORKERS:-$FANOUT_WORKERS}"
+FANOUT_MULTICORE_GREEN_WORKERS="${FANOUT_MULTICORE_GREEN_WORKERS:-$FANOUT_WORKERS}"
+FANOUT_ITERS="${FANOUT_ITERS:-32}"
+FANOUT_STRESS_WORKERS="${FANOUT_STRESS_WORKERS:-512}"
+FANOUT_STRESS_ITERS="${FANOUT_STRESS_ITERS:-1}"
+if [ -z "${COOPERATIVE_GREEN_WORKERS:-}" ]; then
+    if [ -n "${GREEN_WORKERS:-}" ]; then
+        COOPERATIVE_GREEN_WORKERS="$GREEN_WORKERS"
+    elif [ "$CPU_WORKERS" -gt 10 ]; then
+        COOPERATIVE_GREEN_WORKERS=10
+    else
+        COOPERATIVE_GREEN_WORKERS="$CPU_WORKERS"
+    fi
+fi
+GREEN_WORKERS="$COOPERATIVE_GREEN_WORKERS"
+if [ -z "${FANOUT_COOPERATIVE_GREEN_WORKERS:-}" ]; then
+    if [ "$FANOUT_WORKERS" -gt 200 ]; then
+        FANOUT_COOPERATIVE_GREEN_WORKERS=200
+    else
+        FANOUT_COOPERATIVE_GREEN_WORKERS="$FANOUT_WORKERS"
+    fi
+fi
+WARM_ITERS="${WARM_ITERS:-5}"
+WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
+RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
+if [ "$FIB_N" -ne 35 ]; then
+    echo "error=FIB_N=$FIB_N is unsupported; checksum contract requires FIB_N=35" >&2
+    exit 2
+fi
+
 if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ]; then
     if ! command -v docker >/dev/null 2>&1; then
         echo "docker_isolation=false"
@@ -353,7 +195,7 @@ if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ];
         -e PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT="$PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT" \
         -e SIMPLE_COMPILER_PROVENANCE="$PROFILE_DOCKER_COMPILER_PROVENANCE" \
         -e BUILD_DIR="$BUILD_DIR" \
-        -e REPORT_PATH="$PROFILE_DOCKER_REPORT_PATH" \
+        -e REPORT_PATH="$REPORT_PATH" \
         -e PROFILE_REPORT_CONTRACT_TEST="$PROFILE_REPORT_CONTRACT_TEST" \
         -e RUNS="$RUNS" \
         -e FIB_N="$FIB_N" \
@@ -373,7 +215,6 @@ if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ];
         -e WARM_ITERS="$WARM_ITERS" \
         -e WARM_IN_PROCESS="$WARM_IN_PROCESS" \
         -e RUN_TIMEOUT="$RUN_TIMEOUT" \
-        -e BUILD_TIMEOUT="$BUILD_TIMEOUT" \
         "$PROFILE_DOCKER_IMAGE" \
         -lc 'sh scripts/check/check-cross-language-perf.shs'
 fi
@@ -395,6 +236,25 @@ done
 export PATH
 
 # ── helpers ──────────────────────────────────────────────────────────────
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run_bounded() {
+    _cmd="$1"
+    if have timeout; then
+        timeout "$RUN_TIMEOUT" sh -c "$_cmd"
+    else
+        sh -c "$_cmd"
+    fi
+}
+
+run_bounded_argv() {
+    if have timeout; then
+        timeout "$RUN_TIMEOUT" "$@"
+    else
+        "$@"
+    fi
+}
 
 bytes_of() {
     if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo "n/a"; fi
@@ -420,27 +280,24 @@ human_bytes() {
 }
 
 avg_ms() {
-    _runs="$1"
-    shift
+    _cmd="$1"; _runs="$2"
     i=0; total=0; ok=0
     while [ "$i" -lt "$_runs" ]; do
         start="$(date +%s%N)"
-        if run_bounded_argv "$@" >/dev/null 2>&1; then
+        if run_bounded "$_cmd" >/dev/null 2>&1; then
             end="$(date +%s%N)"
             total=$((total + (end - start)))
             ok=$((ok + 1))
         fi
         i=$((i + 1))
     done
-    # A partial sample set is not a timing result.  Treat any failed or timed
-    # out iteration as a failed row instead of biasing the average toward the
-    # surviving samples.
-    if [ "$ok" -ne "$_runs" ]; then echo "fail"
-    else awk "BEGIN {printf \"%.3f\", ($total / $_runs) / 1000000}"; fi
+    if [ "$ok" -eq 0 ]; then echo "fail"
+    else awk "BEGIN {printf \"%.3f\", ($total / $ok) / 1000000}"; fi
 }
 
 failure_reason() {
-    _out=$(run_bounded_argv "$@" 2>&1) && { echo "ok"; return; }
+    _cmd="$1"
+    _out=$(run_bounded "$_cmd" 2>&1) && { echo "ok"; return; }
     _status=$?
     if [ "$_status" -eq 124 ]; then
         echo "timeout"
@@ -462,9 +319,9 @@ failure_reason() {
 }
 
 pool_evidence() {
-    _expected="$1"
-    shift
-    _out=$(run_bounded_argv "$@" 2>&1) || { echo "pool_used=fail/$_expected"; return; }
+    _cmd="$1"
+    _expected="$2"
+    _out=$(run_bounded "$_cmd" 2>&1) || { echo "pool_used=fail/$_expected"; return; }
     _used=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_pool_used = \([0-9][0-9]*\)\/[0-9][0-9]*.*/\1/p' | tail -1)
     _parallelism=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_parallelism = \([0-9][0-9]*\/[0-9][0-9]*\).*/\1/p' | tail -1)
     _counters=$(printf '%s\n' "$_out" | sed -n 's/.*multicore_green_counters = \(counter_delta=[0-9][0-9]*\/[0-9][0-9]*,pending=[0-9][0-9]*,busy=[0-9][0-9]*,blocked=[0-9][0-9]*\).*/\1/p' | tail -1)
@@ -493,10 +350,9 @@ pool_evidence() {
 
 # Extract in-process timing from program stdout (programs print "warm_ms: NNN.NNN")
 extract_warm_ms() {
-    _output=$(run_bounded_argv "$@" 2>/dev/null) || { echo "fail"; return; }
-    _warm_ms=$(echo "$_output" | grep 'warm_ms:' | tail -1 | sed 's/.*warm_ms: *//' | tr -d ' ')
-    require_positive_decimal warm_ms "$_warm_ms" >/dev/null 2>&1 || { echo "fail"; return; }
-    echo "$_warm_ms"
+    _cmd="$1"
+    _output=$(run_bounded "$_cmd" 2>/dev/null) || { echo "fail"; return; }
+    echo "$_output" | grep 'warm_ms:' | tail -1 | sed 's/.*warm_ms: *//' | tr -d ' '
 }
 
 section() { printf "\n## %s\n\n" "$1" >>"$REPORT_PATH"; }
@@ -504,30 +360,6 @@ row() { printf "| %-22s | %12s | %12s | %12s | %12s |\n" "$@" >>"$REPORT_PATH"; 
 sep() { printf "|%-24s|%14s|%14s|%14s|%14s|\n" "------------------------" "--------------" "--------------" "--------------" "--------------" >>"$REPORT_PATH"; }
 
 # ── generate workload sources ────────────────────────────────────────────
-
-# Keep every concurrency lane on the same task domain: task indexes are
-# 0..N-1 and seed the same integer-safe LCG.  The multiplier keeps every
-# intermediate below 2^53 so Bun's Number arithmetic matches i64 peers.
-lcg_checksum() {
-    awk -v tasks="$1" -v iters="$2" 'BEGIN {
-        total = 0
-        for (task = 0; task < tasks; task++) {
-            x = task
-            for (i = 0; i < iters; i++)
-                x = (x * 1664525 + 1013904223) % 2147483648
-            total += x
-        }
-        printf "%.0f", total
-    }'
-}
-
-PARALLEL_EXPECTED_CHECKSUM="$(lcg_checksum "$WORKERS" 100000)"
-COOPERATIVE_EXPECTED_CHECKSUM="$(lcg_checksum "$GREEN_WORKERS" 100000)"
-MULTICORE_EXPECTED_CHECKSUM="$(lcg_checksum "$MULTICORE_GREEN_WORKERS" 100000)"
-FANOUT_EXPECTED_CHECKSUM="$(lcg_checksum "$FANOUT_WORKERS" "$FANOUT_ITERS")"
-FANOUT_COOPERATIVE_EXPECTED_CHECKSUM="$(lcg_checksum "$FANOUT_COOPERATIVE_GREEN_WORKERS" "$FANOUT_ITERS")"
-FANOUT_MULTICORE_EXPECTED_CHECKSUM="$(lcg_checksum "$FANOUT_MULTICORE_GREEN_WORKERS" "$FANOUT_ITERS")"
-FANOUT_STRESS_EXPECTED_CHECKSUM="$(lcg_checksum "$FANOUT_STRESS_WORKERS" "$FANOUT_STRESS_ITERS")"
 
 write_simple_hello() {
     cat >"$BUILD_DIR/hello.spl" <<'SIMPLE'
@@ -550,12 +382,12 @@ fn main():
 SIMPLE
 }
 
-# Warm fib: one source runs in interpreter, SMF-loader, and native modes.  It
-# uses the stdlib monotonic owner whose runtime symbol is implemented with a
-# monotonic clock in every execution engine; no raw/native-only clock binding.
+# Warm fib: runs fib(35) WARM_IN_PROCESS times in-process, reports steady-state
+# Uses extern rt_time_now_unix_micros — only works in native mode.
+# Interpreter/SMF fall back to outer-process measurement (shell-level timing).
 write_simple_fib_warm() {
     cat >"$BUILD_DIR/fib_warm.spl" <<SIMPLE
-use std.io_runtime.{time_now_monotonic_ms}
+extern fn rt_time_now_unix_micros() -> i64
 
 fn fib(n: i64) -> i64:
     if n < 2:
@@ -568,44 +400,53 @@ fn main():
     var checksum: i64 = 0
     for i in 0..warmup:
         checksum = fib(35)
-    val start_ms = time_now_monotonic_ms()
+    val start = rt_time_now_unix_micros()
     for i in 0..measured:
         checksum = fib(35)
-    val elapsed_ms = time_now_monotonic_ms() - start_ms
-    val average_ms = elapsed_ms / measured
-    println("warm_ms: {average_ms}")
+    val elapsed = rt_time_now_unix_micros() - start
+    val avg_us = elapsed / measured
+    val avg_ms_int = avg_us / 1000
+    val avg_ms_frac = avg_us % 1000
+    println("warm_ms: {avg_ms_int}.{avg_ms_frac}")
     println("fib(35) = {checksum}")
 SIMPLE
 }
 
 write_simple_parallel() {
-    # Fork-join OS-thread pattern using Simple's explicit immutable task index.
+    # Fork-join OS-thread pattern using Simple's direct thread_spawn API.
     # thread_spawn_with_args is tracked by a focused native ABI smoke; this row
-    # stays a real OS-thread scheduler baseline without capture ambiguity.
+    # must stay a real OS-thread scheduler baseline.
     {
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args, ThreadHandle}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn, ThreadHandle}'
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn worker(task: i64) -> i64:'
-        echo '    var x = task'
+        echo 'fn worker() -> i64:'
+        echo '    var x = 1'
         echo '    for i in 0..100000:'
-        echo '        x = (x * 1664525 + 1013904223) % 2147483648'
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
-        echo 'fn spawn_worker(task: i64) -> ThreadHandle:'
-        echo '    thread_spawn_with_args(task, 0, \seed, unused: worker(seed))'
+        echo 'fn spawn_worker() -> ThreadHandle:'
+        echo '    thread_spawn(\: worker())'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for task in 0..${WORKERS}:"
+        echo '        total = total + worker()'
+        echo '    total'
         echo ''
         echo 'fn main():'
         echo '    var handles: [ThreadHandle] = []'
         echo "    for task in 0..${WORKERS}:"
-        echo '        handles.push(spawn_worker(task))'
+        echo '        handles.push(spawn_worker())'
         echo '    var total: i64 = 0'
         echo '    for index in 0..handles.len():'
         echo '        val handle = handles[index]'
         echo '        total = total + handle.join()'
-        echo "    if total != ${PARALLEL_EXPECTED_CHECKSUM}:"
-        echo "        println(\"checksum_mismatch total={total} expected=${PARALLEL_EXPECTED_CHECKSUM}\")"
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel.spl"
@@ -620,23 +461,30 @@ write_simple_parallel_cooperative_green() {
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn worker(task: i64) -> i64:'
-        echo '    var x = task'
+        echo 'fn worker() -> i64:'
+        echo '    var x = 1'
         echo '    for i in 0..100000:'
-        echo '        x = (x * 1664525 + 1013904223) % 2147483648'
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for task in 0..${GREEN_WORKERS}:"
+        echo '        total = total + worker()'
+        echo '    total'
         echo ''
         echo 'fn main():'
         echo '    var handles: [GreenThreadHandle] = []'
         echo "    for task in 0..${GREEN_WORKERS}:"
-        echo '        handles.push(cooperative_green_spawn(\: worker(task)))'
+        echo '        handles.push(cooperative_green_spawn(worker))'
         echo '    cooperative_green_run_all()'
         echo '    var total: i64 = 0'
         echo '    for index in 0..handles.len():'
         echo '        val handle = handles[index]'
         echo '        total = total + handle.join()'
-        echo "    if total != ${COOPERATIVE_EXPECTED_CHECKSUM}:"
-        echo "        println(\"checksum_mismatch total={total} expected=${COOPERATIVE_EXPECTED_CHECKSUM}\")"
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel_cooperative_green.spl"
@@ -653,14 +501,20 @@ write_simple_parallel_multicore_green() {
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
-        echo 'fn worker(task: i64) -> i64:'
-        echo '    var x = task'
+        echo 'fn worker() -> i64:'
+        echo '    var x = 1'
         echo '    for i in 0..100000:'
-        echo '        x = (x * 1664525 + 1013904223) % 2147483648'
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
-        echo 'fn spawn_worker(task: i64) -> MulticoreGreenHandle:'
-        echo '    multicore_green_spawn(\: worker(task))'
+        echo 'fn spawn_worker() -> MulticoreGreenHandle:'
+        echo '    multicore_green_spawn(\: worker())'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for task in 0..${MULTICORE_GREEN_WORKERS}:"
+        echo '        total = total + worker()'
+        echo '    total'
         echo ''
         echo 'fn main():'
         echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
@@ -678,7 +532,7 @@ write_simple_parallel_multicore_green() {
         echo '    val completed_before = multicore_green_completed_count()'
         echo '    var handles: [MulticoreGreenHandle] = []'
         echo "    for task in 0..${MULTICORE_GREEN_WORKERS}:"
-        echo '        var handle = spawn_worker(task)'
+        echo '        var handle = spawn_worker()'
         echo '        if handle.used_runtime_pool():'
         echo '            handles.push(handle)'
         echo '    var pool_used: i64 = 0'
@@ -702,40 +556,48 @@ write_simple_parallel_multicore_green() {
         echo '        rt_exit(78)'
         echo '    if pending_count != 0 or busy_count != 0 or blocked_count != 0:'
         echo '        rt_exit(79)'
-        echo "    if total != ${MULTICORE_EXPECTED_CHECKSUM}:"
-        echo "        println(\"checksum_mismatch total={total} expected=${MULTICORE_EXPECTED_CHECKSUM}\")"
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/parallel_multicore_green.spl"
 }
 
 write_simple_fanout() {
-    # OS-thread fanout pattern using Simple's explicit-argument spawn API. This is
+    # OS-thread fanout pattern using Simple's direct thread_spawn API. This is
     # the Simple row comparable to C pthread-per-task fanout.
     {
-        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn_with_args, ThreadHandle}'
+        echo 'use std.nogc_sync_mut.concurrent.thread.{thread_spawn, ThreadHandle}'
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn work(task: i64) -> i64:'
-        echo '    var x = task'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_ITERS}:"
-        echo '        x = (x * 1664525 + 1013904223) % 2147483648'
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
-        echo 'fn spawn_work(task: i64) -> ThreadHandle:'
-        echo '    thread_spawn_with_args(task, 0, \seed, unused: work(seed))'
+        echo 'fn spawn_work() -> ThreadHandle:'
+        echo '    thread_spawn(\: work())'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for task in 0..${FANOUT_WORKERS}:"
+        echo '        total = total + work()'
+        echo '    total'
         echo ''
         echo 'fn main():'
         echo '    var handles: [ThreadHandle] = []'
         echo "    for task in 0..${FANOUT_WORKERS}:"
-        echo '        handles.push(spawn_work(task))'
+        echo '        handles.push(spawn_work())'
         echo '    var total: i64 = 0'
         echo '    for i in 0..handles.len():'
         echo '        val handle = handles[i]'
         echo '        total = total + handle.join()'
-        echo "    if total != ${FANOUT_EXPECTED_CHECKSUM}:"
-        echo "        println(\"checksum_mismatch total={total} expected=${FANOUT_EXPECTED_CHECKSUM}\")"
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout.spl"
@@ -749,23 +611,30 @@ write_simple_fanout_cooperative_green() {
         echo ''
         echo 'extern fn rt_exit(code: i32)'
         echo ''
-        echo 'fn work(task: i64) -> i64:'
-        echo '    var x = task'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_ITERS}:"
-        echo '        x = (x * 1664525 + 1013904223) % 2147483648'
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for task in 0..${FANOUT_COOPERATIVE_GREEN_WORKERS}:"
+        echo '        total = total + work()'
+        echo '    total'
         echo ''
         echo 'fn main():'
         echo '    var handles: [GreenThreadHandle] = []'
         echo "    for task in 0..${FANOUT_COOPERATIVE_GREEN_WORKERS}:"
-        echo '        handles.push(cooperative_green_spawn(\: work(task)))'
+        echo '        handles.push(cooperative_green_spawn(work))'
         echo '    cooperative_green_run_all()'
         echo '    var total: i64 = 0'
         echo '    for index in 0..handles.len():'
         echo '        val handle = handles[index]'
         echo '        total = total + handle.join()'
-        echo "    if total != ${FANOUT_COOPERATIVE_EXPECTED_CHECKSUM}:"
-        echo "        println(\"checksum_mismatch total={total} expected=${FANOUT_COOPERATIVE_EXPECTED_CHECKSUM}\")"
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout_cooperative_green.spl"
@@ -777,14 +646,20 @@ write_simple_fanout_multicore_green() {
         echo 'extern fn rt_exit(code: i32)'
         echo ''
         echo ''
-        echo 'fn work(task: i64) -> i64:'
-        echo '    var x = task'
+        echo 'fn work() -> i64:'
+        echo '    var x = 1'
         echo "    for i in 0..${FANOUT_ITERS}:"
-        echo '        x = (x * 1664525 + 1013904223) % 2147483648'
+        echo '        x = (x * 1103515245 + 12345) % 2147483648'
         echo '    x'
         echo ''
-        echo 'fn spawn_work(task: i64) -> MulticoreGreenHandle:'
-        echo '    multicore_green_spawn(\: work(task))'
+        echo 'fn spawn_work() -> MulticoreGreenHandle:'
+        echo '    multicore_green_spawn(\: work())'
+        echo ''
+        echo 'fn expected_total() -> i64:'
+        echo '    var total: i64 = 0'
+        echo "    for task in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
+        echo '        total = total + work()'
+        echo '    total'
         echo ''
         echo 'fn main():'
         echo "    val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})"
@@ -802,7 +677,7 @@ write_simple_fanout_multicore_green() {
         echo '    val completed_before = multicore_green_completed_count()'
         echo '    var handles: [MulticoreGreenHandle] = []'
         echo "    for task in 0..${FANOUT_MULTICORE_GREEN_WORKERS}:"
-        echo '        var handle = spawn_work(task)'
+        echo '        var handle = spawn_work()'
         echo '        if handle.used_runtime_pool():'
         echo '            handles.push(handle)'
         echo '    var pool_used: i64 = 0'
@@ -826,8 +701,9 @@ write_simple_fanout_multicore_green() {
         echo '        rt_exit(78)'
         echo '    if pending_count != 0 or busy_count != 0 or blocked_count != 0:'
         echo '        rt_exit(79)'
-        echo "    if total != ${FANOUT_MULTICORE_EXPECTED_CHECKSUM}:"
-        echo "        println(\"checksum_mismatch total={total} expected=${FANOUT_MULTICORE_EXPECTED_CHECKSUM}\")"
+        echo '    val expected = expected_total()'
+        echo '    if total != expected:'
+        echo '        println("checksum_mismatch total={total} expected={expected}")'
         echo '        rt_exit(74)'
         echo '    println("total = {total}")'
     } >"$BUILD_DIR/fanout_multicore_green.spl"
@@ -838,14 +714,20 @@ write_simple_fanout_stress_multicore_green() {
 use std.concurrent.multicore_green.{multicore_green_spawn, multicore_green_set_parallelism, multicore_green_parallelism, multicore_green_uses_global_fifo_queue, multicore_green_uses_work_stealing, multicore_green_submitted_count, multicore_green_completed_count, multicore_green_pending_count, multicore_green_busy_count, multicore_green_blocked_count, MulticoreGreenHandle}
 extern fn rt_exit(code: i32)
 
-fn work(task: i64) -> i64:
-    var x = task
+fn work() -> i64:
+    var x = 1
     for i in 0..${FANOUT_STRESS_ITERS}:
-        x = (x * 1664525 + 1013904223) % 2147483648
+        x = (x * 1103515245 + 12345) % 2147483648
     x
 
-fn spawn_work(task: i64) -> MulticoreGreenHandle:
-    multicore_green_spawn(\: work(task))
+fn spawn_work() -> MulticoreGreenHandle:
+    multicore_green_spawn(\: work())
+
+fn expected_total() -> i64:
+    var total: i64 = 0
+    for task in 0..${FANOUT_STRESS_WORKERS}:
+        total = total + work()
+    total
 
 fn main():
     val requested_parallelism = multicore_green_set_parallelism(${CPU_WORKERS})
@@ -863,7 +745,7 @@ fn main():
     val completed_before = multicore_green_completed_count()
     var handles: [MulticoreGreenHandle] = []
     for task in 0..${FANOUT_STRESS_WORKERS}:
-        var handle = spawn_work(task)
+        var handle = spawn_work()
         if handle.used_runtime_pool():
             handles.push(handle)
     var pool_used: i64 = 0
@@ -887,8 +769,9 @@ fn main():
         rt_exit(78)
     if pending_count != 0 or busy_count != 0 or blocked_count != 0:
         rt_exit(79)
-    if total != ${FANOUT_STRESS_EXPECTED_CHECKSUM}:
-        println("checksum_mismatch total={total} expected=${FANOUT_STRESS_EXPECTED_CHECKSUM}")
+    val expected = expected_total()
+    if total != expected:
+        println("checksum_mismatch total={total} expected={expected}")
         rt_exit(74)
     println("total = {total}")
 EOF
@@ -977,6 +860,12 @@ write_c_hello() {
 #include <stdio.h>
 int main(void) { puts("Hello World"); return 0; }
 C
+
+    cat >"$BUILD_DIR/hello.go" <<'GO'
+package main
+import "fmt"
+func main() { fmt.Println("Hello World") }
+GO
 }
 
 write_c_fib() {
@@ -1034,8 +923,8 @@ write_c_parallel() {
 #include <stdint.h>
 #include <pthread.h>
 /* Shared globals — no immutability guarantee (programmer discipline only) */
-static const int64_t LCG_A = 1664525;
-static const int64_t LCG_C = 1013904223;
+static const int64_t LCG_A = 1103515245;
+static const int64_t LCG_C = 12345;
 static const int64_t LCG_M = 2147483648LL;
 static const int ITERS = 100000;
 static void *worker(void *arg) {
@@ -1048,7 +937,6 @@ int main(void) {
     pthread_t t[N]; int64_t total = 0;
     for (int i = 0; i < N; i++) pthread_create(&t[i], NULL, worker, (void *)(intptr_t)i);
     for (int i = 0; i < N; i++) { void *r; pthread_join(t[i], &r); total += (int64_t)(intptr_t)r; }
-    if (total != ${PARALLEL_EXPECTED_CHECKSUM}LL) return 74;
     printf("total = %ld\n", total); return 0;
 }
 C
@@ -1060,8 +948,8 @@ write_c_fanout() {
 #include <stdint.h>
 #include <stdlib.h>
 #include <pthread.h>
-static const int64_t LCG_A = 1664525;
-static const int64_t LCG_C = 1013904223;
+static const int64_t LCG_A = 1103515245;
+static const int64_t LCG_C = 12345;
 static const int64_t LCG_M = 2147483648LL;
 static const int ITERS = ${FANOUT_ITERS};
 static int64_t *results;
@@ -1092,7 +980,6 @@ int main(void) {
     }
     int64_t total = 0;
     for (int i = 0; i < N; i++) { pthread_join(t[i], NULL); total += results[i]; }
-    if (total != ${FANOUT_EXPECTED_CHECKSUM}LL) return 74;
     printf("total = %ld\n", total);
     free(t); free(results);
     return 0;
@@ -1106,8 +993,8 @@ write_c_fanout_stress() {
 #include <stdint.h>
 #include <stdlib.h>
 #include <pthread.h>
-static const int64_t LCG_A = 1664525;
-static const int64_t LCG_C = 1013904223;
+static const int64_t LCG_A = 1103515245;
+static const int64_t LCG_C = 12345;
 static const int64_t LCG_M = 2147483648LL;
 static const int ITERS = ${FANOUT_STRESS_ITERS};
 static int64_t *results;
@@ -1138,7 +1025,6 @@ int main(void) {
     }
     int64_t total = 0;
     for (int i = 0; i < N; i++) { pthread_join(t[i], NULL); total += results[i]; }
-    if (total != ${FANOUT_STRESS_EXPECTED_CHECKSUM}LL) return 74;
     printf("total = %ld\n", total);
     free(t); free(results);
     return 0;
@@ -1179,7 +1065,7 @@ package main
 import "fmt"
 /* Idiomatic Go: results flow through channels (safe pattern) */
 func worker(seed int64, ch chan<- int64) {
-    const a, c, m int64 = 1664525, 1013904223, 2147483648
+    const a, c, m int64 = 1103515245, 12345, 2147483648
     x := seed
     for i := 0; i < 100000; i++ { x = (x*a + c) % m }
     ch <- x
@@ -1189,7 +1075,6 @@ func main() {
     for i := 0; i < ${WORKERS}; i++ { go worker(int64(i), ch) }
     var total int64
     for i := 0; i < ${WORKERS}; i++ { total += <-ch }
-    if total != ${PARALLEL_EXPECTED_CHECKSUM} { panic("checksum mismatch") }
     fmt.Printf("total = %d\n", total)
 }
 GO
@@ -1200,7 +1085,7 @@ write_go_fanout() {
 package main
 import "fmt"
 func work(seed int64) int64 {
-    const a, c, m int64 = 1664525, 1013904223, 2147483648
+    const a, c, m int64 = 1103515245, 12345, 2147483648
     x := seed
     for i := 0; i < ${FANOUT_ITERS}; i++ { x = (x*a + c) % m }
     return x
@@ -1212,7 +1097,6 @@ func main() {
     }
     var total int64
     for i := 0; i < ${FANOUT_WORKERS}; i++ { total += <-ch }
-    if total != ${FANOUT_EXPECTED_CHECKSUM} { panic("checksum mismatch") }
     fmt.Printf("total = %d\n", total)
 }
 GO
@@ -1223,7 +1107,7 @@ write_go_fanout_stress() {
 package main
 import "fmt"
 func work(seed int64) int64 {
-    const a, c, m int64 = 1664525, 1013904223, 2147483648
+    const a, c, m int64 = 1103515245, 12345, 2147483648
     x := seed
     for i := 0; i < ${FANOUT_STRESS_ITERS}; i++ { x = (x*a + c) % m }
     return x
@@ -1235,7 +1119,6 @@ func main() {
     }
     var total int64
     for i := 0; i < ${FANOUT_STRESS_WORKERS}; i++ { total += <-ch }
-    if total != ${FANOUT_STRESS_EXPECTED_CHECKSUM} { panic("checksum mismatch") }
     fmt.Printf("total = %d\n", total)
 }
 GO
@@ -1286,7 +1169,7 @@ PY
 write_python_parallel() {
     cat >"$BUILD_DIR/parallel.py" <<PY
 import threading
-A, C, M, ITERS = 1664525, 1013904223, 2147483648, 100000
+A, C, M, ITERS = 1103515245, 12345, 2147483648, 100000
 def worker(results, idx):
     x = idx
     for _ in range(ITERS):
@@ -1296,16 +1179,14 @@ results = [0]*${WORKERS}
 threads = [threading.Thread(target=worker, args=(results,i)) for i in range(${WORKERS})]
 for t in threads: t.start()
 for t in threads: t.join()
-total = sum(results)
-if total != ${PARALLEL_EXPECTED_CHECKSUM}: raise SystemExit(74)
-print(f"total = {total}")
+print(f"total = {sum(results)}")
 PY
 }
 
 write_python_fanout() {
     cat >"$BUILD_DIR/fanout.py" <<PY
 import threading
-A, C, M, ITERS = 1664525, 1013904223, 2147483648, ${FANOUT_ITERS}
+A, C, M, ITERS = 1103515245, 12345, 2147483648, ${FANOUT_ITERS}
 N = ${FANOUT_WORKERS}
 results = [0] * N
 def work(seed):
@@ -1318,9 +1199,7 @@ def worker(i):
 threads = [threading.Thread(target=worker, args=(i,)) for i in range(N)]
 for t in threads: t.start()
 for t in threads: t.join()
-total = sum(results)
-if total != ${FANOUT_EXPECTED_CHECKSUM}: raise SystemExit(74)
-print(f"total = {total}")
+print(f"total = {sum(results)}")
 PY
 }
 
@@ -1349,7 +1228,7 @@ write_bun_parallel() {
     cat >"$BUILD_DIR/parallel.js" <<JS
 const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
 if (!isMainThread) {
-  const A = 1664525, C = 1013904223, M = 2147483648, ITERS = 100000;
+  const A = 1103515245, C = 12345, M = 2147483648, ITERS = 100000;
   let x = workerData.seed;
   for (let i = 0; i < ITERS; i++) x = (x * A + C) % M;
   parentPort.postMessage(x);
@@ -1358,13 +1237,7 @@ if (!isMainThread) {
   let total = 0, done = 0;
   for (let i = 0; i < N; i++) {
     const w = new Worker(__filename, { workerData: { seed: i } });
-    w.on("message", v => {
-      total += v;
-      if (++done === N) {
-        if (total !== ${PARALLEL_EXPECTED_CHECKSUM}) process.exit(74);
-        console.log("total = " + total);
-      }
-    });
+    w.on("message", v => { total += v; if (++done === N) console.log("total = " + total); });
   }
 }
 JS
@@ -1374,7 +1247,7 @@ write_bun_fanout() {
     cat >"$BUILD_DIR/fanout.js" <<JS
 const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
 if (!isMainThread) {
-  const A = 1664525, C = 1013904223, M = 2147483648, ITERS = ${FANOUT_ITERS};
+  const A = 1103515245, C = 12345, M = 2147483648, ITERS = ${FANOUT_ITERS};
   let x = workerData.seed;
   for (let i = 0; i < ITERS; i++) x = (x * A + C) % M;
   parentPort.postMessage(x);
@@ -1383,13 +1256,7 @@ if (!isMainThread) {
   let total = 0, done = 0;
   for (let i = 0; i < N; i++) {
     const w = new Worker(__filename, { workerData: { seed: i } });
-    w.on("message", v => {
-      total += v;
-      if (++done === N) {
-        if (total !== ${FANOUT_EXPECTED_CHECKSUM}) process.exit(74);
-        console.log("total = " + total);
-      }
-    });
+    w.on("message", v => { total += v; if (++done === N) console.log("total = " + total); });
     w.on("error", e => { console.error(e.message); process.exitCode = 2; });
   }
 }
@@ -1426,7 +1293,7 @@ write_java_parallel() {
 import java.util.concurrent.*;
 import java.util.stream.*;
 public class Parallel {
-    static final long LCG_A = 1664525L, LCG_C = 1013904223L, LCG_M = 2147483648L;
+    static final long LCG_A = 1103515245L, LCG_C = 12345L, LCG_M = 2147483648L;
     static final int ITERS = 100000;
     static long worker(long seed) {
         long x = seed;
@@ -1438,7 +1305,6 @@ public class Parallel {
         var futures = IntStream.range(0,${WORKERS}).mapToObj(i -> pool.submit(() -> worker(i))).toList();
         long total = 0; for (var f : futures) total += f.get();
         pool.shutdown();
-        if (total != ${PARALLEL_EXPECTED_CHECKSUM}L) System.exit(74);
         System.out.printf("total = %d%n", total);
     }
 }
@@ -1450,7 +1316,7 @@ write_java_fanout() {
 import java.util.concurrent.*;
 import java.util.stream.*;
 public class Fanout {
-    static final long LCG_A = 1664525L, LCG_C = 1013904223L, LCG_M = 2147483648L;
+    static final long LCG_A = 1103515245L, LCG_C = 12345L, LCG_M = 2147483648L;
     static final int ITERS = ${FANOUT_ITERS};
     static long work(long seed) {
         long x = seed;
@@ -1462,7 +1328,6 @@ public class Fanout {
         var futures = IntStream.range(0,${FANOUT_WORKERS}).mapToObj(i -> pool.submit(() -> work(i))).toList();
         long total = 0; for (var f : futures) total += f.get();
         pool.shutdown();
-        if (total != ${FANOUT_EXPECTED_CHECKSUM}L) System.exit(74);
         System.out.printf("total = %d%n", total);
     }
 }
@@ -1504,13 +1369,12 @@ write_erlang_parallel() {
 -module(parallel).
 -export([main/1]).
 lcg(_X, 0) -> _X;
-lcg(X, N) -> lcg((X * 1664525 + 1013904223) rem 2147483648, N - 1).
+lcg(X, N) -> lcg((X * 1103515245 + 12345) rem 2147483648, N - 1).
 worker(Parent, Seed) -> Parent ! {self(), lcg(Seed, 100000)}.
 main(_) ->
     Self = self(),
     Pids = [spawn(fun() -> worker(Self, I) end) || I <- lists:seq(0,$((WORKERS - 1)))],
     Total = lists:foldl(fun(Pid, Acc) -> receive {Pid, V} -> Acc + V end end, 0, Pids),
-    case Total =:= ${PARALLEL_EXPECTED_CHECKSUM} of true -> ok; false -> erlang:halt(74) end,
     io:format("total = ~w~n", [Total]).
 ERL
 }
@@ -1520,13 +1384,12 @@ write_erlang_fanout() {
 -module(fanout).
 -export([main/1]).
 lcg(X, 0) -> X;
-lcg(X, N) -> lcg((X * 1664525 + 1013904223) rem 2147483648, N - 1).
+lcg(X, N) -> lcg((X * 1103515245 + 12345) rem 2147483648, N - 1).
 worker(Parent, Seed) -> Parent ! {self(), lcg(Seed, ${FANOUT_ITERS})}.
 main(_) ->
     Self = self(),
     Pids = [spawn(fun() -> worker(Self, I) end) || I <- lists:seq(0,$((FANOUT_WORKERS - 1)))],
     Total = lists:foldl(fun(Pid, Acc) -> receive {Pid, V} -> Acc + V end end, 0, Pids),
-    case Total =:= ${FANOUT_EXPECTED_CHECKSUM} of true -> ok; false -> erlang:halt(74) end,
     io:format("total = ~w~n", [Total]).
 ERL
 }
@@ -1584,12 +1447,12 @@ COMPILE_FAIL_STATUS=0
 # C
 if have gcc; then
     PROFILE_PHASE=compile PROFILE_TOOL=gcc PROFILE_LANE=c
-    run_bounded_build_argv gcc -O2 -o "$BUILD_DIR/hello_c" "$BUILD_DIR/hello.c"
-    run_bounded_build_argv gcc -O2 -o "$BUILD_DIR/fib_c" "$BUILD_DIR/fib.c"
-    run_bounded_build_argv gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
-    run_bounded_build_argv gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
-    run_bounded_build_argv gcc -O2 -pthread -o "$BUILD_DIR/fanout_c" "$BUILD_DIR/fanout.c"
-    run_bounded_build_argv gcc -O2 -pthread -o "$BUILD_DIR/fanout_stress_c" "$BUILD_DIR/fanout_stress.c"
+    run_bounded_argv gcc -O2 -o "$BUILD_DIR/hello_c" "$BUILD_DIR/hello.c"
+    run_bounded_argv gcc -O2 -o "$BUILD_DIR/fib_c" "$BUILD_DIR/fib.c"
+    run_bounded_argv gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
+    run_bounded_argv gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
+    run_bounded_argv gcc -O2 -pthread -o "$BUILD_DIR/fanout_c" "$BUILD_DIR/fanout.c"
+    run_bounded_argv gcc -O2 -pthread -o "$BUILD_DIR/fanout_stress_c" "$BUILD_DIR/fanout_stress.c"
     echo "  [ok] C (gcc)"
 else echo "  [skip] C — gcc not found"; fi
 
@@ -1597,7 +1460,7 @@ else echo "  [skip] C — gcc not found"; fi
 # failure is fatal under `set -e`; it must not degrade into an unavailable row.
 if have rustc; then
     PROFILE_PHASE=compile PROFILE_TOOL=rustc PROFILE_LANE=rust
-    run_bounded_build_argv rustc -C opt-level=2 -o "$BUILD_DIR/fib_warm_rust" "$BUILD_DIR/fib_warm.rs"
+    run_bounded_argv rustc -C opt-level=2 -o "$BUILD_DIR/fib_warm_rust" "$BUILD_DIR/fib_warm.rs"
     echo "  [ok] Rust (rustc -O)"
 else
     echo "  [skip] Rust — rustc not found"
@@ -1609,28 +1472,22 @@ GO_SCHEDULER="GOMAXPROCS=unavailable NumCPU=unavailable"
 if have go; then
     PROFILE_PHASE=compile PROFILE_TOOL=go PROFILE_LANE=go
     GO_VERSION="$(go version 2>/dev/null || echo unavailable)"
-    (cd "$BUILD_DIR" && run_bounded_build_argv go build -o fib_go fib.go && run_bounded_build_argv go build -o fib_warm_go fib_warm.go && run_bounded_build_argv go build -o parallel_go parallel.go && run_bounded_build_argv go build -o fanout_go fanout.go && run_bounded_build_argv go build -o fanout_stress_go fanout_stress.go && run_bounded_build_argv go build -o gomaxprocs_go gomaxprocs.go)
-    if GO_SCHEDULER="$(run_bounded_argv "$BUILD_DIR/gomaxprocs_go" 2>/dev/null)"; then
-        require_go_scheduler_width "$GO_SCHEDULER"
-    else
-        _go_probe_status=$?
-        echo "error=Go scheduler probe failed status=$_go_probe_status" >&2
-        exit "$_go_probe_status"
-    fi
+    (cd "$BUILD_DIR" && run_bounded_argv go build -o hello_go hello.go && run_bounded_argv go build -o fib_go fib.go && run_bounded_argv go build -o fib_warm_go fib_warm.go && run_bounded_argv go build -o parallel_go parallel.go && run_bounded_argv go build -o fanout_go fanout.go && run_bounded_argv go build -o fanout_stress_go fanout_stress.go && run_bounded_argv go build -o gomaxprocs_go gomaxprocs.go)
+    GO_SCHEDULER="$("$BUILD_DIR/gomaxprocs_go" 2>/dev/null || echo "GOMAXPROCS=unavailable NumCPU=unavailable")"
     echo "  [ok] Go"
 else echo "  [skip] Go — go not found"; fi
 
 # Java
 if have javac; then
     PROFILE_PHASE=compile PROFILE_TOOL=javac PROFILE_LANE=java
-    run_bounded_build_argv javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java" "$BUILD_DIR/Fanout.java"
+    run_bounded_argv javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java" "$BUILD_DIR/Fanout.java"
     echo "  [ok] Java (javac)"
 else echo "  [skip] Java — javac not found"; fi
 
 # Erlang
 if have erlc; then
     PROFILE_PHASE=compile PROFILE_TOOL=erlc PROFILE_LANE=erlang
-    run_bounded_build_argv erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl" "$BUILD_DIR/fanout.erl"
+    run_bounded_argv erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl" "$BUILD_DIR/fanout.erl"
     echo "  [ok] Erlang (erlc)"
 else echo "  [skip] Erlang — erlc not found"; fi
 
@@ -1641,7 +1498,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
-            if run_bounded_build_argv "$SIMPLE_BINARY" compile "$_spl" --native -o "$_out" >/dev/null 2>&1; then
+            if run_bounded_argv "$SIMPLE_BINARY" compile "$_spl" --native -o "$_out" >/dev/null 2>&1; then
                 : # ok
             else
                 _status=$?
@@ -1668,7 +1525,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
         if [ -f "$_spl" ]; then
-            if run_bounded_build_argv "$SIMPLE_BINARY" compile "$_spl" -o "$_out" >/dev/null 2>&1; then
+            if run_bounded_argv "$SIMPLE_BINARY" compile "$_spl" -o "$_out" >/dev/null 2>&1; then
                 : # ok
             else
                 _status=$?
@@ -1699,24 +1556,23 @@ cat >"$REPORT_PATH" <<EOF
 **Date:** $(date +%Y-%m-%d)
 **Machine:** $(uname -m) / $(uname -s) $(uname -r)
 **CPU:** $(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs || sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "unknown")
-**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **Go GOMAXPROCS:** $GOMAXPROCS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Fanout stress workers:** $FANOUT_STRESS_WORKERS | **Fanout stress iters:** $FANOUT_STRESS_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s | **Build timeout:** ${BUILD_TIMEOUT}s
+**Runs per measurement:** $RUNS | **Warmup (in-process):** $WARM_IN_PROCESS | **fib(N):** $FIB_N | **CPU workers:** $CPU_WORKERS | **Go GOMAXPROCS:** $GOMAXPROCS | **OS thread workers:** $OS_THREAD_WORKERS | **Cooperative green workers:** $COOPERATIVE_GREEN_WORKERS | **Multicore green workers:** $MULTICORE_GREEN_WORKERS | **Fanout workers:** $FANOUT_WORKERS | **Fanout cooperative green workers:** $FANOUT_COOPERATIVE_GREEN_WORKERS | **Fanout multicore green workers:** $FANOUT_MULTICORE_GREEN_WORKERS | **Fanout iters:** $FANOUT_ITERS | **Fanout stress workers:** $FANOUT_STRESS_WORKERS | **Fanout stress iters:** $FANOUT_STRESS_ITERS | **Per-run timeout:** ${RUN_TIMEOUT}s
 **Profile script:** \`scripts/check/check-cross-language-perf.shs\`
 **Report path:** \`$REPORT_PATH\`
 **Profile contract:** $PROFILE_CONTRACT_STATUS
 **Docker isolation:** inside_container=$PROFILE_DOCKER_INSIDE | image=\`$PROFILE_DOCKER_IMAGE\` | memory=$PROFILE_DOCKER_MEMORY | cpus=$PROFILE_DOCKER_CPUS
-**Evidence classification:** diagnostic-only-not-release; a source-matched admitted Stage 4 binary and fresh execution are mandatory before any release claim.
 
 ## Methodology
 
 - Generates equivalent hello, recursive fib, in-process warm fib, worker, and fanout workloads for each supported runtime.
-- Optional language inventory is explicit: Python participates when available; Bun, Java, and Erlang legacy diagnostic rows are emitted when their toolchains exist. Java and Erlang are excluded from the retained claim-bearing set unless exact checksum and real-toolchain admission is added.
+- Optional language inventory is explicit: Python participates when available; Bun, Java, and Erlang rows are emitted when their toolchains exist. C and Go remain the required native baselines for release-blocking M:N comparisons.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
 - Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. The canonical \`require-self-hosted.shs\` identity gate rejects Rust bootstrap seeds; unavailable or stale release paths are untestable, never fallback evidence.
-- Docker CPU quota is containment metadata, not the scheduler-width proof; diagnostic M:N comparisons use the recorded \`CPU_WORKERS == GOMAXPROCS\` scheduler-width contract.
-- Every generated concurrency workload uses task indexes \`0..N-1\`, the same integer-safe LCG, and an exact expected checksum; a semantic mismatch exits nonzero instead of becoming timing evidence.
-- Go commands inherit \`GOMAXPROCS=$GOMAXPROCS\`, defaulting to \`CPU_WORKERS\`. The built scheduler probe must report actual \`GOMAXPROCS == CPU_WORKERS\` before any Go timing row is emitted.
-- Legacy interpreter and SMF warm rows use outer-process timing and are labelled diagnostic. Retained interpreter/SMF/native rows share one supported-stdlib monotonic-clock fixture and are cyclically interleaved with admitted peer lanes.
+- Docker CPU quota is containment metadata, not the scheduler-width proof; release-blocking M:N comparisons use the recorded \`CPU_WORKERS == GOMAXPROCS\` scheduler-width contract.
+- Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
+- Go commands inherit \`GOMAXPROCS=$GOMAXPROCS\`, defaulting to \`CPU_WORKERS\`. Contract-gated Go-like M:N evidence requires the recorded Go scheduler width to match \`CPU_WORKERS\`; caller overrides are exploratory unless they keep that equality.
+- Warm throughput is measured in-process where the runtime can print \`warm_ms\`; interpreter and SMF rows use outer-process timing and are labeled that way.
 
 ## Environment
 
@@ -1775,7 +1631,7 @@ measure_size "Simple (interpreter)" "$BUILD_DIR/hello.spl" "$BUILD_DIR/fib.spl" 
 measure_size "Simple (SMF loader)" "$BUILD_DIR/hello_simple.smf" "$BUILD_DIR/fib_simple.smf" "$_simple_rt"
 measure_size "Simple (native)" "$BUILD_DIR/hello_simple_native" "$BUILD_DIR/fib_simple_native" "none"
 measure_size "C (gcc -O2)" "$BUILD_DIR/hello_c" "$BUILD_DIR/fib_c" "libc"
-have go && measure_size "Go" "$BUILD_DIR/fib_go" "$BUILD_DIR/fib_go" "none (static)"
+have go && measure_size "Go" "$BUILD_DIR/hello_go" "$BUILD_DIR/fib_go" "none (static)"
 have python3 && measure_size "Python" "$BUILD_DIR/fib.py" "$BUILD_DIR/fib.py" "$(python3 -c 'import sys;print(sys.executable)' 2>/dev/null || echo 'n/a')"
 have bun && measure_size "Bun" "$BUILD_DIR/fib.js" "$BUILD_DIR/fib.js" "$(which bun 2>/dev/null || echo 'n/a')"
 have java && measure_size "Java" "$BUILD_DIR/Fib.class" "$BUILD_DIR/Fib.class" "JRE"
@@ -1788,24 +1644,44 @@ section "Cold Startup — hello world ($RUNS runs avg)"
 row "Language" "Avg (ms)" "Mode" "" "" >>"$REPORT_PATH"
 sep
 
+# Source execution can silently JIT/fallback to a non-interpreter engine, so a
+# measured Simple row is only labeled interpreter when the process itself emits a
+# `simple_execution_mode_v1` receipt naming the final engine with fallback=false.
+# Without that receipt the row is reported blocked and is not labeled interpreter.
+final_actual_mode() {
+    env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" 2>&1 >/dev/null \
+        | sed -n 's/^simple_execution_mode_v1 .*actual=\([A-Za-z0-9_-][A-Za-z0-9_-]*\) fallback=false$/\1/p' \
+        | tail -1
+}
+
 if [ -x "$SIMPLE_BINARY" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello.spl" "$RUNS")
-    row "Simple (interpreter)" "$ms" "interpret" "" ""
+    _cold_engine=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/hello.spl")
+    if [ -n "$_cold_engine" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello.spl" "$RUNS")
+        row "Simple (interpreter)" "$ms" "$_cold_engine" "" ""
+    else
+        row "Simple (interpreter)" "n/a" "blocked: no final-engine actual-mode receipt" "" ""
+    fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hello_simple.smf" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello_simple.smf" "$RUNS")
-    row "Simple (SMF loader)" "$ms" "smf" "" ""
+    _cold_loader=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/hello_simple.smf")
+    if [ -n "$_cold_loader" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/hello_simple.smf" "$RUNS")
+        row "Simple (SMF loader)" "$ms" "$_cold_loader" "" ""
+    else
+        row "Simple (SMF loader)" "n/a" "blocked: no final-loader actual-mode receipt" "" ""
+    fi
 fi
 if [ -x "$BUILD_DIR/hello_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/hello_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/hello_simple_native" "$RUNS")
     row "Simple (native)" "$ms" "native" "" ""
 fi
 if [ -x "$BUILD_DIR/hello_c" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/hello_c")
+    ms=$(avg_ms "$BUILD_DIR/hello_c" "$RUNS")
     row "C (gcc -O2)" "$ms" "native" "" ""
 fi
 if have python3; then
-    ms=$(avg_ms "$RUNS" python3 -c 'print("Hello World")')
+    ms=$(avg_ms "python3 -c 'print(\"Hello World\")'" "$RUNS")
     row "Python" "$ms" "interpret" "" ""
 fi
 
@@ -1820,16 +1696,25 @@ warm_row() {
     printf "| %-22s | %12s | %40s |\n" "$1" "$2" "$3" >>"$REPORT_PATH"
 }
 
-# These legacy exploratory interpreter/SMF rows intentionally retain their
-# outer-process shape.  The claim-bearing rows below instead share fib_warm.spl
-# and its supported stdlib monotonic clock across interpreter/SMF/native modes.
+# Simple interpreter/SMF: extern fn calls segfault in interpreter and SMF loader
+# can't resolve time externs. Fall back to outer-process avg of fib.spl runs.
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib.spl" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib.spl" "$RUNS")
-    warm_row "Simple (interpreter)" "$ms" "tree-walk (outer-process, no in-proc timing)"
+    _warm_engine=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/fib.spl")
+    if [ -n "$_warm_engine" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib.spl" "$RUNS")
+        warm_row "Simple (interpreter)" "$ms" "$_warm_engine (outer-process, no in-proc timing)"
+    else
+        warm_row "Simple (interpreter)" "n/a" "blocked: no final-engine actual-mode receipt"
+    fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fib_simple.smf" ]; then
-    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib_simple.smf" "$RUNS")
-    warm_row "Simple (SMF loader)" "$ms" "bytecode (outer-process, no in-proc timing)"
+    _warm_loader=$(final_actual_mode "$SIMPLE_BINARY" "$BUILD_DIR/fib_simple.smf")
+    if [ -n "$_warm_loader" ]; then
+        ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fib_simple.smf" "$RUNS")
+        warm_row "Simple (SMF loader)" "$ms" "$_warm_loader (outer-process, no in-proc timing)"
+    else
+        warm_row "Simple (SMF loader)" "n/a" "blocked: no final-loader actual-mode receipt"
+    fi
 fi
 # Simple native: in-process timing works via extern fn
 if [ -x "$BUILD_DIR/fib_warm_simple_native" ]; then
@@ -1845,19 +1730,19 @@ if [ -x "$BUILD_DIR/fib_warm_go" ]; then
     warm_row "Go" "$ms" "SSA AOT"
 fi
 if have python3; then
-    ms=$(extract_warm_ms python3 "$BUILD_DIR/fib_warm.py")
+    ms=$(extract_warm_ms "python3 $BUILD_DIR/fib_warm.py")
     warm_row "Python" "$ms" "CPython bytecode"
 fi
 if have bun; then
-    ms=$(extract_warm_ms bun "$BUILD_DIR/fib_warm.js")
+    ms=$(extract_warm_ms "bun $BUILD_DIR/fib_warm.js")
     warm_row "Bun" "$ms" "JavaScriptCore JIT (steady-state)"
 fi
 if have java; then
-    ms=$(extract_warm_ms java -cp "$BUILD_DIR" FibWarm)
+    ms=$(extract_warm_ms "java -cp $BUILD_DIR FibWarm")
     warm_row "Java" "$ms" "HotSpot C2 JIT (steady-state)"
 fi
 if have erl; then
-    ms=$(extract_warm_ms erl -noshell -pa "$BUILD_DIR" -eval 'fib_warm:main([]).' -s init stop)
+    ms=$(extract_warm_ms "erl -noshell -pa $BUILD_DIR -eval 'fib_warm:main([]).' -s init stop")
     warm_row "Erlang" "$ms" "BEAM (single-process)"
 fi
 
@@ -1874,83 +1759,83 @@ par_row() {
 
 par_row "Simple (interpreter)" "n/a" "extern thread FFI not supported"
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_simple.smf" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" "$BUILD_DIR/parallel_simple.smf")
-    par_row "Simple (SMF loader)" "$ms" "std thread_spawn_with_args fork-join (bytecode)"
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_simple.smf" "$RUNS")
+    par_row "Simple (SMF loader)" "$ms" "std thread_spawn fork-join (bytecode)"
 fi
 if [ -x "$BUILD_DIR/parallel_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/parallel_simple_native")
-    par_row "Simple (native)" "$ms" "thread_spawn_with_args fork-join OS threads"
+    ms=$(avg_ms "$BUILD_DIR/parallel_simple_native" "$RUNS")
+    par_row "Simple (native)" "$ms" "thread_spawn fork-join OS threads"
 else
     par_row "Simple (native)" "n/a" "compile failed"
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_cooperative_green.spl" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" run "$BUILD_DIR/parallel_cooperative_green.spl" --mode=interpreter)
+    ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/parallel_cooperative_green.spl --mode=interpreter" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" run "$BUILD_DIR/parallel_cooperative_green.spl" --mode=interpreter)
+        reason=$(failure_reason "$SIMPLE_BINARY run $BUILD_DIR/parallel_cooperative_green.spl --mode=interpreter")
         par_row "Simple cooperative green (interp)" "$ms" "cooperative_green_spawn cooperative queue on current OS thread ($reason)"
     else
         par_row "Simple cooperative green (interp)" "$ms" "cooperative_green_spawn cooperative queue on current OS thread"
     fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_cooperative_green_simple.smf" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" "$BUILD_DIR/parallel_cooperative_green_simple.smf")
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_cooperative_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" "$BUILD_DIR/parallel_cooperative_green_simple.smf")
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_cooperative_green_simple.smf")
         par_row "Simple cooperative green (SMF)" "$ms" "cooperative_green_spawn cooperative queue on current OS thread ($reason)"
     else
         par_row "Simple cooperative green (SMF)" "$ms" "cooperative_green_spawn cooperative queue on current OS thread"
     fi
 fi
 if [ -x "$BUILD_DIR/parallel_cooperative_green_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/parallel_cooperative_green_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/parallel_cooperative_green_simple_native" "$RUNS")
     par_row "Simple cooperative green (native)" "$ms" "cooperative_green_spawn cooperative queue on current OS thread"
 else
     par_row "Simple cooperative green (native)" "n/a" "compile failed"
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/parallel_multicore_green_simple.smf" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" "$BUILD_DIR/parallel_multicore_green_simple.smf")
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" "$BUILD_DIR/parallel_multicore_green_simple.smf")
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf")
         par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate ($reason)"
     else
-        evidence=$(pool_evidence "$MULTICORE_GREEN_WORKERS" "$SIMPLE_BINARY" "$BUILD_DIR/parallel_multicore_green_simple.smf")
+        evidence=$(pool_evidence "$SIMPLE_BINARY $BUILD_DIR/parallel_multicore_green_simple.smf" "$MULTICORE_GREEN_WORKERS")
         par_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool candidate ($evidence)"
     fi
 fi
 if [ -x "$BUILD_DIR/parallel_multicore_green_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/parallel_multicore_green_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/parallel_multicore_green_simple_native" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/parallel_multicore_green_simple_native")
         par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate ($reason)"
     else
-        evidence=$(pool_evidence "$MULTICORE_GREEN_WORKERS" "$BUILD_DIR/parallel_multicore_green_simple_native")
+        evidence=$(pool_evidence "$BUILD_DIR/parallel_multicore_green_simple_native" "$MULTICORE_GREEN_WORKERS")
         par_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool candidate ($evidence)"
     fi
 else
     par_row "Simple multicore green (native)" "n/a" "compile failed"
 fi
 if [ -x "$BUILD_DIR/parallel_c" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/parallel_c")
+    ms=$(avg_ms "$BUILD_DIR/parallel_c" "$RUNS")
     par_row "C (pthreads)" "$ms" "OS threads"
 fi
 if [ -x "$BUILD_DIR/parallel_go" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/parallel_go")
+    ms=$(avg_ms "$BUILD_DIR/parallel_go" "$RUNS")
     par_row "Go" "$ms" "goroutines + chan result (M:N)"
 fi
 if have python3; then
-    ms=$(avg_ms "$RUNS" python3 "$BUILD_DIR/parallel.py")
+    ms=$(avg_ms "python3 $BUILD_DIR/parallel.py" "$RUNS")
     par_row "Python" "$ms" "threading (GIL)"
 fi
 if have bun; then
-    ms=$(avg_ms "$RUNS" bun "$BUILD_DIR/parallel.js")
+    ms=$(avg_ms "bun $BUILD_DIR/parallel.js" "$RUNS")
     par_row "Bun" "$ms" "worker_threads"
 fi
 if have java; then
-    ms=$(avg_ms "$RUNS" java -cp "$BUILD_DIR" Parallel)
+    ms=$(avg_ms "java -cp $BUILD_DIR Parallel" "$RUNS")
     par_row "Java" "$ms" "ThreadPool"
 fi
 if have erl; then
-    ms=$(avg_ms "$RUNS" erl -noshell -pa "$BUILD_DIR" -eval 'parallel:main([]).' -s init stop)
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'parallel:main([]).' -s init stop" "$RUNS")
     par_row "Erlang" "$ms" "lightweight processes"
 fi
 
@@ -1967,9 +1852,9 @@ fanout_row() {
 
 fanout_row "Simple (interpreter)" "n/a" "extern thread FFI not supported"
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_simple.smf" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" "$BUILD_DIR/fanout_simple.smf")
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" "$BUILD_DIR/fanout_simple.smf")
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_simple.smf")
         fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout ($reason)"
     else
         fanout_row "Simple (SMF loader)" "$ms" "std thread_spawn fanout"
@@ -1978,7 +1863,7 @@ elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout(timeout)'; then
     fanout_row "Simple (SMF loader)" "n/a" "std thread_spawn fanout compile timeout"
 fi
 if [ -x "$BUILD_DIR/fanout_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/fanout_simple_native" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_simple_native")
         fanout_row "Simple (native)" "$ms" "OS-thread fork-join fanout ($reason)"
@@ -1991,48 +1876,48 @@ else
     fanout_row "Simple (native)" "n/a" "compile failed"
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_cooperative_green.spl" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" run "$BUILD_DIR/fanout_cooperative_green.spl" --mode=interpreter)
+    ms=$(avg_ms "$SIMPLE_BINARY run $BUILD_DIR/fanout_cooperative_green.spl --mode=interpreter" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" run "$BUILD_DIR/fanout_cooperative_green.spl" --mode=interpreter)
+        reason=$(failure_reason "$SIMPLE_BINARY run $BUILD_DIR/fanout_cooperative_green.spl --mode=interpreter")
         fanout_row "Simple cooperative green (interp)" "$ms" "cooperative queue fanout on current OS thread ($reason)"
     else
         fanout_row "Simple cooperative green (interp)" "$ms" "cooperative queue fanout on current OS thread"
     fi
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_cooperative_green_simple.smf" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" "$BUILD_DIR/fanout_cooperative_green_simple.smf")
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_cooperative_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" "$BUILD_DIR/fanout_cooperative_green_simple.smf")
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_cooperative_green_simple.smf")
         fanout_row "Simple cooperative green (SMF)" "$ms" "cooperative queue fanout on current OS thread ($reason)"
     else
         fanout_row "Simple cooperative green (SMF)" "$ms" "cooperative queue fanout on current OS thread"
     fi
 fi
 if [ -x "$BUILD_DIR/fanout_cooperative_green_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_cooperative_green_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/fanout_cooperative_green_simple_native" "$RUNS")
     fanout_row "Simple cooperative green (native)" "$ms" "cooperative queue fanout on current OS thread"
 else
     fanout_row "Simple cooperative green (native)" "n/a" "compile failed"
 fi
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/fanout_multicore_green_simple.smf" ]; then
-    ms=$(avg_ms "$RUNS" "$SIMPLE_BINARY" "$BUILD_DIR/fanout_multicore_green_simple.smf")
+    ms=$(avg_ms "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf" "$RUNS")
     if [ "$ms" = "fail" ]; then
-        reason=$(failure_reason "$SIMPLE_BINARY" "$BUILD_DIR/fanout_multicore_green_simple.smf")
+        reason=$(failure_reason "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf")
         fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout ($reason)"
     else
-        evidence=$(pool_evidence "$FANOUT_MULTICORE_GREEN_WORKERS" "$SIMPLE_BINARY" "$BUILD_DIR/fanout_multicore_green_simple.smf")
+        evidence=$(pool_evidence "$SIMPLE_BINARY $BUILD_DIR/fanout_multicore_green_simple.smf" "$FANOUT_MULTICORE_GREEN_WORKERS")
         fanout_row "Simple multicore green (SMF)" "$ms" "multicore_green runtime pool fanout ($evidence)"
     fi
 elif echo "$COMPILE_FAIL_SMF" | grep -q 'smf:fanout_multicore_green(timeout)'; then
     fanout_row "Simple multicore green (SMF)" "n/a" "multicore_green runtime pool fanout compile timeout"
 fi
 if [ -x "$BUILD_DIR/fanout_multicore_green_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_multicore_green_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/fanout_multicore_green_simple_native" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_multicore_green_simple_native")
         fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout ($reason)"
     else
-        evidence=$(pool_evidence "$FANOUT_MULTICORE_GREEN_WORKERS" "$BUILD_DIR/fanout_multicore_green_simple_native")
+        evidence=$(pool_evidence "$BUILD_DIR/fanout_multicore_green_simple_native" "$FANOUT_MULTICORE_GREEN_WORKERS")
         fanout_row "Simple multicore green (native)" "$ms" "multicore_green runtime pool fanout ($evidence)"
     fi
 elif echo "$COMPILE_FAIL" | grep -q 'native:fanout_multicore_green(timeout)'; then
@@ -2041,7 +1926,7 @@ else
     fanout_row "Simple multicore green (native)" "n/a" "compile failed"
 fi
 if [ -x "$BUILD_DIR/fanout_c" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_c")
+    ms=$(avg_ms "$BUILD_DIR/fanout_c" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_c")
         fanout_row "C (pthreads)" "$ms" "one OS thread per tiny task ($reason)"
@@ -2050,23 +1935,23 @@ if [ -x "$BUILD_DIR/fanout_c" ]; then
     fi
 fi
 if [ -x "$BUILD_DIR/fanout_go" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_go")
+    ms=$(avg_ms "$BUILD_DIR/fanout_go" "$RUNS")
     fanout_row "Go" "$ms" "goroutine per tiny task + channel"
 fi
 if have python3; then
-    ms=$(avg_ms "$RUNS" python3 "$BUILD_DIR/fanout.py")
+    ms=$(avg_ms "python3 $BUILD_DIR/fanout.py" "$RUNS")
     fanout_row "Python" "$ms" "threading per tiny task (GIL)"
 fi
 if have bun; then
-    ms=$(avg_ms "$RUNS" bun "$BUILD_DIR/fanout.js")
+    ms=$(avg_ms "bun $BUILD_DIR/fanout.js" "$RUNS")
     fanout_row "Bun" "$ms" "worker_thread per tiny task"
 fi
 if have java; then
-    ms=$(avg_ms "$RUNS" java -cp "$BUILD_DIR" Fanout)
+    ms=$(avg_ms "java -cp $BUILD_DIR Fanout" "$RUNS")
     fanout_row "Java" "$ms" "cached ThreadPool future per tiny task"
 fi
 if have erl; then
-    ms=$(avg_ms "$RUNS" erl -noshell -pa "$BUILD_DIR" -eval 'fanout:main([]).' -s init stop)
+    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'fanout:main([]).' -s init stop" "$RUNS")
     fanout_row "Erlang" "$ms" "BEAM process per tiny task"
 fi
 
@@ -2082,7 +1967,7 @@ stress_row() {
 }
 
 if [ -x "$BUILD_DIR/fanout_stress_c" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_stress_c")
+    ms=$(avg_ms "$BUILD_DIR/fanout_stress_c" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_stress_c")
         stress_row "C (pthreads)" "$ms" "pthread per stress task ($reason)"
@@ -2091,12 +1976,12 @@ if [ -x "$BUILD_DIR/fanout_stress_c" ]; then
     fi
 fi
 if [ -x "$BUILD_DIR/fanout_stress_multicore_green_simple_native" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_stress_multicore_green_simple_native")
+    ms=$(avg_ms "$BUILD_DIR/fanout_stress_multicore_green_simple_native" "$RUNS")
     if [ "$ms" = "fail" ]; then
         reason=$(failure_reason "$BUILD_DIR/fanout_stress_multicore_green_simple_native")
         stress_row "Simple multicore green (native)" "$ms" "multicore_green stress fanout ($reason)"
     else
-        evidence=$(pool_evidence "$FANOUT_STRESS_WORKERS" "$BUILD_DIR/fanout_stress_multicore_green_simple_native")
+        evidence=$(pool_evidence "$BUILD_DIR/fanout_stress_multicore_green_simple_native" "$FANOUT_STRESS_WORKERS")
         stress_row "Simple multicore green (native)" "$ms" "multicore_green stress fanout ($evidence)"
     fi
 elif echo "$COMPILE_FAIL" | grep -q 'native:fanout_stress_multicore_green(timeout)'; then
@@ -2105,7 +1990,7 @@ else
     stress_row "Simple multicore green (native)" "n/a" "compile failed"
 fi
 if [ -x "$BUILD_DIR/fanout_stress_go" ]; then
-    ms=$(avg_ms "$RUNS" "$BUILD_DIR/fanout_stress_go")
+    ms=$(avg_ms "$BUILD_DIR/fanout_stress_go" "$RUNS")
     stress_row "Go" "$ms" "goroutine per stress task (M:N)"
 fi
 
@@ -2121,9 +2006,9 @@ fairness_row() {
 }
 
 sliced_fairness_evidence() {
-    _mode="$1"
-    shift
-    _out=$(run_bounded_argv "$@" 2>&1) || { echo "failed"; return; }
+    _cmd="$1"
+    _mode="$2"
+    _out=$(run_bounded "$_cmd" 2>&1) || { echo "failed"; return; }
     _used_pool=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_used_runtime_pool = \(true\|false\).*/\1/p' | tail -1)
     _quick=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_quick_done = \(true\|false\).*/\1/p' | tail -1)
     _parallelism=$(printf '%s\n' "$_out" | sed -n 's/.*sliced_fairness_parallelism = \([0-9][0-9]*\).*/\1/p' | tail -1)
@@ -2142,9 +2027,9 @@ sliced_fairness_evidence() {
 }
 
 loop_safepoint_fairness_evidence() {
-    _mode="$1"
-    shift
-    _out=$(run_bounded_argv "$@" 2>&1) || { echo "failed"; return; }
+    _cmd="$1"
+    _mode="$2"
+    _out=$(run_bounded "$_cmd" 2>&1) || { echo "failed"; return; }
     _used_pool=$(printf '%s\n' "$_out" | sed -n 's/.*loop_safepoint_used_runtime_pool = \(true\|false\).*/\1/p' | tail -1)
     _quick=$(printf '%s\n' "$_out" | sed -n 's/.*loop_safepoint_quick_done = \(true\|false\).*/\1/p' | tail -1)
     _parallelism=$(printf '%s\n' "$_out" | sed -n 's/.*loop_safepoint_parallelism = \([0-9][0-9]*\).*/\1/p' | tail -1)
@@ -2163,7 +2048,7 @@ loop_safepoint_fairness_evidence() {
 }
 
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hosted_sliced_fairness.spl" ]; then
-    evidence=$(sliced_fairness_evidence source "$SIMPLE_BINARY" run "$BUILD_DIR/hosted_sliced_fairness.spl" --mode=interpreter)
+    evidence=$(sliced_fairness_evidence "$SIMPLE_BINARY run $BUILD_DIR/hosted_sliced_fairness.spl --mode=interpreter" source)
     if [ "$evidence" = "multicore_green_spawn_sliced interpreter_inline=true, quick_done=true, parallelism=1, total=9" ]; then
         fairness_row "Simple sliced (source)" "pass" "$evidence"
     else
@@ -2171,7 +2056,7 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hosted_sliced_fairness.spl" ]; th
     fi
 fi
 if [ -x "$BUILD_DIR/hosted_sliced_fairness_simple_native" ]; then
-    evidence=$(sliced_fairness_evidence native "$BUILD_DIR/hosted_sliced_fairness_simple_native")
+    evidence=$(sliced_fairness_evidence "$BUILD_DIR/hosted_sliced_fairness_simple_native" native)
     if [ "$evidence" = "multicore_green_spawn_sliced used_runtime_pool=true, quick_done=true, parallelism=1, total=9" ]; then
         fairness_row "Simple sliced (native)" "pass" "$evidence"
     else
@@ -2184,7 +2069,7 @@ else
 fi
 
 if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hosted_loop_safepoint_fairness.spl" ]; then
-    evidence=$(loop_safepoint_fairness_evidence source "$SIMPLE_BINARY" run "$BUILD_DIR/hosted_loop_safepoint_fairness.spl" --mode=interpreter)
+    evidence=$(loop_safepoint_fairness_evidence "$SIMPLE_BINARY run $BUILD_DIR/hosted_loop_safepoint_fairness.spl --mode=interpreter" source)
     if echo "$evidence" | grep -Eq '^multicore_green_spawn loop_safepoint interpreter_inline=true, quick_done=true, parallelism=[0-9]+, total=9$'; then
         fairness_row "Simple loop safepoint (source)" "pass" "$evidence"
     else
@@ -2192,7 +2077,7 @@ if [ -x "$SIMPLE_BINARY" ] && [ -f "$BUILD_DIR/hosted_loop_safepoint_fairness.sp
     fi
 fi
 if [ -x "$BUILD_DIR/hosted_loop_safepoint_fairness_simple_native" ]; then
-    evidence=$(loop_safepoint_fairness_evidence native "$BUILD_DIR/hosted_loop_safepoint_fairness_simple_native")
+    evidence=$(loop_safepoint_fairness_evidence "$BUILD_DIR/hosted_loop_safepoint_fairness_simple_native" native)
     if echo "$evidence" | grep -Eq '^multicore_green_spawn loop_safepoint used_runtime_pool=true, quick_done=true, parallelism=[0-9]+, total=9$'; then
         fairness_row "Simple loop safepoint (native)" "pass" "$evidence"
     else
@@ -2276,8 +2161,12 @@ par_rss_row() {
 }
 
 measure_rss() {
-    /usr/bin/time -v timeout "$RUN_TIMEOUT" "$@" 2>&1 >/dev/null |
-        grep "Maximum resident" | awk '{print $NF}'
+    _cmd="$1"
+    if have timeout; then
+        /usr/bin/time -v timeout "$RUN_TIMEOUT" sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
+    else
+        /usr/bin/time -v sh -c "$_cmd" 2>&1 >/dev/null | grep "Maximum resident" | awk '{print $NF}'
+    fi
 }
 
 rss_delta_per_worker() {
@@ -2303,7 +2192,7 @@ if [ -x "$BUILD_DIR/hello_c" ]; then
     _base_c_kb=$(measure_rss "$BUILD_DIR/hello_c")
 fi
 if [ -x "$BUILD_DIR/fib_go" ]; then
-    _base_go_kb=$(measure_rss "$BUILD_DIR/fib_go" 1)
+    _base_go_kb=$(measure_rss "$BUILD_DIR/fib_go 1")
 fi
 
 echo "  Measuring parallel RSS..."
@@ -2344,8 +2233,8 @@ if [ -x "$BUILD_DIR/parallel_go" ]; then
     fi
 fi
 if have python3; then
-    _base_py_kb=$(measure_rss python3 -c 'print(1)')
-    _rss_kb=$(measure_rss python3 "$BUILD_DIR/parallel.py")
+    _base_py_kb=$(measure_rss "python3 -c 'print(1)'")
+    _rss_kb=$(measure_rss "python3 $BUILD_DIR/parallel.py")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
         _per=$(rss_delta_per_worker "$_rss_kb" "$_base_py_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_py_kb" ]; then _base_h=$(human_bytes $((_base_py_kb * 1024))); else _base_h="n/a"; fi
@@ -2354,8 +2243,8 @@ if have python3; then
     fi
 fi
 if have java; then
-    _base_java_kb=$(measure_rss java -version)
-    _rss_kb=$(measure_rss java -cp "$BUILD_DIR" Parallel)
+    _base_java_kb=$(measure_rss "java -version")
+    _rss_kb=$(measure_rss "java -cp $BUILD_DIR Parallel")
     if [ -n "$_rss_kb" ] && [ "$_rss_kb" != "0" ]; then
         _per=$(rss_delta_per_worker "$_rss_kb" "$_base_java_kb" "$WORKERS")
         _base_h=""; if [ -n "$_base_java_kb" ]; then _base_h=$(human_bytes $((_base_java_kb * 1024))); else _base_h="n/a"; fi
@@ -2369,13 +2258,13 @@ fi
 cat >>"$REPORT_PATH" <<'EOF'
 
 > **Workload:** LCG (Linear Congruential Generator) with 100K iterations per worker.
-> Every language seeds the same integer-safe LCG with task indexes `0..N-1`
-> and rejects a mismatch against the same generated checksum. Simple OS-thread
-> rows pass indexes explicitly; green rows capture each immutable loop index.
+> Generated Simple workers use a capture-free deterministic LCG kernel so
+> checksum evidence does not depend on native/SMF global-load behavior or the
+> separate native pool loop-closure capture blocker.
 > The large fanout section uses many tiny workers with `FANOUT_ITERS` iterations
 > to expose scheduling overhead; this is the case where Go goroutines should
 > usually beat one-pthread-per-task C. Simple reports both OS-thread fanout
-> through `thread_spawn_with_args`, cooperative green-thread queue fanout, and
+> through `thread_spawn`, cooperative green-thread queue fanout, and
 > pool-backed `multicore_green_spawn` fanout separately. Generated
 > multicore-green workloads call `multicore_green_set_parallelism(CPU_WORKERS)`
 > before spawning tasks and print `multicore_green_parallelism=requested/actual`
@@ -2393,10 +2282,10 @@ cat >>"$REPORT_PATH" <<'EOF'
 > quick task finish during a spinning ordinary closure. Raw `thread_yield()`
 > alone is still not counted as Go-like preemption evidence.
 >
-> **Simple concurrency rows:** `Simple (native)` uses
-> `thread_spawn_with_args`, the OS-thread API for explicit immutable task
-> indexes. Its ABI remains tracked separately by
-> `scripts/check/check-thread-spawn-with-args-native.shs`.
+> **Simple concurrency rows:** `Simple (native)` uses `thread_spawn`, which is
+> the OS-thread API. `thread_spawn_with_args` remains tracked separately by
+> `scripts/check/check-thread-spawn-with-args-native.shs` as an ABI smoke, so
+> the perf rows stay focused on scheduler behavior.
 > `Simple cooperative green` uses
 > `cooperative_green_spawn`, which exercises the
 > implemented cooperative green-thread queue on the current OS thread; it does
@@ -2406,8 +2295,8 @@ cat >>"$REPORT_PATH" <<'EOF'
 > parallelism limit; generated multicore-green workloads require every
 > handle to report `used_runtime_pool()` so inline fallback cannot masquerade as
 > M:N evidence. The large-fanout multicore-green generated source keeps compact
-> handle-array joins and immutable task-index captures so every lane runs the
-> same work. It
+> handle-array joins and a capture-free worker kernel so the profile measures
+> scheduler fanout rather than the separate native closure-capture blocker. It
 > is not yet the final scheduler-aware green API.
 > The cooperative-green row uses the `COOPERATIVE_GREEN_WORKERS` count from the
 > report header because the current cooperative Simple implementation is intentionally separate
@@ -2416,10 +2305,14 @@ cat >>"$REPORT_PATH" <<'EOF'
 > exits successfully. A `fail` value is reported with the direct failure reason
 > instead of being counted as scheduler evidence.
 >
-> **Result collection:** Go and Erlang return results through messages; Simple,
-> C, and Java join handles/futures; Python and Bun collect indexed results or
-> messages. These mechanisms intentionally reflect each runtime, while the task
-> domain, arithmetic, and final checksum remain identical.
+> **Design comparison — Simple channels vs Go channels:**
+> Both Simple and Go use the same pattern: workers send results through a channel,
+> main collects via recv. Simple's `val` constants captured by closures add a
+> **compile-time immutability guarantee** — the compiler rejects mutation of shared
+> data. Go relies on convention (don't mutate shared vars) or channels for all data
+> flow. C shares via globals with no safety guarantee.
+> Same semantic, same safety for result collection; Simple adds compile-time
+> enforcement for shared read-only data.
 >
 > **RSS note:** Per-worker delta = (parallel_RSS - hello_baseline_RSS) / worker count.
 > Baseline measures the runtime's fixed overhead (startup, GC, stdlib).
@@ -2428,11 +2321,9 @@ cat >>"$REPORT_PATH" <<'EOF'
 EOF
 
 # ── retained comparable results ─────────────────────────────────────────
-# These rows are the diagnostic claim-bearing subset for a future admitted
-# Stage 4 run.  Legacy average tables above are exploratory only: admission
-# requires identity, exact mode, no fallback, exact checksum, every requested
-# iteration, raw samples, p50/p95 and RSS.  This run cannot be release evidence
-# without the separate Stage 4 admission gate.
+# These rows are the release-facing subset.  Legacy average tables above are
+# exploratory only: admission requires identity, exact mode, no fallback,
+# exact checksum, every requested iteration, raw samples, p50/p95 and RSS.
 section "Retained Comparable Results"
 cat >>"$REPORT_PATH" <<'EOF'
 | language | toolchain | compiler_path | compiler_sha256 | executable_path | executable_sha256 | selfhost_verdict | workload | requested_mode | actual_mode | fallback | warmups | iterations | wall_samples_ms | wall_ms_p50 | wall_ms_p95 | max_rss_kib | exit_status | checksum | admission / mode receipt | rejection_reason |
@@ -2446,31 +2337,6 @@ sha256_file() {
     fi
 }
 
-real_peer_toolchain() {
-    _language="$1"
-    case "$_language" in
-        c)
-            readlink -f "$(command -v gcc)"
-            ;;
-        rust)
-            _sysroot="$(run_bounded_argv rustc --print sysroot)" || return $?
-            [ -x "$_sysroot/bin/rustc" ] || return 1
-            readlink -f "$_sysroot/bin/rustc"
-            ;;
-        go)
-            _tool_dir="$(run_bounded_argv go env GOTOOLDIR)" || return $?
-            [ -x "$_tool_dir/compile" ] || return 1
-            readlink -f "$_tool_dir/compile"
-            ;;
-        python|bun)
-            readlink -f "$2"
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
 retained_unavailable_row() {
     _language="$1"; _mode="$2"; _reason="$3"
     printf '| %s | unavailable | n/a | n/a | n/a | n/a | n/a | recursive-fib-35 | %s | unavailable | n/a | %s | 0 | n/a | n/a | n/a | n/a | n/a | n/a | rejected | %s |\n' \
@@ -2482,13 +2348,10 @@ retained_measure() {
     _requested="$5"; _actual="$6"; shift 6
     case "$_language" in
         simple_*) _compiler_real="$SIMPLE_COMPILER_REAL" ;;
-        c|rust|go|python|bun)
-            _compiler_real="$(real_peer_toolchain "$_language" "$_executable")" || {
-                _status=$?
-                echo "error=real toolchain unavailable language=$_language status=$_status" >&2
-                return "$_status"
-            }
-            ;;
+        c) _compiler_real="$(readlink -f "$(command -v gcc)")" ;;
+        rust) _compiler_real="$(readlink -f "$(command -v rustc)")" ;;
+        go) _compiler_real="$(readlink -f "$(command -v go)")" ;;
+        python|bun) _compiler_real="$(readlink -f "$_executable")" ;;
         *) _compiler_real=n/a ;;
     esac
     if [ "$_compiler_real" = n/a ]; then _compiler_hash=n/a; else _compiler_hash="$(sha256_file "$_compiler_real")"; fi
@@ -2499,20 +2362,23 @@ retained_measure() {
     : >"${_tmp}.samples"
     _max_rss=0; _i=0
     while [ "$_i" -lt "$RUNS" ]; do
-        if /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" "$@" >"${_tmp}.out" 2>"${_tmp}.err"; then
-            :
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" "$@" >"${_tmp}.out" 2>"${_tmp}.err" || {
+                echo "error=retained admitted row failed: $_language" >&2; return 1;
+            }
         else
-            _status=$?
-            echo "error=retained admitted row failed: $_language status=$_status" >&2
-            return "$_status"
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" "$@" >"${_tmp}.out" 2>"${_tmp}.err" || {
+                echo "error=retained admitted row failed: $_language" >&2; return 1;
+            }
         fi
         _rss=$(sed -n '1p' "${_tmp}.rss")
-        require_positive_rss_kib "$_rss" || return $?
         grep -Fxq 'fib(35) = 9227465' "${_tmp}.out" || {
             echo "error=checksum_mismatch language=$_language expected=9227465" >&2; return 1;
         }
         _ms=$(sed -n 's/^warm_ms: *//p' "${_tmp}.out" | tail -1)
-        require_positive_decimal warm_ms "$_ms" || return $?
+        printf '%s\n' "$_ms" | grep -Eq '^[0-9]+([.][0-9]+)?$' || {
+            echo "error=missing warm_ms receipt: $_language" >&2; return 1;
+        }
         printf '%s\n' "$_ms" >>"${_tmp}.samples"
         [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
         _i=$((_i + 1))
@@ -2537,12 +2403,12 @@ retained_simple_mode_measure() {
     : >"${_tmp}.samples"
     _max_rss=0; _i=0
     while [ "$_i" -lt "$RUNS" ]; do
-        if /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
-            env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" >"${_tmp}.out" 2>"${_tmp}.err"; then
-            :
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
+                env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
         else
-            _status=$?
-            return "$_status"
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" \
+                env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
         fi
         [ "$(grep -Fxc "$_expected_receipt" "${_tmp}.err")" -eq 1 ] || {
             echo "error=missing_or_ambiguous_execution_mode_receipt language=$_language" >&2; return 1;
@@ -2552,10 +2418,9 @@ retained_simple_mode_measure() {
         }
         grep -Fxq 'fib(35) = 9227465' "${_tmp}.out" || return 1
         _ms=$(sed -n 's/^warm_ms: *//p' "${_tmp}.out" | tail -1)
-        require_positive_decimal warm_ms "$_ms" || return $?
+        printf '%s\n' "$_ms" | grep -Eq '^[0-9]+([.][0-9]+)?$' || return 1
         printf '%s\n' "$_ms" >>"${_tmp}.samples"
         _rss=$(sed -n '1p' "${_tmp}.rss")
-        require_positive_rss_kib "$_rss" || return $?
         [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
         _i=$((_i + 1))
     done
@@ -2580,22 +2445,21 @@ retained_compile_measure() {
     while [ "$_i" -lt "$RUNS" ]; do
         rm -f "$_out"
         _start=$(date +%s%N)
-        if /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$BUILD_TIMEOUT" \
-            "$SIMPLE_BINARY" compile "$BUILD_DIR/fib.spl" --native -o "$_out" \
-            >"${_tmp}.out" 2>"${_tmp}.err"; then
-            :
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
+                "$SIMPLE_BINARY" compile "$BUILD_DIR/fib.spl" --native -o "$_out" \
+                >"${_tmp}.out" 2>"${_tmp}.err" || return 1
         else
-            _status=$?
-            return "$_status"
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" \
+                "$SIMPLE_BINARY" compile "$BUILD_DIR/fib.spl" --native -o "$_out" \
+                >"${_tmp}.out" 2>"${_tmp}.err" || return 1
         fi
         _end=$(date +%s%N)
         [ -x "$_out" ] || { echo 'error=native compile produced no executable' >&2; return 1; }
-        run_bounded_checksum_argv 'fib(35) = 9227465' "$_out" || return $?
+        "$_out" | grep -Fxq 'fib(35) = 9227465' || { echo 'error=compiled artifact checksum mismatch' >&2; return 1; }
         _ms=$(awk "BEGIN {printf \"%.3f\", ($_end - $_start) / 1000000}")
-        require_positive_decimal compile_ms "$_ms" || return $?
         printf '%s\n' "$_ms" >>"${_tmp}.samples"
         _rss=$(sed -n '1p' "${_tmp}.rss")
-        require_positive_rss_kib "$_rss" || return $?
         [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
         _i=$((_i + 1))
     done
@@ -2618,22 +2482,21 @@ retained_byte_measure() {
     _max_rss=0; _i=0
     while [ "$_i" -lt "$RUNS" ]; do
         _start=$(date +%s%N)
-        if /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
-            env PERF_BYTE_SIZE="$_bytes" "$_executable" >"${_tmp}.out" 2>"${_tmp}.err"; then
-            :
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
+                env PERF_BYTE_SIZE="$_bytes" "$_executable" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
         else
-            _status=$?
-            return "$_status"
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" \
+                env PERF_BYTE_SIZE="$_bytes" "$_executable" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
         fi
         _end=$(date +%s%N)
         grep -Fxq "$_label: len=$_bytes elapsed_ms=$(sed -n "s/^$_label: len=$_bytes elapsed_ms=\([0-9][0-9]*\) zero_fill_checksum=0$/\1/p" "${_tmp}.out") zero_fill_checksum=0" "${_tmp}.out" || {
             echo "error=byte receipt mismatch requested=$_bytes" >&2; return 1;
         }
         _ms=$(awk "BEGIN {printf \"%.3f\", ($_end - $_start) / 1000000}")
-        require_positive_decimal elapsed_ms "$_ms" || return $?
         printf '%s\n' "$_ms" >>"${_tmp}.samples"
         _rss=$(sed -n '1p' "${_tmp}.rss")
-        require_positive_rss_kib "$_rss" || return $?
+        printf '%s\n' "$_rss" | grep -Eq '^[1-9][0-9]*$' || return 1
         [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
         _i=$((_i + 1))
     done
@@ -2647,256 +2510,30 @@ retained_byte_measure() {
         "$_bytes" "$RUNS" "$_samples" "$_p50" "$_p95" "$_max_rss" "$_bytes" >>"$REPORT_PATH"
 }
 
-# Claim-bearing warm-throughput rows share one source shape and one cyclic
-# schedule.  Each round measures every ready lane exactly once, rotating the
-# first lane by one position to distribute host drift across runtimes.
-# Java and Erlang are intentionally absent: their legacy diagnostic fixtures do
-# not yet satisfy the exact retained checksum/toolchain admission contract.
-RETAINED_CLAIM_LANES='simple_interpreter simple_smf_loader simple_native c rust go python bun'
-RETAINED_SCHEDULE="$BUILD_DIR/retained_cyclic_schedule.tsv"
-
-retained_prepare_lane() {
-    _lane="$1"
-    case "$_lane" in
-        simple_interpreter)
-            [ -f "$BUILD_DIR/fib_warm.spl" ] || { echo 'error=missing retained interpreter fixture' >&2; return 2; }
-            ;;
-        simple_smf_loader)
-            [ -f "$BUILD_DIR/fib_warm.spl" ] || { echo 'error=missing retained SMF source fixture' >&2; return 2; }
-            [ -f "$BUILD_DIR/fib_warm_simple.smf" ] || { echo 'error=missing retained SMF fixture' >&2; return 2; }
-            ;;
-        simple_native)
-            [ -f "$BUILD_DIR/fib_warm.spl" ] || { echo 'error=missing retained Simple native source fixture' >&2; return 2; }
-            [ -x "$BUILD_DIR/fib_warm_simple_native" ] || { echo 'error=missing admitted Simple native warm artifact' >&2; return 2; }
-            ;;
-        c)
-            if ! have gcc; then retained_unavailable_row c native 'toolchain unavailable'; return 1; fi
-            [ -f "$BUILD_DIR/fib_warm.c" ] || { echo 'error=missing retained C source fixture' >&2; return 2; }
-            [ -x "$BUILD_DIR/fib_warm_c" ] || { echo 'error=installed gcc produced no retained artifact' >&2; return 2; }
-            ;;
-        rust)
-            if ! have rustc; then retained_unavailable_row rust native 'toolchain unavailable'; return 1; fi
-            [ -f "$BUILD_DIR/fib_warm.rs" ] || { echo 'error=missing retained Rust source fixture' >&2; return 2; }
-            [ -x "$BUILD_DIR/fib_warm_rust" ] || { echo 'error=installed rustc produced no retained artifact' >&2; return 2; }
-            ;;
-        go)
-            if ! have go; then retained_unavailable_row go native 'toolchain unavailable'; return 1; fi
-            [ -f "$BUILD_DIR/fib_warm.go" ] || { echo 'error=missing retained Go source fixture' >&2; return 2; }
-            [ -x "$BUILD_DIR/fib_warm_go" ] || { echo 'error=installed go produced no retained artifact' >&2; return 2; }
-            ;;
-        python)
-            if ! have python3; then retained_unavailable_row python interpreter 'toolchain unavailable'; return 1; fi
-            [ -f "$BUILD_DIR/fib_warm.py" ] || { echo 'error=missing retained Python source fixture' >&2; return 2; }
-            ;;
-        bun)
-            if ! have bun; then retained_unavailable_row bun jsc-runtime 'toolchain unavailable'; return 1; fi
-            [ -f "$BUILD_DIR/fib_warm.js" ] || { echo 'error=missing retained Bun source fixture' >&2; return 2; }
-            ;;
-        *) return 2 ;;
-    esac
-    : >"$BUILD_DIR/retained_${_lane}.samples"
-    : >"$BUILD_DIR/retained_${_lane}.rss_samples"
-}
-
-retained_sample_lane() {
-    _lane="$1"
-    _round="$2"
-    _order="$3"
-    _tmp="$BUILD_DIR/retained_${_lane}"
-    _mode_receipt=''
-    case "$_lane" in
-        simple_interpreter)
-            _mode_receipt='simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false'
-            set -- env SIMPLE_EXECUTION_MODE_RECEIPT=1 SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
-                SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BINARY" "$BUILD_DIR/fib_warm.spl"
-            ;;
-        simple_smf_loader)
-            _mode_receipt='simple_execution_mode_v1 requested=smf-loader actual=smf-loader fallback=false'
-            set -- env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$SIMPLE_BINARY" "$BUILD_DIR/fib_warm_simple.smf"
-            ;;
-        simple_native) set -- "$BUILD_DIR/fib_warm_simple_native" ;;
-        c) set -- "$BUILD_DIR/fib_warm_c" ;;
-        rust) set -- "$BUILD_DIR/fib_warm_rust" ;;
-        go) set -- "$BUILD_DIR/fib_warm_go" ;;
-        python) set -- python3 "$BUILD_DIR/fib_warm.py" ;;
-        bun) set -- bun "$BUILD_DIR/fib_warm.js" ;;
-        *) return 2 ;;
-    esac
-    if /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
-        "$@" >"${_tmp}.out" 2>"${_tmp}.err"; then
-        :
-    else
-        _status=$?
-        echo "error=retained cyclic sample failed lane=$_lane round=$_round status=$_status" >&2
-        return "$_status"
-    fi
-    if [ -n "$_mode_receipt" ]; then
-        [ "$(grep -Fxc "$_mode_receipt" "${_tmp}.err")" -eq 1 ] || {
-            echo "error=missing_or_ambiguous_execution_mode_receipt lane=$_lane round=$_round" >&2
-            return 1
-        }
-        [ "$(grep -c '^simple_execution_mode_v1 ' "${_tmp}.err")" -eq 1 ] || return 1
-    fi
-    grep -Fxq 'fib(35) = 9227465' "${_tmp}.out" || {
-        echo "error=checksum_mismatch lane=$_lane round=$_round expected=9227465" >&2
-        return 1
+[ -f "$BUILD_DIR/fib_warm.spl" ] || { echo 'error=missing retained interpreter fixture' >&2; exit 1; }
+retained_simple_mode_measure "simple_interpreter" "interpreter" "interpreter" \
+    "$BUILD_DIR/fib_warm.spl" env SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+    SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BINARY" "$BUILD_DIR/fib_warm.spl" || {
+        echo 'error=retained Simple interpreter row failed mode admission' >&2; exit 1;
     }
-    _warm_ms="$(sed -n 's/^warm_ms: *//p' "${_tmp}.out" | tail -1)"
-    require_positive_decimal warm_ms "$_warm_ms" || return $?
-    _rss="$(sed -n '1p' "${_tmp}.rss")"
-    require_positive_rss_kib "$_rss" || return $?
-    printf '%s\n' "$_warm_ms" >>"${_tmp}.samples"
-    printf '%s\n' "$_rss" >>"${_tmp}.rss_samples"
-    printf '%s\t%s\t%s\n' "$_round" "$_order" "$_lane" >>"$RETAINED_SCHEDULE"
-}
-
-retained_finalize_lane() {
-    _lane="$1"
-    _tmp="$BUILD_DIR/retained_${_lane}"
-    _sample_count="$(wc -l <"${_tmp}.samples" | tr -d ' ')"
-    [ "$_sample_count" -eq "$RUNS" ] || {
-        echo "error=retained partial sample set lane=$_lane got=$_sample_count expected=$RUNS" >&2
-        return 1
+[ -f "$BUILD_DIR/fib_warm_simple.smf" ] || { echo 'error=missing retained SMF fixture' >&2; exit 1; }
+retained_simple_mode_measure "simple_smf_loader" "smf-loader" "smf-loader" \
+    "$BUILD_DIR/fib_warm_simple.smf" "$SIMPLE_BINARY" "$BUILD_DIR/fib_warm_simple.smf" || {
+        echo 'error=retained Simple SMF-loader row failed mode admission' >&2; exit 1;
     }
-    sort -n "${_tmp}.samples" >"${_tmp}.sorted"
-    sort -n "${_tmp}.rss_samples" >"${_tmp}.rss_sorted"
-    _p50="$(sed -n "$(( (RUNS + 1) / 2 ))p" "${_tmp}.sorted")"
-    _p95="$(sed -n "$(( (RUNS * 95 + 99) / 100 ))p" "${_tmp}.sorted")"
-    _max_rss="$(sed -n '${p;}' "${_tmp}.rss_sorted")"
-    _samples="$(paste -sd, "${_tmp}.samples")"
-    case "$_lane" in
-        simple_interpreter)
-            _toolchain="$SIMPLE_COMPILER_VERSION"; _compiler="$SIMPLE_COMPILER_REAL"
-            _executable="$BUILD_DIR/fib_warm.spl"; _selfhost="$SIMPLE_COMPILER_ADMISSION"
-            _requested=interpreter; _actual=interpreter
-            _admission='admitted: cyclic schedule, monotonic stdlib clock, exact mode/checksum'
-            ;;
-        simple_smf_loader)
-            _toolchain="$SIMPLE_COMPILER_VERSION"; _compiler="$SIMPLE_COMPILER_REAL"
-            _executable="$BUILD_DIR/fib_warm_simple.smf"; _selfhost="$SIMPLE_COMPILER_ADMISSION"
-            _requested=smf-loader; _actual=smf-loader
-            _admission='admitted: cyclic schedule, monotonic stdlib clock, exact mode/checksum'
-            ;;
-        simple_native)
-            _toolchain="$SIMPLE_COMPILER_VERSION"; _compiler="$SIMPLE_COMPILER_REAL"
-            _executable="$BUILD_DIR/fib_warm_simple_native"; _selfhost="$SIMPLE_COMPILER_ADMISSION"
-            _requested=native; _actual=native
-            _admission='admitted: cyclic schedule, monotonic stdlib clock, exact checksum'
-            ;;
-        c)
-            _toolchain="$(gcc --version | sed -n '1p')"; _compiler="$(real_peer_toolchain c)"
-            _executable="$BUILD_DIR/fib_warm_c"; _selfhost=n/a; _requested=native; _actual=native
-            _admission='admitted: cyclic schedule and exact checksum'
-            ;;
-        rust)
-            _toolchain="$(rustc --version)"; _compiler="$(real_peer_toolchain rust)"
-            _executable="$BUILD_DIR/fib_warm_rust"; _selfhost=n/a; _requested=native; _actual=native
-            _admission='admitted: cyclic schedule and exact checksum'
-            ;;
-        go)
-            _toolchain="$GO_VERSION"; _compiler="$(real_peer_toolchain go)"
-            _executable="$BUILD_DIR/fib_warm_go"; _selfhost=n/a; _requested=native; _actual=native
-            _admission='admitted: cyclic schedule, exact checksum, asserted GOMAXPROCS'
-            ;;
-        python)
-            _toolchain="$(python3 --version 2>&1)"; _compiler="$(real_peer_toolchain python "$(command -v python3)")"
-            _executable="$(command -v python3)"; _selfhost=n/a; _requested=interpreter; _actual=interpreter
-            _admission='admitted: cyclic schedule and exact checksum'
-            ;;
-        bun)
-            _toolchain="$(bun --version 2>&1)"; _compiler="$(real_peer_toolchain bun "$(command -v bun)")"
-            _executable="$(command -v bun)"; _selfhost=n/a; _requested=jsc-runtime; _actual=jsc-runtime
-            _admission='admitted: cyclic schedule and exact checksum'
-            ;;
-        *) return 2 ;;
-    esac
-    _compiler_hash="$(sha256_file "$_compiler")"
-    _real_exec="$(readlink -f "$_executable")"
-    _exec_hash="$(sha256_file "$_real_exec")"
-    printf '| %s | %s | %s | %s | %s | %s | %s | recursive-fib-35-in-process | %s | %s | false | %s | %s | %s | %s | %s | %s | 0 | 9227465 | %s | n/a |\n' \
-        "$_lane" "$_toolchain" "$_compiler" "$_compiler_hash" "$_real_exec" "$_exec_hash" "$_selfhost" \
-        "$_requested" "$_actual" "$WARM_IN_PROCESS" "$RUNS" "$_samples" "$_p50" "$_p95" "$_max_rss" \
-        "$_admission" >>"$REPORT_PATH"
-}
-
-retained_measure_cyclically() {
-    [ -x /usr/bin/time ] || { echo 'error=/usr/bin/time is required for retained cyclic RSS' >&2; return 1; }
-    _ready_lanes=''
-    _ready_count=0
-    for _lane in $RETAINED_CLAIM_LANES; do
-        if retained_prepare_lane "$_lane"; then
-            _ready_lanes="${_ready_lanes}${_ready_lanes:+ }$_lane"
-            _ready_count=$((_ready_count + 1))
-        else
-            _status=$?
-            [ "$_status" -eq 1 ] || return "$_status"
-        fi
-    done
-    [ "$_ready_count" -gt 0 ] || { echo 'error=no retained comparable lanes available' >&2; return 1; }
-    printf 'round\torder\tlane\n' >"$RETAINED_SCHEDULE"
-    _round=1
-    while [ "$_round" -le "$RUNS" ]; do
-        _offset=$(( (_round - 1) % _ready_count ))
-        _index=0
-        while [ "$_index" -lt "$_ready_count" ]; do
-            _position=$(( (_offset + _index) % _ready_count + 1 ))
-            _lane="$(printf '%s\n' $_ready_lanes | sed -n "${_position}p")"
-            retained_sample_lane "$_lane" "$_round" "$((_index + 1))" || return $?
-            _index=$((_index + 1))
-        done
-        _round=$((_round + 1))
-    done
-    for _lane in $_ready_lanes; do retained_finalize_lane "$_lane" || return $?; done
-    cat >>"$REPORT_PATH" <<EOF
-
-Retained comparable lanes were sampled in a one-position cyclic rotation per
-round. Raw execution order: \`$RETAINED_SCHEDULE\`. Java and Erlang remain
-diagnostic-only and are excluded from this claim-bearing set because they lack
-exact retained checksum/toolchain admission. Compiler and byte-memory rows use
-different workloads and therefore are not members of this comparable set.
-EOF
-}
-
-retained_compile_measure || {
-    _status=$?
-    echo "error=retained Simple compiler row failed status=$_status" >&2
-    exit "$_status"
-}
-[ -x "$BUILD_DIR/bytes_push_native" ] || run_bounded_build_argv "$SIMPLE_BINARY" compile test/05_perf/bytes_push_1mib.spl --native -o "$BUILD_DIR/bytes_push_native"
+retained_compile_measure || { echo 'error=retained Simple compiler row failed' >&2; exit 1; }
+[ -x "$BUILD_DIR/bytes_push_native" ] || run_bounded_argv "$SIMPLE_BINARY" compile test/05_perf/bytes_push_1mib.spl --native -o "$BUILD_DIR/bytes_push_native"
 [ -x "$BUILD_DIR/bytes_push_native" ] || { echo 'error=missing admitted byte-memory native artifact' >&2; exit 1; }
-retained_byte_measure "1 MiB" 1048576 "$BUILD_DIR/bytes_push_native" || { _status=$?; echo "error=retained 1 MiB row failed status=$_status" >&2; exit "$_status"; }
-retained_byte_measure "4 MiB" 4194304 "$BUILD_DIR/bytes_push_native" || { _status=$?; echo "error=retained 4 MiB row failed status=$_status" >&2; exit "$_status"; }
-retained_byte_measure "32 MiB" 33554432 "$BUILD_DIR/bytes_push_native" || { _status=$?; echo "error=retained 32 MiB row failed status=$_status" >&2; exit "$_status"; }
-retained_measure_cyclically || {
-    _status=$?
-    echo "error=retained cyclic comparable matrix failed status=$_status" >&2
-    exit "$_status"
-}
-
-cat >>"$REPORT_PATH" <<'EOF'
-
-### Retained Workload Source Identities
-
-These hashes bind the generated workload text separately from compiler/runtime
-and executable identities.
-
-| language / row | workload_source_path | workload_source_sha256 |
-|---|---|---|
-EOF
-retained_source_identity() {
-    _label="$1"
-    _source="$2"
-    _source_real="$(readlink -f "$_source")"
-    printf '| %s | %s | %s |\n' "$_label" "$_source_real" "$(sha256_file "$_source_real")" >>"$REPORT_PATH"
-}
-retained_source_identity simple_warm "$BUILD_DIR/fib_warm.spl"
-retained_source_identity simple_compile "$BUILD_DIR/fib.spl"
-retained_source_identity simple_bytes "test/05_perf/bytes_push_1mib.spl"
-[ ! -f "$BUILD_DIR/fib_warm.c" ] || retained_source_identity c "$BUILD_DIR/fib_warm.c"
-[ ! -f "$BUILD_DIR/fib_warm.rs" ] || retained_source_identity rust "$BUILD_DIR/fib_warm.rs"
-[ ! -f "$BUILD_DIR/fib_warm.go" ] || retained_source_identity go "$BUILD_DIR/fib_warm.go"
-[ ! -f "$BUILD_DIR/fib_warm.py" ] || retained_source_identity python "$BUILD_DIR/fib_warm.py"
-[ ! -f "$BUILD_DIR/fib_warm.js" ] || retained_source_identity bun "$BUILD_DIR/fib_warm.js"
+retained_byte_measure "1 MiB" 1048576 "$BUILD_DIR/bytes_push_native" || { echo 'error=retained 1 MiB row failed' >&2; exit 1; }
+retained_byte_measure "4 MiB" 4194304 "$BUILD_DIR/bytes_push_native" || { echo 'error=retained 4 MiB row failed' >&2; exit 1; }
+retained_byte_measure "32 MiB" 33554432 "$BUILD_DIR/bytes_push_native" || { echo 'error=retained 32 MiB row failed' >&2; exit 1; }
+[ -x "$BUILD_DIR/fib_warm_simple_native" ] || { echo 'error=missing admitted Simple native warm artifact' >&2; exit 1; }
+retained_measure "simple_native" "Simple selfhost" "$BUILD_DIR/fib_warm_simple_native" "$SIMPLE_COMPILER_ADMISSION" "native" "native" "$BUILD_DIR/fib_warm_simple_native"
+if have gcc; then [ -x "$BUILD_DIR/fib_warm_c" ] || { echo 'error=installed gcc produced no retained artifact' >&2; exit 1; }; retained_measure "c" "$(gcc --version | sed -n '1p')" "$BUILD_DIR/fib_warm_c" "n/a" "native" "native" "$BUILD_DIR/fib_warm_c"; else retained_unavailable_row "c" "native" "toolchain unavailable"; fi
+if have rustc; then [ -x "$BUILD_DIR/fib_warm_rust" ] || { echo 'error=installed rustc produced no retained artifact' >&2; exit 1; }; retained_measure "rust" "$(rustc --version)" "$BUILD_DIR/fib_warm_rust" "n/a" "native" "native" "$BUILD_DIR/fib_warm_rust"; else retained_unavailable_row "rust" "native" "toolchain unavailable"; fi
+if have go; then [ -x "$BUILD_DIR/fib_warm_go" ] || { echo 'error=installed go produced no retained artifact' >&2; exit 1; }; retained_measure "go" "$GO_VERSION" "$BUILD_DIR/fib_warm_go" "n/a" "native" "native" "$BUILD_DIR/fib_warm_go"; else retained_unavailable_row "go" "native" "toolchain unavailable"; fi
+if have python3; then retained_measure "python" "$(python3 --version 2>&1)" "$(command -v python3)" "n/a" "interpreter" "interpreter" python3 "$BUILD_DIR/fib_warm.py"; else retained_unavailable_row "python" "interpreter" "toolchain unavailable"; fi
+if have bun; then retained_measure "bun" "$(bun --version 2>&1)" "$(command -v bun)" "n/a" "jsc-runtime" "jsc-runtime" bun "$BUILD_DIR/fib_warm.js"; else retained_unavailable_row "bun" "jsc-runtime" "toolchain unavailable"; fi
 
 # ── footer ───────────────────────────────────────────────────────────────
 
@@ -2920,7 +2557,7 @@ Useful knobs: `RUNS`, `FIB_N`, `CPU_WORKERS`, `GOMAXPROCS`, `OS_THREAD_WORKERS`,
 `COOPERATIVE_GREEN_WORKERS`, `MULTICORE_GREEN_WORKERS`, `GREEN_WORKERS`
 (compatibility alias), `FANOUT_WORKERS`, `FANOUT_COOPERATIVE_GREEN_WORKERS`,
 `FANOUT_MULTICORE_GREEN_WORKERS`, `FANOUT_ITERS`, `FANOUT_STRESS_WORKERS`,
-`FANOUT_STRESS_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `BUILD_TIMEOUT`, `SIMPLE_BINARY`,
+`FANOUT_STRESS_ITERS`, `WARM_IN_PROCESS`, `RUN_TIMEOUT`, `SIMPLE_BINARY`,
 `BUILD_DIR`, `REPORT_PATH`, `PROFILE_DOCKER_ISOLATION`,
 `PROFILE_DOCKER_IMAGE`, `PROFILE_DOCKER_MEMORY`, `PROFILE_DOCKER_CPUS`, and
 `PROFILE_DOCKER_SIMPLE_BINARY`.

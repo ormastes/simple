@@ -10,10 +10,30 @@ REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 is_rust_seed_simple() {
+    # Identity probe, not just a path pattern (2026-07-28).
+    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
+    # seed lives at bin/release/<triple>/simple, which matches none of those
+    # patterns, so the seed was classified "not a seed" and every self-hosted
+    # claim in this script was asserted against it. Ask the binary instead.
+    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
     case "$1" in
-        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
-        *) return 1 ;;
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
     esac
+    # Not runnable: leave it to the caller's own missing-binary branch, which
+    # already fails. Do not report "seed" for something we never ran.
+    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
+    # Executable but unverifiable => treat as forbidden (fail closed). The seed
+    # self-identifies on stderr, so 2>&1 is required.
+    if command -v timeout >/dev/null 2>&1; then
+        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
+    else
+        _irss_v="$("$1" --version 2>&1)" || return 0
+    fi
+    [ -n "$_irss_v" ] || return 0
+    case "$_irss_v" in
+        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
+    esac
+    return 1
 }
 if [ "${SIMPLE_BIN:-}" = "" ]; then
     SIMPLE_BIN_SOURCE="missing-self-hosted"
@@ -110,10 +130,24 @@ rm -f "$SOURCE_LOG" "$CONTRACT_LOG" "$COMPILE_LOG" "$EXPORT_PROOF_LOG" "$EXPORT_
 echo "check=wasm_hello_gui_package_evidence"
 echo "compile_wasm=$COMPILE_WASM"
 echo "wasm_path=$WASM_PATH"
+echo "simple_bin=$SIMPLE_BIN"
+echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "simple_bin_status=$SIMPLE_BIN_STATUS"
 
-if [ ! -x "$SIMPLE_BIN" ]; then
+if [ "$SIMPLE_BIN_STATUS" = "forbidden" ]; then
+    echo "wasm_hello_gui_package_status=fail"
+    echo "wasm_hello_gui_package_reason=simple-bin-forbidden"
+    echo "wasm_hello_gui_simple_bin=$SIMPLE_BIN"
+    echo "wasm_hello_gui_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "wasm_hello_gui_simple_bin_status=$SIMPLE_BIN_STATUS"
+    exit 1
+fi
+if [ "$SIMPLE_BIN_STATUS" != "pass" ] || [ ! -x "$SIMPLE_BIN" ]; then
     echo "wasm_hello_gui_package_status=fail"
     echo "wasm_hello_gui_package_reason=missing-simple-bin"
+    echo "wasm_hello_gui_simple_bin=$SIMPLE_BIN"
+    echo "wasm_hello_gui_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "wasm_hello_gui_simple_bin_status=$SIMPLE_BIN_STATUS"
     exit 1
 fi
 
@@ -171,10 +205,7 @@ compile_reason=compile-disabled
 if [ "$COMPILE_WASM" = "1" ]; then
     rm -f "$WASM_PATH"
     set +e
-    (
-        cd "$ROOT_DIR/src/compiler_rust"
-        RUSTC_BOOTSTRAP="${RUSTC_BOOTSTRAP:-1}" run_with_timeout cargo run -q -p simple-driver --features wasm-wasi --bin simple -- compile "$ROOT_DIR/examples/06_io/ui/hello_wasm_gui.spl" --target wasm32-wasi -o "$WASM_PATH"
-    ) >"$COMPILE_LOG" 2>&1
+    SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" compile "$ROOT_DIR/examples/06_io/ui/hello_wasm_gui.spl" --target wasm32-wasi -o "$WASM_PATH" >"$COMPILE_LOG" 2>&1
     compile_code=$?
     set -e
     cat "$COMPILE_LOG"
@@ -360,6 +391,9 @@ fi
     echo
     echo "- status: $status"
     echo "- reason: $reason"
+    echo "- simple_bin: $SIMPLE_BIN"
+    echo "- simple_bin_source: $SIMPLE_BIN_SOURCE"
+    echo "- simple_bin_status: $SIMPLE_BIN_STATUS"
     echo "- source_status: $source_status"
     echo "- contract_status: $contract_status"
     echo "- artifact_status: $artifact_status"
@@ -386,6 +420,9 @@ fi
 
 echo "wasm_hello_gui_package_status=$status"
 echo "wasm_hello_gui_package_reason=$reason"
+echo "wasm_hello_gui_simple_bin=$SIMPLE_BIN"
+echo "wasm_hello_gui_simple_bin_source=$SIMPLE_BIN_SOURCE"
+echo "wasm_hello_gui_simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "wasm_hello_gui_source_status=$source_status"
 echo "wasm_hello_gui_contract_status=$contract_status"
 echo "wasm_hello_gui_artifact_status=$artifact_status"

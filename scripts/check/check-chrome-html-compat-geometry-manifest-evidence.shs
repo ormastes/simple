@@ -6,7 +6,8 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/chrome_html_compat_geometry_manifest_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/chrome_html_compat_geometry_manifest_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-src/compiler_rust/target/release/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
 WIDTH="${HTML_COMPAT_GEOMETRY_WIDTH:-320}"
 HEIGHT="${HTML_COMPAT_GEOMETRY_HEIGHT:-240}"
 TIMEOUT_SECS="${HTML_COMPAT_GEOMETRY_TIMEOUT_SECS:-60}"
@@ -16,6 +17,61 @@ BASE_HTML_PATH="test/fixtures/html_compat/02_block_boxes.html"
 SUMMARY="$BUILD_DIR/summary.env"
 ROWS="$BUILD_DIR/rows.md"
 SUBPIXEL_ROWS="$BUILD_DIR/subpixel_rows.md"
+
+is_rust_seed_simple() {
+    # Identity probe, not just a path pattern (2026-07-28).
+    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
+    # seed lives at bin/release/<triple>/simple, which matches none of those
+    # patterns, so the seed was classified "not a seed" and every self-hosted
+    # claim in this script was asserted against it. Ask the binary instead.
+    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+    esac
+    # Not runnable: leave it to the caller's own missing-binary branch, which
+    # already fails. Do not report "seed" for something we never ran.
+    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
+    # Executable but unverifiable => treat as forbidden (fail closed). The seed
+    # self-identifies on stderr, so 2>&1 is required.
+    if command -v timeout >/dev/null 2>&1; then
+        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
+    else
+        _irss_v="$("$1" --version 2>&1)" || return 0
+    fi
+    [ -n "$_irss_v" ] || return 0
+    case "$_irss_v" in
+        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
+    esac
+    return 1
+}
+
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_SOURCE="default-missing"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+fi
+if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SUMMARY" "$ROWS" "$REPORT_PATH"
@@ -29,6 +85,9 @@ fail_unavailable() {
         echo "pass_count=0"
         echo "fail_count=0"
         echo "blur_or_tolerance_used=false"
+        echo "simple_bin=$SIMPLE_BIN"
+        echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$SUMMARY"
     {
         echo "# Chrome HTML Compat Geometry Manifest Evidence"
@@ -36,6 +95,7 @@ fail_unavailable() {
         echo "- status: unavailable"
         echo "- reason: $reason"
         echo "- blur/tolerance used: false"
+        echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE, $SIMPLE_BIN_STATUS)"
     } >"$REPORT_PATH"
     cat "$SUMMARY"
     exit 1
@@ -87,7 +147,9 @@ PY
 }
 
 command -v node >/dev/null 2>&1 || fail_unavailable "node-not-found"
-test -x "$SIMPLE_BIN" || fail_unavailable "simple-runtime-missing"
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    fail_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
+fi
 
 fixture_html_path() {
     fixture="$1"
@@ -226,6 +288,9 @@ fi
     echo "height=$HEIGHT"
     echo "blur_or_tolerance_used=false"
     echo "build_dir=$BUILD_DIR"
+    echo "simple_bin=$SIMPLE_BIN"
+    echo "simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "simple_bin_status=$SIMPLE_BIN_STATUS"
 } >"$SUMMARY"
 
 {
@@ -238,6 +303,7 @@ fi
     echo "- viewport: ${WIDTH}x${HEIGHT}"
     echo "- build dir: \`$BUILD_DIR\`"
     echo "- blur/tolerance used: false"
+    echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE, $SIMPLE_BIN_STATUS)"
     echo
     echo "This wrapper captures real Chrome headless geometry for each listed"
     echo "html_compat fixture and compares it against Simple structural boxes."

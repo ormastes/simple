@@ -23,25 +23,20 @@ set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 FIX="$SCRIPT_DIR/fixtures"
-TEST_BUILD_THREADS=${SIMPLE_BOOTSTRAP_TEST_BUILD_THREADS:-1}
-case "$TEST_BUILD_THREADS" in
-    ''|*[!0-9]*|0*) printf 'redeploy-gate: invalid test build thread count: %s\n' "$TEST_BUILD_THREADS" >&2; exit 2 ;;
-esac
-[ "${#TEST_BUILD_THREADS}" -le 2 ] || {
-    printf 'redeploy-gate: test build thread count is too long\n' >&2
-    exit 2
-}
-[ "$TEST_BUILD_THREADS" -le 64 ] || {
-    printf 'redeploy-gate: test build thread count exceeds hard maximum 64\n' >&2
-    exit 2
-}
 
-# Ordered list of every check name (used by --list and as documentation).
+# Ordered list of every blocking check name (used by --list and as documentation).
 CHECK_NAMES="val-scalar add print-literal enum-payload qmark twofn struct-field struct-copy-isolation class-in-array-mutation cfg-arch-dispatch-a cfg-arch-dispatch-b cfg-lowered-funcs=2"
+
+# Ratchet checks: advisory (not counted toward PASS/TOTAL) only while the
+# incumbent binary also fails them; they self-promote to blocking the
+# instant a passing binary becomes the incumbent (see the native-build-smoke
+# block below).
+ADVISORY_CHECK_NAMES="native-build-smoke"
 
 case "${1:-}" in
     --list|-l)
         for n in $CHECK_NAMES; do printf '%s\n' "$n"; done
+        for n in $ADVISORY_CHECK_NAMES; do printf '%s (advisory)\n' "$n"; done
         exit 0
         ;;
     --help|-h)
@@ -63,13 +58,64 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+# Incumbent binary: the currently-deployed binary the candidate is ratcheted
+# against for native-build-smoke (see below). Override for testing via
+# REDEPLOY_GATE_INCUMBENT_BIN; default: bin/simple (the live deploy symlink).
+INCUMBENT_ARG="${REDEPLOY_GATE_INCUMBENT_BIN:-bin/simple}"
+case "$INCUMBENT_ARG" in
+    /*) INCUMBENT_BIN="$INCUMBENT_ARG" ;;
+    *)  INCUMBENT_BIN="$REPO_ROOT/$INCUMBENT_ARG" ;;
+esac
+
 PASS=0
 TOTAL=0
 SKIP=0
+ADV_PASS=0
+ADV_TOTAL=0
 
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf 'PASS  %-24s %s\n' "$1" "$2"; }
 fail() { TOTAL=$((TOTAL + 1)); printf 'FAIL  %-24s %s\n' "$1" "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf 'SKIP  %-24s %s\n' "$1" "$2"; }
+
+# advise_pass/advise_fail — same shape as pass/fail but for ADVISORY checks
+# (see the native-build-smoke block below): they print PASS/FAIL and are
+# counted in their own ADV_PASS/ADV_TOTAL tally, but deliberately do NOT
+# touch PASS/TOTAL, so they cannot flip the gate's overall exit status.
+advise_pass() { ADV_PASS=$((ADV_PASS + 1)); ADV_TOTAL=$((ADV_TOTAL + 1)); printf 'PASS  %-24s %s [advisory]\n' "$1" "$2"; }
+advise_fail() { ADV_TOTAL=$((ADV_TOTAL + 1)); printf 'FAIL  %-24s %s [advisory]\n' "$1" "$2"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout_180() {
+    if have timeout; then timeout 180 "$@"; else "$@"; fi
+}
+
+# native_build_smoke_check BIN_PATH — builds+runs the native-build-smoke
+# fixture (cranelift backend, 180s timeout) against BIN_PATH. Sets
+# NB_LAST_MSG to a human-readable result and returns 0 on the exact marker,
+# 1 otherwise (build failure, no executable produced, timeout, or wrong
+# output). Used for both the incumbent and the candidate so the ratchet
+# below can compare them.
+native_build_smoke_check() {
+    nb_bin="$1"
+    nb_tmpdir=$(mktemp -d 2>/dev/null || printf '%s/redeploy_gate_nbsmoke.%s' "${TMPDIR:-/tmp}" "$$")
+    mkdir -p "$nb_tmpdir" 2>/dev/null
+    nb_out="$nb_tmpdir/nbsmoke.bin"
+    nb_result=1
+    NB_LAST_MSG="native-build failed or produced no executable (see $nb_tmpdir/build.log)"
+    if run_with_timeout_180 "$nb_bin" native-build --backend=cranelift \
+        --entry "$FIX/native_build_smoke.spl" --output "$nb_out" >"$nb_tmpdir/build.log" 2>&1 \
+        && [ -x "$nb_out" ]; then
+        nb_run_out=$("$nb_out" 2>/dev/null)
+        if [ "$nb_run_out" = "NATIVE_BUILD_SMOKE_OK" ]; then
+            nb_result=0
+            NB_LAST_MSG="= NATIVE_BUILD_SMOKE_OK"
+        else
+            NB_LAST_MSG="built but ran wrong output [$(printf '%s' "$nb_run_out" | tr '\n' ';')]"
+        fi
+    fi
+    rm -rf "$nb_tmpdir" 2>/dev/null
+    return "$nb_result"
+}
 
 # assert_eq NAME EXPECTED ACTUAL  — exact stdout match (command substitution
 # already strips trailing newlines from the captured output).
@@ -81,14 +127,17 @@ assert_eq() {
     fi
 }
 
-# assert_selfcheck NAME OUTPUT — fixture prints its own PASS/FAIL verdict.
-# (cfg-arch repros hardcode the x86_64 host outcome; the redeploy target triple
-#  is x86_64-unknown-linux-gnu, so this holds for the deploy gate.)
-assert_selfcheck() {
-    if printf '%s' "$2" | grep -q 'PASS' && ! printf '%s' "$2" | grep -q 'FAIL'; then
-        pass "$1" "self-check PASS"
+assert_host_arch() {
+    host_arch="$(uname -m)"
+    case "$host_arch" in
+        arm64|aarch64) expected_arch="arm64" ;;
+        x86_64|amd64) expected_arch="x86_64" ;;
+        *) fail "$1" "unsupported host architecture: $host_arch"; return ;;
+    esac
+    if printf '%s' "$2" | grep -q "arch_name() = ${expected_arch}"; then
+        pass "$1" "selected ${expected_arch}"
     else
-        fail "$1" "self-check not PASS: [$(printf '%s' "$2" | tr '\n' ';')]"
+        fail "$1" "expected ${expected_arch}: [$(printf '%s' "$2" | tr '\n' ';')]"
     fi
 }
 
@@ -114,8 +163,8 @@ OUT=$(SIMPLE_EXECUTION_MODE=interpret "$BIN" run "$FIX/class_in_array_mutation.s
 assert_eq "class-in-array-mutation" "777" "$OUT"
 
 # --- #45: cfg arch-variant dispatch (fixtures self-check on an x86_64 host) ---
-OUT=$("$BIN" run "$FIX/cfg_arch_dispatch_repro_a.spl" 2>/dev/null); assert_selfcheck "cfg-arch-dispatch-a" "$OUT"
-OUT=$("$BIN" run "$FIX/cfg_arch_dispatch_repro_b.spl" 2>/dev/null); assert_selfcheck "cfg-arch-dispatch-b" "$OUT"
+OUT=$("$BIN" run "$FIX/cfg_arch_dispatch_repro_a.spl" 2>/dev/null); assert_host_arch "cfg-arch-dispatch-a" "$OUT"
+OUT=$("$BIN" run "$FIX/cfg_arch_dispatch_repro_b.spl" 2>/dev/null); assert_host_arch "cfg-arch-dispatch-b" "$OUT"
 
 # --- cfg-lowered-funcs=2: count-check (recorded gate gap) ---
 # The lowered-function count is not observable from current CLI output.
@@ -128,9 +177,53 @@ else
 fi
 
 printf -- '---------------------------------------------------------------\n'
+
+# --- native-build-smoke: self-promoting RATCHET (doc/08_tracking/bug/native_build_nil_receiver_crash_2026-07-25.md) ---
+# The gate previously ran NO native-build check at all, so a binary whose
+# native-build lane was completely dead (LLVM-backend nil-receiver trap,
+# see the bug doc) still gated 10-11/11 and shipped. This check exercises
+# `native-build --backend=cranelift` (the lane that must work; the LLVM
+# lane has a known separate open miscompile, so testing it here would be
+# a false discriminator) end-to-end: compile the fixture, then run the
+# produced binary and check for its marker.
+#
+# It is a RATCHET, not a fixed advisory: run the same smoke fixture against
+# the INCUMBENT (currently-deployed) binary. If the incumbent already
+# passes, a regressing candidate is a BLOCKING failure (pass/fail, counted
+# in PASS/TOTAL) — this check can never silently go dark again once a
+# passing binary has shipped. If the incumbent still fails (today's case:
+# every currently-deployed binary fails this check), the candidate's result
+# stays informational (advise_pass/advise_fail) so today's deploys are not
+# blocked by a check nothing has ever passed. No human step is needed to
+# flip modes — it flips itself the moment a passing binary becomes the
+# incumbent.
+if [ -x "$INCUMBENT_BIN" ] && native_build_smoke_check "$INCUMBENT_BIN"; then
+    INCUMBENT_SMOKE_OK=1
+    printf 'native-build-smoke: RATCHET (incumbent=pass)\n'
+else
+    INCUMBENT_SMOKE_OK=0
+    printf 'native-build-smoke: ADVISORY (incumbent=fail)\n'
+fi
+
+if native_build_smoke_check "$BIN"; then
+    if [ "$INCUMBENT_SMOKE_OK" -eq 1 ]; then
+        pass "native-build-smoke" "$NB_LAST_MSG"
+    else
+        advise_pass "native-build-smoke" "$NB_LAST_MSG"
+    fi
+else
+    if [ "$INCUMBENT_SMOKE_OK" -eq 1 ]; then
+        fail "native-build-smoke" "$NB_LAST_MSG"
+    else
+        advise_fail "native-build-smoke" "$NB_LAST_MSG"
+    fi
+fi
+
+printf -- '---------------------------------------------------------------\n'
 printf 'GATE: %d/%d PASS' "$PASS" "$TOTAL"
 [ "$SKIP" -gt 0 ] && printf ' (%d skipped)' "$SKIP"
 printf '\n'
+[ "$ADV_TOTAL" -gt 0 ] && printf 'ADVISORY: %d/%d PASS (informational; does not affect gate exit status)\n' "$ADV_PASS" "$ADV_TOTAL"
 
 [ "$PASS" -eq "$TOTAL" ] || exit 1
 exit 0

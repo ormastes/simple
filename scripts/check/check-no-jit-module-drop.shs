@@ -416,6 +416,11 @@ u_timeout=0      # killed by the per-file budget (rc 124) — LOAD-DEPENDENT, an
                  # reason: a timeout is fixed by budget or by a quieter box, a
                  # silent non-zero is a real defect to chase.
 u_silent=0       # non-zero with no `error:` line — signal or OOM kill
+u_import=0       # `cannot resolve import` — the module's package context is not
+                 # reachable from a single-file compile
+u_typeerr=0      # a real type/semantic error that is not an undefined identifier
+                 # (`struct X has no field y`, `MIR lowering: Unsupported`)
+u_codegen=0      # object/relocation emission failed downstream of lowering
 u_other=0
 DROP_LIST="$RUN_DIR/drops.txt"
 UNMEAS_LIST="$RUN_DIR/unmeasurable.txt"
@@ -450,7 +455,22 @@ for f in $FILES; do
             ;;
         *)
             n_unmeasurable=$((n_unmeasurable + 1))
-            reason="$(grep -m1 -E '^error' "$log" 2>/dev/null | cut -c1-160)"
+            # CLASSIFY ON THE FULL LINE, TRUNCATE ONLY FOR THE RECORD.
+            #
+            # Until 2026-08-18 the first error line was truncated to 160
+            # characters BEFORE the case below matched on it. These paths are
+            # long, so the distinguishing keyword was routinely cut off and the
+            # file landed in `other`: measured on this tree, 33 of 35 `other`
+            # entries were truncated mid-message, and among them 5 were
+            # `cannot resolve import`, 5 `has no field`, 4 `SMF emission
+            # failed` (an EXISTING bucket the truncation was hiding) and 6
+            # `Failed to parse object`. The bucket breakdown exists so the
+            # unmeasured gap is not one opaque number; truncating first
+            # defeated exactly that. This changes only how the ALREADY
+            # UNMEASURED remainder is labelled — no file moves into the
+            # measured count, and no verdict changes.
+            reason_full="$(grep -m1 -E '^error' "$log" 2>/dev/null)"
+            reason="$(printf '%s' "$reason_full" | cut -c1-160)"
             if [ "${LAST_RC:-0}" -eq 124 ]; then
                 reason="killed by the ${TIMEOUT}s per-file budget (rc 124)${reason:+ — last error: $reason}"
                 u_timeout=$((u_timeout + 1))
@@ -460,11 +480,14 @@ for f in $FILES; do
                 u_silent=$((u_silent + 1))
                 bucket="silent"
             else
-                case "$reason" in
+                case "$reason_full" in
                     *'Undefined('*|*'unresolved '*) u_undefined=$((u_undefined + 1)); bucket="undefined" ;;
+                    *'cannot resolve import'*)      u_import=$((u_import + 1));       bucket="import" ;;
                     *'parse:'*)                     u_parse=$((u_parse + 1));         bucket="parse" ;;
                     *'lint:'*)                      u_lint=$((u_lint + 1));           bucket="lint" ;;
                     *'SMF emission failed'*)        u_emit=$((u_emit + 1));           bucket="emit" ;;
+                    *'Failed to parse object'*)     u_codegen=$((u_codegen + 1));     bucket="codegen" ;;
+                    *'has no field'*|*'MIR lowering'*) u_typeerr=$((u_typeerr + 1));  bucket="type-error" ;;
                     *)                              u_other=$((u_other + 1));         bucket="other" ;;
                 esac
             fi
@@ -497,7 +520,7 @@ cp "$UNMEAS_LIST" "$LOG_DIR/.unmeasurable.txt.$RUN_ID" 2>/dev/null && mv "$LOG_D
 if [ "$n_unmeasurable" -gt 0 ]; then
     echo "NOT MEASURED: $n_unmeasurable of $n_checked selected file(s) never reached the oracle."
     echo "      This fence has NO OPINION about them. They are neither clean nor dirty here."
-    echo "      breakdown: undefined-identifier=$u_undefined parse=$u_parse lint=$u_lint smf-emission=$u_emit timeout=$u_timeout silent=$u_silent other=$u_other"
+    echo "      breakdown: undefined-identifier=$u_undefined import=$u_import type-error=$u_typeerr parse=$u_parse lint=$u_lint smf-emission=$u_emit codegen=$u_codegen timeout=$u_timeout silent=$u_silent other=$u_other"
     echo "      list: $UNMEAS_LIST (also published at $LOG_DIR/unmeasurable.txt)"
 fi
 

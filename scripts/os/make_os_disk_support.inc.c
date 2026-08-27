@@ -747,4 +747,3 @@ static void write_desktop_font_image(
     write_directory(fonts_cluster, fonts, fonts_n);
     finish_fat32_image(img_path);
 }
-

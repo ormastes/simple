@@ -118,6 +118,11 @@ classify_runtime() {
 matrix_summary() {
     summary_file="$1"
     runtime_requested="$2"
+    if [ ! -f "$summary_file" ]; then
+        printf 'gpu_backend_matrix status=ERROR reason=missing-evidence-file file=%s\n' "$summary_file"
+        echo "ERROR — nothing was checked (no evidence file at $summary_file)"
+        return 2
+    fi
     selected_count=0
     for backend in cuda vulkan metal hip opencl; do
         has_target "$backend" && selected_count=$((selected_count + 1))
@@ -129,10 +134,18 @@ matrix_summary() {
     failure_count="$(grep -Ec '_result=FAIL$' "$summary_file" || true)"
     skip_count="$(grep -Ec '_result=SKIP_UNAVAILABLE$' "$summary_file" || true)"
 
+    if [ "$expected_count" -eq 0 ] || [ "$actual_count" -eq 0 ]; then
+        printf 'gpu_backend_matrix status=ERROR backends=%s layers=%s unique=%s expected=%s pass=%s failures=%s skips=%s runtime=%s reason=empty-matrix\n' \
+            "$selected_count" "$actual_count" "$unique_count" "$expected_count" \
+            "$pass_count" "$failure_count" "$skip_count" "$runtime_requested"
+        echo "ERROR — nothing was checked (0 GPU backend layers evaluated)"
+        return 2
+    fi
     if [ "$actual_count" -ne "$expected_count" ] || [ "$unique_count" -ne "$expected_count" ]; then
         printf 'gpu_backend_matrix status=FAIL backends=%s layers=%s unique=%s expected=%s pass=%s failures=%s skips=%s runtime=%s reason=incomplete-matrix\n' \
             "$selected_count" "$actual_count" "$unique_count" "$expected_count" \
             "$pass_count" "$failure_count" "$skip_count" "$runtime_requested"
+        echo "FAIL — $actual_count GPU backend layer(s) checked, incomplete matrix (expected $expected_count)"
         return 1
     fi
     if [ "$failure_count" -gt 0 ]; then
@@ -145,7 +158,22 @@ matrix_summary() {
     printf 'gpu_backend_matrix status=%s backends=%s layers=%s unique=%s expected=%s pass=%s failures=%s skips=%s runtime=%s\n' \
         "$matrix_status" "$selected_count" "$actual_count" "$unique_count" \
         "$expected_count" "$pass_count" "$failure_count" "$skip_count" "$runtime_requested"
-    [ "$failure_count" -eq 0 ]
+
+    # Verdict convention (.claude/rules/vcs.md).  This guard is artifact-first:
+    # a PASS layer is real source/artifact evidence read off the tree, which is
+    # available on ANY host.  So skips alongside >=1 verified layer are a
+    # legitimate RECORDED skip and the count is stated.  But zero verified
+    # layers means the guard proved nothing -> ERROR, never exit 0.
+    if [ "$failure_count" -gt 0 ]; then
+        echo "FAIL — $actual_count GPU backend layer(s) checked, $failure_count failure(s), $skip_count skip(s)"
+        return 1
+    fi
+    if [ "$pass_count" -eq 0 ]; then
+        echo "ERROR — nothing was checked ($skip_count GPU backend layer(s) skipped as unavailable, 0 verified)"
+        return 2
+    fi
+    echo "PASS — $actual_count GPU backend layer(s) checked, $pass_count verified, $skip_count recorded skip(s)"
+    return 0
 }
 
 matrix_self_test() {
@@ -211,9 +239,68 @@ self_test() {
     printf '%s\n' 'gpu_backend_layer_self_test=PASS'
 }
 
+# Fixture-driven proof of the VERDICT contract (PASS / FAIL / ERROR).  Feeds
+# matrix_summary synthetic summary files so every branch is exercised, and is
+# FATAL: it runs before every scan.
+verdict_self_test() {
+    vt_dir="${TMPDIR:-/tmp}/gpu-layer-verdict-self-test.$$"
+    mkdir -p "$vt_dir"
+    vt_fail=0
+    vt_saved_targets="$TARGETS"
+    TARGETS=cuda
+    vt_case() { # name file expect_exit expect_substr
+        # Never read an exit code through a pipe: run to a file, capture $? on
+        # the very next line, then read the verdict (last line) from the file.
+        if matrix_summary "$2" false >"$vt_dir/out.txt" 2>/dev/null; then vt_ec=0; else vt_ec=$?; fi
+        vt_out="$(tail -n 1 "$vt_dir/out.txt")"
+        if [ "$vt_ec" -ne "$3" ]; then
+            echo "verdict selftest FAIL $1: exit $vt_ec expected $3 ($vt_out)" >&2
+            vt_fail=$((vt_fail + 1)); return 0
+        fi
+        case "$vt_out" in
+            *"$4"*) ;;
+            *) echo "verdict selftest FAIL $1: '$vt_out' lacks '$4'" >&2; vt_fail=$((vt_fail + 1)) ;;
+        esac
+    }
+    # must-PASS: all four cuda layers verified
+    for st in emit validate link runtime; do
+        printf 'cuda_%s_result=PASS\n' "$st"
+    done >"$vt_dir/all_pass.env"
+    vt_case must-pass "$vt_dir/all_pass.env" 0 "PASS — 4 GPU backend layer(s) checked, 4 verified, 0 recorded skip(s)"
+    # must-PASS with recorded skips: verified evidence exists, skips stated
+    { printf 'cuda_emit_result=PASS\ncuda_validate_result=PASS\n'
+      printf 'cuda_link_result=SKIP_UNAVAILABLE\ncuda_runtime_result=SKIP_UNAVAILABLE\n'; } >"$vt_dir/mixed.env"
+    vt_case must-pass-with-skips "$vt_dir/mixed.env" 0 "PASS — 4 GPU backend layer(s) checked, 2 verified, 2 recorded skip(s)"
+    # must-FAIL
+    { printf 'cuda_emit_result=PASS\ncuda_validate_result=FAIL\n'
+      printf 'cuda_link_result=FAIL\ncuda_runtime_result=SKIP_UNAVAILABLE\n'; } >"$vt_dir/fail.env"
+    vt_case must-fail "$vt_dir/fail.env" 1 "FAIL — 4 GPU backend layer(s) checked, 2 failure(s), 1 skip(s)"
+    # must-ERROR: every layer skipped, nothing verified
+    for st in emit validate link runtime; do
+        printf 'cuda_%s_result=SKIP_UNAVAILABLE\n' "$st"
+    done >"$vt_dir/all_skip.env"
+    vt_case must-error-all-skipped "$vt_dir/all_skip.env" 2 "ERROR — nothing was checked (4 GPU backend layer(s) skipped as unavailable, 0 verified)"
+    # must-ERROR: nonexistent evidence file -> zero layers evaluated
+    vt_case must-error-missing-evidence "$vt_dir/does-not-exist.env" 2 "ERROR — nothing was checked"
+    rm -rf "$vt_dir"
+    TARGETS="$vt_saved_targets"
+    if [ "$vt_fail" -gt 0 ]; then
+        echo "gpu_backend_verdict_selftest status=FAIL cases_failed=$vt_fail" >&2
+        return 1
+    fi
+    echo "gpu_backend_verdict_selftest status=PASS cases=5"
+    return 0
+}
+
 if [ "$SELF_TEST" = true ]; then
+    verdict_self_test || exit 1
     self_test
     exit 0
+fi
+
+if ! verdict_self_test; then
+    echo "ERROR — nothing was checked (verdict selftest failed)"
+    exit 2
 fi
 
 if [ "$MATRIX_SELF_TEST" = true ]; then

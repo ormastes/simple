@@ -3,6 +3,8 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 source_file="$root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+scheduler_source="$root/examples/09_embedded/simple_os/arch/arm64/boot/scheduler_runtime_owner.c"
+value_source="$root/examples/09_embedded/simple_os/arch/arm64/boot/value_runtime_owner.c"
 work=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-arm64-runtime-owner.XXXXXX")
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
@@ -10,6 +12,12 @@ clang --target=aarch64-none-elf -ffreestanding -c \
     -I "$root/examples/09_embedded/simple_os/arch/arm64/boot" \
     "$source_file" -o "$work/runtime.o"
 llvm-nm --defined-only "$work/runtime.o" > "$work/symbols.txt"
+clang --target=aarch64-none-elf -ffreestanding -c \
+    "$scheduler_source" -o "$work/scheduler.o"
+llvm-nm --defined-only "$work/scheduler.o" > "$work/scheduler-symbols.txt"
+clang --target=aarch64-none-elf -ffreestanding -c \
+    "$value_source" -o "$work/value.o"
+llvm-nm --defined-only "$work/value.o" > "$work/value-symbols.txt"
 
 for symbol in rt_copy_user_byte spl_mutex_lock spl_mutex_unlock \
     rt_read_cr3_raw rt_write_cr3_raw; do
@@ -18,6 +26,34 @@ for symbol in rt_copy_user_byte spl_mutex_lock spl_mutex_unlock \
         echo "FAIL arm64 runtime owner is not a function: $symbol" >&2
         exit 1
     }
+done
+
+awk '$NF == "rt_arm64_wfe" && $(NF - 1) ~ /^[Tt]$/ { found=1 } END { exit !found }' \
+    "$work/scheduler-symbols.txt" || {
+    echo 'FAIL ARM64 scheduler runtime owner is missing rt_arm64_wfe' >&2
+    exit 1
+}
+if grep -Eq '[[:space:]]rt_arm64_wfe$' "$work/symbols.txt"; then
+    echo 'FAIL duplicate rt_arm64_wfe remains in monolithic ARM64 stubs' >&2
+    exit 1
+fi
+grep -Fq 'scheduler_runtime_owner.c' \
+    "$root/src/compiler/70.backend/backend/llvm_native_link.spl"
+grep -Fq 'value_runtime_owner.c' \
+    "$root/src/compiler/70.backend/backend/llvm_native_link.spl"
+
+for symbol in rt_raw_i64_to_string rt_any_sub rt_any_mul rt_any_div \
+              rt_any_mod rt_any_lt rt_any_gt rt_any_le rt_any_ge; do
+    awk -v expected="$symbol" \
+        '$NF == expected && $(NF - 1) ~ /^[Tt]$/ { found=1 } END { exit !found }' \
+        "$work/value-symbols.txt" || {
+        echo "FAIL ARM64 value runtime owner is missing $symbol" >&2
+        exit 1
+    }
+    if grep -Eq "[[:space:]]${symbol}$" "$work/symbols.txt"; then
+        echo "FAIL duplicate $symbol remains in monolithic ARM64 stubs" >&2
+        exit 1
+    fi
 done
 
 if grep -Eq '[[:space:]]_g_vfs_root_read_file_bytes_once$' "$work/symbols.txt"; then

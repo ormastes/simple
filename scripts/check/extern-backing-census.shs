@@ -14,7 +14,7 @@
 #   libc_libm               defined in libc/libm/libgcc_s, i.e. resolvable by dlsym
 #   interp_extern_registry  a string literal in interpreter_extern/**.rs (name-dispatched)
 # Candidate-unbacked sub-classes:
-#   c_runtime_source_only     defined in owned src/runtime/*.c but absent from the seed binary
+#   c_runtime_source_only     defined in owned src/runtime or src/os C/C++ but absent from the seed binary
 #   rust_source_feature_gated `pub extern "C" fn` in src/compiler_rust but absent from the binary
 #   external_library_symbol   SDL_/gl/cu/vk/... — resolved from a dlopen'd library, if present
 #   SHADOWED_BY_SPL_FN        a pure-Simple `fn` of the same name exists somewhere
@@ -32,7 +32,13 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "${root}"
 OUT="${1:-/dev/stdout}"
-BIN="${SIMPLE_BIN:-${root}/bin/release/x86_64-unknown-linux-gnu/simple}"
+if [ -n "${SIMPLE_BIN:-}" ]; then
+  BIN=$SIMPLE_BIN
+elif [ -x "${root}/bin/release/x86_64-unknown-linux-gnu/simple" ]; then
+  BIN=${root}/bin/release/x86_64-unknown-linux-gnu/simple
+else
+  BIN=${root}/bin/simple
+fi
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT INT TERM
 
 grep -rnE --include='*.spl' --exclude-dir=vendor \
@@ -60,16 +66,49 @@ for L in libc.so.6 libm.so.6 libgcc_s.so.1 libpthread.so.0 libdl.so.2; do
 done | sort -u > "$W/libc.txt"
 grep -rhoE '"[A-Za-z_][A-Za-z0-9_]{2,}"' src/compiler_rust/compiler/src/interpreter_extern/ --include=*.rs \
   | tr -d '"' | sort -u > "$W/interp.txt"
-find src/runtime \( -name '*.c' -o -name '*.h' \) | grep -v '/vendor/' \
-  | grep -vE 'miniaudio.h|stb_image.h|stb_truetype.h' > "$W/cfiles.txt"
-xargs -a "$W/cfiles.txt" grep -hoE '^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\([^;]*$' 2>/dev/null \
-  | grep -oE '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' | tr -d ' (' | sort -u > "$W/cdefs.txt"
+find src/runtime src/os -name '*.c' | grep -v '/vendor/' > "$W/c-source-files.txt"
+find src/runtime src/os \( -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' \) \
+  | grep -v '/vendor/' > "$W/cxx-source-files.txt"
+find src/runtime src/os \( -name '*.h' -o -name '*.hh' -o -name '*.hpp' \) \
+  | grep -v '/vendor/' | grep -vE 'miniaudio.h|stb_image.h|stb_truetype.h' \
+  > "$W/c-header-files.txt"
+extract_native_definitions() {
+  files=$1
+  output=$2
+  if [ -s "$files" ]; then
+    xargs -a "$files" grep -hoE '^[A-Za-z_][A-Za-z0-9_ \*]*[ \*]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\([^;]*$' 2>/dev/null \
+      | grep -oE '[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' | tr -d ' (' | sort -u > "$output"
+  else
+    : > "$output"
+  fi
+}
+extract_native_definitions "$W/c-source-files.txt" "$W/cdefs.txt"
+extract_native_definitions "$W/cxx-source-files.txt" "$W/cxxdefs.txt"
+extract_native_definitions "$W/c-header-files.txt" "$W/cheaderdefs.txt"
 grep -rhoE '(pub[[:space:]]+(unsafe[[:space:]]+)?extern[[:space:]]+"C"[[:space:]]+fn|#\[no_mangle\][[:space:]]*pub[[:space:]]+fn)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
   src/compiler_rust --include=*.rs 2>/dev/null | awk '{print $NF}' | sort -u > "$W/rsdefs.txt"
 grep -rhoE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' --include='*.spl' \
   --exclude-dir=vendor src test 2>/dev/null | awk '{print $NF}' | sort -u > "$W/splfns.txt"
-sed 's/$/(/' "$W/syms.txt" > "$W/needles.txt"
-grep -rnoFf "$W/needles.txt" --include='*.spl' --exclude-dir=vendor src test 2>/dev/null > "$W/occ.txt" || :
+# Scan every Simple source once. GNU grep's `-Ff` matcher becomes extremely
+# slow with the several-thousand-symbol extern set (observed at >1 hour),
+# because this report asks it to retain line/filename detail for every match.
+# Loading the exact symbol set into a hash keeps this O(source bytes + hits),
+# while preserving the same `file:line:symbol(` interchange below.
+export EXTERN_CENSUS_SYMBOLS="$W/syms.txt"
+find src test -type f -name '*.spl' ! -path '*/vendor/*' -print0 |
+xargs -0 -r -n 200 perl -ne '
+  BEGIN {
+    open my $fh, "<", $ENV{EXTERN_CENSUS_SYMBOLS} or die $!;
+    while (my $symbol = <$fh>) {
+      chomp $symbol;
+      $wanted{$symbol}=1 if $symbol ne "";
+    }
+  }
+  while (/\b([A-Za-z_]\w*)\s*\(/g) {
+    print "$ARGV:$.:$1(\n" if $wanted{$1};
+  }
+  close ARGV if eof;
+' > "$W/occ.txt"
 
 W="$W" OUT="$OUT" python3 - <<'PY'
 import os,collections
@@ -88,7 +127,8 @@ for L in open(f"{W}/occ.txt"):
     s=m.rstrip("(")
     if s in sset: occ[s].append((f,ln))
 bare,binf,libc,interp=S("bare.txt"),S("bin.txt"),S("libc.txt"),S("interp.txt")
-cdefs,rsdefs,splfns=S("cdefs.txt"),S("rsdefs.txt"),S("splfns.txt")
+cdefs,cxxdefs,cheaderdefs=S("cdefs.txt"),S("cxxdefs.txt"),S("cheaderdefs.txt")
+rsdefs,splfns=S("rsdefs.txt"),S("splfns.txt")
 EXT=("SDL_","SDL3_","sqlite3_","gl","cu","nv","cl","Vk","vk","av","Py_","ma_","stbi_","curl_","SSL_","EVP_","BIO_","X509_","LLVM")
 rows=[];c=collections.Counter()
 for s in syms:
@@ -98,15 +138,26 @@ for s in syms:
     elif s in binf:   k="in_deployed_binary"
     elif s in libc:   k="libc_libm"
     elif s in interp: k="interp_extern_registry"
-    elif s in cdefs:  k="c_runtime_source_only"
+    elif s in cdefs or s in cxxdefs or s in cheaderdefs: k="c_runtime_source_only"
     elif s in rsdefs: k="rust_source_feature_gated"
     elif s.startswith(EXT): k="external_library_symbol"
     elif n==0:        k="DEAD_DECLARATION"
     elif s in splfns: k="SHADOWED_BY_SPL_FN"
     else:             k="GENUINELY_MISSING"
-    c[k]+=1; rows.append((s,k,n,sorted(dfs)[0] if dfs else ""))
+    languages=[]
+    if s in cdefs: languages.append("c")
+    if s in cxxdefs: languages.append("cxx")
+    if s in cheaderdefs: languages.append("c_or_cxx_header")
+    if s in rsdefs: languages.append("rust_export")
+    if s in interp: languages.append("rust_interpreter")
+    if s in libc: languages.append("system_c")
+    if s.startswith(EXT): languages.append("external_c_abi")
+    if s in bare: languages.append("freestanding")
+    if s in binf and not languages: languages.append("linked_native_unknown")
+    if not languages: languages.append("none_observed")
+    c[k]+=1; rows.append((s,k,n,sorted(dfs)[0] if dfs else "",",".join(languages)))
 with open(OUT,"w") as fh:
-    fh.write("symbol\tclass\tscoped_callsites\tfirst_declaring_file\n")
+    fh.write("symbol\tclass\tscoped_callsites\tfirst_declaring_file\tsource_languages\n")
     for r in sorted(rows,key=lambda t:(t[1],-t[2],t[0])): fh.write("\t".join(map(str,r))+"\n")
 import sys
 for k,v in c.most_common(): print(f"{v:6d}  {k}", file=sys.stderr)

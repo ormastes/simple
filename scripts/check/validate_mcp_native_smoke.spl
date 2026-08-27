@@ -1,10 +1,13 @@
 # Validate MCP native smoke outputs without Python.
 
-use std.nogc_sync_mut.io_runtime.{env_get, file_read, get_args}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, file_read_bytes}
 
 struct SmokeResult:
     json_valid: bool
+    framing_valid: bool
     schema_valid: bool
+    correlation_valid: bool
+    feature_valid: bool
     tool_count: i64
     wm_text_valid: bool
 
@@ -32,62 +35,58 @@ fn parse_nonnegative_i64(value: text) -> i64:
         i = i + 1
     n
 
-fn validate_content_length_frames(raw: text) -> bool:
-    val prefix = "Content-Length: "
+fn byte_is_ascii_digit(values: [u8], index: i64) -> bool:
+    if index < 0 or index >= values.len():
+        return false
+    val value = values[index]
+    value >= 48u8 and value <= 57u8
+
+fn bytes_match_at(values: [u8], offset: i64, expected: [u8]) -> bool:
+    if offset < 0 or offset + expected.len() > values.len():
+        return false
+    var i: i64 = 0
+    while i < expected.len():
+        if values[offset + i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn validate_content_length_frames(bytes: [u8]) -> bool:
+    val prefix: [u8] = [67u8, 111u8, 110u8, 116u8, 101u8, 110u8, 116u8, 45u8, 76u8, 101u8, 110u8, 103u8, 116u8, 104u8, 58u8, 32u8]
+    val crlf_separator: [u8] = [13u8, 10u8, 13u8, 10u8]
+    val lf_separator: [u8] = [10u8, 10u8]
     var pos: i64 = 0
     var count: i64 = 0
-    while pos < raw.len():
-        if raw.substring(pos, pos + prefix.len()) != prefix:
+    while pos < bytes.len():
+        if not bytes_match_at(bytes, pos, prefix):
             return false
-        val tail = raw.substring(pos, raw.len())
-        var sep = "\r\n\r\n"
-        var sep_rel = tail.find(sep)
-        if sep_rel < 0:
-            sep = "\n\n"
-            sep_rel = tail.find(sep)
-        if sep_rel < 0:
+        var len_end = pos + prefix.len()
+        while len_end < bytes.len() and byte_is_ascii_digit(bytes, len_end):
+            len_end = len_end + 1
+        if len_end == pos + prefix.len():
             return false
-        val len_start = pos + prefix.len()
-        val len_end = pos + sep_rel
-        val declared = parse_nonnegative_i64(raw.substring(len_start, len_end))
-        if declared <= 0 or declared > raw.len():
+        var declared: i64 = 0
+        var digit_pos = pos + prefix.len()
+        while digit_pos < len_end:
+            declared = declared * 10 + (bytes[digit_pos] as i64) - 48
+            digit_pos = digit_pos + 1
+        if declared <= 0:
             return false
-        val body_start = pos + sep_rel + sep.len()
+        var body_start = len_end
+        if bytes_match_at(bytes, body_start, crlf_separator):
+            body_start = body_start + 4
+        elif bytes_match_at(bytes, body_start, lf_separator):
+            body_start = body_start + 2
+        else:
+            return false
         val body_end = body_start + declared
-        if body_end > raw.len():
+        if body_end > bytes.len():
             return false
-        val body = raw.substring(body_start, body_end)
-        if body.len() != declared or not body.starts_with("{"):
+        if bytes[body_start] != 123u8:
             return false
         pos = body_end
         count = count + 1
     count > 0
-
-fn count_content_length_frames(raw: text) -> i64:
-    val prefix = "Content-Length: "
-    var pos: i64 = 0
-    var count: i64 = 0
-    while pos < raw.len():
-        if raw.substring(pos, pos + prefix.len()) != prefix:
-            return count
-        val tail = raw.substring(pos, raw.len())
-        var sep = "\r\n\r\n"
-        var sep_rel = tail.find(sep)
-        if sep_rel < 0:
-            sep = "\n\n"
-            sep_rel = tail.find(sep)
-        if sep_rel < 0:
-            return count
-        val declared = parse_nonnegative_i64(raw.substring(pos + prefix.len(), pos + sep_rel))
-        if declared <= 0:
-            return count
-        val body_start = pos + sep_rel + sep.len()
-        val body_end = body_start + declared
-        if body_end > raw.len():
-            return count
-        pos = body_end
-        count = count + 1
-    count
 
 fn extract_json_payloads(text_value: text) -> [text]:
     var payloads: [text] = []
@@ -250,34 +249,51 @@ fn last_tools_payload(payloads: [text]) -> text:
         i = i - 1
     return ""
 
+fn payload_for_id(payloads: [text], id: text) -> text:
+    val quoted_id = "\"id\":\"" + id + "\""
+    for payload in payloads:
+        if payload.contains(quoted_id):
+            return payload
+    ""
+
 fn validate_payload_file(path: text, prefix: text) -> SmokeResult:
     val raw = file_read(path)
-    val expected_frames: i64 = if prefix == "mcp": 2 else: 1
+    val framing_bytes = file_read_bytes(path)
+    val expected_frames: i64 = if prefix == "mcp": 5 else: 3
     val frame_count = count_occurrences(raw, "Content-Length:")
-    val framing_valid = frame_count >= expected_frames and not raw.contains("Content-Length: 2305843009213693951")
+    val framing_valid = frame_count >= expected_frames and validate_content_length_frames(framing_bytes) and not raw.contains("Content-Length: 2305843009213693951")
     val payloads = extract_json_payloads(raw)
     var json_valid = payloads.len() >= expected_frames and frame_count >= expected_frames
+    val initialize_frame = payload_for_id(payloads, "1")
+    val first_tools_frame = payload_for_id(payloads, "2")
+    val feature_id = if prefix == "mcp": "4" else: "3"
+    val feature_frame = payload_for_id(payloads, feature_id)
+    val pipe_frame = if prefix == "mcp": payload_for_id(payloads, "5") else: ""
+    val correlation_valid = initialize_frame.contains("\"protocolVersion\"") and first_tools_frame.contains("\"tools\":") and feature_frame != "" and (prefix != "mcp" or pipe_frame != "")
+    val feature_marker = if prefix == "mcp": "Project Diagnostics" else: "\\\"name\\\":\\\"main\\\""
+    val feature_valid = feature_frame.contains("\"result\":") and feature_frame.contains(feature_marker) and not feature_frame.contains("\"error\":") and not feature_frame.contains("\"isError\":true") and (prefix != "mcp" or (pipe_frame.contains("\"result\":") and pipe_frame.contains("-- simple_pipe codebase query=main --") and not pipe_frame.contains("\"error\":") and not pipe_frame.contains("\"isError\":true")))
+    json_valid = json_valid and correlation_valid
     var schema_valid = json_valid
     var tool_count: i64 = 0
-    if payloads.len() == 0:
+    val tools_frame = last_tools_payload(payloads)
+    if tools_frame == "":
         schema_valid = false
     else:
-        val last = payloads[payloads.len() - 1]
-        if not last.contains("\"tools\":"):
+        tool_count = count_occurrences(tools_frame, "\"name\":\"")
+        val schema_count = count_occurrences(tools_frame, "\"inputSchema\":")
+        if tool_count <= 0 or schema_count < tool_count or not tools_frame.contains("\"properties\":") or not tools_frame.contains("\"required\":"):
             schema_valid = false
-        else:
-            tool_count = count_occurrences(last, "\"name\":\"")
-            val schema_count = count_occurrences(last, "\"inputSchema\":")
-            if tool_count <= 0 or schema_count < tool_count or not last.contains("\"properties\":") or not last.contains("\"required\":"):
-                schema_valid = false
     var wm_text_valid = true
     if prefix == "mcp":
         wm_text_valid = tools_frame.contains("\"name\":\"play_wm_text_status\"") and tools_frame.contains("\"name\":\"play_wm_text_snapshot\"") and tools_frame.contains("\"name\":\"play_wm_text_find\"") and tools_frame.contains("\"name\":\"play_wm_text_act\"")
-    SmokeResult(json_valid: json_valid, framing_valid: framing_valid, schema_valid: schema_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
+    SmokeResult(json_valid: json_valid, framing_valid: framing_valid, schema_valid: schema_valid, correlation_valid: correlation_valid, feature_valid: feature_valid, tool_count: tool_count, wm_text_valid: wm_text_valid)
 
 fn print_result(prefix: text, result: SmokeResult):
     print prefix + "_tools_json_valid=" + result.json_valid.to_string()
+    print prefix + "_framing_valid=" + result.framing_valid.to_string()
     print prefix + "_tools_schema_valid=" + result.schema_valid.to_string()
+    print prefix + "_correlated_ids_valid=" + result.correlation_valid.to_string()
+    print prefix + "_main_feature_call_valid=" + result.feature_valid.to_string()
     print prefix + "_tools_count=" + result.tool_count.to_string()
     if prefix == "mcp":
         print prefix + "_wm_text_tools_present=" + result.wm_text_valid.to_string()
@@ -286,23 +302,33 @@ fn print_missing_args():
     print "mcp_tools_json_valid=false"
     print "mcp_framing_valid=false"
     print "mcp_tools_schema_valid=false"
+    print "mcp_correlated_ids_valid=false"
+    print "mcp_main_feature_call_valid=false"
     print "mcp_tools_count=0"
     print "mcp_wm_text_tools_present=false"
     print "lsp_tools_json_valid=false"
+    print "lsp_framing_valid=false"
     print "lsp_tools_schema_valid=false"
+    print "lsp_correlated_ids_valid=false"
+    print "lsp_main_feature_call_valid=false"
     print "lsp_tools_count=0"
 
 fn validate_rt_forward_cache(path: text) -> bool:
     if path == "":
         return false
     val raw = file_read(path)
-    raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_line") and raw.contains("rt_stdin_read_line_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_bytes") and raw.contains("rt_stdin_read_chars_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_message") and raw.contains("rt_stdin_read_mcp_message_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_is_json_lines") and raw.contains("cached_transport_mode")
+    val forward_cache_valid = raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_line") and raw.contains("rt_stdin_read_line_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_read_bytes") and raw.contains("rt_stdin_read_chars_text") and raw.contains("std.mcp_sdk.transport.stdio.mcp_stdio_is_json_lines") and raw.contains("cached_transport_mode")
+    # framed-message reads are pure-Simple (read_stdin_message in
+    # src/lib/nogc_sync_mut/mcp_sdk/transport/stdio.spl) — no rt forward
+    # exists for them, so the cache is not expected to mention that path.
+    val stdio_source = file_read("src/lib/nogc_sync_mut/mcp_sdk/transport/stdio.spl")
+    val stdio_message_read_valid = stdio_source.contains("read_stdin_message")
+    forward_cache_valid and stdio_message_read_valid
 
 fn main() -> i32:
-    val args = get_args()
-    val mcp_path = env_or_arg(args, "MCP_NATIVE_SMOKE_MCP_OUT", "--mcp-out")
-    val lsp_path = env_or_arg(args, "MCP_NATIVE_SMOKE_LSP_OUT", "--lsp-out")
-    val rt_forward_cache_path = env_or_arg(args, "MCP_NATIVE_SMOKE_RT_FORWARD_CACHE", "--rt-forward-cache")
+    val mcp_path = env_get("MCP_NATIVE_SMOKE_MCP_OUT")
+    val lsp_path = env_get("MCP_NATIVE_SMOKE_LSP_OUT")
+    val rt_forward_cache_path = env_get("MCP_NATIVE_SMOKE_RT_FORWARD_CACHE")
     if mcp_path == "" or lsp_path == "":
         print_missing_args()
         return 1
@@ -312,6 +338,6 @@ fn main() -> i32:
     print_result("mcp", mcp)
     print_result("lsp", lsp)
     print "rt_forward_cache_valid=" + rt_forward_cache_valid.to_string()
-    if mcp.json_valid and mcp.framing_valid and mcp.schema_valid and mcp.wm_text_valid and lsp.json_valid and lsp.framing_valid and lsp.schema_valid and rt_forward_cache_valid:
+    if mcp.json_valid and mcp.framing_valid and mcp.schema_valid and mcp.correlation_valid and mcp.feature_valid and mcp.wm_text_valid and lsp.json_valid and lsp.framing_valid and lsp.schema_valid and lsp.correlation_valid and lsp.feature_valid and rt_forward_cache_valid:
         return 0
     1

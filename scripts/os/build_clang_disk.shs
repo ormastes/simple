@@ -1,31 +1,32 @@
 #!/bin/sh
-# build_clang_disk.shs — Stage C: run clang_static (--version) INSIDE SimpleOS.
+# build_clang_disk.shs — compile /hello.c to an ELF object inside SimpleOS.
 #
-# 1. Build the FS-exec kernel (fs_elf_exec_smoke_entry.spl) with the Rust seed
-#    native-build (freestanding x86_64-unknown-none).
+# 1. Build the FS-exec kernel with a functional self-hosted Simple compiler.
 # 2. Build a FAT32 NVMe image whose /FSEXEC.ELF is the 119 MB static
 #    clang_static: fsexec_mkimg_big.spl writes the structural prefix, then this
 #    script appends the raw ELF payload (at cluster 3, contiguous) and truncates
 #    to the full image size.
 # 3. Boot QEMU q35 with the image on NVMe, capture serial. The kernel streams
-#    the ELF into ring-3 user pages and iretq's to clang's _start@0x10000000.
+#    clang into ring-3, runs `-cc1 -emit-obj`, and dumps /hello.o over serial.
 #
-# Env knobs: SKIP_KERNEL=1 (reuse kernel), SKIP_IMG=1 (reuse image),
-#            QEMU_MEM (default 4G), QEMU_TIMEOUT (default 180s).
+# Env knobs: QEMU_MEM (default 4G), QEMU_TIMEOUT (default 180s).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-SEED="src/compiler_rust/target/release/simple"
+COMPILER="${SIMPLE_BUILD_COMPILER:-}"
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_elf_exec_smoke_entry.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 OUT_DIR="build/os/elfexec"
 KERNEL_OUTPUT="$OUT_DIR/fsexec_smoke.elf"
 CLANG_BIN="build/os/clang_static/bin/clang_static"
 IMG="$OUT_DIR/fat32-clang.img"
+LINK_IMG="$OUT_DIR/fat32-clang-link.img"
 PREFIX="$OUT_DIR/fat32-clang-prefix.bin"
+IMAGE_WRITER="$OUT_DIR/fsexec_mkimg_big"
 SERIAL_LOG="$OUT_DIR/clang_run.log"
+LINK_LOG="$OUT_DIR/clang_link_run.log"
 QEMU_MEM="${QEMU_MEM:-4G}"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-180}"
 QEMU_CPU="${QEMU_CPU:-qemu64}"
@@ -153,17 +154,23 @@ SPL
     done
     echo "[clang-disk] building kernel -> $KERNEL_OUTPUT"
     rm -f "$KERNEL_OUTPUT"   # never run a stale kernel if this link fails
-    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
-    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
-    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
-        "$SEED" native-build \
+    BUILD_LOG="$OUT_DIR/fsexec_smoke_build.log"
+    if ! SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+        SIMPLE_NATIVE_CPU=x86-64-v1 \
+        SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+        PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$COMPILER" native-build \
         --source build/os/generated --source src/os --source src/lib \
         --source examples/09_embedded/simple_os/arch/x86_64 \
-        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --backend cranelift --opt-level=aggressive --log off \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
-        --linker-script "$LINKER_SCRIPT" 2>&1 | tail -8
-    [ -f "$KERNEL_OUTPUT" ] || { echo "[clang-disk] KERNEL BUILD FAILED"; exit 1; }
+        --linker-script "$LINKER_SCRIPT" >"$BUILD_LOG" 2>&1; then
+        tail -20 "$BUILD_LOG"
+        fail "kernel native-build failed"
+    fi
+    tail -8 "$BUILD_LOG"
+    [ -s "$KERNEL_OUTPUT" ] || fail "kernel build produced no ELF"
 fi
 SIMPLE_ALLOW_FREESTANDING_STUBS=1 sh scripts/check/check-simpleos-x86-kernel-elf.shs "$KERNEL_OUTPUT"
 KERNEL_SHA="$(sha256sum "$KERNEL_OUTPUT" | awk '{print $1}')"
@@ -174,11 +181,13 @@ if [ "${SKIP_IMG:-0}" != "1" ]; then
     [ -f "$CLANG_BIN" ] || { echo "[clang-disk] missing $CLANG_BIN"; exit 1; }
     # Stage D: place a small C source (HELLO.C) on the FAT image for `clang -cc1`.
     mkdir -p "$OUT_DIR/stageD"
-    printf 'int main(void){ return 7; }\n' > "$OUT_DIR/stageD/hello.c"
+    rm -f "$OUT_DIR/stageD/hello.o"
+    cp examples/09_embedded/simpleos_hello_c/hello_fs.c "$OUT_DIR/stageD/hello.c"
     SIZE="$(stat -c%s "$CLANG_BIN")"
     echo "$SIZE" > "$OUT_DIR/payload_size.txt"
     echo "[clang-disk] clang_static size=$SIZE bytes; writing FAT32 prefix"
-    SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run scripts/os/fsexec_mkimg_big.spl 2>&1 | grep -E 'fsexec_mkimg_big' || true
+    rm -f "$PREFIX" "$OUT_DIR/fat32-clang-total.txt"
+    run_image_writer
     [ -f "$PREFIX" ] || { echo "[clang-disk] prefix build FAILED"; exit 1; }
     TOTAL="$(cat "$OUT_DIR/fat32-clang-total.txt")"
     echo "[clang-disk] assembling image: prefix + payload -> $IMG (total=$TOTAL)"
@@ -186,6 +195,7 @@ if [ "${SKIP_IMG:-0}" != "1" ]; then
     truncate -s "$TOTAL" "$IMG"
     echo "[clang-disk] image size=$(stat -c%s "$IMG")"
 fi
+echo "[clang-disk] artifact image=$IMG sha256=$(sha256sum "$IMG" | awk '{print $1}')"
 
 # ---- 3. Compile in guest -------------------------------------------------
 run_guest "$IMG" "$SERIAL_LOG" compile 0

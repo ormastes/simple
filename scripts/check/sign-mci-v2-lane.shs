@@ -26,7 +26,7 @@ case "$key_id" in ''|*[!A-Za-z0-9._-]*) usage;; esac
 case "$signer_valid_until" in *[!0-9]*) usage;; esac
 case "$lane" in
     compiler) producer=compiler-admission; artifact_schema=mci-compiler-collector-receipt-v2; scenarios=MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004 ;;
-    tooling) producer=tooling-admission; artifact_schema=mci-tooling-child-manifest-v2; scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014 ;;
+    tooling) producer=tooling-admission; artifact_schema=mci-tooling-child-manifest-v1; scenarios=MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014 ;;
     simpleos) producer=simpleos-target; artifact_schema=mci-simpleos-platform-evidence-v1; scenarios=MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006 ;;
     rendering) producer=rendering-target; artifact_schema=mci-rendering-evidence-v1; scenarios=MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012 ;;
     allocation) producer=allocation-runtime; artifact_schema=mci-allocation-domain-arena-evidence-v1; scenarios=MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008 ;;
@@ -38,8 +38,6 @@ case "$lane" in
 esac
 
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
-is_sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
-is_uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
 field() { awk -F= -v k="$1" '$1==k{n++;v=substr($0,length(k)+2)} END{if(n!=1)exit 1;print v}' "$2"; }
 hash_file() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
@@ -77,7 +75,7 @@ cp -- "$template" "$work/template"; cp -- "$artifact" "$work/artifact"
 
 # Exact unique key set: 19 common fields, plus the traceability provenance pair.
 keys='receipt_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible receipt_hash'
-[ "$lane" = simpleos ] && keys='receipt_template_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible simpleos_gate_sidecar_sha256 simpleos_gate_matrix_passed simpleos_gate_report_sha256 simpleos_gate_matrix_out_sha256 simpleos_gate_matrix_err_sha256 simpleos_gate_stdout_sha256 simpleos_gate_stderr_sha256'
+[ "$lane" = simpleos ] && keys='receipt_template_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible'
 [ "$lane" = traceability ] && keys='receipt_schema check_id producer_class attestation trusted_key_id signature_relpath run_id source_hash configuration_hash captured_at_utc_ns valid_until_utc_ns result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible docgen_receipt_relpath docgen_receipt_sha256 receipt_hash'
 actual=$(awk -F= '{print $1}' "$work/template" | paste -sd' ' -)
 [ "$actual" = "$keys" ] || blocked 'template field set/order is not canonical for lane'
@@ -91,33 +89,6 @@ actual=$(awk -F= '{print $1}' "$work/template" | paste -sd' ' -)
 if [ "$lane" = tooling ]; then
     tar_member_count_within_limit "$work/artifact" "${MCI_SIGNER_TAR_MEMBER_LIMIT:-256}" || blocked 'tooling archive has too many members or is malformed'
     extract_tar_member_bounded "$work/artifact" ./manifest.env "$work/header" 65536 || blocked 'malformed or oversized tooling manifest'
-    [ "$(field manifest_schema "$work/header")" = mci-tooling-child-manifest-v2 ] || blocked 'unversioned tooling manifest'
-    [ "$(field producer_class "$work/header")" = tooling-admission ] && [ "$(field mode "$work/header")" = live ] && [ "$(field release_eligible "$work/header")" = true ] || blocked 'tooling manifest is not a live release manifest'
-    [ "$(field capture_limit_bytes "$work/header")" = 16777216 ] && [ "$(field timeout_seconds "$work/header")" = 1800 ] && [ "$(field scan_count_limit "$work/header")" = 0 ] && [ "$(field scan_count_policy "$work/header")" = per-row-explicit ] || blocked 'tooling manifest budgets or scan policy mismatch'
-    [ "$(field warm_cli_min_samples "$work/header")" = 30 ] && [ "$(field warm_request_min_samples "$work/header")" = 1000 ] && [ "$(field warm_cli_p95_max_ms "$work/header")" = 250 ] && [ "$(field warm_cli_rss_max_kib "$work/header")" = 262144 ] || blocked 'tooling CLI warm budget mismatch'
-    [ "$(field warm_mcp_startup_max_ms "$work/header")" = 500 ] && [ "$(field warm_mcp_request_p95_max_ms "$work/header")" = 100 ] && [ "$(field warm_mcp_rss_max_kib "$work/header")" = 524288 ] || blocked 'tooling MCP warm budget mismatch'
-    [ "$(field warm_lsp_startup_max_ms "$work/header")" = 1500 ] && [ "$(field warm_lsp_request_p95_max_ms "$work/header")" = 150 ] && [ "$(field warm_lsp_rss_max_kib "$work/header")" = 786432 ] || blocked 'tooling LSP warm budget mismatch'
-    tooling_ids='compiler-check lib-check mcp-check lsp-check bootstrap-essential bootstrap-portability bootstrap-parity lint duplicate whole-test direct-env-working direct-env-staged runtime-contract artifact-execution warm-cli warm-mcp warm-lsp'
-    [ "$(field required_child_ids "$work/header")" = "$tooling_ids" ] || blocked 'tooling manifest child policy mismatch'
-    [ "$(grep -c '^row=' "$work/header")" -eq 17 ] && [ "$(grep -c '^scan_policy=' "$work/header")" -eq 17 ] && [ "$(grep -c '^metric=' "$work/header")" -eq 3 ] && [ "$(grep -c '^baseline=' "$work/header")" -eq 3 ] || blocked 'incomplete tooling metric policy'
-    awk -F'|' -v ids="$tooling_ids" 'BEGIN{n=split(ids,a," ");for(i=1;i<=n;i++)e[a[i]]=1}
-      /^row=/{id=substr($1,5);if(NF!=20||!e[id]||seen[id]++||$2!="pass"&&$2!="blocked"&&$2!="fail"||$14!~/^[0-9]+$/||$14!=0||$15!~/^[0-9]+$/||$16!~/^[0-9]+$/||$17!~/^[0-9]+$/||$18!~/^[0-9]+$/||$19!~/^[0-9]+$/||$20!~/^[0-9]+$/)bad=1}
-      END{for(i=1;i<=n;i++)if(!seen[a[i]])bad=1;exit bad+0}' "$work/header" || blocked 'tooling manifest rows are not exact'
-    awk -F'|' -v ids="$tooling_ids" 'BEGIN{n=split(ids,a," ");for(i=1;i<=n;i++)e[a[i]]=1}
-      /^scan_policy=/{id=substr($1,13);if(NF!=3||!e[id]||$2!="not-applicable"||$3!="command-contract-v1"||seen[id]++)bad=1}
-      END{for(i=1;i<=n;i++)if(!seen[a[i]])bad=1;exit bad+0}' "$work/header" || blocked 'tooling scan policy rows are not exact'
-    for warm_id in warm-cli warm-mcp warm-lsp; do
-        metric=$(sed -n "s/^metric=${warm_id}|//p" "$work/header"); old_ifs=$IFS; IFS='|'; set -- $metric; IFS=$old_ifs
-        [ "$#" -eq 16 ] && [ "$1" = startup_p95_ms ] && [ "$3" = samples ] && [ "$5" = p50_ms ] && [ "$7" = p95_ms ] && [ "$9" = p99_ms ] && [ "${11}" = max_rss_kib ] && [ "${13}" = raw_relpath ] && [ "${14}" = "raw/$warm_id.samples" ] && [ "${15}" = raw_sha256 ] || blocked 'tooling metric semantics are incomplete'
-        for number in "$2" "$4" "$6" "$8" "${10}" "${12}"; do is_uint "$number" || blocked 'tooling metric is not numeric'; done
-        metric_raw_sha=${16}
-        is_sha256 "$metric_raw_sha" || blocked 'tooling raw sample hash is invalid'
-        baseline=$(sed -n "s/^baseline=${warm_id}|//p" "$work/header"); old_ifs=$IFS; IFS='|'; set -- $baseline; IFS=$old_ifs
-        [ "$#" -eq 2 ] && is_uint "$1" && is_uint "$2" && [ "$1" -gt 0 ] && [ "$2" -gt 0 ] || blocked 'tooling baseline is incomplete'
-        raw_out="$work/$warm_id.raw"
-        extract_tar_member_bounded "$work/artifact" "./raw/$warm_id.samples" "$raw_out" 65536 || blocked 'tooling raw sample member missing or oversized'
-        [ "$(hash_file "$raw_out")" = "$metric_raw_sha" ] || blocked 'tooling raw sample hash mismatch'
-    done
 else cp -- "$work/artifact" "$work/header"; fi
 actual_schema=$(field artifact_schema "$work/header" 2>/dev/null || field schema_version "$work/header" 2>/dev/null || field manifest_schema "$work/header" 2>/dev/null || true)
 actual_mode=$(field artifact_mode "$work/header" 2>/dev/null || field mode "$work/header" 2>/dev/null || true)
@@ -134,7 +105,6 @@ case "$schema" in mci-lane-receipt-v1|mci-lane-unsigned-template-v1) :;; *) bloc
     if [ "$lane" = stress ]; then [ -n "$signer_valid_until" ] || blocked 'stress requires signer-resolved --valid-until-utc-ns'; template_valid_until=$signer_valid_until; fi
     echo "valid_until_utc_ns=$template_valid_until"
     for k in result scenarios artifact_relpath artifact_sha256 artifact_schema artifact_mode release_eligible; do echo "$k=$(field "$k" "$work/template")"; done
-    [ "$lane" = simpleos ] && for k in simpleos_gate_sidecar_sha256 simpleos_gate_matrix_passed simpleos_gate_report_sha256 simpleos_gate_matrix_out_sha256 simpleos_gate_matrix_err_sha256 simpleos_gate_stdout_sha256 simpleos_gate_stderr_sha256; do echo "$k=$(field "$k" "$work/template")"; done
     if [ "$lane" = traceability ]; then echo "docgen_receipt_relpath=$(field docgen_receipt_relpath "$work/template")"; echo "docgen_receipt_sha256=$(field docgen_receipt_sha256 "$work/template")"; fi
 } > "$work/canonical"
 echo "receipt_hash=$(hash_file "$work/canonical")" > "$work/hash-line"

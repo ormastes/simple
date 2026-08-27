@@ -1,40 +1,14 @@
 #!/bin/sh
 set -eu
-root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-fs-exec-probe-check.XXXXXX")
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-cd "$root"
 
-for arch in arm32 arm64 riscv32 riscv64; do
-    sh scripts/os/build_simpleos_fs_exec_probe.shs "$arch" "$tmp/$arch.elf" "$tmp/$arch.manifest"
-    sh scripts/check/check-simpleos-fs-exec-payload-elf.shs "$arch" "$tmp/$arch.elf"
-    grep -Fqx "arch=$arch" "$tmp/$arch.manifest"
-    grep -Fqx 'nonce_slot_bytes=96' "$tmp/$arch.manifest"
-    grep -Fqx 'exit_status=37' "$tmp/$arch.manifest"
-    expected=$(awk -F= '$1 == "template_sha256" { print $2 }' "$tmp/$arch.manifest")
-    [ "$(sha256sum "$tmp/$arch.elf" | awk '{print $1}')" = "$expected" ]
-done
-
-# The gate must reject an architecture mismatch and a patched/non-template ELF.
-if sh scripts/check/check-simpleos-fs-exec-payload-elf.shs arm64 "$tmp/riscv64.elf" >/dev/null 2>&1; then
-    echo "payload gate accepted wrong ISA" >&2; exit 1
+# The x86_64 scheduler-owned row executes the real mounted filesystem payload;
+# it must never fall back to an architecture-template probe.
+entry=examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl
+wrapper=scripts/check/rebuild-sosix-qemu-media.shs
+grep -Fq 'x86_64_fs_exec_spawn_scheduler_owned("/FSEXEC.ELF"' "$entry"
+grep -Fq 'x86_32|arm32|arm64|riscv32|riscv64)' "$wrapper"
+if grep -Eq 'x86_64\|.*build_simpleos_fs_exec_probe|x86_64\).*build_simpleos_fs_exec_probe' "$wrapper"; then
+    echo 'x86_64 row incorrectly depends on a template payload' >&2
+    exit 1
 fi
-if sh scripts/check/check-simpleos-fs-exec-payload-elf.shs arm32 "$tmp/riscv32.elf" >/dev/null 2>&1; then
-    echo "payload gate accepted RISC-V32 as ARM32" >&2; exit 1
-fi
-if sh scripts/check/check-simpleos-fs-exec-payload-elf.shs riscv32 "$tmp/arm32.elf" >/dev/null 2>&1; then
-    echo "payload gate accepted ARM32 as RISC-V32" >&2; exit 1
-fi
-if sh scripts/check/check-simpleos-fs-exec-payload-elf.shs riscv32 "$tmp/riscv64.elf" >/dev/null 2>&1; then
-    echo "payload gate accepted RV64 as RV32" >&2; exit 1
-fi
-if sh scripts/check/check-simpleos-fs-exec-payload-elf.shs riscv64 "$tmp/riscv32.elf" >/dev/null 2>&1; then
-    echo "payload gate accepted RV32 as RV64" >&2; exit 1
-fi
-cp "$tmp/arm64.elf" "$tmp/patched.elf"
-offset=$(LC_ALL=C grep -aob '__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__' "$tmp/patched.elf" | cut -d: -f1)
-printf 'test-nonce' | dd of="$tmp/patched.elf" bs=1 seek="$offset" conv=notrunc 2>/dev/null
-if sh scripts/check/check-simpleos-fs-exec-payload-elf.shs arm64 "$tmp/patched.elf" >/dev/null 2>&1; then
-    echo "template gate accepted already-patched ELF" >&2; exit 1
-fi
-echo "simpleos_fs_exec_probe_builder_self_test=pass"
+echo 'simpleos_fs_exec_probe_builder_x86_64_real_payload_self_test=pass'

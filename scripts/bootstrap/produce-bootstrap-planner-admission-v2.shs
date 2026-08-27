@@ -28,6 +28,9 @@ root=$(CDPATH= cd -- "$root/.." && pwd -P)
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
 
 adm_fail() {
     echo "bootstrap-admission-error: $1" >&2
@@ -44,10 +47,10 @@ selftest=0
 adm_target=''
 adm_reason=''
 adm_parent=''
-adm_bootstrap_output=''
 adm_runtime=''
 adm_out=''
 adm_root=$root
+adm_bootstrap_output=''
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -57,19 +60,6 @@ while [ "$#" -gt 0 ]; do
         --parent-compiler=*) adm_parent=${1#*=} ;;
         --bootstrap-output=*) adm_bootstrap_output=${1#*=} ;;
         --runtime-dir=*) adm_runtime=${1#*=} ;;
-        --runtime-dir-descriptor=*) adm_runtime_descriptor=${1#*=} ;;
-        --runtime-dir-display=*) adm_runtime_display=${1#*=} ;;
-        --planner-source-descriptor=*) adm_planner_source_descriptor=${1#*=} ;;
-        --planner-source-display=*) adm_planner_source_display=${1#*=} ;;
-        --stage2-transaction-descriptor=*) adm_stage2_transaction_descriptor=${1#*=} ;;
-        --stage2-transaction-display=*) adm_stage2_transaction_display=${1#*=} ;;
-        --git-state-descriptor=*) adm_git_state_descriptor=${1#*=} ;;
-        --git-state-display=*) adm_git_state_display=${1#*=} ;;
-        --parent-compiler-transaction-relative=*) adm_parent_relative=${1#*=} ;;
-        --parent-sanity-transaction-relative=*) adm_sanity_relative=${1#*=} ;;
-        --parent-provenance-transaction-relative=*) adm_provenance_relative=${1#*=} ;;
-        --capsule-root=*) adm_capsule_root=${1#*=} ;;
-        --verifier-descriptor=*) adm_verifier_descriptor=${1#*=} ;;
         --out=*) adm_out=${1#*=} ;;
         --root=*) adm_root=${1#*=} ;;
         --help|-h) usage; exit 0 ;;
@@ -83,263 +73,22 @@ if [ "$selftest" -eq 1 ]; then
     exit $?
 fi
 
-[ -n "$adm_target" ] && [ -n "$adm_reason" ] || { usage; exit 2; }
-
-if [ -n "$adm_capsule_root" ]; then
-    [ -z "$adm_parent" ] && [ -z "$adm_bootstrap_output" ] && [ -z "$adm_runtime" ] || adm_fail capsule-rejects-legacy-path-authority
-    for adm_required in "$adm_root" "$adm_parent_descriptor" "$adm_parent_display" \
-        "$adm_sanity_descriptor" "$adm_sanity_display" \
-        "$adm_provenance_descriptor" "$adm_provenance_display" \
-        "$adm_runtime_descriptor" "$adm_runtime_display" \
-        "$adm_planner_source_descriptor" "$adm_planner_source_display" \
-        "$adm_stage2_transaction_descriptor" "$adm_stage2_transaction_display" \
-        "$adm_git_state_descriptor" "$adm_git_state_display" \
-        "$adm_parent_relative" "$adm_sanity_relative" "$adm_provenance_relative"; do
-        [ -n "$adm_required" ] || { usage; exit 2; }
-    done
-    bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
-    bootstrap_planner_v2_display_path "$adm_root" || adm_fail root-display-not-canonical
-    bootstrap_planner_v2_descriptor_dir "$adm_capsule_root" || adm_fail capsule-root-not-descriptor-directory
-    capsule_display=$(readlink -- "$adm_capsule_root") || adm_fail capsule-root-unreadable
-    bootstrap_planner_v2_descriptor_display "$adm_capsule_root" "$capsule_display" || adm_fail capsule-root-display-not-canonical
-    case "$capsule_display" in
-        "$adm_root"|"$adm_root"/*) adm_fail capsule-root-must-not-write-repository ;;
-    esac
-    [ -z "$(find "$adm_capsule_root/." -mindepth 1 -maxdepth 1 -print -quit)" ] || adm_fail capsule-root-not-empty
-
-    for adm_pair in \
-        "$adm_parent_descriptor:$adm_parent_display" \
-        "$adm_sanity_descriptor:$adm_sanity_display" \
-        "$adm_provenance_descriptor:$adm_provenance_display" \
-        "$adm_planner_source_descriptor:$adm_planner_source_display" \
-        "$adm_git_state_descriptor:$adm_git_state_display"; do
-        adm_descriptor=${adm_pair%%:*}
-        adm_display=${adm_pair#*:}
-        bootstrap_planner_v2_descriptor_file "$adm_descriptor" || adm_fail capsule-input-not-regular-descriptor
-        bootstrap_planner_v2_descriptor_display "$adm_descriptor" "$adm_display" || adm_fail capsule-input-display-mismatch
-    done
-    bootstrap_planner_v2_descriptor_dir "$adm_runtime_descriptor" || adm_fail runtime-not-directory-descriptor
-    bootstrap_planner_v2_descriptor_display "$adm_runtime_descriptor" "$adm_runtime_display" || adm_fail runtime-display-mismatch
-    bootstrap_planner_v2_descriptor_dir "$adm_stage2_transaction_descriptor" || adm_fail stage2-transaction-not-directory-descriptor
-    bootstrap_planner_v2_descriptor_display "$adm_stage2_transaction_descriptor" "$adm_stage2_transaction_display" || adm_fail stage2-transaction-display-mismatch
-    [ -x "$adm_parent_descriptor" ] || adm_fail parent-compiler-not-executable
-    [ "$adm_planner_source_display" = "$adm_root/src/app/cli/bootstrap_reason_planner.spl" ] || adm_fail planner-source-display-mismatch
-    case "$adm_runtime_display" in "$adm_root"/*) ;; *) adm_fail runtime-display-outside-root ;; esac
-    grep -Fq 'stage2-sanity: pass' "$adm_sanity_descriptor" || adm_fail parent-stage2-sanity-not-pass
-    if grep -Fq 'rust-seed' "$adm_provenance_descriptor"; then adm_fail parent-compiler-is-rust-seed; fi
-    grep -Fq 'stage2-provenance: pure-simple' "$adm_provenance_descriptor" || adm_fail parent-stage2-provenance-not-pure-simple
-
-    for adm_relative in "$adm_parent_relative" "$adm_sanity_relative" "$adm_provenance_relative"; do
-        case "$adm_relative" in output/stage2/*) ;; *) adm_fail parent-stage2-relative-path-invalid ;; esac
-        case "$adm_relative" in *//*|*/./*|*/../*|*/.|*/..|*'
-'*) adm_fail parent-stage2-relative-path-invalid ;; esac
-    done
-    parent_relative_dir=$(dirname -- "$adm_parent_relative")
-    [ "$(dirname -- "$adm_sanity_relative")" = "$parent_relative_dir" ] || adm_fail parent-stage2-common-parent-mismatch
-    [ "$(dirname -- "$adm_provenance_relative")" = "$parent_relative_dir" ] || adm_fail parent-stage2-common-parent-mismatch
-    [ "$(basename -- "$adm_parent_relative")" = simple ] || adm_fail parent-stage2-compiler-name-mismatch
-    [ "$(basename -- "$adm_sanity_relative")" = stage2-sanity.receipt ] || adm_fail parent-stage2-sanity-name-mismatch
-    [ "$(basename -- "$adm_provenance_relative")" = stage2-provenance.receipt ] || adm_fail parent-stage2-provenance-name-mismatch
-    for adm_identity_pair in \
-        "$adm_parent_descriptor:$adm_parent_relative" \
-        "$adm_sanity_descriptor:$adm_sanity_relative" \
-        "$adm_provenance_descriptor:$adm_provenance_relative"; do
-        adm_identity_descriptor=${adm_identity_pair%%:*}
-        adm_identity_relative=${adm_identity_pair#*:}
-        bootstrap_planner_v2_transaction_child_descriptor \
-            "$adm_stage2_transaction_descriptor" "$adm_identity_relative" \
-            "$adm_identity_descriptor" || adm_fail parent-stage2-transaction-identity-mismatch
-    done
-    [ -f "$adm_stage2_transaction_descriptor/transaction.env" ] && [ ! -L "$adm_stage2_transaction_descriptor/transaction.env" ] || adm_fail stage2-transaction-receipt-missing
-    grep -Fxq 'schema=simple-bootstrap-stage2-transaction-v1' "$adm_stage2_transaction_descriptor/transaction.env" || adm_fail stage2-transaction-schema-mismatch
-    grep -Fxq 'status=committed' "$adm_stage2_transaction_descriptor/transaction.env" || adm_fail stage2-transaction-not-committed
-    grep -Fxq 'exit_code=0' "$adm_stage2_transaction_descriptor/transaction.env" || adm_fail stage2-transaction-not-successful
-    [ -f "$adm_stage2_transaction_descriptor/evidence/result.env" ] && [ ! -L "$adm_stage2_transaction_descriptor/evidence/result.env" ] || adm_fail stage2-result-receipt-missing
-    grep -Fxq 'schema=simple-bootstrap-stage2-runner-v4' "$adm_stage2_transaction_descriptor/evidence/result.env" || adm_fail stage2-result-schema-mismatch
-    grep -Fxq 'status=succeeded' "$adm_stage2_transaction_descriptor/evidence/result.env" || adm_fail stage2-result-not-successful
-    grep -Fxq 'exit_code=0' "$adm_stage2_transaction_descriptor/evidence/result.env" || adm_fail stage2-result-exit-mismatch
-
-    parent_sha=$(bootstrap_planner_v2_hash_file "$adm_parent_descriptor")
-    sanity_sha=$(bootstrap_planner_v2_hash_file "$adm_sanity_descriptor")
-    prov_sha=$(bootstrap_planner_v2_hash_file "$adm_provenance_descriptor")
-    planner_source_sha=$(bootstrap_planner_v2_hash_file "$adm_planner_source_descriptor")
-    verifier_sha=$(bootstrap_planner_v2_hash_file "$adm_verifier_descriptor")
-    git_sha=$(bootstrap_planner_v2_hash_file "$adm_git_state_descriptor")
-
-    bindings="$adm_capsule_root/descriptor-bindings.env"
-    {
-        printf 'schema=simple-bootstrap-planner-descriptor-bindings-v1\n'
-        printf 'status=bound\n'
-        printf 'root_display=%s\n' "$adm_root"
-        printf 'capsule_root_descriptor=%s\n' "$adm_capsule_root"
-        printf 'capsule_root_display=%s\n' "$capsule_display"
-        printf 'stage2_transaction_descriptor=%s\n' "$adm_stage2_transaction_descriptor"
-        printf 'stage2_transaction_display=%s\n' "$adm_stage2_transaction_display"
-        printf 'parent_compiler_transaction_relative=%s\n' "$adm_parent_relative"
-        printf 'parent_stage2_sanity_transaction_relative=%s\n' "$adm_sanity_relative"
-        printf 'parent_stage2_provenance_transaction_relative=%s\n' "$adm_provenance_relative"
-        printf 'parent_compiler_descriptor=%s\n' "$adm_parent_descriptor"
-        printf 'parent_compiler_display=%s\n' "$adm_parent_display"
-        printf 'parent_stage2_sanity_descriptor=%s\n' "$adm_sanity_descriptor"
-        printf 'parent_stage2_sanity_display=%s\n' "$adm_sanity_display"
-        printf 'parent_stage2_provenance_descriptor=%s\n' "$adm_provenance_descriptor"
-        printf 'parent_stage2_provenance_display=%s\n' "$adm_provenance_display"
-        printf 'runtime_dir_descriptor=%s\n' "$adm_runtime_descriptor"
-        printf 'runtime_dir_display=%s\n' "$adm_runtime_display"
-        printf 'planner_source_descriptor=%s\n' "$adm_planner_source_descriptor"
-        printf 'planner_source_display=%s\n' "$adm_planner_source_display"
-        printf 'git_state_descriptor=%s\n' "$adm_git_state_descriptor"
-        printf 'git_state_display=%s\n' "$adm_git_state_display"
-        printf 'verifier_descriptor=%s\n' "$adm_verifier_descriptor"
-        printf 'verifier_sha256=%s\n' "$verifier_sha"
-        printf 'execution_path_mode=descriptor\n'
-        printf 'canonical_digest_path_mode=display-binding\n'
-    } >"$bindings"
-
-    adm_snapshot_runtime() {
-        ( cd "$adm_runtime_descriptor" && find . -type f ! -path './vendor/*' -print0 |
-            LC_ALL=C sort -z | xargs -0 -r sha256sum -- )
-    }
-    adm_snapshot_runtime >"$adm_capsule_root/runtime.snapshot"
-    runtime_sha=$(bootstrap_planner_v2_hash_file "$adm_capsule_root/runtime.snapshot")
-    {
-        printf 'closure-schema: simple-planner-source-closure-v1\n'
-        printf '%s  %s\n' "$planner_source_sha" "src/app/cli/bootstrap_reason_planner.spl"
-        grep -n '^extern fn ' "$adm_planner_source_descriptor" || true
-    } >"$adm_capsule_root/planner-source-closure.snapshot"
-    closure_sha=$(bootstrap_planner_v2_hash_file "$adm_capsule_root/planner-source-closure.snapshot")
-    scope_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | sha256sum | awk '{print $1}')
-
-    mkdir "$adm_capsule_root/source"
-    cp -- "$adm_planner_source_descriptor" "$adm_capsule_root/source/bootstrap_reason_planner.spl"
-    [ "$(bootstrap_planner_v2_hash_file "$adm_capsule_root/source/bootstrap_reason_planner.spl")" = "$planner_source_sha" ] || adm_fail planner-source-copy-mismatch
-    if ! ( cd "$adm_capsule_root" && env -i LC_ALL=C LANG=C TZ=UTC \
-            PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
-            HOME="$adm_capsule_root" TMPDIR="$adm_capsule_root" \
-            SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime_descriptor" \
-            "$adm_parent_descriptor" \
-            native-build --source "$adm_capsule_root/source" --entry-closure \
-            --entry "$adm_capsule_root/source/bootstrap_reason_planner.spl" \
-            -o "$adm_capsule_root/planner" ) >"$adm_capsule_root/planner-build.log" 2>&1; then
-        adm_fail planner-build-failed
-    fi
-    [ -x "$adm_capsule_root/planner" ] || adm_fail planner-build-produced-no-executable
-    planner_sha=$(bootstrap_planner_v2_hash_file "$adm_capsule_root/planner")
-
-    auth_actual="$adm_capsule_root/authorization.receipt"
-    auth_display="$capsule_display/authorization.receipt"
-    planner_display="$capsule_display/planner"
-    argv_text=$(bootstrap_planner_v2_canonical_argv_text \
-        "$planner_display" "$adm_reason" "$adm_target" \
-        "$parent_sha" "$runtime_sha" "$closure_sha" "$planner_sha" "$auth_display")
-    env_text=$(bootstrap_planner_v2_canonical_env_text "$adm_runtime_display")
-    argv_sha=$(bootstrap_planner_v2_hash_text "$argv_text")
-    env_sha=$(bootstrap_planner_v2_hash_text "$env_text")
-
-    planner_rc=0
-    env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
-        SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime_descriptor" \
-        "$adm_capsule_root/planner" \
-        "--bootstrap-reason=$adm_reason" "--bootstrap-target=$adm_target" \
-        "--parent-compiler-sha256=$parent_sha" \
-        "--runtime-snapshot-sha256=$runtime_sha" \
-        "--planner-source-closure-sha256=$closure_sha" \
-        "--planner-sha256=$planner_sha" \
-        "--bootstrap-receipt=$auth_actual" >"$adm_capsule_root/planner-stdout.txt" 2>&1 || planner_rc=$?
-    [ "$planner_rc" -eq 0 ] || adm_fail planner-execution-nonzero-exit
-    [ -f "$auth_actual" ] && [ ! -L "$auth_actual" ] || adm_fail planner-emitted-no-authorization
-    expected_auth=$(bootstrap_planner_v2_authorization_text \
-        "$adm_target" "$adm_reason" "$parent_sha" "$runtime_sha" "$closure_sha" "$planner_sha")
-    [ "$(cat -- "$auth_actual")" = "$expected_auth" ] || adm_fail authorization-text-mismatch
-
-    smoke_rc=0
-    env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
-        SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime_descriptor" \
-        "$adm_capsule_root/planner" '--bootstrap-reason=none' \
-        "--bootstrap-target=$adm_target" "--parent-compiler-sha256=$parent_sha" \
-        "--runtime-snapshot-sha256=$runtime_sha" \
-        "--planner-source-closure-sha256=$closure_sha" \
-        "--planner-sha256=$planner_sha" \
-        "--bootstrap-receipt=$adm_capsule_root/smoke.receipt" \
-        >"$adm_capsule_root/planner-smoke-output.txt" 2>&1 || smoke_rc=$?
-    [ "$smoke_rc" -ne 0 ] || adm_fail planner-smoke-accepted-untyped-reason
-    [ ! -e "$adm_capsule_root/smoke.receipt" ] && [ ! -L "$adm_capsule_root/smoke.receipt" ] || adm_fail planner-smoke-wrote-receipt-on-refusal
-    {
-        printf 'smoke-schema: simple-planner-smoke-v1\n'
-        printf 'untyped-reason-exit: %s\n' "$smoke_rc"
-        printf 'untyped-reason-wrote-receipt: no\n'
-        cat -- "$adm_capsule_root/planner-smoke-output.txt"
-    } >"$adm_capsule_root/planner-smoke.txt"
-    smoke_sha=$(bootstrap_planner_v2_hash_file "$adm_capsule_root/planner-smoke.txt")
-    auth_sha=$(bootstrap_planner_v2_hash_file "$auth_actual")
-    [ "$(bootstrap_planner_v2_hash_file "$adm_parent_descriptor")" = "$parent_sha" ] || adm_fail parent-compiler-changed-during-admission
-    [ "$(bootstrap_planner_v2_hash_file "$adm_sanity_descriptor")" = "$sanity_sha" ] || adm_fail parent-sanity-changed-during-admission
-    [ "$(bootstrap_planner_v2_hash_file "$adm_provenance_descriptor")" = "$prov_sha" ] || adm_fail parent-provenance-changed-during-admission
-    [ "$(bootstrap_planner_v2_hash_file "$adm_planner_source_descriptor")" = "$planner_source_sha" ] || adm_fail planner-source-changed-during-admission
-    runtime_final="$adm_capsule_root/runtime.snapshot.final"
-    adm_snapshot_runtime >"$runtime_final"
-    cmp -s -- "$adm_capsule_root/runtime.snapshot" "$runtime_final" || adm_fail runtime-directory-changed-during-admission
-    rm -f -- "$runtime_final"
-    [ "$(bootstrap_planner_v2_hash_file "$adm_git_state_descriptor")" = "$git_sha" ] || adm_fail git-state-changed-during-admission
-    bootstrap_planner_v2_transaction_child_descriptor "$adm_stage2_transaction_descriptor" "$adm_parent_relative" "$adm_parent_descriptor" || adm_fail parent-stage2-transaction-changed-during-admission
-    bootstrap_planner_v2_transaction_child_descriptor "$adm_stage2_transaction_descriptor" "$adm_sanity_relative" "$adm_sanity_descriptor" || adm_fail parent-stage2-transaction-changed-during-admission
-    bootstrap_planner_v2_transaction_child_descriptor "$adm_stage2_transaction_descriptor" "$adm_provenance_relative" "$adm_provenance_descriptor" || adm_fail parent-stage2-transaction-changed-during-admission
-    [ "$(bootstrap_planner_v2_hash_file "$adm_capsule_root/planner")" = "$planner_sha" ] || adm_fail planner-changed-during-admission
-
-    receipt_actual="$adm_capsule_root/planner-admission-v2.env"
-    receipt_display="$capsule_display/planner-admission-v2.env"
-    [ -z "$adm_out" ] || [ "$adm_out" = "$receipt_display" ] || adm_fail capsule-out-display-mismatch
-    platform=$(uname -m 2>/dev/null || echo unknown)
-    {
-        printf 'schema=simple-bootstrap-planner-admission-v2\n'
-        printf 'status=pass\n'
-        printf 'platform=%s\n' "$platform"
-        printf 'target=%s\n' "$adm_target"
-        printf 'reason=%s\n' "$adm_reason"
-        printf 'parent_compiler_path=%s\n' "$adm_parent_display"
-        printf 'parent_compiler_sha256=%s\n' "$parent_sha"
-        printf 'parent_stage2_sanity_path=%s\n' "$adm_sanity_display"
-        printf 'parent_stage2_sanity_sha256=%s\n' "$sanity_sha"
-        printf 'parent_stage2_provenance_path=%s\n' "$adm_provenance_display"
-        printf 'parent_stage2_provenance_sha256=%s\n' "$prov_sha"
-        printf 'runtime_dir=%s\n' "$adm_runtime_display"
-        printf 'runtime_snapshot_path=%s/runtime.snapshot\n' "$capsule_display"
-        printf 'runtime_snapshot_sha256=%s\n' "$runtime_sha"
-        printf 'planner_source_path=%s\n' "$adm_planner_source_display"
-        printf 'planner_source_sha256=%s\n' "$planner_source_sha"
-        printf 'planner_source_closure_snapshot_path=%s/planner-source-closure.snapshot\n' "$capsule_display"
-        printf 'planner_source_closure_snapshot_sha256=%s\n' "$closure_sha"
-        printf 'git_state_path=%s\n' "$adm_git_state_display"
-        printf 'git_state_sha256=%s\n' "$git_sha"
-        printf 'build_argv_sha256=%s\n' "$argv_sha"
-        printf 'build_env_sha256=%s\n' "$env_sha"
-        printf 'cache_scope_key=%s\n' "$scope_key"
-        printf 'planner_path=%s\n' "$planner_display"
-        printf 'planner_sha256=%s\n' "$planner_sha"
-        printf 'planner_smoke_path=%s/planner-smoke.txt\n' "$capsule_display"
-        printf 'planner_smoke_sha256=%s\n' "$smoke_sha"
-        printf 'authorization_receipt_path=%s\n' "$auth_display"
-        printf 'authorization_receipt_sha256=%s\n' "$auth_sha"
-    } >"$receipt_actual"
-
-    [ "$(wc -l <"$receipt_actual" | tr -d ' ')" -eq 29 ] || adm_fail produced-receipt-field-count
-    bootstrap_planner_v2_verify "$receipt_actual" "$adm_root" "$adm_capsule_root" || adm_fail produced-receipt-fails-own-verifier
-    echo "bootstrap-admission: produced $receipt_display"
-    exit 0
-fi
-
-[ -n "$adm_parent" ] || { usage; exit 2; }
+[ -n "$adm_target" ] && [ -n "$adm_reason" ] && [ -n "$adm_parent" ] || { usage; exit 2; }
 
 adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
 bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
 
-case "$adm_parent" in /*) ;; *) adm_parent="$PWD/$adm_parent" ;; esac
-if [ -z "$adm_bootstrap_output" ]; then adm_bootstrap_output="$adm_root/build/bootstrap"; fi
-case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$PWD/$adm_bootstrap_output" ;; esac
-adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-missing-or-not-canonical
-case "$adm_bootstrap_output" in "$adm_root"/build/*) ;; *) adm_fail bootstrap-output-outside-root-build ;; esac
+physical_cwd=$(pwd -P) || adm_fail cwd-not-canonical
+if [ -z "$adm_bootstrap_output" ]; then
+    adm_bootstrap_output="$adm_root/build/bootstrap"
+fi
+case "$adm_bootstrap_output" in /*) ;; *) adm_bootstrap_output="$physical_cwd/$adm_bootstrap_output" ;; esac
+adm_bootstrap_output=$(bootstrap_planner_v2_canonical_dir "$adm_bootstrap_output") || adm_fail bootstrap-output-missing
+case "$adm_bootstrap_output" in "$adm_root"/build/*) ;; *) adm_fail bootstrap-output-outside-build-root ;; esac
+
+case "$adm_parent" in /*) ;; *) adm_parent="$physical_cwd/$adm_parent" ;; esac
 if [ -z "$adm_runtime" ]; then adm_runtime="$adm_root/src/runtime"; fi
-case "$adm_runtime" in /*) ;; *) adm_runtime="$PWD/$adm_runtime" ;; esac
+case "$adm_runtime" in /*) ;; *) adm_runtime="$physical_cwd/$adm_runtime" ;; esac
 
 # --- 2. parent authority -----------------------------------------------------
 # The parent must be a stage2 artifact carrying sanity + provenance evidence.
@@ -374,7 +123,7 @@ parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
 admission_file=$(parent_field "$sanity_file" admission_receipt_path || true)
 [ -n "$admission_file" ] && [ "$admission_file" = "$(parent_field "$prov_file" admission_receipt_path || true)" ] || adm_fail parent-stage2-admission-path-mismatch
 admission_file=$(bootstrap_planner_v2_canonical_file "$admission_file") || adm_fail parent-stage2-admission-unavailable
-case "$admission_file" in "$adm_bootstrap_output"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap ;; esac
+case "$admission_file" in "$adm_root/build/bootstrap"/*) ;; *) adm_fail parent-stage2-admission-outside-bootstrap ;; esac
 admission_sha=$(bootstrap_planner_v2_hash_file "$admission_file")
 [ "$(parent_field "$sanity_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-sanity-admission-mismatch
 [ "$(parent_field "$prov_file" admission_receipt_sha256 || true)" = "$admission_sha" ] || adm_fail parent-stage2-provenance-admission-mismatch
@@ -403,7 +152,6 @@ mkdir "$lock_dir" 2>/dev/null || adm_fail admission-lock-held
 trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
 
 # --- 3. measure --------------------------------------------------------------
-parent_sha=$(bootstrap_planner_v2_hash_file "$parent_file")
 sanity_sha=$(bootstrap_planner_v2_hash_file "$sanity_file")
 prov_sha=$(bootstrap_planner_v2_hash_file "$prov_file")
 planner_source_sha=$(bootstrap_planner_v2_hash_file "$planner_source")

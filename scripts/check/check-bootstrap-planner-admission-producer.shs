@@ -20,16 +20,34 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
-producer="$root/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+producer="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
 
 checked=0
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-admission-gate.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
 trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
 
 fail() {
     echo "FAIL — $1"
     exit 1
 }
+
+replace_in_file() {
+    rif_expr=$1 rif_file=$2 rif_tmp="${2}.tmp.$$"
+    sed "$rif_expr" "$rif_file" >"$rif_tmp" || { rm -f -- "$rif_tmp"; return 1; }
+    mv -f -- "$rif_tmp" "$rif_file"
+}
+
+# The planner is intentionally a tiny leaf. Omitting entry-closure silently
+# compiles all of src/app/cli and src/lib, turning receipt production into a
+# multi-gigabyte full-tree build before any bootstrap phase can start.
+grep -F -- '--entry-closure' "$producer" >/dev/null &&
+    grep -F -- '--entry "$planner_source"' "$producer" >/dev/null ||
+    fail "producer does not constrain the planner build to its entry closure"
+checked=$((checked + 1))
 
 # Build a self-contained fixture repository root.
 #   $1 destination, $2 provenance body, $3 planner-shim policy
@@ -41,8 +59,6 @@ make_fixture() {
     cp -- "$root/src/app/cli/bootstrap_reason_planner.spl" \
         "$mf_dst/src/app/cli/bootstrap_reason_planner.spl"
     printf 'int fixture_runtime(void) { return 0; }\n' >"$mf_dst/src/runtime/fixture.c"
-    printf 'stage2-sanity: pass\n' >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-sanity.receipt"
-    printf '%s\n' "$mf_prov" >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-provenance.receipt"
 
     # Fixture parent compiler: on `native-build ... -o OUT` it emits a planner
     # shim with the same argv contract and authorization text as the real
@@ -87,17 +103,87 @@ echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
 PLANNER
 chmod +x "$out"
 FIXTURE_CC
-    sed -i "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
     chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    mf_parent="$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    mf_parent_sha=$(bootstrap_planner_v2_hash_file "$mf_parent")
+    mf_evidence_dir="$mf_dst/build/bootstrap/provenance/fixture"
+    mkdir -p "$mf_evidence_dir"
+    printf '%s\n' source >"$mf_evidence_dir/source.snapshot"
+    printf '%s\n' runtime >"$mf_evidence_dir/runtime.snapshot"
+    printf '%s\n' tool >"$mf_evidence_dir/tool.snapshot"
+    printf '%s\n' receiver-log >"$mf_evidence_dir/stage2-receiver.log"
+    mf_log_sha=$(bootstrap_planner_v2_hash_file "$mf_evidence_dir/stage2-receiver.log")
+    mf_runtime_sha=$(bootstrap_planner_v2_hash_file "$mf_evidence_dir/runtime.snapshot")
+    {
+        echo schema=simple-bootstrap-sanity-evidence-v1
+        echo status=pass
+        echo candidate_sha256_before="$mf_parent_sha"
+        echo version_status=0
+        planner_fixture_version=$(bootstrap_stage3_canonical_version "$root") || return 1
+        echo "version_output=simple-bootstrap $planner_fixture_version"
+        echo "version_expected=$planner_fixture_version"
+        echo 'version_expect_status=0'
+        echo 'version_match_status=0'
+        echo unsupported_status=1
+        echo unsupported_output_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        echo frontend_smoke_status=0
+        echo frontend_smoke_bootstrap_mode_status=0
+        echo frontend_smoke_output_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        echo candidate_sha256_after="$mf_parent_sha"
+    } >"$mf_evidence_dir/stage2-sanity.env"
+    {
+        echo schema=simple-bootstrap-stage2-receiver-evidence-v1
+        echo status=pass
+        echo probe_exit=0
+        echo candidate_sha256_before="$mf_parent_sha"
+        echo candidate_sha256_after="$mf_parent_sha"
+        echo runtime_snapshot_sha256="$mf_runtime_sha"
+        echo probe_log="$mf_evidence_dir/stage2-receiver.log"
+        echo probe_log_sha256="$mf_log_sha"
+    } >"$mf_evidence_dir/stage2-receiver.env"
+    mf_admission="$mf_evidence_dir/admission.env"
+    bootstrap_stage3_write_stage2_admission_receipt \
+        "$mf_admission" "$mf_parent" "$mf_evidence_dir/source.snapshot" \
+        "$mf_evidence_dir/runtime.snapshot" "$mf_evidence_dir/tool.snapshot" \
+        cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+        "$mf_evidence_dir/stage2-sanity.env" \
+        "$mf_evidence_dir/stage2-receiver.env" "$root" || fail "could not create fixture Stage-2 admission"
+    mf_admission_sha=$(bootstrap_planner_v2_hash_file "$mf_admission")
+    {
+        echo schema=simple-bootstrap-stage2-parent-sanity-v1
+        echo 'stage2-sanity: pass'
+        echo candidate_sha256="$mf_parent_sha"
+        echo admission_receipt_path="$mf_admission"
+        echo admission_receipt_sha256="$mf_admission_sha"
+    } >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-sanity.receipt"
+    {
+        echo schema=simple-bootstrap-stage2-parent-provenance-v1
+        echo "$mf_prov"
+        echo authority=explicit-full-bootstrap-stage2-trust-root
+        echo candidate_sha256="$mf_parent_sha"
+        echo admission_receipt_path="$mf_admission"
+        echo admission_receipt_sha256="$mf_admission_sha"
+    } >"$mf_dst/build/bootstrap/stage2/fixture-triple/stage2-provenance.receipt"
 }
 
 run_producer() {
     rp_root=$1
-    sh "$producer" --root="$rp_root" \
+    sh "$producer" planner-admission-v2 --root="$rp_root" \
         --parent-compiler="$rp_root/build/bootstrap/stage2/fixture-triple/simple" \
         --runtime-dir="$rp_root/src/runtime" \
         --target=//bootstrap:stage4 --reason=self-host-convergence-check \
         --out="$rp_root/receipt.env"
+}
+
+run_custom_output_producer() {
+    rp_root=$1
+    sh "$producer" planner-admission-v2 --root="$rp_root" \
+        --bootstrap-output="$rp_root/build/bootstrap-custom" \
+        --parent-compiler="$rp_root/build/bootstrap-custom/stage2/fixture-triple/simple" \
+        --runtime-dir="$rp_root/src/runtime" \
+        --target=//bootstrap:stage4 --reason=self-host-convergence-check \
+        --out="$rp_root/custom-output-receipt.env"
 }
 
 # --- fixture 1: the gate is satisfiable -------------------------------------
@@ -138,7 +224,7 @@ bootstrap_stage3_write_stage2_admission_receipt \
     "$custom_evidence/runtime.snapshot" "$custom_evidence/tool.snapshot" \
     cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
     "$custom_evidence/stage2-sanity.env" \
-    "$custom_evidence/stage2-receiver.env" || \
+    "$custom_evidence/stage2-receiver.env" "$root" || \
     fail "could not rebuild configured-output Stage-2 admission"
 custom_admission_sha=$(bootstrap_planner_v2_hash_file "$custom_admission")
 custom_admission_esc=$(printf '%s' "$custom_admission" | sed 's/[\/&]/\\&/g')
@@ -156,7 +242,7 @@ checked=$((checked + 1))
 
 # --- fixture 2: a forged argv digest is refused ------------------------------
 cp -- "$ok_root/receipt.env" "$scratch/argv.env"
-sed -i 's/^build_argv_sha256=.*/build_argv_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$scratch/argv.env"
+replace_in_file 's/^build_argv_sha256=.*/build_argv_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$scratch/argv.env"
 bootstrap_planner_v2_verify_structure "$scratch/argv.env" "$ok_root" >/dev/null 2>&1 ||
     fail "argv fixture no longer passes the structural layer, so it does not isolate the argv binding"
 if bootstrap_planner_v2_verify "$scratch/argv.env" "$ok_root" >/dev/null 2>&1; then
@@ -166,7 +252,7 @@ checked=$((checked + 1))
 
 # --- fixture 3: a forged env digest is refused -------------------------------
 cp -- "$ok_root/receipt.env" "$scratch/env.env"
-sed -i 's/^build_env_sha256=.*/build_env_sha256=1111111111111111111111111111111111111111111111111111111111111111/' "$scratch/env.env"
+replace_in_file 's/^build_env_sha256=.*/build_env_sha256=1111111111111111111111111111111111111111111111111111111111111111/' "$scratch/env.env"
 if bootstrap_planner_v2_verify "$scratch/env.env" "$ok_root" >/dev/null 2>&1; then
     fail "a receipt with a forged build_env_sha256 was admitted"
 fi
@@ -178,7 +264,7 @@ checked=$((checked + 1))
 cp -- "$ok_root/receipt.env" "$scratch/outside.env"
 cp -- "$ok_root/build/bootstrap/admission/"*/git-state.txt "$scratch/git-state.txt"
 esc=$(printf '%s' "$scratch/git-state.txt" | sed 's/[\/&]/\\&/g')
-sed -i "s/^git_state_path=.*/git_state_path=$esc/" "$scratch/outside.env"
+replace_in_file "s/^git_state_path=.*/git_state_path=$esc/" "$scratch/outside.env"
 bootstrap_planner_v2_verify_structure "$scratch/outside.env" "$ok_root" >/dev/null 2>&1 ||
     fail "out-of-root fixture no longer passes the structural layer, so it does not isolate path pinning"
 if bootstrap_planner_v2_verify "$scratch/outside.env" "$ok_root" >/dev/null 2>&1; then
@@ -205,11 +291,49 @@ seed_root=$(CDPATH= cd -- "$seed_root" && pwd -P)
 if run_producer "$seed_root" >"$scratch/seed.log" 2>&1; then
     fail "producer admitted a Rust-seed parent compiler"
 fi
-grep -q 'parent-compiler-is-rust-seed' "$scratch/seed.log" ||
+grep -q 'parent-stage2-provenance-not-pure-simple' "$scratch/seed.log" ||
     fail "seed parent did not yield the typed diagnostic"
 checked=$((checked + 1))
 
-# --- fixture 7: a planner that is not a policy gate is refused --------------
+# --- fixture 7: evidence for a different candidate is refused ---------------
+wrong_candidate_root="$scratch/wrong-candidate"
+make_fixture "$wrong_candidate_root" 'stage2-provenance: pure-simple' strict
+printf '%s\n' '# changed after measurement' >>"$wrong_candidate_root/build/bootstrap/stage2/fixture-triple/simple"
+wrong_candidate_root=$(CDPATH= cd -- "$wrong_candidate_root" && pwd -P)
+if run_producer "$wrong_candidate_root" >"$scratch/wrong-candidate.log" 2>&1; then
+    fail "producer admitted receipts for a different parent candidate"
+fi
+grep -q 'parent-stage2-sanity-candidate-mismatch' "$scratch/wrong-candidate.log" ||
+    fail "changed candidate did not yield the typed hash diagnostic"
+checked=$((checked + 1))
+
+# --- fixture 8: a forged admission receipt binding is refused ---------------
+wrong_admission_root="$scratch/wrong-admission"
+make_fixture "$wrong_admission_root" 'stage2-provenance: pure-simple' strict
+replace_in_file 's/^admission_receipt_sha256=.*/admission_receipt_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+    "$wrong_admission_root/build/bootstrap/stage2/fixture-triple/stage2-sanity.receipt"
+wrong_admission_root=$(CDPATH= cd -- "$wrong_admission_root" && pwd -P)
+if run_producer "$wrong_admission_root" >"$scratch/wrong-admission.log" 2>&1; then
+    fail "producer admitted a forged Stage-2 admission binding"
+fi
+grep -q 'parent-stage2-sanity-admission-mismatch' "$scratch/wrong-admission.log" ||
+    fail "forged admission binding did not yield the typed diagnostic"
+checked=$((checked + 1))
+
+# --- fixture 9: an unknown evidence schema is refused -----------------------
+wrong_schema_root="$scratch/wrong-schema"
+make_fixture "$wrong_schema_root" 'stage2-provenance: pure-simple' strict
+replace_in_file 's/^schema=.*/schema=unknown-stage2-sanity-v0/' \
+    "$wrong_schema_root/build/bootstrap/stage2/fixture-triple/stage2-sanity.receipt"
+wrong_schema_root=$(CDPATH= cd -- "$wrong_schema_root" && pwd -P)
+if run_producer "$wrong_schema_root" >"$scratch/wrong-schema.log" 2>&1; then
+    fail "producer admitted an unknown Stage-2 sanity schema"
+fi
+grep -q 'parent-stage2-sanity-schema-mismatch' "$scratch/wrong-schema.log" ||
+    fail "unknown sanity schema did not yield the typed diagnostic"
+checked=$((checked + 1))
+
+# --- fixture 10: a planner that is not a policy gate is refused -------------
 perm_root="$scratch/permissive"
 make_fixture "$perm_root" 'stage2-provenance: pure-simple' permissive
 perm_root=$(CDPATH= cd -- "$perm_root" && pwd -P)
@@ -220,8 +344,8 @@ grep -q 'planner-smoke-accepted-untyped-reason' "$scratch/perm.log" ||
     fail "permissive planner did not yield the typed smoke diagnostic"
 checked=$((checked + 1))
 
-# --- fixture 8: a target/reason pair outside the typed set is refused -------
-if sh "$producer" --root="$ok_root" \
+# --- fixture 11: a target/reason pair outside the typed set is refused ------
+if sh "$producer" planner-admission-v2 --root="$ok_root" \
         --parent-compiler="$ok_root/build/bootstrap/stage2/fixture-triple/simple" \
         --target=//bootstrap:stage4 --reason=because-i-said-so \
         --out="$scratch/bad.env" >"$scratch/bad.log" 2>&1; then

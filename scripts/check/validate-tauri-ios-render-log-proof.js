@@ -29,14 +29,41 @@ const maxRenderHtmlLen = 10000000;
 
 const validRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=([1-9][0-9]*)(?:\s|$)/;
 const anyRenderMarkerPattern = /\[tauri-shell\]\s+render,\s+html_len=/;
+const rawRenderEnvelopePattern = /\[tauri-shell\]\s+raw stdout:\s*(\{.*"type"\s*:\s*"render".*\})/;
+const rawRenderEnvelopePrefixPattern = /\[tauri-shell\]\s+raw stdout:\s*\{[^\r\n]*"type"\s*:\s*"render"/;
+const renderAppliedPattern = /\[tauri-shell\]\s+(inline shell eval OK|eval OK|delayed inline shell eval OK)/;
 const metalRuntimeMarkerPattern = /(CAMetalLayer\s+Metal renderer ready|MetalKit\.framework|Metal\.framework|-framework Metal|\bMTL[A-Za-z0-9_]*\b|\bAGX\b|\bIOGPU\b)/i;
 const fallbackRendererPattern = /(SwiftShader|software rasterizer|software renderer|software rendering|llvmpipe|ANGLE[^\r\n]*(OpenGL|GL)|OpenGL[^\r\n]*(renderer|fallback|software)|fallback renderer)/i;
 const seenSourceRealpaths = new Set();
 
-function renderHtmlLen(content) {
+function renderProof(content) {
   const match = content.match(validRenderMarkerPattern);
-  if (!match) return '';
-  return BigInt(match[1]) <= BigInt(maxRenderHtmlLen) ? match[1] : '';
+  if (match) {
+    const htmlLen = BigInt(match[1]) <= BigInt(maxRenderHtmlLen) ? match[1] : '';
+    return { present: htmlLen !== '', htmlLen, source: htmlLen !== '' ? 'html_len' : 'html_len-malformed' };
+  }
+  for (const line of content.split(/\r?\n/)) {
+    const rawMatch = line.match(rawRenderEnvelopePattern);
+    if (!rawMatch) continue;
+    try {
+      const message = JSON.parse(rawMatch[1]);
+      if (message && message.type === 'render' && typeof message.html === 'string') {
+        const len = message.html.length;
+        if (len > 0 && len <= maxRenderHtmlLen) {
+          return { present: true, htmlLen: String(len), source: 'raw-render-envelope' };
+        }
+      }
+    } catch (_err) {
+      // A malformed raw stdout envelope is handled by the marker checks below.
+    }
+  }
+  if (rawRenderEnvelopePrefixPattern.test(content) && renderAppliedPattern.test(content)) {
+    return { present: true, htmlLen: '', source: 'raw-render-envelope-truncated' };
+  }
+  if (rawRenderEnvelopePrefixPattern.test(content)) {
+    return { present: false, htmlLen: '', source: 'raw-render-envelope-malformed' };
+  }
+  return { present: false, htmlLen: '', source: 'missing' };
 }
 
 for (const file of files) {
@@ -81,8 +108,9 @@ for (const file of files) {
   }
   sourceCount += 1;
   text += `\n${content}`;
-  const sourceHtmlLen = renderHtmlLen(content);
-  const sourceRenderMarker = sourceHtmlLen !== '';
+  const sourceRenderProof = renderProof(content);
+  const sourceHtmlLen = sourceRenderProof.htmlLen;
+  const sourceRenderMarker = sourceRenderProof.present;
   if (htmlLen === '' && sourceHtmlLen !== '') htmlLen = sourceHtmlLen;
   const sourceMetalMarker = metalRuntimeMarkerPattern.test(content);
   const sourceTauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(content);
@@ -102,7 +130,10 @@ if (coherentSourceHtmlLen !== '') {
 }
 
 const hasAnyRenderMarker = anyRenderMarkerPattern.test(text);
-const renderMarker = renderHtmlLen(text) !== '';
+const hasAnyRawRenderEnvelope = rawRenderEnvelopePattern.test(text);
+const renderLogProof = renderProof(text);
+const renderMarker = renderLogProof.present;
+const renderMarkerSource = hasAnyRenderMarker ? 'html_len' : renderLogProof.source;
 const metalMarker = metalRuntimeMarkerPattern.test(text);
 const fallbackMarker = fallbackRendererPattern.test(text);
 const tauriIosContext = /(\[tauri-shell\]\s+ios renderer context:.*WKWebView|Tauri iOS external_url|ios_mdi_probe\.html|\[tauri-shell\]\s+creating window (from|with)|mobile inline shell base)/i.test(text);
@@ -130,6 +161,8 @@ if (requestedSourceCount === 0 || sourceCount === 0) {
   reason = 'ios-render-log-fallback-gpu';
 } else if (hasAnyRenderMarker && !renderMarker) {
   reason = 'ios-render-log-html-len-malformed';
+} else if ((hasAnyRawRenderEnvelope || rawRenderEnvelopePrefixPattern.test(text)) && !renderMarker) {
+  reason = 'ios-render-log-raw-envelope-malformed';
 } else if (!renderMarker) {
   reason = 'ios-render-log-marker-missing';
 } else if (!metalMarker) {
@@ -156,6 +189,7 @@ emit('ios_render_log_source_coherence_status', coherentSource ? 'pass' : 'fail')
 emit('ios_render_log_coherent_source_path', coherentSourcePath);
 emit('ios_render_log_coherent_source_size_bytes', coherentSourceSizeBytes);
 emit('ios_render_log_marker_status', renderMarker ? 'pass' : 'fail');
+emit('ios_render_log_marker_source', renderMarkerSource);
 emit('ios_render_log_html_len', htmlLen);
 emit('ios_render_log_metal_marker_status', metalMarker ? 'pass' : 'fail');
 emit('ios_render_log_fallback_marker_status', fallbackMarker ? 'fail' : 'pass');

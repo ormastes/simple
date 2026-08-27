@@ -14,28 +14,124 @@
 #   MLKEM_SIMD_CFLAGS            extra ISA/compiler flags
 #   MLKEM_SIMD_OUT_DIR           receipt directory
 
+#   MLKEM_SIMD_LOWER_RUNNER      override the lower build script (selftest only)
+#
+# Verdict contract (.claude/rules/vcs.md): the LAST stdout line is always
+# `PASS — <n> ... checked` / `FAIL — ...` (exit 1) / `ERROR — nothing was
+# checked` (exit 2), and a run that verified 0 gates is ERROR, never PASS.
+# This script previously emitted a non-conforming `STATUS: PASS` with no count,
+# so a caller could not tell a real run from one that measured nothing —
+# doc/08_tracking/bug/check_scripts_vacuity_census_2026-08-17.md.
+
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-lower_runner="$repo_root/scripts/check/build-mlkem-simd-c-lane.shs"
+lower_runner="${MLKEM_SIMD_LOWER_RUNNER:-$repo_root/scripts/check/build-mlkem-simd-c-lane.shs}"
+
+# Number of gates this run actually evaluated.  Incremented only AFTER a gate
+# has been decided, so an early exit can never inflate it.
+checks=0
+
+selftest() {
+    st_fail=0
+    st_dir="${TMPDIR:-/tmp}/mlkem-simd-verdict-selftest.$$"
+    rm -rf "$st_dir"; mkdir -p "$st_dir"
+    trap 'rm -rf "$st_dir"' EXIT
+
+    # Stub lower runner: does nothing, so the receipt content under test is
+    # exactly what each fixture wrote.  This exercises the VERDICT logic
+    # without needing a C toolchain or SIMD hardware.
+    printf '#!/bin/sh\nexit 0\n' > "$st_dir/stub_runner.shs"
+    chmod +x "$st_dir/stub_runner.shs"
+
+    st_case() { # name out_dir expected_backend expect_exit expect_substr
+        st_out="$st_dir/$1.out"
+        set +e
+        MLKEM_SIMD_LOWER_RUNNER="$st_dir/stub_runner.shs" \
+        MLKEM_SIMD_OUT_DIR="$2" \
+        MLKEM_SIMD_EXPECTED_BACKEND="$3" \
+        MLKEM_SIMD_EXECUTION_CLASS=native \
+            sh "$0" >"$st_out" 2>&1
+        st_ec=$?
+        set -e
+        st_line=$(tail -n 1 "$st_out")
+        if [ "$st_ec" != "$4" ]; then
+            echo "selftest FAIL $1: exit $st_ec expected $4 ($st_line)" >&2
+            st_fail=$((st_fail + 1)); return 0
+        fi
+        case "$st_line" in
+            *"$5"*) : ;;
+            *) echo "selftest FAIL $1: verdict '$st_line' lacks '$5'" >&2
+               st_fail=$((st_fail + 1)) ;;
+        esac
+    }
+
+    mkdir -p "$st_dir/good"
+    printf 'MLKEM_NTT_SIMD_C_TEST: PASS\nmlkem_ntt_simd_backend=1\n' > "$st_dir/good/output.txt"
+    mkdir -p "$st_dir/noparity"
+    printf 'mlkem_ntt_simd_backend=1\n' > "$st_dir/noparity/output.txt"
+    mkdir -p "$st_dir/nobackend"
+    printf 'MLKEM_NTT_SIMD_C_TEST: PASS\n' > "$st_dir/nobackend/output.txt"
+
+    st_case must-pass          "$st_dir/good"      1 0 "PASS — 7 SIMD gate(s) checked"
+    st_case must-fail-parity   "$st_dir/noparity"  1 1 "FAIL — 4 SIMD gate(s) checked"
+    st_case must-fail-backend  "$st_dir/nobackend" 1 1 "FAIL — 5 SIMD gate(s) checked"
+    st_case must-fail-mismatch "$st_dir/good"      2 1 "expected SIMD backend=2 observed=1"
+    st_case must-error-noreceipt "$st_dir/absent"  1 2 "ERROR — nothing was checked"
+
+    # Absent lower runner must ERROR, never silently pass or claim a content FAIL.
+    set +e
+    MLKEM_SIMD_LOWER_RUNNER="$st_dir/no-such-runner" MLKEM_SIMD_OUT_DIR="$st_dir/good" \
+        sh "$0" >"$st_dir/norunner.out" 2>&1
+    st_ec=$?
+    set -e
+    st_line=$(tail -n 1 "$st_dir/norunner.out")
+    if [ "$st_ec" != "2" ] || [ "${st_line#ERROR — nothing was checked}" = "$st_line" ]; then
+        echo "selftest FAIL must-error-norunner: exit $st_ec line '$st_line'" >&2
+        st_fail=$((st_fail + 1))
+    fi
+
+    if [ "$st_fail" != "0" ]; then
+        echo "mlkem_simd_verdict_selftest status=FAIL cases_failed=$st_fail" >&2
+        return 1
+    fi
+    echo "mlkem_simd_verdict_selftest status=PASS cases=6"
+    return 0
+}
+
+case "${1:-}" in
+    --selftest)
+        if selftest; then
+            echo "PASS — 6 fixture(s) checked (selftest only, scan skipped)"
+            exit 0
+        fi
+        echo "ERROR — nothing was checked (selftest failed)"
+        exit 2
+        ;;
+    '') ;;
+    *) echo "usage: $0 [--selftest]" >&2; exit 64 ;;
+esac
 expected_backend=${MLKEM_SIMD_EXPECTED_BACKEND:-}
 execution_class=${MLKEM_SIMD_EXECUTION_CLASS:-native}
 out_dir=${MLKEM_SIMD_OUT_DIR:-$repo_root/build/check/x25519mlkem768-cpu-simd}
 iters=${MLKEM_SIMD_BENCH_ITERS:-20000}
 
 case "$expected_backend" in
-    ''|1|2|3) ;;
-    *) echo "STATUS: FAIL invalid MLKEM_SIMD_EXPECTED_BACKEND=$expected_backend"; exit 1 ;;
+    ''|1|2|3) checks=$((checks + 1)) ;;
+    *) echo "FAIL — $checks SIMD gate(s) checked, invalid MLKEM_SIMD_EXPECTED_BACKEND=$expected_backend"; exit 1 ;;
 esac
 case "$execution_class" in
-    native|cross-qemu-correctness) ;;
-    *) echo "STATUS: FAIL invalid MLKEM_SIMD_EXECUTION_CLASS=$execution_class"; exit 1 ;;
+    native|cross-qemu-correctness) checks=$((checks + 1)) ;;
+    *) echo "FAIL — $checks SIMD gate(s) checked, invalid MLKEM_SIMD_EXECUTION_CLASS=$execution_class"; exit 1 ;;
 esac
 
+# No lower runner means the correctness lane never executed.  Absence of
+# evidence is ERROR, not FAIL: nothing about the SIMD code was observed.
 if [ ! -x "$lower_runner" ]; then
-    echo "STATUS: FAIL missing SIMD lower runner: $lower_runner"
-    exit 1
+    echo "ERROR — nothing was checked: no executable SIMD lower runner at '$lower_runner'"
+    exit 2
 fi
+checks=$((checks + 1))
 
 MLKEM_SIMD_OUT_DIR="$out_dir" \
 MLKEM_SIMD_BENCH_ITERS="$iters" \
@@ -44,27 +140,39 @@ MLKEM_SIMD_CFLAGS="${MLKEM_SIMD_CFLAGS:-}" \
 sh "$lower_runner" "$iters"
 
 receipt="$out_dir/output.txt"
+# A missing receipt means the lane produced no evidence at all — ERROR, since
+# there is nothing to judge the SIMD implementation by, in either direction.
 if [ ! -f "$receipt" ]; then
-    echo "STATUS: FAIL missing SIMD receipt: $receipt"
-    exit 1
+    echo "ERROR — nothing was checked: no SIMD receipt at '$receipt'"
+    exit 2
 fi
+checks=$((checks + 1))
+
 if ! grep -qx 'MLKEM_NTT_SIMD_C_TEST: PASS' "$receipt"; then
-    echo "STATUS: FAIL SIMD receipt has no parity pass marker"
+    echo "FAIL — $checks SIMD gate(s) checked, receipt '$receipt' has no scalar-vs-vector parity pass marker"
     exit 1
 fi
+checks=$((checks + 1))
 
 observed_backend=$(sed -n 's/^mlkem_ntt_simd_backend=//p' "$receipt" | head -n 1)
 case "$observed_backend" in
-    1|2|3) ;;
-    *) echo "STATUS: FAIL invalid or missing SIMD backend in receipt"; exit 1 ;;
+    1|2|3) checks=$((checks + 1)) ;;
+    *) echo "FAIL — $checks SIMD gate(s) checked, invalid or missing SIMD backend in receipt '$receipt'"; exit 1 ;;
 esac
 if [ -n "$expected_backend" ] && [ "$observed_backend" != "$expected_backend" ]; then
-    echo "STATUS: FAIL expected SIMD backend=$expected_backend observed=$observed_backend"
+    echo "FAIL — $checks SIMD gate(s) checked, expected SIMD backend=$expected_backend observed=$observed_backend"
     exit 1
 fi
+checks=$((checks + 1))
 
 echo "mlkem_simd_execution_class=$execution_class"
 echo "mlkem_simd_expected_backend=${expected_backend:-any}"
 echo "mlkem_simd_observed_backend=$observed_backend"
 echo "mlkem_simd_receipt=$receipt"
-echo "STATUS: PASS X25519MLKEM768 CPU SIMD correctness"
+
+# Non-vacuity: a run that decided 0 gates cannot report PASS.
+if [ "$checks" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 SIMD gates evaluated)"
+    exit 2
+fi
+echo "PASS — $checks SIMD gate(s) checked, X25519MLKEM768 CPU SIMD correctness verified (backend=$observed_backend, class=$execution_class)"

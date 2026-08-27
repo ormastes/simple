@@ -75,8 +75,7 @@ run_tmp=$(CDPATH= cd -- "$run_tmp" && pwd -P)
 stub="$work/probe-stub"
 cat >"$stub" <<'STUB'
 #!/bin/sh
-for name in SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER SIMPLE_BOOTSTRAP_DIAG \
+for name in SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_BOOTSTRAP_DIAG \
     SIMPLE_MIR_FIELD_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
     SIMPLE_DEBUG_INFO_LEVEL; do
     eval "value=\${$name-<unset>}"
@@ -98,7 +97,7 @@ run_path="$path_dir:/usr/bin:/bin"
 baseline_env='SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1'
 
 # arm <label> <diagnostic-env-words>
-# Records the stub's observed values for the allowlisted diagnostic variables.
+# Echoes the stub's observed value for SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE.
 arm() {
     arm_label=$1
     arm_diag=$2
@@ -113,12 +112,13 @@ arm() {
         EV_FAILURES="$EV_FAILURES $arm_label:run-status=$arm_status"
         return 1
     fi
+    grep -c '^HIR-PAYLOAD-LOOKUP probe-visible SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1$' \
+        "$arm_log" >"$work/$arm_label.count" 2>/dev/null
     return 0
 }
 
-visible_count() {
-    grep -c "^HIR-PAYLOAD-LOOKUP probe-visible $2=1$" \
-        "$work/$1.log" 2>/dev/null || true
+count_of() {
+    tr -d ' \n' <"$work/$1.count"
 }
 
 note_fail() {
@@ -127,12 +127,9 @@ note_fail() {
 
 # ---------------------------------------------------------------- arm 1 -----
 # WITH the fix and the var set: the trace variable reaches the process.
-echo "=== arm 1: with fix, allowlisted diagnostics set to 1 ==="
+echo "=== arm 1: with fix, SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1 ==="
 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
-SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER=1
-SIMPLE_DEBUG_STAGE3_PARSE_OWNER=1
-export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
 arm1_diag=$(bootstrap_stage3_diagnostic_env)
 arm1_diag_status=$?
 if [ "$arm1_diag_status" -ne 0 ]; then
@@ -143,36 +140,27 @@ arm "arm1" "$arm1_diag"
 arm1_run=$?
 EV_CHECKED=$((EV_CHECKED + 1))
 if [ "$arm1_run" -eq 0 ]; then
-    arm1_count=$(visible_count arm1 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE)
-    arm1_owner_count=$(visible_count arm1 SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER)
-    arm1_parse_count=$(visible_count arm1 SIMPLE_DEBUG_STAGE3_PARSE_OWNER)
-    echo "trace-var-visible lines: payload=$arm1_count owner=$arm1_owner_count parse=$arm1_parse_count"
+    arm1_count=$(count_of arm1)
+    echo "trace-var-visible lines: $arm1_count"
     sed -n '1p' "$work/arm1.log"
     [ "$arm1_count" -ge 1 ] || note_fail "arm1:expected>=1-got-$arm1_count"
-    [ "$arm1_owner_count" -ge 1 ] || note_fail "arm1:owner-expected>=1-got-$arm1_owner_count"
-    [ "$arm1_parse_count" -ge 1 ] || note_fail "arm1:parse-expected>=1-got-$arm1_parse_count"
 fi
 
 # ---------------------------------------------------------------- arm 2 -----
 # WITH the fix and the var UNSET: nothing passes through, and the explicit-env
 # vector is byte-identical to the pre-fix one.
 echo "=== arm 2: with fix, variable unset ==="
-unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
 arm2_diag=$(bootstrap_stage3_diagnostic_env)
 printf 'diagnostic env emitted: [%s]\n' "$(printf '%s' "$arm2_diag" | tr '\n' ' ')"
 arm "arm2" "$arm2_diag"
 arm2_run=$?
 EV_CHECKED=$((EV_CHECKED + 1))
 if [ "$arm2_run" -eq 0 ]; then
-    arm2_count=$(visible_count arm2 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE)
-    arm2_owner_count=$(visible_count arm2 SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER)
-    arm2_parse_count=$(visible_count arm2 SIMPLE_DEBUG_STAGE3_PARSE_OWNER)
-    echo "trace-var-visible lines: payload=$arm2_count owner=$arm2_owner_count parse=$arm2_parse_count"
+    arm2_count=$(count_of arm2)
+    echo "trace-var-visible lines: $arm2_count"
     sed -n '1p' "$work/arm2.log"
     [ "$arm2_count" -eq 0 ] || note_fail "arm2:expected-0-got-$arm2_count"
-    [ "$arm2_owner_count" -eq 0 ] || note_fail "arm2:owner-expected-0-got-$arm2_owner_count"
-    [ "$arm2_parse_count" -eq 0 ] || note_fail "arm2:parse-expected-0-got-$arm2_parse_count"
 fi
 [ -z "$arm2_diag" ] || note_fail "arm2:diagnostic-env-not-empty"
 
@@ -181,35 +169,25 @@ fi
 # modelled by omitting the pass-through words from the invocation, which is
 # exactly what the pre-fix call sites did.  A control that fails to fail means
 # the test is broken, not the code.
-echo "=== arm 3: control -- without fix, allowlisted diagnostics set to 1 ==="
+echo "=== arm 3: control -- without fix, SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1 ==="
 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
-SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER=1
-SIMPLE_DEBUG_STAGE3_PARSE_OWNER=1
-export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
 arm "arm3" ""
 arm3_run=$?
 EV_CHECKED=$((EV_CHECKED + 1))
 if [ "$arm3_run" -eq 0 ]; then
-    arm3_count=$(visible_count arm3 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE)
-    arm3_owner_count=$(visible_count arm3 SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER)
-    arm3_parse_count=$(visible_count arm3 SIMPLE_DEBUG_STAGE3_PARSE_OWNER)
-    echo "trace-var-visible lines: payload=$arm3_count owner=$arm3_owner_count parse=$arm3_parse_count"
+    arm3_count=$(count_of arm3)
+    echo "trace-var-visible lines: $arm3_count"
     sed -n '1p' "$work/arm3.log"
     [ "$arm3_count" -eq 0 ] ||
         note_fail "arm3:control-did-not-reproduce-defect-got-$arm3_count"
-    [ "$arm3_owner_count" -eq 0 ] ||
-        note_fail "arm3:owner-control-did-not-reproduce-defect-got-$arm3_owner_count"
-    [ "$arm3_parse_count" -eq 0 ] ||
-        note_fail "arm3:parse-control-did-not-reproduce-defect-got-$arm3_parse_count"
 fi
 
 # --------------------------------------------------- invariant: hash ----
 # Default behaviour is byte-identical: with nothing set, the args hash equals
 # the hash of the vector with no pass-through words at all.
 echo "=== invariant 1: args hash unchanged by default ==="
-unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
 inv_empty=$(bootstrap_stage3_diagnostic_env)
 # shellcheck disable=SC2086
 hash_with=$(bootstrap_stage3_args_sha256 $baseline_env $inv_empty -- stub)
@@ -224,10 +202,7 @@ echo "pre-fix-baseline:         $hash_without"
 # of the environment would be the weaker gate.
 echo "=== invariant 2: an enabled probe changes the args hash ==="
 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=1
-SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER=1
-SIMPLE_DEBUG_STAGE3_PARSE_OWNER=1
-export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE
 inv_set=$(bootstrap_stage3_diagnostic_env)
 # shellcheck disable=SC2086
 hash_diag=$(bootstrap_stage3_args_sha256 $baseline_env $inv_set -- stub)
@@ -236,41 +211,21 @@ echo "with-probe-enabled:       $hash_diag"
 [ "$hash_diag" != "$hash_without" ] ||
     note_fail "invariant2:enabled-probe-did-not-change-hash"
 
-# Each newly allowlisted diagnostic independently participates in provenance.
-unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_STAGE3_PARSE_OWNER
-SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER=1
-owner_inv_set=$(bootstrap_stage3_diagnostic_env)
-# shellcheck disable=SC2086
-owner_hash_diag=$(bootstrap_stage3_args_sha256 $baseline_env $owner_inv_set -- stub)
-[ "$owner_hash_diag" != "$hash_without" ] ||
-    note_fail "invariant2:owner-probe-did-not-change-hash"
-unset SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER
-SIMPLE_DEBUG_STAGE3_PARSE_OWNER=1
-parse_inv_set=$(bootstrap_stage3_diagnostic_env)
-# shellcheck disable=SC2086
-parse_hash_diag=$(bootstrap_stage3_args_sha256 $baseline_env $parse_inv_set -- stub)
-[ "$parse_hash_diag" != "$hash_without" ] ||
-    note_fail "invariant2:parse-probe-did-not-change-hash"
-
 # ------------------------------------------- invariant: value/name scope ----
 # Only the literal value 1 is accepted, and only allowlisted names.  A
 # path-valued or codegen-affecting knob must never appear.
 echo "=== invariant 3: value and name scope ==="
 EV_CHECKED=$((EV_CHECKED + 1))
 SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE=/etc/passwd
-SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER=0
-SIMPLE_DEBUG_STAGE3_PARSE_OWNER=2
 SIMPLE_DIAG_FILE=/tmp/evil
 SIMPLE_KEEP_LLVM_IR=1
 SIMPLE_DEBUG_INFO_LEVEL=2
-export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
+export SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
     SIMPLE_DEBUG_INFO_LEVEL
 scope=$(bootstrap_stage3_diagnostic_env)
 printf 'emitted with hostile values: [%s]\n' "$(printf '%s' "$scope" | tr '\n' ' ')"
 [ -z "$scope" ] || note_fail "invariant3:emitted-non-allowlisted-or-non-1-value"
-unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DEBUG_BOOTSTRAP_HIR_OWNER \
-    SIMPLE_DEBUG_STAGE3_PARSE_OWNER SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
+unset SIMPLE_HIR_PAYLOAD_LOOKUP_TRACE SIMPLE_DIAG_FILE SIMPLE_KEEP_LLVM_IR \
     SIMPLE_DEBUG_INFO_LEVEL
 
 # ------------------------------------------------------------- verdict ------

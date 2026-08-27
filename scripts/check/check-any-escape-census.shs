@@ -32,17 +32,28 @@
 #   A run that fed 0 modules to the checker is ERROR, never a pass: absence of
 #   analysis is absence of evidence. A missing `bin/simple` is ERROR too.
 #
+#   Every driver invocation runs under a per-module `timeout`
+#   ($ANY_ESCAPE_MODULE_TIMEOUT seconds, default 600). A module that does not
+#   terminate is ERROR exit 2 NAMING THE FILE -- never silently skipped, never
+#   counted as unanalyzable, never a pass: a hung checker is no verdict at all,
+#   and every other guard in this repo is fail-closed on non-termination.
+#
 # USAGE
 #   sh scripts/check/check-any-escape-census.shs                 # default scope
 #   sh scripts/check/check-any-escape-census.shs --root DIR      # narrow scope
 #   sh scripts/check/check-any-escape-census.shs --selftest      # fixtures only
 #   sh scripts/check/check-any-escape-census.shs --generate-baseline
+#   ANY_ESCAPE_MODULE_TIMEOUT=30 sh scripts/check/check-any-escape-census.shs
 #
 #   `--generate-baseline` is for DELIBERATE, REVIEWED updates only, exactly like
 #   the divergence and unbacked-extern baselines. Do not "fix" a FAIL with it
 #   without reading the diff: a FAIL naming growth is real new debt.
 
 set -u
+
+# Phase 9: mint an evidence receipt for this gate's verdict (additive; never
+# changes the verdict or the exit status). See scripts/check/lib/emit_receipt.shs.
+. "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/emit_receipt.shs"
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
@@ -51,6 +62,8 @@ SIMPLE_BIN="bin/simple"
 DRIVER="src/app/check/any_escape_census.spl"
 BASELINE="scripts/check/any_escape_baseline.txt"
 FIXTURES="test/fixtures/any_escape"
+MODULE_TIMEOUT="${ANY_ESCAPE_MODULE_TIMEOUT:-600}"
+TIMEOUT_BIN=$(command -v timeout 2>/dev/null || true)
 # Default scope. `src/compiler/**` is the population §8.7 cares about, but the
 # analysis lowers each file to HIR, which costs seconds per file, so the default
 # is the sub-tree the Any-hardening wave owns. Widen with --root.
@@ -80,11 +93,22 @@ trap 'rm -rf "$TMPDIR_RUN"' EXIT
 # the invocation, never through a pipe: a pipeline's $? is the last stage's
 # status and has produced false greens in this repo before.
 # ---------------------------------------------------------------------------
+# run_census LIST OUT -- one driver invocation under the per-module timeout.
+# Returns the driver's exit status; 124 means the timeout fired (GNU timeout's
+# contract), and every caller that is part of a scan treats 124 as ERROR.
+# $CENSUS_BIN overrides the driver binary (selftest only: it substitutes a
+# sleeping stand-in to prove the timeout path is live, not dead code).
 run_census() {
     _list="$1"
     _out="$2"
-    "$SIMPLE_BIN" run "$DRIVER" --list "$_list" > "$_out" 2>"$_out.err"
-    _rc=$?
+    _bin="${CENSUS_BIN:-$SIMPLE_BIN}"
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" -k 5 "$MODULE_TIMEOUT" "$_bin" run "$DRIVER" --list "$_list" > "$_out" 2>"$_out.err"
+        _rc=$?
+    else
+        "$_bin" run "$DRIVER" --list "$_list" > "$_out" 2>"$_out.err"
+        _rc=$?
+    fi
     return $_rc
 }
 
@@ -115,7 +139,7 @@ count_code() {
 # ---------------------------------------------------------------------------
 selftest() {
     _fail=0
-    for _f in clean any_in_safe_fn any_returned_from_boundary checked_downcast_ok; do
+    for _f in clean any_in_safe_fn any_returned_from_boundary checked_downcast_ok unanalyzable; do
         if [ ! -f "$FIXTURES/$_f.spl" ]; then
             echo "selftest: missing fixture $FIXTURES/$_f.spl"
             _fail=1
@@ -124,6 +148,16 @@ selftest() {
         echo "$FIXTURES/$_f.spl" > "$TMPDIR_RUN/st.list"
         run_census "$TMPDIR_RUN/st.list" "$TMPDIR_RUN/st.out"
         _rc=$?
+        if [ "$_f" = "unanalyzable" ]; then
+            # The whole point: this file cannot be analyzed, so the checker
+            # MUST refuse it (non-zero) rather than return a clean, empty
+            # analysis that would silently shrink the census denominator.
+            if [ "$_rc" -eq 0 ]; then
+                echo "selftest: unanalyzable fixture was accepted (rc=0) — the census denominator is fail-open"
+                _fail=1
+            fi
+            continue
+        fi
         if [ "$_rc" -ne 0 ]; then
             echo "selftest: fixture $_f: driver exited $_rc"
             sed -n '1,5p' "$TMPDIR_RUN/st.out.err"
@@ -144,6 +178,30 @@ selftest() {
                 [ "$_n001" -eq 0 ] && [ "$_n002" -eq 0 ] || { echo "selftest: checked_downcast_ok must be silent, got 001=$_n001 002=$_n002"; _fail=1; } ;;
         esac
     done
+    # Timeout fixture: the checker must not be able to hang the gate. A
+    # sleeping stand-in driver under a 1s budget must come back as 124, the
+    # status the scan loop turns into ERROR. Without a `timeout` binary the
+    # budget cannot be enforced at all, so that is a selftest failure too.
+    if [ -z "$TIMEOUT_BIN" ]; then
+        echo "selftest: no 'timeout' binary on PATH; the per-module budget cannot be enforced"
+        _fail=1
+    elif [ ! -f "$FIXTURES/sleep_forever.spl" ]; then
+        echo "selftest: missing fixture $FIXTURES/sleep_forever.spl"
+        _fail=1
+    else
+        printf '#!/bin/sh\nsleep 30\n' > "$TMPDIR_RUN/sleeping_driver"
+        chmod +x "$TMPDIR_RUN/sleeping_driver"
+        echo "$FIXTURES/sleep_forever.spl" > "$TMPDIR_RUN/st.list"
+        _saved_timeout="$MODULE_TIMEOUT"
+        MODULE_TIMEOUT=1
+        CENSUS_BIN="$TMPDIR_RUN/sleeping_driver" run_census "$TMPDIR_RUN/st.list" "$TMPDIR_RUN/st.out"
+        _rc=$?
+        MODULE_TIMEOUT="$_saved_timeout"
+        if [ "$_rc" -ne 124 ]; then
+            echo "selftest: sleeping driver returned $_rc, expected 124 — the per-module timeout is not live"
+            _fail=1
+        fi
+    fi
     return $_fail
 }
 
@@ -155,7 +213,7 @@ if [ "$SELFTEST_RC" -ne 0 ]; then
 fi
 
 if [ "$MODE" = "selftest" ]; then
-    echo "PASS — 4 module(s) checked, selftest only (no tree scan requested)"
+    echo "PASS — 5 module(s) checked, selftest only (no tree scan requested)"
     exit 0
 fi
 
@@ -198,6 +256,10 @@ while IFS= read -r _file; do
     echo "$_file" > "$TMPDIR_RUN/one.list"
     run_census "$TMPDIR_RUN/one.list" "$TMPDIR_RUN/one.out"
     _rc=$?
+    if [ "$_rc" -eq 124 ]; then
+        echo "ERROR — nothing was checked (module timed out after ${MODULE_TIMEOUT}s: $_file; a hung checker is no verdict)"
+        exit 2
+    fi
     _sum=$(grep '^SUMMARY ' "$TMPDIR_RUN/one.out" | tail -1)
     if [ "$_rc" -ne 0 ] || [ -z "$_sum" ]; then
         UNANALYZABLE=$((UNANALYZABLE + 1))
@@ -256,14 +318,20 @@ if [ "$UNANALYZABLE" -gt "$BASE_UNA" ]; then
 fi
 
 if [ "$ANY_SITES" -gt "$BASE_ANY" ] || [ "$ESCAPES" -gt "$BASE_ESC" ]; then
-    echo "FAIL — $MODULES module(s) checked, $ANY_SITES Any site(s) (baseline $BASE_ANY), $ESCAPES escape(s) (baseline $BASE_ESC): the population GREW"
+    VERDICT="FAIL — $MODULES module(s) checked, $ANY_SITES Any site(s) (baseline $BASE_ANY), $ESCAPES escape(s) (baseline $BASE_ESC): the population GREW"
+    echo "$VERDICT"
+    emit_receipt "check-any-escape-census" "$VERDICT" || true
     exit 1
 fi
 
 if [ "$ANY_SITES" -lt "$BASE_ANY" ] || [ "$ESCAPES" -lt "$BASE_ESC" ] || [ "$UNANALYZABLE" -lt "$BASE_UNA" ]; then
-    echo "FAIL — $MODULES module(s) checked, $ANY_SITES Any site(s) (baseline $BASE_ANY), $ESCAPES escape(s) (baseline $BASE_ESC), $UNANALYZABLE unanalyzable (baseline $BASE_UNA): STALE baseline, tighten it with --generate-baseline"
+    VERDICT="FAIL — $MODULES module(s) checked, $ANY_SITES Any site(s) (baseline $BASE_ANY), $ESCAPES escape(s) (baseline $BASE_ESC), $UNANALYZABLE unanalyzable (baseline $BASE_UNA): STALE baseline, tighten it with --generate-baseline"
+    echo "$VERDICT"
+    emit_receipt "check-any-escape-census" "$VERDICT" || true
     exit 1
 fi
 
-echo "PASS — $MODULES module(s) checked, $ANY_SITES Any site(s), $ESCAPES escape(s), $UNANALYZABLE unanalyzable (baseline $BASE_ANY/$BASE_ESC, scope $ROOT)"
+VERDICT="PASS — $MODULES module(s) checked, $ANY_SITES Any site(s), $ESCAPES escape(s), $UNANALYZABLE unanalyzable (baseline $BASE_ANY/$BASE_ESC, scope $ROOT)"
+echo "$VERDICT"
+emit_receipt "check-any-escape-census" "$VERDICT" || true
 exit 0

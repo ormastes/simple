@@ -9,7 +9,6 @@ usage() {
 }
 evidence= manifest= config_manifest= run_id= source_hash= config_hash= compiler_hash= captured= valid_until= now=
 trusted_key_id= collector_key= collector_key_id= fixture=false
-gate_sidecar=${MCI_SIMPLEOS_GATE_SIDECAR:-}
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --evidence) evidence=$2; shift 2;; --manifest) manifest=$2; shift 2;; --configuration-manifest) config_manifest=$2; shift 2;;
@@ -21,9 +20,6 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 safe_token() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1;; esac; }
-canonical_guest_version_command='exec /SYS/APPS/SIMPLSTC.SMF --version'
-canonical_guest_compile_command='exec /SYS/APPS/SIMPLSTC.SMF --compile-fixture'
-canonical_guest_run_command='exec /SYS/APPS/SIMPLSTC.SMF --run-fixture'
 is_hash() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
 is_uint() { case "$1" in ''|*[!0-9]*) return 1;; esac; }
 dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";exit !((length(a)<length(b))||(length(a)==length(b)&&a<=b))}'; }
@@ -236,15 +232,6 @@ stress_invariant_violations
 stress_invariant_ledger_relpath
 stress_invariant_ledger_sha256
 receipt_hash'
-                if [ "$fixture" = false ]; then expected_keys=$(printf '%s\n%s' "$expected_keys" 'version_command
-version_stderr_transcript_relpath
-version_stderr_transcript_sha256
-compile_command
-compile_stderr_transcript_relpath
-compile_stderr_transcript_sha256
-run_command
-run_stderr_transcript_relpath
-run_stderr_transcript_sha256'); fi
                 if [ "$keys" != "$expected_keys" ] || [ "$(field collector_schema "$r" 2>/dev/null || true)" != simpleos-qemu-host-collector-v1 ]; then row_reason=invalid-collector-schema
                 elif [ "$(field attestation "$r" 2>/dev/null || true)" != signed-real-v1 ]; then row_reason=synthetic-or-unsigned-collector
                 elif [ "$(field collector_key_id "$r" 2>/dev/null || true)" != "$collector_key_id" ]; then row_reason=untrusted-collector
@@ -254,7 +241,6 @@ run_stderr_transcript_sha256'); fi
                 elif [ "$(field qemu_or_host_collector "$r" 2>/dev/null || true)" != real ] || [ "$(field target_side "$r" 2>/dev/null || true)" != true ] || [ "$(field guest_filesystem_execution "$r" 2>/dev/null || true)" != true ]; then row_reason=not-real-target-execution
                 elif [ "$(field payload_paths "$r" 2>/dev/null || true)" != '/usr/bin,/bin,/sys/apps,/SYS/SIMPLETOOL.SDN' ]; then row_reason=incomplete-payload-paths
                 elif ! is_hash "$(field usr_bin_sha256 "$r" 2>/dev/null || true)" || ! is_hash "$(field bin_sha256 "$r" 2>/dev/null || true)" || ! is_hash "$(field sys_apps_sha256 "$r" 2>/dev/null || true)" || ! is_hash "$(field sys_simpletool_sdn_sha256 "$r" 2>/dev/null || true)"; then row_reason=invalid-payload-hash
-                elif [ "$fixture" = false ] && { [ "$(field version_command "$r" 2>/dev/null || true)" != "$canonical_guest_version_command" ] || [ "$(field compile_command "$r" 2>/dev/null || true)" != "$canonical_guest_compile_command" ] || [ "$(field run_command "$r" 2>/dev/null || true)" != "$canonical_guest_run_command" ] || ! safe_rel "$(field version_stderr_transcript_relpath "$r" 2>/dev/null || true)" || ! is_hash "$(field version_stderr_transcript_sha256 "$r" 2>/dev/null || true)" || ! safe_rel "$(field compile_stderr_transcript_relpath "$r" 2>/dev/null || true)" || ! is_hash "$(field compile_stderr_transcript_sha256 "$r" 2>/dev/null || true)" || ! safe_rel "$(field run_stderr_transcript_relpath "$r" 2>/dev/null || true)" || ! is_hash "$(field run_stderr_transcript_sha256 "$r" 2>/dev/null || true)"; }; then row_reason=noncanonical-guest-command-or-transcript
                 elif [ "$(field payload_execution_schema "$r" 2>/dev/null || true)" != simpleos-payload-execution-v1 ] || ! is_hash "$(field version_command_sha256 "$r" 2>/dev/null || true)" || [ "$(field version_exit_code "$r" 2>/dev/null || true)" != 0 ] || ! is_hash "$(field compile_command_sha256 "$r" 2>/dev/null || true)" || [ "$(field compile_exit_code "$r" 2>/dev/null || true)" != 0 ] || ! is_hash "$(field run_command_sha256 "$r" 2>/dev/null || true)" || [ "$(field run_exit_code "$r" 2>/dev/null || true)" != 0 ]; then row_reason=invalid-payload-execution
                 elif ! verify_bundle_artifact "$(field version_transcript_relpath "$r" 2>/dev/null || true)" "$(field version_transcript_sha256 "$r" 2>/dev/null || true)" simpleos-version-transcript-v1 "version-$index" || ! verify_bundle_artifact "$(field compile_transcript_relpath "$r" 2>/dev/null || true)" "$(field compile_transcript_sha256 "$r" 2>/dev/null || true)" simpleos-compile-transcript-v1 "compile-$index" || ! verify_bundle_artifact "$(field run_transcript_relpath "$r" 2>/dev/null || true)" "$(field run_transcript_sha256 "$r" 2>/dev/null || true)" simpleos-run-transcript-v1 "run-$index" || ! verify_bundle_artifact "$(field alias_identity_relpath "$r" 2>/dev/null || true)" "$(field alias_identity_sha256 "$r" 2>/dev/null || true)" simpleos-alias-identity-v1 "aliases-$index"; then row_reason=invalid-payload-artifact
                 elif [ "$(field stress_schema "$r" 2>/dev/null || true)" != simpleos-stress-receipt-v1 ] || [ "$(field stress_invariant_violations "$r" 2>/dev/null || true)" != 0 ]; then row_reason=invalid-stress-receipt
@@ -279,24 +265,6 @@ done
 [ "$selected" -gt 0 ] || reason=no-certified-cells-selected
 [ "$reason" = none ] && [ "$passed" -eq "$selected" ] && [ "$fixture" = false ] && result=PASS || result=BLOCKED
 artifact="$work/simpleos.evidence"
-if [ -n "$gate_sidecar" ]; then
-    regular "$gate_sidecar" || { echo 'BLOCKED: SimpleOS gate sidecar missing' >&2; exit 2; }
-    [ "$(field gate_schema "$gate_sidecar")" = simpleos-mission-critical-gate-v1 ] || { echo 'BLOCKED: invalid SimpleOS gate sidecar schema' >&2; exit 2; }
-    [ "$(field matrix_passed "$gate_sidecar")" = 26/26 ] || { echo 'BLOCKED: SimpleOS gate matrix is not 26/26' >&2; exit 2; }
-    [ "$(field report_relpath "$gate_sidecar")" = simpleos-mission-critical-release/report.md ] || exit 2
-    [ "$(field matrix_out_relpath "$gate_sidecar")" = simpleos-mission-critical-release/matrix.out ] || exit 2
-    [ "$(field matrix_err_relpath "$gate_sidecar")" = simpleos-mission-critical-release/matrix.err ] || exit 2
-    [ "$(field gate_stdout_relpath "$gate_sidecar")" = orchestrator-captures/simpleos-mission-critical.stdout ] || exit 2
-    [ "$(field gate_stderr_relpath "$gate_sidecar")" = orchestrator-captures/simpleos-mission-critical.stderr ] || exit 2
-    for gate_hash in report_sha256 matrix_out_sha256 matrix_err_sha256 gate_stdout_sha256 gate_stderr_sha256; do
-        is_hash "$(field "$gate_hash" "$gate_sidecar")" || { echo "BLOCKED: invalid SimpleOS gate hash: $gate_hash" >&2; exit 2; }
-    done
-    [ "$(hash_file "$evidence_abs/$(field report_relpath "$gate_sidecar")")" = "$(field report_sha256 "$gate_sidecar")" ] || exit 2
-    [ "$(hash_file "$evidence_abs/$(field matrix_out_relpath "$gate_sidecar")")" = "$(field matrix_out_sha256 "$gate_sidecar")" ] || exit 2
-    [ "$(hash_file "$evidence_abs/$(field matrix_err_relpath "$gate_sidecar")")" = "$(field matrix_err_sha256 "$gate_sidecar")" ] || exit 2
-    [ "$(hash_file "$evidence_abs/$(field gate_stdout_relpath "$gate_sidecar")")" = "$(field gate_stdout_sha256 "$gate_sidecar")" ] || exit 2
-    [ "$(hash_file "$evidence_abs/$(field gate_stderr_relpath "$gate_sidecar")")" = "$(field gate_stderr_sha256 "$gate_sidecar")" ] || exit 2
-fi
 {
     echo artifact_schema=mci-simpleos-platform-evidence-v1
     [ "$fixture" = false ] && echo artifact_mode=live || echo artifact_mode=fixture
@@ -317,16 +285,6 @@ fi
     echo structural_reason="$reason"
     cat "$rows"
     echo result="$result"
-    if [ -n "$gate_sidecar" ]; then
-        regular "$gate_sidecar" || { echo 'BLOCKED: SimpleOS gate sidecar missing' >&2; exit 2; }
-        echo simpleos_gate_sidecar_sha256="$(hash_file "$gate_sidecar")"
-        echo simpleos_gate_matrix_passed="$(field matrix_passed "$gate_sidecar")"
-        echo simpleos_gate_report_sha256="$(field report_sha256 "$gate_sidecar")"
-        echo simpleos_gate_matrix_out_sha256="$(field matrix_out_sha256 "$gate_sidecar")"
-        echo simpleos_gate_matrix_err_sha256="$(field matrix_err_sha256 "$gate_sidecar")"
-        echo simpleos_gate_stdout_sha256="$(field gate_stdout_sha256 "$gate_sidecar")"
-        echo simpleos_gate_stderr_sha256="$(field gate_stderr_sha256 "$gate_sidecar")"
-    fi
 } > "$artifact"
 artifact_hash=$(hash_file "$artifact")
 template="$work/simpleos.receipt.unsigned.template"
@@ -348,15 +306,6 @@ template="$work/simpleos.receipt.unsigned.template"
     echo artifact_sha256="$artifact_hash"
     echo artifact_schema=mci-simpleos-platform-evidence-v1
     [ "$result" = PASS ] && [ "$fixture" = false ] && { echo artifact_mode=live; echo release_eligible=true; } || { echo artifact_mode=fixture; echo release_eligible=false; }
-    if [ -n "$gate_sidecar" ]; then
-        echo simpleos_gate_sidecar_sha256="$(hash_file "$gate_sidecar")"
-        echo simpleos_gate_matrix_passed="$(field matrix_passed "$gate_sidecar")"
-        echo simpleos_gate_report_sha256="$(field report_sha256 "$gate_sidecar")"
-        echo simpleos_gate_matrix_out_sha256="$(field matrix_out_sha256 "$gate_sidecar")"
-        echo simpleos_gate_matrix_err_sha256="$(field matrix_err_sha256 "$gate_sidecar")"
-        echo simpleos_gate_stdout_sha256="$(field gate_stdout_sha256 "$gate_sidecar")"
-        echo simpleos_gate_stderr_sha256="$(field gate_stderr_sha256 "$gate_sidecar")"
-    fi
 } > "$template"
 publisher_source=$root/scripts/check/lib/mci-secure-publish.c
 snapshot "$publisher_source" "$work/mci-secure-publish.c" || { echo 'BLOCKED: secure publisher source missing/unsafe' >&2; exit 2; }

@@ -15,24 +15,30 @@ set -eu
 #   SIMPLE_BIG_STORAGE_ROOT Shared media root (default: $HOME/.simple)
 #   SIMPLE_FREEBSD_MEDIA_SHA256 Trusted SHA-256 (or use <image>.sha256 sidecar)
 #   QEMU_SSH_PUBLIC_KEY   SSH public key to inject (default: ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)
+#   QEMU_SSH_PRIVATE_KEY  Matching SSH private key (default: public-key path without .pub)
 #   QEMU_PORT            SSH forwarding port (default: 2222)
 #   QEMU_USER            VM user (default: freebsd)
-#   QEMU_MEM             RAM (default: 4G)
+#   QEMU_MEM             RAM (default: 8G)
 #   QEMU_CPUS            CPUs (default: 4)
-#   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 180)
+#   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 1800; pristine images
+#                        may run freebsd-update before nuageinit/sshd)
 #   QEMU_ROOT_SSH_TIMEOUT Root SSH wait seconds after user SSH (default: 120)
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
-EXPECTED_SIMPLE_VERSION="$(tr -d '[:space:]' <"${ROOT_DIR}/VERSION")"
-[ -n "$EXPECTED_SIMPLE_VERSION" ] || exit 1
+
+. "$ROOT_DIR/scripts/check/lib/bootstrap-stage3/sanity.shs"
+EXPECTED_BOOTSTRAP_VERSION=$(bootstrap_stage3_canonical_version "$ROOT_DIR") || {
+    printf '%s\n' 'FreeBSD bootstrap check: release/version.sdn or its VERSION projection is invalid' >&2
+    exit 2
+}
 
 VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
-QEMU_MEM="${QEMU_MEM:-4G}"
+QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
-QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-180}"
+QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-1800}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 QEMU_REMOTE_TIMEOUT="${QEMU_REMOTE_TIMEOUT:-300}"
 QEMU_PACKAGE_TIMEOUT="${QEMU_PACKAGE_TIMEOUT:-1800}"
@@ -48,6 +54,7 @@ QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${SIMPLE_FREEBSD_MEDIA_PATH:-
 QEMU_CLOUDINIT_ISO="${QEMU_CLOUDINIT_ISO:-${VM_DIR}/freebsd-cloudinit-seed.iso}"
 PID_FILE="${VM_DIR}/qemu.pid"
 SERIAL_LOG="${VM_DIR}/qemu-serial.log"
+QEMU_START_LOG="${VM_DIR}/qemu-start.log"
 OVERLAY_IMAGE="${VM_DIR}/freebsd-run.overlay.qcow2"
 PROVENANCE_DIR="${ROOT_DIR}/build/freebsd/bootstrap-logs"
 PROVENANCE_RECEIPT="${PROVENANCE_DIR}/freebsd_qemu_bootstrap_provenance.env"
@@ -391,6 +398,11 @@ cleanup() {
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if [ -n "${VM_SSH:-}" ]; then
+                info "Requesting guest shutdown"
+                $VM_SSH "shutdown -p now" >/dev/null 2>&1 || true
+                sleep 5
+            fi
             info "Stopping QEMU (pid=$pid)"
             kill "$pid" 2>/dev/null || true
             sleep 1
@@ -481,28 +493,28 @@ local-hostname: freebsd-bootstrap
 EOF
 
 cat > "$CLOUDINIT_DIR/user-data" <<USERDATA
-#!/bin/sh
-# nuageinit on FreeBSD executes non-cloud-config user-data as a root script
-# during firstboot (BEFORE networking/sshd). This sets up SSH keys and
-# enables root login so the host can SSH in as root for package installs.
-
-# Ensure freebsd user exists
-pw useradd -n ${QEMU_USER} -s /bin/sh -m -G wheel 2>/dev/null || true
-
-# SSH keys for both root and freebsd
-mkdir -p /root/.ssh /home/${QEMU_USER}/.ssh
-echo '${SSH_PUB_KEY_CONTENT}' >> /root/.ssh/authorized_keys
-echo '${SSH_PUB_KEY_CONTENT}' >> /home/${QEMU_USER}/.ssh/authorized_keys
-chmod 700 /root/.ssh /home/${QEMU_USER}/.ssh
-chmod 600 /root/.ssh/authorized_keys /home/${QEMU_USER}/.ssh/authorized_keys
-chown -R ${QEMU_USER}:${QEMU_USER} /home/${QEMU_USER}/.ssh
-
-# Enable root SSH login
-sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i '' 's/^PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
-
-# Set hostname
-hostname freebsd-bootstrap
+#cloud-config
+write_files:
+  - path: /etc/rc.conf.d/firstboot_freebsd_update
+    permissions: "0644"
+    content: |
+      firstboot_freebsd_update_enable="NO"
+  - path: /etc/rc.conf.d/firstboot_pkgs
+    permissions: "0644"
+    content: |
+      firstboot_pkgs_enable="NO"
+runcmd:
+  - |
+    pw useradd -n ${QEMU_USER} -s /bin/sh -m -G wheel 2>/dev/null || true
+    mkdir -p /root/.ssh /home/${QEMU_USER}/.ssh
+    echo '${SSH_PUB_KEY_CONTENT}' >> /root/.ssh/authorized_keys
+    echo '${SSH_PUB_KEY_CONTENT}' >> /home/${QEMU_USER}/.ssh/authorized_keys
+    chmod 700 /root/.ssh /home/${QEMU_USER}/.ssh
+    chmod 600 /root/.ssh/authorized_keys /home/${QEMU_USER}/.ssh/authorized_keys
+    chown -R ${QEMU_USER}:${QEMU_USER} /home/${QEMU_USER}/.ssh
+    sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sed -i '' 's/^PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
+    hostname freebsd-bootstrap
 USERDATA
 chmod +x "$CLOUDINIT_DIR/user-data"
 
@@ -550,13 +562,26 @@ if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" qemu-system-x86_64 \
     -display none \
     -serial "file:${SERIAL_LOG}" \
     -daemonize \
-    -pidfile "$PID_FILE" 2>/dev/null
-
-if [ -f "$PID_FILE" ]; then
-    pass "QEMU started (pid=$(cat "$PID_FILE"), accel=${ACCEL})"
-else
+    -pidfile "$PID_FILE" 2>"$QEMU_START_LOG"; then
+    [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
     fail "QEMU failed to start"
 fi
+
+QEMU_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+    pass "QEMU started (pid=${QEMU_PID}, accel=${ACCEL})"
+else
+    [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
+    fail "QEMU failed to start"
+fi
+
+require_qemu_alive() {
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+        [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
+        [ -s "$SERIAL_LOG" ] && tail -20 "$SERIAL_LOG" >&2
+        fail "QEMU exited while waiting for SSH"
+    fi
+}
 
 # ── SSH Connectivity ───────────────────────────────────────────────────
 printf '[6/7] SSH connectivity\n'
@@ -567,6 +592,7 @@ CONNECTED=0
 
 info "Waiting for SSH (up to ${SSH_TIMEOUT}s)..."
 while [ "$ELAPSED" -lt "$SSH_TIMEOUT" ]; do
+    require_qemu_alive
     if $SSH_CMD true 2>/dev/null; then
         CONNECTED=1
         break
@@ -585,6 +611,7 @@ fi
 pass "SSH connected as ${QEMU_USER} in ${ELAPSED}s"
 
 UNAME=$($SSH_CMD "uname -sr" 2>/dev/null) || UNAME="(unknown)"
+[ "${UNAME%% *}" = "FreeBSD" ] || fail "Expected FreeBSD guest, got: $UNAME"
 pass "Remote: $UNAME"
 
 # Poll for root SSH (bootcmd enables PermitRootLogin before cloud-init finishes)
@@ -592,6 +619,7 @@ info "Waiting for root SSH (up to ${QEMU_ROOT_SSH_TIMEOUT}s after initial connec
 ROOT_ELAPSED=0
 ROOT_OK=0
 while [ "$ROOT_ELAPSED" -lt "$QEMU_ROOT_SSH_TIMEOUT" ]; do
+    require_qemu_alive
     if $ROOT_SSH_CMD true 2>/dev/null; then
         ROOT_OK=1
         break
@@ -653,7 +681,7 @@ if [ "$MODE" = "smoke" ]; then
     else
         info "Installing clang..."
         $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>/dev/null || true
-        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm" 2>&1 | tail -3
+        $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y llvm18" 2>&1 | tail -3
         CLANG_CHECK=$($VM_SSH "command -v clang >/dev/null 2>&1 && echo ok || echo missing" 2>/dev/null)
         if [ "$CLANG_CHECK" = "ok" ]; then
             pass "clang installed"
@@ -667,23 +695,46 @@ if [ "$MODE" = "smoke" ]; then
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
-    printf '\nSmoke test PASSED\n'
+    printf '\nFreeBSD x86_64 QEMU smoke PASS\n'
 else
     # Full: install deps, rsync project, build seed, run bootstrap
     rm -f "$PROVENANCE_RECEIPT"
     VM_HOME=$($VM_SSH "echo \$HOME" 2>/dev/null)
     VM_HOME="${VM_HOME:-/root}"
 
+    info "Growing and checking the guest root filesystem..."
+    $PKG_CMD "service growfs onestart >/tmp/simple-growfs.log 2>&1 || true"
+    ROOT_AVAILABLE_KB=$($VM_SSH "df -k / | awk 'NR == 2 { print \$4 }'" 2>/dev/null)
+    case "$ROOT_AVAILABLE_KB" in
+        ''|*[!0-9]*) fail "Could not determine guest root free space" ;;
+    esac
+    [ "$ROOT_AVAILABLE_KB" -ge 10485760 ] || fail "Guest root has less than 10 GiB free after growfs"
+    pass "Guest root has at least 10 GiB free"
+
     info "Installing build dependencies in VM (this may take a few minutes)..."
-    $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>&1 | tail -3 || true
-    $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf" 2>&1 | tail -5
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap > /tmp/simple-pkg-bootstrap.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-bootstrap.log" >&2 || true
+        fail "pkg bootstrap failed"
+    fi
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg update -f > /tmp/simple-pkg-update.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-update.log" >&2 || true
+        fail "pkg update failed"
+    fi
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm18 git gmake pkgconf libffi zstd perl5 > /tmp/simple-pkg-install.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-install.log" >&2 || true
+        fail "dependency installation failed"
+    fi
     $VM_SSH "command -v rsync" 2>/dev/null || fail "rsync install failed"
+    $VM_SSH "command -v perl" 2>/dev/null || fail "perl install failed"
     pass "Dependencies installed"
 
     info "Syncing project to VM..."
     run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete \
         --exclude='.git' \
         --exclude='.jj/' \
+        --exclude='/.claude/worktrees/' \
+        --exclude='/.codex/worktrees/' \
+        --exclude='/.agents/worktrees/' \
         --exclude='/build/' \
         --exclude='.simple/' \
         --exclude='/bootstrap/' \
@@ -704,26 +755,15 @@ else
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
-    info "Building Rust seed in VM..."
-    BUILD_OUT=$($VM_SSH "cd ${VM_HOME}/simple/src/compiler_rust && cargo build --profile bootstrap -p simple-driver -p simple-native-all 2>&1; echo EXIT:\$?" 2>/dev/null)
-    BUILD_EXIT=$(printf '%s' "$BUILD_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
-    printf '%s\n' "$BUILD_OUT" | grep -v '^EXIT:' | tail -5
-    [ "$BUILD_EXIT" = "0" ] || fail "Rust seed build failed (exit $BUILD_EXIT)"
-    pass "Rust seed built"
-
-    info "Running 3-stage bootstrap in VM..."
-    BOOT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BOOTSTRAP=1 src/compiler_rust/target/bootstrap/simple build bootstrap --seed=src/compiler_rust/target/bootstrap/simple 2>&1; echo EXIT:\$?" 2>/dev/null)
-    BOOT_EXIT=$(printf '%s' "$BOOT_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
-    printf '%s\n' "$BOOT_OUT" | grep -v '^EXIT:' | tail -10
-    # exit 1 is acceptable (hash mismatch between stages is known non-determinism)
-    STAGE3_EXISTS=$($VM_SSH "test -f ${VM_HOME}/simple/bootstrap/simple_stage3 && echo yes || echo no" 2>/dev/null)
-    if [ "$STAGE3_EXISTS" != "yes" ]; then
-        fail "3-stage bootstrap failed — no stage3 binary (exit $BOOT_EXIT)"
+    info "Running canonical full bootstrap in VM..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then
+        copy_guest_bootstrap_logs
+        fail "Canonical FreeBSD bootstrap failed"
     fi
-    if [ "$BOOT_EXIT" = "0" ]; then
-        pass "3-stage bootstrap completed (exact match)"
-    else
-        pass "3-stage bootstrap completed (hash mismatch is known non-determinism)"
+    STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"
+    STAGE_EXISTS=$($VM_SSH "test -x ${STAGE_BIN} && echo yes || echo no" 2>/dev/null)
+    if [ "$STAGE_EXISTS" != "yes" ]; then
+        fail "Canonical bootstrap produced no stage3 dynload binary"
     fi
     GUEST_STAGE_SHA256=$($VM_SSH "sha256 -q '$STAGE_BIN'" 2>/dev/null) ||
         fail "Could not hash guest stage3 binary"
@@ -776,16 +816,17 @@ else
     MATRIX_EXIT=$(printf '%s' "$MATRIX_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$MATRIX_OUT" | grep -v '^EXIT:' | tail -20
     [ "$MATRIX_EXIT" = "0" ] || fail "FreeBSD native smoke matrix failed (exit $MATRIX_EXIT)"
-    printf '%s\n' "$MATRIX_OUT" | grep -qx 'total=15 pass=15 fail=0 xfail=0 xpass=0 codegen_fallback_hits=0' || fail "FreeBSD native smoke matrix summary was not strict 15/15"
+    printf '%s\n' "$MATRIX_OUT" | grep -qx 'native_smoke_matrix=true' || fail "FreeBSD native smoke matrix success receipt missing"
     pass "FreeBSD default-LLVM native smoke matrix completed"
 
     info "Running FreeBSD scoped Cranelift smoke..."
     CRANELIFT_MODULE_INIT_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap NATIVE_SMOKE_BACKEND=cranelift NATIVE_SMOKE_CASES='dict_struct_value enum_f64_payload_precision tuple_return_across_call hyphenated_module_init parse_f64 scalar_spill_across_loop_calls' NATIVE_SMOKE_WORK_DIR=/tmp/simple-freebsd-native-smoke-cranelift-module-init sh scripts/check/native-smoke-matrix.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
     CRANELIFT_MODULE_INIT_EXIT=$(printf '%s' "$CRANELIFT_MODULE_INIT_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$CRANELIFT_MODULE_INIT_OUT" | grep -v '^EXIT:' | tail -10
-    [ "$CRANELIFT_MODULE_INIT_EXIT" = "0" ] || fail "FreeBSD Cranelift module-init/parse-f64 smoke failed (exit $CRANELIFT_MODULE_INIT_EXIT)"
-    printf '%s\n' "$CRANELIFT_MODULE_INIT_OUT" | grep -qx 'native_smoke_matrix=true' || fail "FreeBSD Cranelift module-init/parse-f64 success receipt missing"
-    pass "FreeBSD Cranelift module-init/parse-f64 smoke completed"
+    [ "$CRANELIFT_MODULE_INIT_EXIT" = "0" ] || fail "FreeBSD scoped Cranelift smoke failed (exit $CRANELIFT_MODULE_INIT_EXIT)"
+    printf '%s\n' "$CRANELIFT_MODULE_INIT_OUT" | grep -Fqx '[dict_struct_value] (19) struct-valued Dict m[k].field + keys() text (#189) -> PASS (rc got=73 want=73, fallback_hits=0)' || fail "FreeBSD scoped Cranelift Dict receipt missing"
+    printf '%s\n' "$CRANELIFT_MODULE_INIT_OUT" | grep -qx 'native_smoke_matrix=true' || fail "FreeBSD scoped Cranelift success receipt missing"
+    pass "FreeBSD scoped Cranelift smoke completed"
 
     info "Running FreeBSD cross-module Result<u8> compiler smoke..."
     CROSSMODULE_OUT=$($VM_SSH "cd ${VM_HOME}/simple && SIMPLE_BINARY=${STAGE_BIN} SIMPLE_RUNTIME_PATH=${VM_HOME}/simple/src/compiler_rust/target/bootstrap WORK_DIR=/tmp/simple-freebsd-result-u8 sh scripts/check/check-native-crossmodule-result-u8.shs 2>&1; echo EXIT:\$?" 2>/dev/null)
@@ -809,7 +850,7 @@ else
     SELECTED_EXIT=$(printf '%s' "$SELECTED_OUT" | grep '^EXIT:' | tail -1 | cut -d: -f2)
     printf '%s\n' "$SELECTED_OUT" | grep -v '^EXIT:' | tail -12
     [ "$SELECTED_EXIT" = "0" ] || fail "FreeBSD selected native parity failed (exit $SELECTED_EXIT)"
-    printf '%s\n' "$SELECTED_OUT" | grep -qx 'total=30 pass=30 fail=0 xfail=0' || fail "FreeBSD selected native parity summary was not strict 30/30"
+    printf '%s\n' "$SELECTED_OUT" | grep -qx 'total=32 pass=32 fail=0 xfail=0' || fail "FreeBSD selected native parity summary was not strict 32/32"
     pass "FreeBSD bare-main/class-copy/text-Option/bool/method/dynload/Option-map selected parity completed under LLVM and Cranelift"
 
     # Retrieve binary

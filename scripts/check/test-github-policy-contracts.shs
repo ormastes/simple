@@ -31,6 +31,8 @@ args="$*"
 if [ "$args" = "api user --jq .id" ]; then printf '%s\n' "$actor"; exit 0; fi
 
 case $args in
+  "api repos/"*" --jq .default_branch") echo main ;;
+  "api repos/"*"/git/ref/heads/main --jq .object.sha") git -C "$root" rev-parse HEAD ;;
   "api --paginate repos/"*"/rulesets")
     if [ "$mode" = missing ]; then echo '[]'; exit 0; fi
     jq -s 'to_entries | map(.value + {id:(.key + 1)})' "$root"/.github/rulesets/spipe-vcs-v3-*.json
@@ -44,6 +46,9 @@ case $args in
   "api repos/"*"/environments/"*)
     environment=${args##*/}
     jq '{protection_rules:((if .wait_timer > 0 then [{type:"wait_timer",wait_timer:.wait_timer}] else [] end) + (if (.reviewers|length)>0 then [{type:"required_reviewers",prevent_self_review:.prevent_self_review,reviewers:[.reviewers[]|{type,reviewer:{id}}]}] else [] end)),deployment_branch_policy}' "$root/.github/$environment-environment.json"
+    ;;
+  "api repos/"*"/actions/permissions/workflow")
+    cat "$root/.github/actions-workflow-permissions.json"
     ;;
   "api repos/"*"/immutable-releases --jq .enabled") echo true ;;
   "api repos/"*"/pulls/28")
@@ -96,6 +101,34 @@ case $args in
 esac
 EOF
 chmod +x "$tmp/bin/gh"
+
+make_policy_repo() {
+    _destination=$1
+    mkdir -p "$_destination/scripts/release" "$_destination/.github/rulesets"
+    cp "$root/scripts/release/github-policy.shs" "$_destination/scripts/release/github-policy.shs"
+    cp "$root/.github/actions-workflow-permissions.json" \
+       "$root/.github/review-admission-broker.json" \
+       "$root"/.github/*-environment.json "$_destination/.github/"
+    cp "$root"/.github/rulesets/spipe-vcs-v3-*.json "$_destination/.github/rulesets/"
+    git -C "$_destination" init -q
+    git -C "$_destination" add .github scripts/release/github-policy.shs
+    git -C "$_destination" -c user.name=contract -c user.email=contract@example.invalid \
+        commit -qm "canonical policy fixture"
+}
+
+commit_policy_mutation() {
+    _repository=$1
+    _message=$2
+    git -C "$_repository" add .github
+    git -C "$_repository" -c user.name=contract -c user.email=contract@example.invalid \
+        commit -qm "$_message"
+}
+
+run_policy_in() {
+    _repository=$1
+    shift
+    (cd "$_repository" && exec ./scripts/release/github-policy.shs "$@")
+}
 
 export PATH="$tmp/bin:$PATH" MOCK_ROOT="$root"
 policy="$root/scripts/release/github-policy.shs"
@@ -231,6 +264,9 @@ jq '.configured=true | .apply_live=true |
 
 issued=$(date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
 expires=$(date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_issued=$(date -u -d '20 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_expires=$(date -u -d '7 hours' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_overlong_expires=$(date -u -d '8 hours 1 minute' '+%Y-%m-%dT%H:%M:%SZ')
 required='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368},{"context":"SPipe Self Review Admission","integration_id":15368}]'
 jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
   --argjson required "$required" '
@@ -244,7 +280,7 @@ jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
 "$policy" verify-review "$tmp/independent.json" feature/release-hardening "$repo" \
   >"$tmp/review.out"
 
-jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
+jq -cnS --arg repo "$repo" --arg issued "$fallback_issued" --arg expires "$fallback_expires" \
   --argjson required "$required" '
   {schema:"spipe-review-admission/1",mode:"owner_attested_fallback",
    repository:$repo,pull_request_number:28,session_id:"feature/release-hardening",
@@ -255,6 +291,10 @@ jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
    unavailable_verifier_receipt_sha256:("d"*64)}' >"$tmp/fallback.json"
 "$policy" verify-review "$tmp/fallback.json" feature/release-hardening "$repo" \
   >"$tmp/fallback.out"
+jq --arg issued "$issued" --arg expires "$fallback_overlong_expires" \
+  '.issued_at=$issued | .expires_at=$expires' "$tmp/fallback.json" >"$tmp/overlong-fallback.json"
+expect_fail "invalid closed spipe-review-admission/1 receipt" \
+  "$policy" verify-review "$tmp/overlong-fallback.json" feature/release-hardening "$repo"
 jq '.reason="owner chose to bypass review"' "$tmp/fallback.json" >"$tmp/bad-fallback.json"
 expect_fail "invalid closed spipe-review-admission/1 receipt" \
   "$policy" verify-review "$tmp/bad-fallback.json" feature/release-hardening "$repo"

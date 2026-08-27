@@ -3,23 +3,46 @@
 # `expect(a == b).to_equal(true)` and variants. These are antipatterns because:
 #   - They nest a boolean comparison inside expect(), making the assertion intent unclear
 #   - The direct form `expect(a).to_equal(b)` is clearer and more idiomatic
+#   - `expect(a == b).to_equal(false)` asserts VACUOUSLY when `a` and `b` are of
+#     types whose `==` is not defined -- the comparison degrades to false and the
+#     assertion passes without ever comparing anything.
 #
 # Patterns flagged:
-#   - expect(X == Y).to_equal(true)     → expect(X).to_equal(Y)
-#   - expect(X == Y).to_equal(false)    → expect(X).to_equal(Y) (no, use `.not_()`)
-#   - expect(X != Y).to_equal(true)     → expect(X).not_().to_equal(Y)
-#   - expect(X != Y).to_equal(false)    → expect(X).to_equal(Y)
-#   - expect(X == Y).to_be(true)        → expect(X).to_be(Y)
-#   - expect(X == Y).to_be(false)       → expect(X).to_be(Y) (no, use `.not_()`)
-#   - (and other matcher variants)
+#   - expect(X == Y).to_equal(true)     -> expect(X).to_equal(Y)
+#   - expect(X == Y).to_equal(false)    -> expect(X).not_().to_equal(Y)
+#   - expect(X != Y).to_equal(true)     -> expect(X).not_().to_equal(Y)
+#   - expect(X != Y).to_equal(false)    -> expect(X).to_equal(Y)
+#   - expect(X == Y).to_be(true/false)  -> expect(X).to_be(Y) / .not_().to_be(Y)
 #
-# This check is report-only by default (exit 0); pass --strict to fail on any hit.
-set -eu
+# FAIL-OPEN DEFECT FIXED 2026-08-17
+# ---------------------------------
+# This gate previously computed only a HIT count and reported
+#   "EXPECT-FOOTGUN: No footgun patterns found" ; exit 0
+# whenever that count was zero -- with no record of how many FILES were fed to
+# grep. A run that scanned ZERO files (wrong cwd, a `find` that matched nothing,
+# a tree being rewritten by a parallel checkout) was therefore byte-identical to
+# a genuinely clean tree, and exited 0. Worse, `--strict` shared the same early
+# `exit 0`, so even the strict lane could not distinguish "clean" from "measured
+# nothing". Reproduced 2026-08-17 against an empty fixture tree:
+#   rc=0, "EXPECT-FOOTGUN: No footgun patterns found"   (0 files scanned)
+# identical to the clean-tree output. Absence of evidence was reported as
+# evidence of absence.
+#
+# The gate now follows the repo pre-push guard convention:
+#   PASS  -- <n> file(s) scanned, 0 footgun pattern(s)      exit 0   (n > 0)
+#   FAIL  -- ...                                             exit 1   (--strict)
+#   WARN  -- ... (report-only, use --strict to fail)         exit 0
+#   ERROR -- nothing was checked                             exit 2
+# A run that fed 0 files to grep is ERROR, never a pass. `--selftest` is fatal
+# and runs before every scan.
+#
+# This check is report-only by default; pass --strict to fail on any hit.
+set -u
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-cd "$ROOT_DIR"
 
 STRICT=0
+SELFTEST_ONLY=0
 
 usage() {
     cat <<'EOF'
@@ -39,50 +62,124 @@ These should be rewritten as:
 
 Options:
   --strict    Exit 1 if any hits are found (default: report-only, exit 0)
+  --selftest  Run the fixture self-check only, then exit
   -h, --help  Show this help
+
+Verdict (always the LAST line of stdout):
+  PASS  -- <n> file(s) scanned, 0 footgun pattern(s)   exit 0 (n > 0 always)
+  WARN  -- <n> file(s) scanned, <k> footgun pattern(s) exit 0 (report-only)
+  FAIL  -- <n> file(s) scanned, <k> footgun pattern(s) exit 1 (--strict)
+  ERROR -- nothing was checked                         exit 2
 EOF
 }
 
 for arg in "$@"; do
     case "$arg" in
         --strict) STRICT=1 ;;
+        --selftest) SELFTEST_ONLY=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "check-expect-footgun: unknown option: $arg" >&2; usage; exit 2 ;;
     esac
 done
 
-COUNT=0
+FOOTGUN_RE='^[^#]*expect\([^)]*[[:space:]]+(==|!=)[[:space:]]*[^)]*\)\.(to_equal|to_be)\((true|false)\)'
 
-# Search for the footgun pattern: expect(...==...).to_equal/to_be(true/false)
-# Exclude protected directories and skip comment-only lines
-HITS=$(find test src -name '*_spec.spl' \
-    ! -path 'doc/06_spec/*' \
-    ! -path 'src/app/test_runner_new/*' \
-    ! -path 'src/compiler_rust/lib/std/*' \
-    ! -path 'vendor/*' \
-    -type f 2>/dev/null | \
-    xargs grep -nE '^[^#]*expect\([^)]*\s+(==|!=)\s+[^)]*\)\.(to_equal|to_be)\((true|false)\)' 2>/dev/null | grep -v '^\s*#' | wc -l)
+# list_spec_files <root> -> prints spec files, one per line
+list_spec_files() {
+    find "$1/test" "$1/src" -name '*_spec.spl' \
+        ! -path '*/doc/06_spec/*' \
+        ! -path '*/src/app/test_runner_new/*' \
+        ! -path '*/src/compiler_rust/lib/std/*' \
+        ! -path '*/vendor/*' \
+        -type f 2>/dev/null
+}
 
-if [ "$HITS" -gt 0 ]; then
-    COUNT=$HITS
-    echo "EXPECT-FOOTGUN: Found $HITS footgun pattern(s):"
-    find test src -name '*_spec.spl' \
-        ! -path 'doc/06_spec/*' \
-        ! -path 'src/app/test_runner_new/*' \
-        ! -path 'src/compiler_rust/lib/std/*' \
-        ! -path 'vendor/*' \
-        -type f 2>/dev/null | \
-        xargs grep -nE '^[^#]*expect\([^)]*\s+(==|!=)\s+[^)]*\)\.(to_equal|to_be)\((true|false)\)' 2>/dev/null | grep -v '^\s*#' | head -20
-else
-    echo "EXPECT-FOOTGUN: No footgun patterns found"
+# ---------------------------------------------------------------- SELFTEST
+# Fatal. Three fixtures, each pinning one leg of the defect class:
+#   1. a tree with a real footgun  -> must be DETECTED (scanned > 0, hits > 0)
+#   2. a clean non-empty tree      -> must PASS with scanned > 0
+#   3. an EMPTY tree (0 files)     -> must yield scanned == 0, so the caller is
+#      forced to ERROR. This is the incident replay: the old code reported this
+#      case as "No footgun patterns found" + exit 0.
+run_selftest() {
+    st_tmp="$(mktemp -d)" || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+    st_fail=0
+
+    # fixture 1: dirty
+    mkdir -p "$st_tmp/dirty/test" "$st_tmp/dirty/src"
+    printf 'expect(a == b).to_equal(true)\n' > "$st_tmp/dirty/test/x_spec.spl"
+    d_files=$(list_spec_files "$st_tmp/dirty" | wc -l | tr -d ' ')
+    d_hits=$(list_spec_files "$st_tmp/dirty" | xargs grep -hnE "$FOOTGUN_RE" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$d_files" -lt 1 ] || [ "$d_hits" -lt 1 ]; then
+        echo "selftest: FIXTURE 1 (dirty) expected files>0 and hits>0, got files=$d_files hits=$d_hits" >&2
+        st_fail=$((st_fail + 1))
+    fi
+
+    # fixture 2: clean but non-empty
+    mkdir -p "$st_tmp/clean/test" "$st_tmp/clean/src"
+    printf 'expect(a).to_equal(b)\n' > "$st_tmp/clean/test/y_spec.spl"
+    c_files=$(list_spec_files "$st_tmp/clean" | wc -l | tr -d ' ')
+    c_hits=$(list_spec_files "$st_tmp/clean" | xargs grep -hnE "$FOOTGUN_RE" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$c_files" -lt 1 ] || [ "$c_hits" -ne 0 ]; then
+        echo "selftest: FIXTURE 2 (clean) expected files>0 and hits=0, got files=$c_files hits=$c_hits" >&2
+        st_fail=$((st_fail + 1))
+    fi
+
+    # fixture 3: empty tree -- the incident replay
+    mkdir -p "$st_tmp/empty/test" "$st_tmp/empty/src"
+    e_files=$(list_spec_files "$st_tmp/empty" | wc -l | tr -d ' ')
+    if [ "$e_files" -ne 0 ]; then
+        echo "selftest: FIXTURE 3 (empty) expected files=0, got files=$e_files" >&2
+        st_fail=$((st_fail + 1))
+    fi
+
+    rm -rf "$st_tmp"
+    if [ "$st_fail" -gt 0 ]; then
+        echo "ERROR -- nothing was checked (selftest failed with $st_fail fixture failure(s))"
+        exit 2
+    fi
+    return 0
+}
+
+run_selftest
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS -- 3 selftest fixture(s) checked, 0 failures"
+    exit 0
 fi
 
+cd "$ROOT_DIR" || { echo "ERROR -- nothing was checked (cannot cd to $ROOT_DIR)"; exit 2; }
+
+FILE_LIST="$(mktemp)" || { echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+list_spec_files "$ROOT_DIR" > "$FILE_LIST"
+SCANNED=$(wc -l < "$FILE_LIST" | tr -d ' ')
+
+# NON-VACUITY: a run that fed zero files to grep proves nothing. This is the
+# whole point of the 2026-08-17 fix -- never report it as a pass.
+if [ "$SCANNED" -eq 0 ]; then
+    rm -f "$FILE_LIST"
+    echo "ERROR -- nothing was checked (0 spec files found under $ROOT_DIR/{test,src}; wrong root, or the tree is being rewritten)"
+    exit 2
+fi
+
+HIT_LIST="$(mktemp)" || { rm -f "$FILE_LIST"; echo "ERROR -- nothing was checked (mktemp failed)"; exit 2; }
+xargs -a "$FILE_LIST" grep -nE "$FOOTGUN_RE" > "$HIT_LIST" 2>/dev/null
+COUNT=$(wc -l < "$HIT_LIST" | tr -d ' ')
+
+if [ "$COUNT" -gt 0 ]; then
+    echo "EXPECT-FOOTGUN: Found $COUNT footgun pattern(s) in $SCANNED scanned file(s):"
+    head -20 "$HIT_LIST"
+fi
+
+rm -f "$FILE_LIST" "$HIT_LIST"
+
 if [ "$COUNT" -eq 0 ]; then
+    echo "PASS -- $SCANNED file(s) scanned, 0 footgun pattern(s)"
     exit 0
 fi
 
 if [ "$STRICT" -eq 1 ]; then
-    echo "check-expect-footgun: $COUNT pattern(s) found (EXPECT-FOOTGUN, warn severity)"
+    echo "FAIL -- $SCANNED file(s) scanned, $COUNT footgun pattern(s) found"
     exit 1
 fi
+echo "WARN -- $SCANNED file(s) scanned, $COUNT footgun pattern(s) found (report-only; use --strict to fail)"
 exit 0

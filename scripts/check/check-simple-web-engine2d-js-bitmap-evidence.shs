@@ -6,7 +6,8 @@ cd "$ROOT_DIR"
 
 BUILD_DIR="${BUILD_DIR:-build/simple_web_engine2d_js_bitmap_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simple_web_engine2d_js_bitmap_evidence_$(date -u +%F).md}"
-SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
+SIMPLE_BIN_STATUS=pass
 JS_RENDER_RUNTIME="${JS_RENDER_RUNTIME:-node}"
 JS_RENDER_RUNTIME_BIN="${JS_RENDER_RUNTIME_BIN:-$JS_RENDER_RUNTIME}"
 ITERATIONS="${NODE_BITMAP_ITERATIONS:-1000}"
@@ -20,6 +21,61 @@ JS_OUT="$BUILD_DIR/${JS_RENDER_RUNTIME}.out"
 SIMPLE_ARGB="$BUILD_DIR/simple-argb.json"
 JS_ARGB="$BUILD_DIR/${JS_RENDER_RUNTIME}-argb.json"
 NODE_FIXTURE_TOOL_PATH="tools/node-render-bitmap/simple_web_engine2d_fixture.js"
+
+is_rust_seed_simple() {
+    # Identity probe, not just a path pattern (2026-07-28).
+    # This used to test ONLY for a src/compiler_rust/ path. The deployed Rust
+    # seed lives at bin/release/<triple>/simple, which matches none of those
+    # patterns, so the seed was classified "not a seed" and every self-hosted
+    # claim in this script was asserted against it. Ask the binary instead.
+    # Audit: doc/08_tracking/todo/check_scripts_seed_identity_fail_open_2026-07-28.md
+    case "$1" in
+        src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+    esac
+    # Not runnable: leave it to the caller's own missing-binary branch, which
+    # already fails. Do not report "seed" for something we never ran.
+    [ -n "${1:-}" ] && [ -x "$1" ] || return 1
+    # Executable but unverifiable => treat as forbidden (fail closed). The seed
+    # self-identifies on stderr, so 2>&1 is required.
+    if command -v timeout >/dev/null 2>&1; then
+        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
+    else
+        _irss_v="$("$1" --version 2>&1)" || return 0
+    fi
+    [ -n "$_irss_v" ] || return 0
+    case "$_irss_v" in
+        *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
+    esac
+    return 1
+}
+
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN_SOURCE="default-missing"
+    for candidate in \
+        "bin/simple" \
+        "./bin/simple" \
+        "release"/*/simple \
+        "bin/release"/*/simple \
+        "build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            SIMPLE_BIN_SOURCE="repo-self-hosted-fallback"
+            break
+        fi
+    done
+fi
+if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
+    SIMPLE_BIN=""
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif is_rust_seed_simple "$SIMPLE_BIN"; then
+    SIMPLE_BIN_STATUS=forbidden
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
+elif [ ! -x "$SIMPLE_BIN" ]; then
+    SIMPLE_BIN_STATUS=missing
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-missing"
+fi
+export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$SIMPLE_SRC" "$SIMPLE_OUT" "$JS_OUT" "$SIMPLE_ARGB" "$JS_ARGB" "$REPORT_PATH"
@@ -47,6 +103,9 @@ emit_unavailable() {
         echo "simple_web_engine2d_js_node_fixture_producer=$JS_RENDER_RUNTIME-simple-web-engine2d-baseline"
         echo "simple_web_engine2d_js_node_fixture_engine2d_backend=software"
         echo "simple_web_engine2d_js_node_fixture_pixel_format=argb-u32"
+        echo "simple_web_engine2d_js_simple_bin=$SIMPLE_BIN"
+        echo "simple_web_engine2d_js_simple_bin_source=$SIMPLE_BIN_SOURCE"
+        echo "simple_web_engine2d_js_simple_bin_status=$SIMPLE_BIN_STATUS"
     } >"$BUILD_DIR/evidence.env"
     {
         echo "# Simple Web Engine2D JS Bitmap Evidence"
@@ -169,8 +228,8 @@ if ! command -v "$JS_RENDER_RUNTIME_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ ! -x "$SIMPLE_BIN" ]; then
-    emit_unavailable "missing-simple-bin"
+if [ "$SIMPLE_BIN_STATUS" != "pass" ]; then
+    emit_unavailable "simple-bin-$SIMPLE_BIN_STATUS"
     exit 1
 fi
 
@@ -196,6 +255,7 @@ js_producer=""
 js_engine2d_backend=""
 js_pixel_format=""
 js_baseline_source=""
+js_argb_baseline_source=""
 simple_cache_hits=""
 simple_cache_stores=""
 mismatch_count=""
@@ -244,6 +304,11 @@ while [ "$trial" -le "$TRIALS" ]; do
     trial_simple_cache_hits="$(field_of cache_hits "$trial_simple_out")"
     trial_simple_cache_stores="$(field_of cache_stores "$trial_simple_out")"
     trial_mismatch_count="$(node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const b=JSON.parse(fs.readFileSync(process.argv[2],"utf8")); let n=0; if (a.width!==b.width || a.height!==b.height || a.pixels.length!==b.pixels.length) { n = Math.max(a.pixels.length, b.pixels.length); } else { for (let i=0;i<a.pixels.length;i+=1) if ((a.pixels[i]>>>0)!==(b.pixels[i]>>>0)) n+=1; } console.log(n);' "$SIMPLE_ARGB" "$JS_ARGB")"
+    # Honesty check: read the pixel-out JSON's own baseline_source marker
+    # (written by the JS fixture). For the simple-layout-benchmark scenes the
+    # fixture replays Simple's own transport baseline instead of independently
+    # rasterizing, which makes checksum equality a tautology, not evidence.
+    trial_js_argb_baseline_source="$(node -e 'const fs=require("fs"); const b=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log(b.baseline_source||"unknown");' "$JS_ARGB")"
 
     if [ -z "$simple_checksum" ]; then
         simple_checksum="$trial_simple_checksum"
@@ -264,6 +329,7 @@ while [ "$trial" -le "$TRIALS" ]; do
         js_engine2d_backend="$trial_js_engine2d_backend"
         js_pixel_format="$trial_js_pixel_format"
         js_baseline_source="$trial_js_baseline_source"
+        js_argb_baseline_source="$trial_js_argb_baseline_source"
         simple_cache_hits="$trial_simple_cache_hits"
         simple_cache_stores="$trial_simple_cache_stores"
         mismatch_count="$trial_mismatch_count"
@@ -277,7 +343,7 @@ while [ "$trial" -le "$TRIALS" ]; do
             mismatch_count="inconsistent"
             break
         fi
-        if [ "$js_target" != "$trial_js_target" ] || [ "$js_renderer" != "$trial_js_renderer" ] || [ "$js_producer" != "$trial_js_producer" ] || [ "$js_engine2d_backend" != "$trial_js_engine2d_backend" ] || [ "$js_pixel_format" != "$trial_js_pixel_format" ] || [ "$js_baseline_source" != "$trial_js_baseline_source" ]; then
+        if [ "$js_target" != "$trial_js_target" ] || [ "$js_renderer" != "$trial_js_renderer" ] || [ "$js_producer" != "$trial_js_producer" ] || [ "$js_engine2d_backend" != "$trial_js_engine2d_backend" ] || [ "$js_pixel_format" != "$trial_js_pixel_format" ] || [ "$js_baseline_source" != "$trial_js_baseline_source" ] || [ "$js_argb_baseline_source" != "$trial_js_argb_baseline_source" ]; then
             js_target="inconsistent"
             break
         fi
@@ -343,6 +409,16 @@ else
     fi
 fi
 
+# Honesty gate: even if every measurement above lined up, a match only counts
+# as independent evidence when the JS fixture actually rasterized the scene
+# itself. If the fixture's own pixel-out JSON says it replayed Simple's
+# transport baseline, checksum equality is a tautology (Simple vs Simple) —
+# demote pass to self-referential rather than reporting it as verified.
+if [ "$status" = "pass" ] && [ "$js_argb_baseline_source" != "js-fixture" ]; then
+    status=self-referential
+    reason=js-baseline-is-simple-transport
+fi
+
 simple_checksum="${simple_checksum:-0}"
 js_checksum="${js_checksum:-0}"
 simple_weighted="${simple_weighted:-0}"
@@ -374,6 +450,7 @@ mismatch_count="${mismatch_count:-}"
     echo "simple_web_engine2d_js_node_fixture_engine2d_backend=$js_engine2d_backend"
     echo "simple_web_engine2d_js_node_fixture_pixel_format=$js_pixel_format"
     echo "simple_web_engine2d_js_node_fixture_baseline_source=${js_baseline_source:-unknown}"
+    echo "simple_web_engine2d_js_node_fixture_argb_baseline_source=${js_argb_baseline_source:-unknown}"
     echo "simple_web_engine2d_js_simple_checksum=$simple_checksum"
     echo "simple_web_engine2d_js_baseline_checksum=$js_checksum"
     echo "simple_web_engine2d_js_simple_weighted_checksum=$simple_weighted"
@@ -388,6 +465,9 @@ mismatch_count="${mismatch_count:-}"
     echo "simple_web_engine2d_js_optimized_path=static-pixel-cache"
     echo "simple_web_engine2d_js_simple_argb_path=$SIMPLE_ARGB"
     echo "simple_web_engine2d_js_baseline_argb_path=$JS_ARGB"
+    echo "simple_web_engine2d_js_simple_bin=$SIMPLE_BIN"
+    echo "simple_web_engine2d_js_simple_bin_source=$SIMPLE_BIN_SOURCE"
+    echo "simple_web_engine2d_js_simple_bin_status=$SIMPLE_BIN_STATUS"
 } >"$BUILD_DIR/evidence.env"
 
 {
@@ -403,6 +483,7 @@ mismatch_count="${mismatch_count:-}"
     echo "- node fixture Engine2D backend: $js_engine2d_backend"
     echo "- node fixture pixel format: $js_pixel_format"
     echo "- node fixture baseline source: ${js_baseline_source:-unknown}"
+    echo "- node fixture pixel-out baseline source: ${js_argb_baseline_source:-unknown}"
     echo "- scene: $SCENE"
     echo "- dimensions: ${WIDTH}x${HEIGHT}"
     echo "- iterations per trial: $ITERATIONS"
@@ -421,6 +502,7 @@ mismatch_count="${mismatch_count:-}"
     echo "- baseline/simple speedup x1000: $speedup_x1000"
     echo "- simple ARGB path: $SIMPLE_ARGB"
     echo "- baseline ARGB path: $JS_ARGB"
+    echo "- simple binary: $SIMPLE_BIN ($SIMPLE_BIN_SOURCE, $SIMPLE_BIN_STATUS)"
     echo
     echo "## Simple Output"
     sed 's/^/- /' "$SIMPLE_OUT" 2>/dev/null || true

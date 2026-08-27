@@ -7,7 +7,7 @@ if (@("--all", "--working", "--staged", "--self-test", "-h", "--help") -notconta
 $RootDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location -LiteralPath $RootDir
 
-$ForbiddenPattern = 'extern fn rt_env_(get|cwd)\s*\(|rt_env_(get|cwd)\s*\(|extern fn rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)\s*\(|rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)\s*\(|^(use|import|from|export\s+use)\s.*rt_env_(get|cwd)([^A-Za-z0-9_]|$)|^(use|import|from|export\s+use)\s.*rt_process_(run(_timeout)?|spawn_async|wait|is_running|is_alive|kill)([^A-Za-z0-9_]|$)'
+$ForbiddenPattern = 'extern fn rt_env_(get|cwd)\s*\(|rt_env_(get|cwd)\s*\(|extern fn rt_process_(run(_timeout|_bounded|_inherit)?|spawn_async|spawn_inherit|wait|is_running|is_alive|kill)\s*\(|rt_process_(run(_timeout|_bounded|_inherit)?|spawn_async|spawn_inherit|wait|is_running|is_alive|kill)\s*\(|^(use|import|from|export\s+use)\s.*rt_env_(get|cwd)([^A-Za-z0-9_]|$)|^(use|import|from|export\s+use)\s.*rt_process_(run(_timeout|_bounded|_inherit)?|spawn_async|spawn_inherit|wait|is_running|is_alive|kill)([^A-Za-z0-9_]|$)'
 
 function Show-Usage {
     @"
@@ -21,9 +21,15 @@ owner modules. Use app/std/gc env and process facades instead.
 
 function Test-AllowedOwner([string]$Path) {
     $normalized = $Path.Replace("\", "/")
-    return $normalized.StartsWith("src/app/io/") -or
+    return $normalized -eq "src/app/io/process_ops.spl" -or
+        $normalized -eq "src/app/io/process_env_ops.spl" -or
         $normalized.StartsWith("src/app/ffi_gen.specs/") -or
         $normalized -eq "src/lib/nogc_sync_mut/io/env_ops.spl"
+}
+
+function Test-ForbiddenPath([string]$LogicalPath, [string]$SourcePath) {
+    if (Test-AllowedOwner $LogicalPath) { return $false }
+    return [bool](Select-String -LiteralPath $SourcePath -Pattern $ForbiddenPattern -Quiet)
 }
 
 function Get-GuardPaths {
@@ -55,10 +61,16 @@ function Invoke-SelfTest {
         $rawImport = Join-Path $tmpDir "raw_import.spl"
         $facadeImport = Join-Path $tmpDir "facade_import.spl"
         $rawCall = Join-Path $tmpDir "raw_call.spl"
+        $rawInherit = Join-Path $tmpDir "raw_inherit.spl"
+        $rawBounded = Join-Path $tmpDir "raw_bounded.spl"
+        $rawSpawnInherit = Join-Path $tmpDir "raw_spawn_inherit.spl"
         $envHandleOwner = Join-Path $tmpDir "env_handle_owner.spl"
         Set-Content -LiteralPath $rawImport -Value 'use std.env.types.{rt_process_run}'
         Set-Content -LiteralPath $facadeImport -Value 'use app.io.mod.{process_run_timeout}'
         Set-Content -LiteralPath $rawCall -Value 'val result = rt_process_spawn_async("sh", ["-c", "true"])'
+        Set-Content -LiteralPath $rawInherit -Value 'extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64'
+        Set-Content -LiteralPath $rawBounded -Value 'extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_bytes: i64) -> auto'
+        Set-Content -LiteralPath $rawSpawnInherit -Value 'val pid = rt_process_spawn_inherit()'
         Set-Content -LiteralPath $envHandleOwner -Value 'extern fn rt_env_get_var(env_handle: i64, name: text) -> auto'
 
         if (-not (Select-String -LiteralPath $rawImport -Pattern $ForbiddenPattern -Quiet)) {
@@ -66,6 +78,27 @@ function Invoke-SelfTest {
         }
         if (-not (Select-String -LiteralPath $rawCall -Pattern $ForbiddenPattern -Quiet)) {
             Write-Error "STATUS: FAIL direct-env-runtime-guard self-test raw call not detected"
+        }
+        if (-not (Select-String -LiteralPath $rawInherit -Pattern $ForbiddenPattern -Quiet)) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test raw inherit not detected"
+        }
+        if (-not (Select-String -LiteralPath $rawBounded -Pattern $ForbiddenPattern -Quiet)) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test raw bounded run not detected"
+        }
+        if (-not (Select-String -LiteralPath $rawSpawnInherit -Pattern $ForbiddenPattern -Quiet)) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test raw inherited spawn not detected"
+        }
+        if (Test-ForbiddenPath "src/app/io/process_ops.spl" $rawInherit) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test process owner provider rejected"
+        }
+        if (Test-ForbiddenPath "src/app/io/process_env_ops.spl" $rawCall) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test process env owner provider rejected"
+        }
+        if (-not (Test-ForbiddenPath "src/app/io/cli_ops.spl" $rawInherit)) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test cli leaf owner leak"
+        }
+        if (-not (Test-ForbiddenPath "src/app/io/process_ops_extra.spl" $rawInherit)) {
+            Write-Error "STATUS: FAIL direct-env-runtime-guard self-test adjacent owner name leak"
         }
         if (Select-String -LiteralPath $facadeImport -Pattern $ForbiddenPattern -Quiet) {
             Write-Error "STATUS: FAIL direct-env-runtime-guard self-test facade import rejected"

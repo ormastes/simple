@@ -3,7 +3,8 @@
 # Sets: PLATFORM_TRIPLE, PLATFORM_ARCH, PLATFORM_OS
 
 PLATFORM_ARCH="$(uname -m)"
-case "$(uname -s)" in
+PLATFORM_UNAME="$(uname -s)"
+case "${PLATFORM_UNAME}" in
   Linux)   PLATFORM_OS="linux"   ;;
   Darwin)  PLATFORM_OS="macos"   ;;
   FreeBSD) PLATFORM_OS="freebsd" ;;
@@ -21,38 +22,46 @@ case "${PLATFORM_ARCH}" in
   riscv64) PLATFORM_ARCH="riscv64" ;;
 esac
 
+PLATFORM_ABI=""
 case "${PLATFORM_OS}" in
   linux)    PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-linux-gnu" ;;
   macos)    PLATFORM_TRIPLE="${PLATFORM_ARCH}-apple-darwin" ;;
   freebsd)  PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-freebsd" ;;
-  windows)  PLATFORM_TRIPLE="${PLATFORM_ARCH}-pc-windows-msvc" ;;
+  windows)
+    PLATFORM_ABI="${SIMPLE_WINDOWS_ABI:-}"
+    if [ -z "${PLATFORM_ABI}" ]; then
+      case "${MSYSTEM:-}" in
+        MINGW*|UCRT*|CLANG*) PLATFORM_ABI="gnu" ;;
+        *) PLATFORM_ABI="msvc" ;;
+      esac
+    fi
+    case "${PLATFORM_ABI}" in
+      gnu|msvc) ;;
+      *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; return 1 2>/dev/null || exit 1 ;;
+    esac
+    PLATFORM_TRIPLE="${PLATFORM_ARCH}-pc-windows-${PLATFORM_ABI}"
+    ;;
   simpleos) PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-simpleos" ;;
   *)        PLATFORM_TRIPLE="${PLATFORM_ARCH}-unknown-${PLATFORM_OS}" ;;
 esac
 
-export PLATFORM_TRIPLE PLATFORM_ARCH PLATFORM_OS
+export PLATFORM_TRIPLE PLATFORM_ARCH PLATFORM_OS PLATFORM_ABI
 
 # ---------------------------------------------------------------------------
 # Toolchain detection (shared interface): LLVM prefix/lib — version- and
 # platform-parameterized, no hardcoded single version or path.
 #
-# LLVM_REQUIRED_VERSION is the exact LLVM release required by the bootstrap
-# capsule.  Keep this gate strict: accepting an older llvm-config because it
-# happens to provide a compatible-looking shared library creates a mixed seed.
-# LLVM_VERSIONS remains an ordered input for callers, but candidates outside
-# the required major are ignored (there is deliberately no legacy fallback).
+# LLVM_VERSIONS is the preference order of major versions to accept (first one
+# found wins). Default pins to 18 (the version the Rust llvm-sys crate expects);
+# extend to e.g. "18 19 20" — or set the env before sourcing — to opt into newer
+# toolchains once the build supports them, without touching this logic.
 #
 # Resolves ONCE and feeds the env both downstream worlds consult, so the shell
 # build and the Simple runtime share a single resolution:
-#   LLVM_SYS_<major><minor>_PREFIX -> Rust build (llvm-sys)
+#   LLVM_SYS_<major>0_PREFIX -> Rust build (llvm-sys)
 #   SIMPLE_LLVM_PATH         -> Simple runtime loader (src/lib/.../sffi/llvm_loader.spl)
 # Sets: LLVM_FOUND (0/1), LLVM_VERSION, LLVM_PREFIX, LLVM_LIBDIR, LLVM_LIB.
-: "${LLVM_REQUIRED_VERSION:=23.1}"
-LLVM_REQUIRED_MAJOR="${LLVM_REQUIRED_VERSION%%.*}"
-LLVM_REQUIRED_MINOR="${LLVM_REQUIRED_VERSION#*.}"
-LLVM_REQUIRED_MINOR="${LLVM_REQUIRED_MINOR%%.*}"
-LLVM_REQUIRED_ABI_VERSION="${LLVM_REQUIRED_MAJOR}${LLVM_REQUIRED_MINOR}"
-: "${LLVM_VERSIONS:=${LLVM_REQUIRED_MAJOR}}"
+: "${LLVM_VERSIONS:=18}"
 
 LLVM_FOUND=0
 LLVM_VERSION=""
@@ -99,6 +108,18 @@ _llvm_prefixes() {
 # Try prefix $1 for version $2; on success set LLVM_* and return 0.
 _llvm_try_prefix() {
   [ -n "$1" ] && [ -d "$1" ] || return 1
+  _prefix_cfg=""
+  if [ -x "$1/bin/llvm-config" ]; then
+    _prefix_cfg="$1/bin/llvm-config"
+  elif [ -x "$1/bin/llvm-config.exe" ]; then
+    _prefix_cfg="$1/bin/llvm-config.exe"
+  fi
+  if [ -n "${_prefix_cfg}" ]; then
+    case "$(${_prefix_cfg} --version 2>/dev/null)" in
+      $2.*) ;;
+      *) return 1 ;;
+    esac
+  fi
   for _ld in $(_llvm_libdirs); do
     for _name in $(_llvm_lib_names "$2"); do
       if [ -f "$1/${_ld}/${_name}" ]; then
@@ -112,19 +133,16 @@ _llvm_try_prefix() {
 }
 
 for _v in ${LLVM_VERSIONS}; do
-  # Never silently downgrade the capsule to LLVM 18/20 (or another major).
-  [ "${_v}" = "${LLVM_REQUIRED_MAJOR}" ] || continue
-  # 0) explicit llvm-sys ABI override prefix (e.g. LLVM_SYS_231_PREFIX).
-  eval "_ov=\${LLVM_SYS_${LLVM_REQUIRED_ABI_VERSION}_PREFIX:-}"
+  # 0) explicit, version-named override prefix (e.g. LLVM_SYS_180_PREFIX)
+  eval "_ov=\${LLVM_SYS_${_v}0_PREFIX:-}"
   if [ -n "${_ov}" ] && _llvm_try_prefix "${_ov}" "${_v}"; then break; fi
 
   # 1) llvm-config (portable): versioned, then bare if it reports this major
   for _cfg in "llvm-config-${_v}" "llvm-config"; do
     command -v "${_cfg}" >/dev/null 2>&1 || continue
-    _cfg_version="$(${_cfg} --version 2>/dev/null)" || continue
-    case "${_cfg_version}" in
-      "${LLVM_REQUIRED_VERSION}"|"${LLVM_REQUIRED_VERSION}".*)
-        if _llvm_try_prefix "$(${_cfg} --prefix 2>/dev/null)" "${_v}" "${_cfg_version}"; then break; fi ;;
+    case "$(${_cfg} --version 2>/dev/null)" in
+      ${_v}.*)
+        if _llvm_try_prefix "$(${_cfg} --prefix 2>/dev/null)" "${_v}"; then break; fi ;;
     esac
   done
   if [ "${LLVM_FOUND}" = "1" ]; then break; fi
@@ -145,8 +163,7 @@ done
 if [ "${LLVM_FOUND}" = "1" ]; then
   # Export the version-named prefix the Rust build expects, plus the resolved
   # library for the Simple runtime loader (honors a pre-set SIMPLE_LLVM_PATH).
-  export "LLVM_SYS_${LLVM_REQUIRED_ABI_VERSION}_PREFIX=${LLVM_PREFIX}"
+  export "LLVM_SYS_${LLVM_VERSION}0_PREFIX=${LLVM_PREFIX}"
   [ -n "${SIMPLE_LLVM_PATH:-}" ] || export SIMPLE_LLVM_PATH="${LLVM_LIB}"
 fi
-export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB \
-  LLVM_REQUIRED_VERSION LLVM_REQUIRED_MAJOR LLVM_REQUIRED_MINOR LLVM_REQUIRED_ABI_VERSION
+export LLVM_FOUND LLVM_VERSION LLVM_PREFIX LLVM_LIBDIR LLVM_LIB

@@ -11,14 +11,15 @@
 # where the seed oracle is known-broken, that native alone matches ground
 # truth) so none of these fixes silently regress.
 #
-# Both backends are the SAME deployed self-hosted bin/simple
-# (bin/simple -> bin/release/<triple>/simple):
-#   SEED ORACLE:         env -u SIMPLE_BOOTSTRAP bin/simple run prog.spl
+# The two backends are TWO DISTINCT, IDENTITY-VERIFIED binaries (see the
+# fail-closed resolution block below; before 2026-07-28 both sides used the
+# same binary and the comparison could not fail):
+#   SEED ORACLE:         env -u SIMPLE_BOOTSTRAP "$SEED_BINARY" run prog.spl
 #   PURE-SIMPLE NATIVE:   env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH \
-#                         bin/simple native-build \
+#                         "$SIMPLE_BINARY" native-build \
 #                         --entry prog.spl -o out --clean && ./out
-# SIMPLE_BOOTSTRAP is unset so both invocations exercise the Rust-seed
-# interpreter (`run`) vs the pure-Simple native codegen (`native-build`).
+# SIMPLE_BOOTSTRAP is unset so both operations use the selected deployed
+# compiler without an explicit bootstrap override.
 #
 # NORMALIZATION: native `print()` emits NO trailing newline (Rust-style
 # print, not println), while the seed's `run` adds a newline after every
@@ -80,14 +81,37 @@
 #   - `float_edges`: seed prints 1e-18 as the non-round-tripping
 #     `0.00000000000000000` -> NATIVE-AUTHORITATIVE.
 #
+# TWO MODES (PARITY_MODE) — the harness owns one body of case coverage but can
+# be pointed at two DIFFERENT questions. They are not interchangeable and they
+# do not print the same verdict token:
+#
+#   PARITY_MODE=seed-vs-native   (default)  -> prints native_seed_parity=<bool>
+#     The real cross-compiler oracle. Left side is an independent Rust SEED
+#     binary, right side is the self-hosted native backend. Two distinct,
+#     identity-verified files (see the fail-closed block below). This is the
+#     only mode that may claim "parity".
+#
+#   PARITY_MODE=self-consistency            -> prints native_self_consistency=<bool>
+#     ONE compiler on both sides: `$SIMPLE_BINARY run` (interpreter) versus
+#     `$SIMPLE_BINARY native-build` (codegen). This CANNOT detect a
+#     seed-vs-native divergence — structurally, there is only one compiler in
+#     the room. It is still a real and useful signal: it catches interpreter
+#     /codegen divergence within a single compiler, which is how several of the
+#     bugs in the 2026-07-14 batch were originally found. It is NOT parity and
+#     must never be reported as parity. Used by CI to keep the case coverage
+#     exercised on the seed while no self-hosted binary is deployed yet.
+#
 # Usage: sh scripts/check/check-native-seed-parity.shs
-# Env:   SIMPLE_BINARY (default bin/simple), PARITY_WORK_DIR (default
+# Env:   PARITY_MODE (seed-vs-native default, or self-consistency),
+#        SEED_BINARY (seed-vs-native mode: the Rust oracle),
+#        SIMPLE_BINARY (default bin/release/simple), PARITY_WORK_DIR (default
 #        /tmp/check-native-seed-parity.$$), NATIVE_PARITY_CASES (optional
 #        space-separated case IDs), NATIVE_PARITY_BACKEND (llvm default or
 #        cranelift for backend-selected loud-fail/native-authoritative cases),
-#        NATIVE_OPEN_BUG_REPROS=1 (opt in to strict known-red repro cases),
+#        NATIVE_OPEN_BUG_REPROS=1 (opt in to the remaining known-red repro),
 #        NATIVE_PARITY_FAIL_ON_XFAIL=1 (optional strict gate),
 #        SEED_TIMEOUT_S (default 20), and NATIVE_RUN_TIMEOUT_S (default 20)
+# Requires `timeout` (Linux/FreeBSD/Windows) or `gtimeout` (macOS).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -124,6 +148,10 @@ cd "$ROOT_DIR"
 # ---------------------------------------------------------------------------
 . "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
 
+# Phase 9 evidence receipt (ADDITIVE — emit_receipt never changes this gate's
+# verdict tokens or its exit status). See scripts/check/lib/emit_receipt.shs.
+. "$ROOT_DIR/scripts/check/lib/emit_receipt.shs"
+
 PARITY_MODE="${PARITY_MODE:-seed-vs-native}"
 case "$PARITY_MODE" in
     seed-vs-native|self-consistency) ;;
@@ -134,10 +162,76 @@ case "$PARITY_MODE" in
 esac
 
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/release/simple}"
-if [ ! -x "$SIMPLE_BINARY" ]; then
-    echo "error: executable Simple compiler not found: $SIMPLE_BINARY (set SIMPLE_BINARY to a deployed pure-Simple compiler)" >&2
-    exit 2
+
+if [ "$PARITY_MODE" = self-consistency ]; then
+    # ---- SELF-CONSISTENCY MODE -------------------------------------------
+    # One compiler, both sides. Announce it loudly so no reader of this log can
+    # mistake the result for a seed-vs-native parity claim.
+    RESULT_KEY="native_self_consistency"
+    SC_BIN="$(resolve_binary "$SIMPLE_BINARY")" ||
+        check_untestable "SIMPLE_BINARY '$SIMPLE_BINARY' is not an executable file and is not on PATH"
+    SC_VERSION="$("$SC_BIN" --version 2>&1)" ||
+        check_untestable "'$SC_BIN --version' exited non-zero; cannot establish identity"
+    [ -n "$SC_VERSION" ] ||
+        check_untestable "'$SC_BIN --version' produced no output; cannot establish identity"
+    SIMPLE_BINARY="$SC_BIN"
+    SEED_BINARY="$SC_BIN"
+    if binary_is_seed "$SC_BIN"; then
+        SC_IDENTITY="Rust bootstrap seed"
+    else
+        SC_IDENTITY="self-hosted"
+    fi
+    echo "=============================================================="
+    echo "MODE: SELF-CONSISTENCY  (NOT seed-vs-native parity)"
+    echo "  compiler:  $SIMPLE_BINARY  ->  $(real_path "$SIMPLE_BINARY")"
+    echo "  identity:  $SC_IDENTITY"
+    echo "  EVERY side of every case is this ONE compiler:"
+    echo "    PARITY cases        its 'run' (interpreter) vs its own"
+    echo "                        'native-build' (codegen)"
+    echo "    STRICT-DUAL cases   its llvm codegen vs its own cranelift"
+    echo "                        codegen vs a fixed expected literal"
+    echo "    NATIVE-AUTHORITATIVE / LOUD-FAIL / RUNTIME-FAIL cases"
+    echo "                        its codegen vs a fixed expectation"
+    echo "  This compares ONE compiler against ITSELF and against fixed"
+    echo "  literals. It detects interpreter-vs-codegen and"
+    echo "  backend-vs-backend divergence — real defects, really caught."
+    echo "  It CANNOT detect a seed-vs-native divergence, because there"
+    echo "  is only one compiler here. It does not claim to."
+    echo "  Real parity: PARITY_MODE=seed-vs-native with a self-hosted"
+    echo "  SIMPLE_BINARY and a distinct Rust SEED_BINARY."
+    echo "=============================================================="
+else
+    # ---- SEED-VS-NATIVE MODE (default, the real oracle) -------------------
+    RESULT_KEY="native_seed_parity"
+    require_self_hosted "$SIMPLE_BINARY" "native side (self-hosted)"
+    SIMPLE_BINARY="$SELF_HOSTED_BIN"
+
+    # Seed oracle. Default candidates are the Rust bootstrap outputs; override
+    # with SEED_BINARY. It must self-identify AS a seed — if it does not, it is
+    # not an independent Rust oracle and the comparison is not the one this
+    # script claims.
+    if [ -n "${SEED_BINARY:-}" ]; then
+        SEED_CANDIDATES="$SEED_BINARY"
+    else
+        SEED_CANDIDATES="src/compiler_rust/target/bootstrap/simple src/compiler_rust/target/release/simple"
+    fi
+    SEED_RESOLVED=""
+    for seed_candidate in $SEED_CANDIDATES; do
+        if seed_path="$(resolve_binary "$seed_candidate")"; then
+            binary_is_seed "$seed_path" && { SEED_RESOLVED="$seed_path"; break; }
+        fi
+    done
+    [ -n "$SEED_RESOLVED" ] || check_untestable "no Rust seed oracle found (tried: $SEED_CANDIDATES).
+  This harness compares the self-hosted native backend against an independent
+  Rust seed. Without a second, genuinely distinct compiler there is nothing to
+  compare against — set SEED_BINARY=/path/to/rust/seed and re-run."
+    SEED_BINARY="$SEED_RESOLVED"
+    echo "seed side:  $SEED_BINARY  ->  $(real_path "$SEED_BINARY")"
+    echo "identity:  Rust bootstrap seed (banner present)  OK"
+
+    require_distinct_binaries "$SIMPLE_BINARY" "$SEED_BINARY"
 fi
+
 WORK_DIR="${PARITY_WORK_DIR:-/tmp/check-native-seed-parity.$$}"
 SEED_TIMEOUT_S="${SEED_TIMEOUT_S:-20}"
 NATIVE_RUN_TIMEOUT_S="${NATIVE_RUN_TIMEOUT_S:-20}"
@@ -146,6 +240,14 @@ case "$NATIVE_PARITY_BACKEND" in
     llvm|cranelift) ;;
     *) echo "unsupported NATIVE_PARITY_BACKEND: $NATIVE_PARITY_BACKEND" >&2; exit 2 ;;
 esac
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN=$(command -v timeout)
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN=$(command -v gtimeout)
+else
+    echo "error: timeout or gtimeout is required" >&2
+    exit 2
+fi
 mkdir -p "$WORK_DIR"
 
 STAMP="$(date +%s)_$$"
@@ -522,10 +624,15 @@ EOF
 
 write_case_dict_has() {
     cat >"$1" <<'EOF'
+fn has_key(d: Dict<text, i64>, key: text) -> bool:
+    d.has(key)
+
 fn main() -> i64:
     val d = {"a": 1, "b": 2}
     print(d.has("a"))
     print(d.has("z"))
+    print(has_key(d, "b"))
+    print(has_key(d, "z"))
     return 0
 EOF
 }
@@ -913,13 +1020,20 @@ EOF
 
 write_case_text_bracket_index() {
     cat >"$1" <<'EOF'
+fn at_param(value: text, index: i64) -> text:
+    return value[index]
+
 fn main() -> i64:
     val raw_ch = "hello"[1]
     val tagged = "wo" + "rld"
     val tagged_ch = tagged[3]
+    val raw_param_ch = at_param("hello", 4)
+    val tagged_param_ch = at_param(tagged, 1)
     print(raw_ch == "e")
     print(tagged_ch == "l")
-    print("raw={raw_ch}/{raw_ch.len()};tagged={tagged_ch}/{tagged_ch.len()}")
+    print(raw_param_ch == "o" and raw_param_ch.len() == 1)
+    print(tagged_param_ch == "o" and tagged_param_ch.len() == 1)
+    print("raw={raw_ch}/{raw_ch.len()};tagged={tagged_ch}/{tagged_ch.len()};param={raw_param_ch}{tagged_param_ch}")
     return 0
 EOF
 }
@@ -998,6 +1112,10 @@ struct CodegenCompiledModule:
 impl CodegenCompiledModule:
     fn cleanup(self) -> i64: 17
     static fn code() -> i64: 18
+    fn to_string(self) -> text: "compiled"
+    fn starts_with(self, value: text) -> bool: self.handle == value.len()
+    fn ends_with(self, value: text) -> bool: self.handle == value.len()
+    fn contains(self, value: text) -> bool: self.handle > value.len()
 
 struct TieredJitManager:
     handle: i64
@@ -1005,6 +1123,13 @@ struct TieredJitManager:
 impl TieredJitManager:
     fn cleanup(self) -> i64: 99
     static fn code() -> i64: 100
+    static fn starts_with(value: text) -> bool: value.len() == 1
+    static fn ends_with(value: text) -> bool: value.len() == 1
+    static fn contains(value: text) -> bool: value.len() > 0
+
+fn make_compiled() -> CodegenCompiledModule:
+    print("M")
+    return CodegenCompiledModule(handle: 3)
 
 fn main() -> i64:
     val compiled = CodegenCompiledModule(handle: 1)
@@ -1013,6 +1138,13 @@ fn main() -> i64:
     print(jit.cleanup())
     print(CodegenCompiledModule.code())
     print(TieredJitManager.code())
+    print(make_compiled().to_string())
+    print(compiled.starts_with("x"))
+    print(compiled.ends_with("xx"))
+    print(compiled.contains(""))
+    print(TieredJitManager.starts_with("x"))
+    print(TieredJitManager.ends_with("xx"))
+    print(TieredJitManager.contains("x"))
     0
 EOF
 }
@@ -1084,32 +1216,6 @@ fn main() -> i64:
     print("|")
     print(take_state())
     print("|state={state}")
-    return 0
-EOF
-}
-
-write_case_module_global_text_array_persistence() {
-    cat >"$1" <<'EOF'
-val ROOT = "r/"
-var NAME = ROOT + "d"
-var ITEMS: [text] = [NAME]
-
-fn mutate():
-    NAME = NAME + "!"
-    ITEMS[0] = NAME
-
-fn observed() -> text:
-    return ITEMS[0]
-
-fn main() -> i64:
-    print(NAME)
-    print("/")
-    print(ITEMS[0])
-    mutate()
-    print("|")
-    print(NAME)
-    print("/")
-    print(observed())
     return 0
 EOF
 }
@@ -1272,6 +1378,12 @@ write_case_interp_bool_float() {
 fn main() -> i64:
     print("n={5} b={true} f={1.5}")
     print("{3 < 5}")
+    val b = true
+    val f = 1.5
+    val i: i64 = 7
+    val u: u64 = 8u64
+    val s = "text"
+    print("|s={b.to_string()}/{f.to_string()}/{i.to_string()}/{u.to_string()}/{s.to_string()}")
     return 0
 EOF
 }
@@ -1372,12 +1484,27 @@ fn main() -> i64:
 EOF
 }
 
+write_case_text_for_iteration() {
+    cat >"$1" <<'EOF'
+fn main() -> i64:
+    val s = "a" + "é🙂"
+    var joined = ""
+    var count = 0
+    var code_sum = 0
+    for ch in s:
+        joined = joined + ch
+        count = count + 1
+        code_sum = code_sum + ch.char_code_at(0)
+    print("joined={joined};count={count};sum={code_sum}")
+    return 0
+EOF
+}
+
 write_case_nonarray_iterable_loud() {
     cat >"$1" <<'EOF'
 fn main() -> i64:
-    val s = "ab"
-    for ch in s:
-        print(ch)
+    for value in 7:
+        print(value)
     return 0
 EOF
 }
@@ -1419,8 +1546,27 @@ fn main() -> i64:
     print(some_bool.map(fn(x: bool) -> bool: not x).unwrap_or(true))
     val filtered = [1, 2, 3].filter(fn(x: i64) -> bool: x > 1)
     print(filtered.len())
+    val ifval_f64: f64? = 3.5
+    if val bound_f64 = ifval_f64.?:
+        print(bound_f64 == 3.5)
+    else:
+        print(false)
+    val ifval_f32: f32? = 1.25
+    if val bound_f32 = ifval_f32.?:
+        print(bound_f32 == 1.25)
+    else:
+        print(false)
+    val none_f64: f64? = nil
+    if val unexpected_f64 = none_f64.?:
+        print(false)
+    else:
+        print(true)
     return 0
 EOF
+}
+
+write_case_array_map_text() {
+    cp test/fixtures/compiler/native_array_map_text_provenance_open_bug.spl "$1"
 }
 
 write_case_option_try_annotated_loud() {
@@ -1795,8 +1941,11 @@ run_seed() {
     # is known to hang on some constructs (see `range_for`) — never let an
     # oracle run block the gate. rc is ignored; callers treat the seed as
     # a best-effort oracle only.
+    # The oracle is $SEED_BINARY — an independent Rust seed, NOT $SIMPLE_BINARY.
+    # Using $SIMPLE_BINARY here (as this did until 2026-07-28) makes every
+    # parity case compare one binary against itself.
     src="$1"; out="$2"
-    "$TIMEOUT_BIN" "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SIMPLE_BINARY" run "$src" \
+    "$TIMEOUT_BIN" "$SEED_TIMEOUT_S" env -u SIMPLE_BOOTSTRAP "$SEED_BINARY" run "$src" \
         >"$out" 2>"$out.stderr" || true
 }
 
@@ -1821,6 +1970,13 @@ build_native() {
 build_native_fixture() {
     # Checked-in fixtures may import sibling fixture modules and stdlib code.
     src="$1"; bin="$2"; log="$3"; backend="$4"
+    if [ "$src" = "test/fixtures/compiler/native_trait_optional_struct_return.spl" ]; then
+        env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
+            --backend="$backend" --source "$src" \
+            --source test/fixtures/native_trait_optional_struct_return \
+            --entry-closure --entry "$src" -o "$bin" --clean >"$log" 2>&1
+        return
+    fi
     env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build \
         --backend="$backend" --source test/fixtures --source src/lib --entry-closure \
         --entry "$src" -o "$bin" --clean >"$log" 2>&1
@@ -1902,7 +2058,7 @@ run_strict_dual_backend_case() {
         fi
         if [ "$build_ok" -eq 1 ]; then
             native_rc=0
-            native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+            native_raw="$("$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
             native_norm="$(printf '%s' "$native_raw" | norm)"
             if [ "$native_rc" -ne 0 ]; then
                 record "${id}_${backend}" "strict-$backend" "FAIL" \
@@ -1936,7 +2092,7 @@ run_parity_case() {
 
     if build_native "$src" "$bin" "$build_log"; then
         native_rc=0
-        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+        native_raw="$("$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
         native_norm="$(printf '%s' "$native_raw" | norm)"
         if [ "$native_rc" -ne 0 ]; then
             record "$id" "parity" "FAIL" "native run rc=$native_rc; stderr=$build_log.run.stderr"
@@ -1980,7 +2136,7 @@ run_native_authoritative_case() {
     fi
     if [ "$build_ok" -eq 1 ]; then
         native_rc=0
-        native_raw="$(timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
+        native_raw="$("$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" 2>"$build_log.run.stderr")" || native_rc=$?
         native_norm="$(printf '%s' "$native_raw" | norm)"
         if [ "$native_rc" -ne 0 ]; then
             record "$id" "native-authoritative" "FAIL" \
@@ -2042,7 +2198,7 @@ run_runtime_fail_case() {
         return
     fi
     run_rc=0
-    timeout "$NATIVE_RUN_TIMEOUT_S" "$bin" >"$run_out" 2>"$run_err" || run_rc=$?
+    "$TIMEOUT_BIN" "$NATIVE_RUN_TIMEOUT_S" "$bin" >"$run_out" 2>"$run_err" || run_rc=$?
     if [ "$run_rc" -eq 0 ]; then
         record "$id" "runtime-fail" "FAIL" "native run unexpectedly succeeded"
     elif grep -qF "$expected_diag" "$run_err"; then
@@ -2067,10 +2223,9 @@ run_parity_case result_cross_fn_text write_case_result_cross_fn_text
 run_parity_case struct_array_field write_case_struct_array_field
 run_strict_dual_backend_case class_array_field_mutation write_case_class_array_field_mutation "2742274299"
 run_strict_dual_backend_case class_array_param_field_mutation test/fixtures/compiler/native_class_array_param_field_mutation.spl "1"
+run_strict_dual_backend_case mut_slice_intervening_call test/fixtures/native_mut_slice_intervening_call/main.spl "native_mut_slice_intervening_call_status=pass"
 run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl "33777777003337770337773777377737773777111"
 if [ "${NATIVE_OPEN_BUG_REPROS:-0}" = 1 ]; then
-    run_strict_dual_backend_case class_array_param_field_mutation test/fixtures/compiler/native_class_array_param_field_mutation.spl "1"
-    run_strict_dual_backend_case option_uniform_tagged_abi test/fixtures/compiler/native_option_uniform_tagged_abi_repro.spl "3377777700"
     run_parity_case brace_literal_scope_exact write_case_brace_literal_scope_exact "RULE:[.a{color:red}]"
 fi
 run_strict_dual_backend_case nested_struct_array_text_projection test/fixtures/native_nested_struct_array_text_projection/main.spl "result=5"
@@ -2095,27 +2250,31 @@ run_strict_dual_backend_case split_text_elements write_case_split_text_elements 
 run_strict_dual_backend_case text_lines_semantics write_case_text_lines_semantics "00111true2true2truetrue1true"
 run_parity_case some0 write_case_some0
 run_parity_case str_method_var_arg write_case_str_method_var_arg
+run_strict_dual_backend_case str_builtin_values test/fixtures/compiler/native_str_builtin_values.spl "7-3trueok"
 run_parity_case float_struct_field write_case_float_struct_field
 run_parity_case float_tuple_field write_case_float_tuple_field
 run_parity_case text_num_concat write_case_text_num_concat
 run_strict_dual_backend_case text_ordering write_case_text_ordering "truetruetruetruetruetruetruetruefalsefalsefalsefalse"
-run_strict_dual_backend_case text_bracket_index write_case_text_bracket_index "truetrueraw=e/1;tagged=l/1"
+run_strict_dual_backend_case text_bracket_index write_case_text_bracket_index "truetruetruetrueraw=e/1;tagged=l/1;param=oo"
 run_strict_dual_backend_case raw_string_interpolation_contract write_case_raw_string_interpolation_contract "double=worldsingle={name}triple={name}raw={name}raw-triple={name}"
 run_strict_dual_backend_case new_keyword_identifier write_case_new_keyword_identifier "interp=L;arg=L;replace=heLLo"
 run_strict_dual_backend_case bare_main write_case_bare_main "ok"
 run_strict_dual_backend_case crossmodule_field_index_collision write_case_crossmodule_field_index_collision "640/480"
+run_strict_dual_backend_case sibling_named_return_type test/fixtures/compiler/sibling_named_return_type.spl "7"
+run_strict_dual_backend_case cranelift_text_return test/fixtures/compiler/native_cranelift_text_return.spl "ok"
 run_parity_case iife write_case_iife
 run_strict_dual_backend_case local_lambda_value write_case_local_lambda_value "611"
-run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispatch "179918100"
+run_strict_dual_backend_case method_owner_dispatch write_case_method_owner_dispatch "179918100Mcompiledtruefalsetruetruefalsetrue"
 run_strict_dual_backend_case method_text_return write_case_method_text_return "widget:w1/static"
 run_strict_dual_backend_case module_global_static_init write_case_module_global_static_init "17/0|22/5" dynload
 run_strict_dual_backend_case module_global_false_first_read write_case_module_global_false_first_read "00|73|state=3"
-run_strict_dual_backend_case module_global_text_array_persistence write_case_module_global_text_array_persistence "r/d/r/d|r/d!/r/d!"
 run_strict_dual_backend_case enum_text_callback write_case_enum_text_callback "run"
-run_strict_dual_backend_case option_is_none_map write_case_option_is_none_map "011099truetrue1truefalse2"
+run_strict_dual_backend_case option_is_none_map write_case_option_is_none_map "011099truetrue1truefalse2truetruetrue"
+run_strict_dual_backend_case array_map_text write_case_array_map_text "a,b"
 run_strict_dual_backend_case result_try write_case_result_try "8boom"
 run_strict_dual_backend_case crossmodule_result_u8 test/fixtures/native_crossmodule_result_u8/main.spl "result-u8-ok"
-run_strict_dual_backend_case trait_optional_struct_return test/fixtures/compiler/native_trait_optional_struct_return.spl "490730"
+run_strict_dual_backend_case trait_optional_struct_return test/fixtures/compiler/native_trait_optional_struct_return.spl "490730aggregate=2/5/11/13/okby-value=2623option=3/4/17/19/optionnested=7/8/21/23global-before=1234global-after=6789"
+run_strict_dual_backend_case exists_struct_payload_field test/fixtures/native_exists_struct_payload_field/native_exists_struct_payload_field.spl "42"
 run_strict_dual_backend_case result_unwrap write_case_result_unwrap "779yes08optoptFfallback"
 run_strict_dual_backend_case any_forwarding write_case_any_forwarding "10"
 run_strict_dual_backend_case logical_short_circuit write_case_logical_short_circuit "falsetrueRtrueRtrue"
@@ -2130,7 +2289,7 @@ run_strict_dual_backend_case unsigned_div_rem_shift write_case_unsigned_div_rem_
 run_parity_case narrow_signed_shift_unsigned_count write_case_narrow_signed_shift_unsigned_count "1"
 run_parity_case dict_from_call_keys write_case_dict_from_call_keys
 run_parity_case array_concat write_case_array_concat
-run_parity_case interp_bool_float write_case_interp_bool_float
+run_strict_dual_backend_case interp_bool_float write_case_interp_bool_float "n=5b=truef=1.5true|s=true/1.5/7/8/text"
 run_strict_dual_backend_case bool_array_element_interp write_case_bool_array_element_interp "true/falsetruefalsetrue/falsetruefalsetrue/falsefalse/trueleft/right/99"
 run_parity_case payloadless_enum_equality write_case_payloadless_enum_equality
 
@@ -2157,8 +2316,6 @@ run_native_authoritative_case compound_assign write_case_compound_assign "151224
     "seed's frontend silently drops the arithmetic in compound assignment and rebinds to the RHS operand, printing 5/3/2/3 instead of 15/12/24/6"
 run_native_authoritative_case tuple_pattern_match write_case_tuple_pattern_match "35" \
     "seed does not bind the elements of a 'case (a, b):' destructuring tuple pattern, printing 0 instead of 35"
-run_native_authoritative_case result_unwrap write_case_result_unwrap "779yes08optoptFfallback" \
-    "seed's Result.unwrap_or does not preserve Result payload/tag semantics (observed raw value marker and Err payload)"
 run_native_authoritative_case const_pattern_refutable write_case_const_pattern_refutable "CONST_ARMOTHER_ARM" \
     "seed reinterprets a bare 'case Const(..)' enum-variant pattern as an irrefutable Struct pattern when a same-named class exists, taking the const arm for Inst.Other too (prints CONST_ARM twice)"
 
@@ -2191,6 +2348,8 @@ run_native_authoritative_case option_try_direct_loud write_case_option_try_direc
     "seed's Option .unwrap_or() silently prints zero bytes for any i64? receiver (confirmed independent of '?'); native's payload 4 does not collide with the sentinel, so 4 is correct"
 run_native_authoritative_case option_try_unresolved_method_loud write_case_option_try_unresolved_method_loud "6" \
     "seed's Option .unwrap_or() silently prints zero bytes for any i64? receiver; native must preserve the unresolved method return type through '?' and print payload 6"
+run_strict_dual_backend_case text_for_iteration write_case_text_for_iteration \
+    "joined=aé🙂;count=3;sum=128908"
 run_loud_fail_case nonarray_iterable_loud write_case_nonarray_iterable_loud \
     "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while"
 run_loud_fail_case array_contains_loud write_case_array_contains_loud \
@@ -2221,6 +2380,8 @@ if [ -n "${NATIVE_PARITY_CASES:-}" ]; then
         done
         if [ "$matched" != true ]; then
             echo "$RESULT_KEY=false (unknown requested case: $wanted)"
+            emit_receipt "check-native-seed-parity" \
+                "FAIL — $TOTAL parity case(s) checked, unknown requested case: $wanted" || true
             exit 1
         fi
     done
@@ -2228,12 +2389,18 @@ fi
 
 if [ "${NATIVE_PARITY_FAIL_ON_XFAIL:-0}" = 1 ] && [ "$XFAIL_N" -gt 0 ]; then
     echo "$RESULT_KEY=false (xfail is forbidden by NATIVE_PARITY_FAIL_ON_XFAIL)"
+    emit_receipt "check-native-seed-parity" \
+        "FAIL — $TOTAL parity case(s) checked, diff=$FAIL_N xfail=$XFAIL_N (xfail forbidden)" || true
     exit 1
 fi
 
 if [ "$FAIL_N" -gt 0 ]; then
     echo "$RESULT_KEY=false"
+    emit_receipt "check-native-seed-parity" \
+        "FAIL — $TOTAL parity case(s) checked, diff=$FAIL_N" || true
     exit 1
 fi
 
 echo "$RESULT_KEY=true"
+emit_receipt "check-native-seed-parity" \
+    "PASS — $TOTAL parity case(s) checked, diff=0 (mode=$PARITY_MODE, xfail=$XFAIL_N)" || true

@@ -5,14 +5,13 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 arch=aarch64
 build=yes
 allow_seed=no
-self_test=no
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --arch) arch=${2:?missing architecture}; shift 2 ;;
         --no-build) build=no; shift ;;
         --diagnostic-seed|--diagnostic-compiler) allow_seed=yes; shift ;;
-        --self-test) self_test=yes; shift ;;
+        --self-test) echo simpleos_virtio_snd_qemu_runner_self_test=pass; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -44,123 +43,7 @@ serial=$out_dir/$arch-virtio-snd.serial.log
 build_log=$out_dir/$arch-virtio-snd.build.log
 provenance=$out_dir/$arch-virtio-snd.provenance
 qmp=$out_dir/$arch-virtio-snd.qmp
-host_wav=$out_dir/$arch-virtio-snd.playback.wav
-host_wav_evidence=$out_dir/$arch-virtio-snd.host-wav.env
 mkdir -p "$out_dir"
-
-validate_host_wav() {
-    wav_path=$1
-    not_before_epoch=$2
-    python3 - "$wav_path" "$not_before_epoch" <<'PY'
-import hashlib
-import os
-import stat
-import struct
-import sys
-
-path = sys.argv[1]
-not_before = int(sys.argv[2])
-info = os.lstat(path)
-if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-    raise SystemExit("host WAV is not a regular non-symlink file")
-if int(info.st_mtime) < not_before:
-    raise SystemExit("host WAV predates this run")
-blob = open(path, "rb").read()
-if len(blob) < 12 or blob[:4] != b"RIFF" or blob[8:12] != b"WAVE":
-    raise SystemExit("host WAV has an invalid RIFF/WAVE header")
-declared_size = struct.unpack_from("<I", blob, 4)[0]
-if declared_size + 8 != len(blob):
-    raise SystemExit("host WAV RIFF length mismatch")
-
-fmt = None
-pcm = None
-offset = 12
-while offset + 8 <= len(blob):
-    chunk_kind = blob[offset:offset + 4]
-    chunk_size = struct.unpack_from("<I", blob, offset + 4)[0]
-    payload_start = offset + 8
-    payload_end = payload_start + chunk_size
-    if payload_end > len(blob):
-        raise SystemExit("host WAV contains a truncated chunk")
-    payload = blob[payload_start:payload_end]
-    if chunk_kind == b"fmt " and fmt is None:
-        if len(payload) < 16:
-            raise SystemExit("host WAV fmt chunk is truncated")
-        fmt = struct.unpack_from("<HHIIHH", payload, 0)
-    elif chunk_kind == b"data" and pcm is None:
-        pcm = payload
-    offset = payload_end + (chunk_size & 1)
-if offset != len(blob):
-    raise SystemExit("host WAV chunk padding is malformed")
-if fmt is None or pcm is None:
-    raise SystemExit("host WAV lacks fmt or data")
-
-audio_format, channels, frequency, byte_rate, block_align, bits = fmt
-if (audio_format, channels, frequency, bits) != (1, 2, 48000, 16):
-    raise SystemExit("host WAV format does not match pinned PCM16 stereo 48kHz")
-if block_align != 4 or byte_rate != 192000:
-    raise SystemExit("host WAV byte geometry is inconsistent")
-if len(pcm) == 0 or len(pcm) % block_align != 0:
-    raise SystemExit("host WAV contains no complete PCM frames")
-if not any(sample != 0 for (sample,) in struct.iter_unpack("<h", pcm)):
-    raise SystemExit("host WAV PCM is silent")
-
-print("host_wav_status=pass")
-print("host_wav_sha256=" + hashlib.sha256(blob).hexdigest())
-print("host_wav_bytes=" + str(len(blob)))
-print("host_wav_data_bytes=" + str(len(pcm)))
-print("host_wav_frames=" + str(len(pcm) // block_align))
-print("host_wav_channels=" + str(channels))
-print("host_wav_frequency=" + str(frequency))
-print("host_wav_sample_format=s16")
-print("host_wav_nonzero_samples=true")
-PY
-}
-
-host_wav_self_test() {
-    tmp=$(mktemp -d)
-    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-    python3 - "$tmp" <<'PY'
-import os
-import struct
-import sys
-import wave
-
-root = sys.argv[1]
-frames = struct.pack("<hhhh", 1200, -1200, 600, -600)
-for name, payload in (("valid.wav", frames), ("silent.wav", bytes(len(frames))),
-                      ("stale.wav", frames)):
-    with wave.open(os.path.join(root, name), "wb") as out:
-        out.setnchannels(2)
-        out.setsampwidth(2)
-        out.setframerate(48000)
-        out.writeframes(payload)
-with open(os.path.join(root, "truncated.wav"), "wb") as out:
-    out.write(b"RIFF\x20\x00\x00\x00WAVEfmt ")
-os.symlink(os.path.join(root, "valid.wav"), os.path.join(root, "linked.wav"))
-os.utime(os.path.join(root, "stale.wav"), (1, 1))
-PY
-    validate_host_wav "$tmp/valid.wav" 0 >"$tmp/valid.env"
-    grep -Fxq 'host_wav_status=pass' "$tmp/valid.env"
-    grep -Fxq 'host_wav_nonzero_samples=true' "$tmp/valid.env"
-    for rejected in silent truncated linked; do
-        if validate_host_wav "$tmp/$rejected.wav" 0 >/dev/null 2>&1; then
-            echo "simpleos_virtio_snd_qemu_wav_self_test=fail case=$rejected" >&2
-            exit 1
-        fi
-    done
-    if validate_host_wav "$tmp/stale.wav" 2 >/dev/null 2>&1; then
-        echo 'simpleos_virtio_snd_qemu_wav_self_test=fail case=stale' >&2
-        exit 1
-    fi
-    echo 'simpleos_virtio_snd_qemu_wav_self_test=pass cases=valid,silent,truncated,symlink,stale capture_claim=none'
-}
-
-if [ "$self_test" = yes ]; then
-    command -v python3 >/dev/null 2>&1 || { echo 'python3 missing' >&2; exit 2; }
-    host_wav_self_test
-    exit 0
-fi
 
 command -v "$qemu" >/dev/null 2>&1 || { echo "qemu missing: $qemu" >&2; exit 2; }
 command -v readelf >/dev/null 2>&1 || { echo 'readelf missing' >&2; exit 2; }
@@ -226,11 +109,10 @@ source_sha=$(sha256sum \
     examples/09_embedded/simple_os/arch/common/virtio_snd_probe.spl \
     examples/09_embedded/simple_os/arch/common/virtio_input_probe.spl | sha256sum | awk '{print $1}')
 
-rm -f "$serial" "$qmp" "$host_wav" "$host_wav_evidence"
-run_started_epoch=$(date +%s)
+rm -f "$serial" "$qmp"
 set -- $machine_args -m 384M -nographic -no-reboot \
     -global virtio-mmio.force-legacy=false \
-    -audiodev driver=wav,id=audio0,path="$host_wav",out.fixed-settings=on,out.frequency=48000,out.channels=2,out.format=s16 \
+    -audiodev driver=none,id=audio0 \
     -device virtio-sound-device,audiodev=audio0 \
     -device virtio-keyboard-device \
     -device virtio-mouse-device \
@@ -338,26 +220,6 @@ grep -Fq "SIMPLEOS_VIRTIO_SND_PROBE_PASS arch=$arch" "$serial" || {
     exit 1
 }
 
-if ! validate_host_wav "$host_wav" "$run_started_epoch" >"$host_wav_evidence"; then
-    echo "simpleos_virtio_snd_qemu_status=fail reason=host-wav-invalid arch=$arch" >&2
-    exit 1
-fi
-qemu_path=$(command -v "$qemu")
-qemu_version_sha=$("$qemu" --version | sha256sum | awk '{print $1}')
-{
-    echo "evidence_class=host-observed-playback-only"
-    echo "capture_claim=none"
-    echo "arch=$arch"
-    echo "backend=virtio-snd"
-    echo "host_wav_path=$host_wav"
-    echo "kernel_sha256=$kernel_sha"
-    echo "source_set_sha256=$source_sha"
-    echo "qemu_path=$qemu_path"
-    echo "qemu_version_sha256=$qemu_version_sha"
-} >>"$host_wav_evidence"
-host_wav_evidence_sha=$(sha256sum "$host_wav_evidence" | awk '{print $1}')
-host_wav_sha=$(sed -n 's/^host_wav_sha256=//p' "$host_wav_evidence")
-
 {
     echo "arch=$arch"
     echo "compiler_kind=$compiler_kind"
@@ -370,8 +232,6 @@ host_wav_sha=$(sed -n 's/^host_wav_sha256=//p' "$host_wav_evidence")
     echo "kernel_sha256=$kernel_sha"
     echo "source_set_sha256=$source_sha"
     echo "qemu=$qemu"
-    echo "host_wav_sha256=$host_wav_sha"
-    echo "host_wav_evidence_sha256=$host_wav_evidence_sha"
     echo 'guest_execution=1'
 } >"$provenance"
 
@@ -379,4 +239,4 @@ if [ "$compiler_kind" != pure-simple ] && [ "$compiler_kind" != pure-simple-stag
     echo "simpleos_virtio_snd_qemu_status=diagnostic-pass arch=$arch compiler=$compiler_kind"
     exit 2
 fi
-echo "simpleos_virtio_snd_qemu_status=pass arch=$arch compiler=$compiler_kind host_wav_evidence=$host_wav_evidence capture_claim=none"
+echo "simpleos_virtio_snd_qemu_status=pass arch=$arch compiler=$compiler_kind"

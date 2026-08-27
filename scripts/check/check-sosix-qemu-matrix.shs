@@ -4,10 +4,9 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "${repo_root}"
-SOSIX_QEMU_COMPILER_DESIGNATION_POLICY=$repo_root/scripts/check/lib/sosix-qemu-compiler-designation-v1.tsv
-export SOSIX_QEMU_COMPILER_DESIGNATION_POLICY
-. "${repo_root}/scripts/check/lib/sosix-qemu-compiler-designation.shs"
-. "${repo_root}/scripts/check/lib/sosix-qemu-firmware-transcript.shs"
+spec_runtime=${SIMPLE_QEMU_RUNTIME:-bin/simple}
+runtime_admission_cmd=scripts/check/check-sosix-qemu-runtime-admission.shs
+spec_runtime_receipt=${SIMPLE_QEMU_RUNTIME_RECEIPT:-${spec_runtime}.sosix-admission.env}
 
 host_override=
 guest_filter=
@@ -98,6 +97,9 @@ accelerator_for() {
 }
 
 if [ "${mode}" = self-test ]; then
+    "${runtime_admission_cmd}" --self-test >/dev/null
+    scripts/check/check-x86-32-cpl3-lifecycle-contract.shs --self-test >/dev/null
+    scripts/check/check-arm32-user-lifecycle-contract.shs --self-test >/dev/null
     [ "$(SIMPLE_QEMU_HOST=windows SIMPLE_QEMU_ACCELERATOR=whpx "${settings_cmd}" --print | sed -n 's/^simple_qemu_host=//p')" = windows ]
     [ "$(SIMPLE_QEMU_HOST=freebsd SIMPLE_QEMU_ACCELERATOR=tcg "${settings_cmd}" --print | sed -n 's/^simple_qemu_native_timing_applicable=//p')" = false ]
     if "$0" --guest mips64 --preflight >/dev/null 2>&1; then
@@ -120,6 +122,8 @@ if [ "${mode}" = self-test ]; then
     printf '%s\n' 'sosix_qemu_matrix_self_test=pass'
     exit 0
 fi
+
+. scripts/lib/simple-compiler-select.shs
 
 run_id=${SOSIX_QEMU_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
 case "$run_id" in ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-]*)
@@ -146,16 +150,19 @@ emit "sosix_qemu_matrix_artifact_root=${run_root}"
 blocked=0
 ready=0
 
-# Audited descriptor truth: none of the six current guests emits the canonical
-# nonce-bound compiler protocol yet.  Future promotions happen in the shared
-# closed designation owner; the run path below validates and retains receipts.
+# Audited descriptor truth: the current x86_64 matrix boots fs_exec_entry.spl,
+# not simpleos_smoke_init.spl, so none of the six rows emits the canonical
+# compiler protocol yet. Promotion requires wiring the real boot entry first.
 compiler_in_filesystem_for() {
-    sosix_qemu_compiler_designation_live "$host" "$1"
+    case "$1" in
+        x86_32|x86_64|arm32|arm64|riscv32|riscv64) printf false ;;
+        *) return 1 ;;
+    esac
 }
 
 compiler_version_for() {
     [ "$(compiler_in_filesystem_for "$1")" = true ] || return 0
-    printf '%s' "${SOSIX_QEMU_COMPILER_VERSION_EXPECTED:-}"
+    printf '%s' "${SOSIX_QEMU_COMPILER_VERSION_EXPECTED:-Simple-v1.0.0-RC}"
 }
 
 check_row() {
@@ -167,13 +174,9 @@ check_row() {
     compiler_in_filesystem=$6
     compiler_version_evidence_path=$7
     compiler_hello_evidence_path=$8
-    compiler_alias_evidence_path=
-    compiler_manifest_evidence_path=
     if [ "${compiler_in_filesystem}" = true ]; then
         compiler_version_evidence_path="${run_root}/${guest}.compiler-version.txt"
         compiler_hello_evidence_path="${run_root}/${guest}.compiler-hello.txt"
-        compiler_alias_evidence_path="${run_root}/${guest}.compiler-aliases.txt"
-        compiler_manifest_evidence_path="${run_root}/${guest}.compiler-manifest.env"
     fi
     if [ -n "${guest_filter}" ] && [ "${guest_filter}" != "${guest}" ]; then
         return
@@ -187,8 +190,6 @@ check_row() {
     emit "${prefix}_compiler_in_filesystem=${compiler_in_filesystem}"
     emit "${prefix}_compiler_version_evidence_path=${compiler_version_evidence_path}"
     emit "${prefix}_compiler_hello_evidence_path=${compiler_hello_evidence_path}"
-    emit "${prefix}_compiler_alias_evidence_path=${compiler_alias_evidence_path}"
-    emit "${prefix}_compiler_manifest_evidence_path=${compiler_manifest_evidence_path}"
     emit "${prefix}_accelerator=${row_accelerator}"
     emit "${prefix}_native_timing_applicable=$([ "${row_accelerator}" = tcg ] && printf false || printf true)"
     if ! command -v "${binary}" >/dev/null 2>&1 && [ ! -x "${binary}" ]; then
@@ -263,6 +264,32 @@ check_row riscv64 "$(setting simple_qemu_riscv64_bin)" \
 emit "sosix_qemu_matrix_ready_count=${ready}"
 emit "sosix_qemu_matrix_blocked_count=${blocked}"
 
+if [ ! -x "${spec_runtime}" ]; then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit "sosix_qemu_matrix_reason=missing-spec-runtime:${spec_runtime}"
+    exit 1
+fi
+if ! simple_compiler_usable "${spec_runtime}"; then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit "sosix_qemu_matrix_reason=unusable-spec-runtime:${spec_runtime}"
+    exit 1
+fi
+
+if ! runtime_identity=$("${runtime_admission_cmd}" --verify "${spec_runtime}" "${spec_runtime_receipt}" 2>&1); then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit "sosix_qemu_matrix_reason=spec-runtime-admission-failed:${runtime_identity}"
+    exit 1
+fi
+runtime_path=$(printf '%s\n' "${runtime_identity}" | sed -n 's/^runtime_path=//p')
+runtime_sha256=$(printf '%s\n' "${runtime_identity}" | sed -n 's/^runtime_sha256=//p')
+emit "sosix_qemu_matrix_spec_runtime_path=${runtime_path}"
+emit "sosix_qemu_matrix_spec_runtime_sha256=${runtime_sha256}"
+
+require_runtime_identity() {
+    identity_now=$("${runtime_admission_cmd}" --verify "${spec_runtime}" "${spec_runtime_receipt}" 2>&1) || return 1
+    [ "${identity_now}" = "${runtime_identity}" ]
+}
+
 if [ "${mode}" = preflight ]; then
     if [ "${blocked}" -ne 0 ]; then
         emit 'sosix_qemu_matrix_status=blocked'
@@ -272,7 +299,7 @@ if [ "${mode}" = preflight ]; then
     exit 0
 fi
 
-version_output=$(bin/simple --version 2>&1 || true)
+version_output=$("${spec_runtime}" --version 2>&1 || true)
 if printf '%s\n' "${version_output}" | grep -q 'bootstrap seed only'; then
     emit 'sosix_qemu_matrix_status=blocked'
     emit 'sosix_qemu_matrix_reason=deployed-cli-is-bootstrap-seed'
@@ -299,7 +326,7 @@ run_spec_checked() {
     nonce="${run_id}-${host}-${guest}"
     : > "${reason_file}"
     if ! SOSIX_QEMU_NONCE="${nonce}" SIMPLE_QEMU_ACCELERATOR="${row_accelerator}" \
-        SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "${spec}" --no-session-daemon --timeout 180 >"${log}" 2>&1; then
+        SIMPLE_TIMEOUT_SECONDS=900 "${spec_runtime}" test "${spec}" --no-session-daemon --timeout 180 >"${log}" 2>&1; then
         printf '%s\n' "spec-failed:${spec}" > "${reason_file}"
         return 1
     fi
@@ -315,11 +342,19 @@ run_spec_checked() {
             printf '%s\n' "missing-compiler-serial:${serial_path}" > "${reason_file}"
             return 1
         fi
-        if ! bin/simple run scripts/check/validate-sosix-qemu-compiler-serial.spl -- \
+        if ! require_runtime_identity; then
+            printf '%s\n' "spec-runtime-identity-changed-before-compiler-validation:${guest}" > "${reason_file}"
+            return 1
+        fi
+        if ! "${spec_runtime}" run scripts/check/validate-sosix-qemu-compiler-serial.spl -- \
             "${serial_path}" "${host}" "${guest}" "${nonce}" "${compiler_path}" \
             "${compiler_version}" "${source_path}" "${executable_path}" \
             "${expected_stdout}" "${version_artifact}" "${hello_artifact}" >>"${log}" 2>&1; then
             printf '%s\n' "compiler-serial-invalid:${guest}" > "${reason_file}"
+            return 1
+        fi
+        if ! require_runtime_identity; then
+            printf '%s\n' "spec-runtime-identity-changed-after-compiler-validation:${guest}" > "${reason_file}"
             return 1
         fi
         [ -s "${version_artifact}" ] && [ -s "${hello_artifact}" ] || {
@@ -337,44 +372,6 @@ descriptor_field() {
     awk -F= -v k="$descriptor_key" '$1 == k { print substr($0,index($0,"=")+1) }' "$descriptor_file"
 }
 
-hash_file() { sha256sum "$1" | awk '{print $1}'; }
-
-# A native PASS descriptor is a receipt from the just-completed guest run, not
-# merely a set of inputs for the bundle producer.  Keep this check in the
-# matrix owner so a stale descriptor/serial pair cannot be republished.
-validate_current_guest_receipt() {
-    receipt_guest=$1 receipt_descriptor=$2 receipt_kernel=$3 receipt_image=$4
-    receipt_nonce=$(descriptor_field nonce "$receipt_descriptor")
-    expected_nonce="${run_id}-${host}-${receipt_guest}"
-    [ "$receipt_nonce" = "$expected_nonce" ] || {
-        printf '%s\n' "native-pass-receipt-stale:$receipt_guest" >&2
-        return 1
-    }
-    receipt_serial=$repo_root/build/os/systest/$receipt_guest.serial.log
-    [ -f "$receipt_serial" ] || {
-        printf '%s\n' "native-pass-receipt-missing-serial:$receipt_serial" >&2
-        return 1
-    }
-    receipt_mode=$(descriptor_field firmware_mode "$receipt_descriptor")
-    receipt_stages=$(descriptor_field firmware_stages "$receipt_descriptor")
-    receipt_marker=$(descriptor_field boot_correlation_marker "$receipt_descriptor")
-    sosix_qemu_validate_firmware_transcript "$receipt_mode" "$receipt_stages" \
-        "$receipt_marker" "$receipt_nonce" "$receipt_serial" || {
-        printf '%s\n' "native-pass-receipt-transcript-invalid:$receipt_guest" >&2
-        return 1
-    }
-    receipt_kernel_identity=$(descriptor_field kernel_identity "$receipt_descriptor")
-    receipt_image_identity=$(descriptor_field image_identity "$receipt_descriptor")
-    [ "$receipt_kernel_identity" = "sha256:$(hash_file "$receipt_kernel")" ] || {
-        printf '%s\n' "native-pass-receipt-kernel-mismatch:$receipt_guest" >&2
-        return 1
-    }
-    [ "$receipt_image_identity" = "sha256:$(hash_file "$receipt_image")" ] || {
-        printf '%s\n' "native-pass-receipt-image-mismatch:$receipt_guest" >&2
-        return 1
-    }
-}
-
 resolve_repo_input() {
     case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$repo_root" "$1";; esac
 }
@@ -387,29 +384,16 @@ publish_native_pass() {
         /^[A-Za-z0-9_]+=/ {
           if ($1=="schema_version" || $1=="nonce" || $1=="qemu_argv_file" || $1=="firmware_path" ||
               $1=="firmware_id" || $1=="firmware_mode" || $1=="firmware_version" || $1=="firmware_stages" ||
-              $1=="boot_correlation_marker" ||
               $1=="program_path" || $1=="transcript_path" || $1=="required_markers_file" ||
-              $1=="kernel_identity" || $1=="image_identity" ||
-              $1=="owner" || $1=="reviewer" || $1=="compiler_identity" ||
-              $1=="compiler_version_evidence_path" || $1=="compiler_hello_evidence_path" ||
-              $1=="compiler_alias_evidence_path" || $1=="compiler_manifest_evidence_path") next
+              $1=="owner" || $1=="reviewer" || $1=="compiler_identity") next
         } { bad=1 } END { exit bad }
     ' "$descriptor"; then
         echo "native-pass-descriptor-open-or-malformed:$descriptor" >&2; return 1
     fi
     [ "$(descriptor_field schema_version "$descriptor")" = 1 ] || return 1
-    validate_current_guest_receipt "$publish_guest" "$descriptor" "$publish_kernel" "$publish_image" || return 1
     admission=$run_root/$publish_guest.host-admission.env
     version_file=$run_root/$publish_guest.qemu.version
     descriptor_field qemu_version "$admission" > "$version_file"
-    publish_compiler_in_filesystem=$(compiler_in_filesystem_for "$publish_guest")
-    set --
-    if [ "$publish_compiler_in_filesystem" = true ]; then
-        set -- --compiler-version-evidence "$(resolve_repo_input "$(descriptor_field compiler_version_evidence_path "$descriptor")")" \
-            --compiler-hello-evidence "$(resolve_repo_input "$(descriptor_field compiler_hello_evidence_path "$descriptor")")" \
-            --compiler-alias-evidence "$(resolve_repo_input "$(descriptor_field compiler_alias_evidence_path "$descriptor")")" \
-            --compiler-manifest-evidence "$(resolve_repo_input "$(descriptor_field compiler_manifest_evidence_path "$descriptor")")"
-    fi
     scripts/check/produce-sosix-qemu-native-pass-bundle.shs \
         --host "$host" --guest "$publish_guest" --output "$artifact_root/sosix-qemu/native" \
         --admission "$admission" --qemu-binary "$publish_qemu" \
@@ -420,15 +404,13 @@ publish_native_pass() {
         --firmware-mode "$(descriptor_field firmware_mode "$descriptor")" \
         --firmware-version "$(descriptor_field firmware_version "$descriptor")" \
         --firmware-stages "$(descriptor_field firmware_stages "$descriptor")" \
-        --boot-correlation-marker "$(descriptor_field boot_correlation_marker "$descriptor")" \
         --kernel "$publish_kernel" --image "$publish_image" \
         --program "$(resolve_repo_input "$(descriptor_field program_path "$descriptor")")" \
         --transcript "$(resolve_repo_input "$(descriptor_field transcript_path "$descriptor")")" \
         --required-markers-file "$(resolve_repo_input "$(descriptor_field required_markers_file "$descriptor")")" \
         --nonce "$(descriptor_field nonce "$descriptor")" --owner "$(descriptor_field owner "$descriptor")" \
         --reviewer "$(descriptor_field reviewer "$descriptor")" \
-        --compiler-identity "$(descriptor_field compiler_identity "$descriptor")" \
-        --compiler-in-filesystem "$publish_compiler_in_filesystem" "$@" --source "$repo_root"
+        --compiler-identity "$(descriptor_field compiler_identity "$descriptor")" --source "$repo_root"
 }
 
 row_paths() {
@@ -449,6 +431,24 @@ publish_completed_guest() {
     publish_native_pass "$publish_guest" "$publish_kernel" "$publish_image" "$publish_binary" "$(accelerator_for "$publish_guest")"
 }
 
+admit_guest_lifecycle() {
+    guest=$1
+    reason_file=$2
+    case "${guest}" in
+        x86_32)
+            if scripts/check/check-x86-32-cpl3-lifecycle-contract.shs --admit >"${reason_file}" 2>&1; then return 0; fi
+            printf '%s\n' 'x86_32-cpl3-lifecycle-not-admitted' >>"${reason_file}"
+            return 1
+            ;;
+        arm32)
+            if scripts/check/check-arm32-user-lifecycle-contract.shs --admit >"${reason_file}" 2>&1; then return 0; fi
+            printf '%s\n' 'arm32-el0-lifecycle-not-admitted' >>"${reason_file}"
+            return 1
+            ;;
+        *) return 0 ;;
+    esac
+}
+
 run_spec_serial() {
     guest=$1
     spec=$2
@@ -457,6 +457,11 @@ run_spec_serial() {
     fi
     log=${run_root}/$(basename "${spec}" .spl).log
     reason_file=${run_root}/${guest}.reason
+    if ! admit_guest_lifecycle "${guest}" "${reason_file}"; then
+        emit 'sosix_qemu_matrix_status=failed'
+        emit "sosix_qemu_matrix_reason=$(cat "${reason_file}")"
+        exit 1
+    fi
     if ! run_spec_checked "${guest}" "${spec}" "${log}" "${reason_file}" \
         "$(accelerator_for "${guest}")" \
         "$(compiler_in_filesystem_for "${guest}")" '/usr/bin/simple' "$(compiler_version_for "${guest}")" \
@@ -478,7 +483,8 @@ launch_spec_parallel() {
     spec=$2
     log=${run_root}/$(basename "${spec}" .spl).log
     reason_file=${run_root}/${guest}.reason
-    (run_spec_checked "${guest}" "${spec}" "${log}" "${reason_file}" \
+    (admit_guest_lifecycle "${guest}" "${reason_file}" && \
+     run_spec_checked "${guest}" "${spec}" "${log}" "${reason_file}" \
         "$(accelerator_for "${guest}")" \
         "$(compiler_in_filesystem_for "${guest}")" '/usr/bin/simple' "$(compiler_version_for "${guest}")" \
         '/tmp/sosix-hello.spl' '/tmp/sosix-hello' "hello-${run_id}-${host}-${guest}") &

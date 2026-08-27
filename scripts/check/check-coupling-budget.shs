@@ -43,6 +43,7 @@ BASELINE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --selftest) MODE=selftest ;;
+    --metrics) MODE=metrics ;;
     --root) shift; SRCROOT="${1:-}" ;;
     --baseline) shift; BASELINE="${1:-}" ;;
     *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (bad argument: $1)"; exit 2 ;;
@@ -151,6 +152,8 @@ measure() {
     }
     nnodes = 0
     for (f in seen) nnodes++
+    nedges = 0
+    for (e in edge) { split(e, ab, SUBSEP); if ((ab[1] in seen) && (ab[2] in seen)) nedges++ }
     # iterative Tarjan over `seen` nodes
     cidx = 0; sp = 0; nscc = 0
     for (i = 0; i < nfiles; i++) {
@@ -205,6 +208,7 @@ measure() {
       }
     }
     print "nodes " nnodes
+    print "edges " nedges
     print "cycles " cycles
     print "files_in_cycles " fic
     print "largest_scc " largest
@@ -302,6 +306,25 @@ if [ "$MODE" = selftest ]; then
   fi
   echo "ERROR — nothing was checked (selftest failed)"
   exit 2
+fi
+
+# --metrics: print raw metric lines (nodes/edges/cycles/...) for snapshot tooling.
+# Selftest is fatal here too; 0 resolved files is ERROR, never a pass.
+if [ "$MODE" = metrics ]; then
+  if ! selftest > /dev/null; then
+    echo "ERROR — nothing was checked (fatal: --selftest failed; fix the detector before trusting it)"
+    exit 2
+  fi
+  [ -n "$SRCROOT" ] || SRCROOT="$ROOT_DEFAULT/src"
+  out="$(measure "$SRCROOT" '^(compiler|app)/')"
+  nodes=$(printf '%s\n' "$out" | awk '$1=="nodes"{print $2}')
+  [ -n "$nodes" ] || nodes=0
+  if [ "$nodes" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 files resolved under $SRCROOT)"
+    exit 2
+  fi
+  printf '%s\n' "$out"
+  exit 0
 fi
 
 # real scan: selftest is fatal and runs first

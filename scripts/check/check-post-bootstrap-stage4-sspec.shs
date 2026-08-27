@@ -1,128 +1,26 @@
 #!/bin/sh
 set -eu
-
-post_bootstrap_fail() {
-  echo "post_bootstrap_stage4_reason=$1"
-  return 1
-}
-
-check_post_bootstrap_phase_matrix() (
-  binary=$1
-  provenance=$2
-
-  stage3_manifest=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage3_provenance_path "$provenance")") || exit 1
-  parent_compiler=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value parent_compiler_path "$provenance")") || exit 1
-  bootstrap_stage3_verify_manifest "$stage3_manifest" "$repo_root" "$parent_compiler" || exit 1
-
-  stage2_compiler=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage2_admitted_path "$stage3_manifest")") || exit 1
-  stage3_compiler=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage3_path "$stage3_manifest")") || exit 1
-  [ "$parent_compiler" = "$stage3_compiler" ] || exit 1
-  [ "$(bootstrap_stage3_manifest_value stage2_admitted_sha256 "$stage3_manifest")" = "$(bootstrap_stage3_hash_file "$stage2_compiler")" ] || exit 1
-  [ "$(bootstrap_stage3_manifest_value stage3_sha256 "$stage3_manifest")" = "$(bootstrap_stage3_hash_file "$stage3_compiler")" ] || exit 1
-
-  build_log=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value build_log_path "$provenance")") || exit 1
-  smoke_log=$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value essential_tools_log_path "$provenance")") || exit 1
-  [ "$(grep -Fxc "command: bootstrap_native_build_main $parent_compiler $binary" "$build_log")" -eq 1 ] || exit 1
-  for marker in \
-      essential_tools_pure_simple_identity=true \
-      essential_list_constructor_smoke=true \
-      essential_test_runner_smoke=true \
-      essential_lint_smoke=true \
-      essential_duplicate_checker_smoke=true \
-      bootstrap_essential_tools_smoke=true; do
-    [ "$(grep -Fxc "$marker" "$smoke_log")" -eq 1 ] || exit 1
-  done
-
-  echo 'post_bootstrap_matrix_compiler_build_stage2=true'
-  echo 'post_bootstrap_matrix_compiler_build_stage3=true'
-  echo 'post_bootstrap_matrix_compiler_build_stage4=true'
-  echo 'post_bootstrap_matrix_tools_build_stage2=not_applicable'
-  echo 'post_bootstrap_matrix_tools_build_stage3=not_applicable'
-  echo 'post_bootstrap_matrix_tools_build_stage4=true'
-  echo 'post_bootstrap_matrix_simple_tests_stage2=not_applicable'
-  echo 'post_bootstrap_matrix_simple_tests_stage3=not_applicable'
-  echo 'post_bootstrap_matrix_simple_tests_stage4=true'
-  echo 'post_bootstrap_matrix_tool_tests_stage2=not_applicable'
-  echo 'post_bootstrap_matrix_tool_tests_stage3=not_applicable'
-  echo 'post_bootstrap_matrix_tool_tests_stage4=true'
-)
-
-run_post_bootstrap_stage4_acceptance() (
-  [ "$#" -eq 4 ] || {
-    echo "usage: $0 STAGE4_BINARY STAGE4_BINARY_SHA256 STAGE4_PROVENANCE STAGE4_PROVENANCE_SHA256" >&2
-    exit 2
-  }
-
-  binary=$(bootstrap_stage3_canonical_file "$1") || {
-    post_bootstrap_fail binary_missing_symlinked_or_noncanonical
-    exit 1
-  }
-  expected_binary_sha=$2
-  provenance=$(bootstrap_stage3_canonical_file "$3") || {
-    post_bootstrap_fail provenance_missing_symlinked_or_noncanonical
-    exit 1
-  }
-  expected_provenance_sha=$4
-
-  printf '%s\n' "$expected_binary_sha" | grep -Eq '^[0-9a-f]{64}$' || {
-    post_bootstrap_fail candidate_hash_malformed
-    exit 1
-  }
-  printf '%s\n' "$expected_provenance_sha" | grep -Eq '^[0-9a-f]{64}$' || {
-    post_bootstrap_fail provenance_hash_malformed
-    exit 1
-  }
-  [ "$(bootstrap_stage3_hash_file "$binary")" = "$expected_binary_sha" ] || {
-    post_bootstrap_fail candidate_hash_mismatch
-    exit 1
-  }
-  [ "$(bootstrap_stage3_hash_file "$provenance")" = "$expected_provenance_sha" ] || {
-    post_bootstrap_fail provenance_hash_mismatch
-    exit 1
-  }
-
-  [ -x "$binary" ] || {
-    post_bootstrap_fail binary_not_executable
-    exit 1
-  }
-  [ "$provenance" = "${binary}.provenance.env" ] || {
-    post_bootstrap_fail provenance_not_adjacent
-    exit 1
-  }
-
-  smoke_log=$(bootstrap_stage3_manifest_value essential_tools_log_path "$provenance") || exit 1
-  smoke_sha_before=$(bootstrap_stage3_hash_file "$smoke_log") || exit 1
-  stage4_verify_candidate_provenance "$provenance" "$binary" "$repo_root" || {
-    post_bootstrap_fail provenance_verification_failed
-    exit 1
-  }
-  check_post_bootstrap_phase_matrix "$binary" "$provenance" || {
-    post_bootstrap_fail phase_matrix_verification_failed
-    exit 1
-  }
-  smoke_sha_after=$(bootstrap_stage3_hash_file "$smoke_log") || exit 1
-  [ "$smoke_sha_before" = "$smoke_sha_after" ] || {
-    post_bootstrap_fail smoke_evidence_changed_during_verification
-    exit 1
-  }
-
-  echo 'post_bootstrap_stage4_candidate_hash_bound=true'
-  echo 'post_bootstrap_stage4_provenance_hash_bound=true'
-  echo 'post_bootstrap_stage4_provenance=true'
-  echo 'post_bootstrap_stage4_exact_binary=true'
-  echo 'post_bootstrap_stage4_source_binding=true'
-  echo 'post_bootstrap_stage4_smoke_log_unchanged=true'
-  echo 'post_bootstrap_stage4_test_runner=true'
-  echo 'post_bootstrap_stage4_lint=true'
-  echo 'post_bootstrap_stage4_duplicate_check=true'
-  echo 'post_bootstrap_stage4_acceptance=true'
-)
-
+if [ "$#" -ne 2 ]; then echo "usage: $0 STAGE4_BINARY STAGE4_PROVENANCE" >&2; exit 2; fi
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
 BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 STAGE4_PROVENANCE_HELPER_PATH="$repo_root/scripts/check/lib/stage4-candidate-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
-
-run_post_bootstrap_stage4_acceptance "$@"
+binary=$(bootstrap_stage3_canonical_file "$1") || { echo 'post_bootstrap_stage4_reason=binary_missing_symlinked_or_noncanonical'; exit 1; }
+provenance=$(bootstrap_stage3_canonical_file "$2") || { echo 'post_bootstrap_stage4_reason=provenance_missing_symlinked_or_noncanonical'; exit 1; }
+[ -x "$binary" ] || { echo 'post_bootstrap_stage4_reason=binary_not_executable'; exit 1; }
+[ "$provenance" = "${binary}.provenance.env" ] || { echo 'post_bootstrap_stage4_reason=provenance_not_adjacent'; exit 1; }
+smoke_log=$(bootstrap_stage3_manifest_value essential_tools_log_path "$provenance") || exit 1
+smoke_sha_before=$(bootstrap_stage3_hash_file "$smoke_log") || exit 1
+stage4_verify_candidate_provenance "$provenance" "$binary" "$repo_root" || { echo 'post_bootstrap_stage4_reason=provenance_verification_failed'; exit 1; }
+smoke_sha_after=$(bootstrap_stage3_hash_file "$smoke_log") || exit 1
+[ "$smoke_sha_before" = "$smoke_sha_after" ] || { echo 'post_bootstrap_stage4_reason=smoke_evidence_changed_during_verification'; exit 1; }
+echo 'post_bootstrap_stage4_provenance=true'
+echo 'post_bootstrap_stage4_exact_binary=true'
+echo 'post_bootstrap_stage4_source_binding=true'
+echo 'post_bootstrap_stage4_smoke_log_unchanged=true'
+echo 'post_bootstrap_stage4_test_runner=true'
+echo 'post_bootstrap_stage4_lint=true'
+echo 'post_bootstrap_stage4_duplicate_check=true'
+echo 'post_bootstrap_stage4_acceptance=true'

@@ -6,36 +6,37 @@
 # SYSCALL MSRs, TSS, NVMe, PMM/VMM — then calls fs_exec_spawn_ring3, the SAME
 # path the shell uses, which streams /FSEXEC.ELF off the FAT32/NVMe disk, builds
 # the general image, and iretq's to CPL3), and boot it under QEMU q35 with the
-# FAT32-fsexec disk attached as an NVMe namespace. The payload writes "FDR\n" via
-# `out` (ring-3 proof) then "FSEXEC_OK rc=42\n" via syscall 60, then exits QEMU
-# via out 0xf4.
+# FAT32-fsexec disk attached as an NVMe namespace. Success requires the payload's
+# exact serial text and clean syscall exit status, not a synthetic marker.
 #
 # This is the sibling of build_fsexec_general_ring3.shs: same disk, same proven
 # boot config, but the ring-3 load+map+enter runs through the production
 # fs_exec_spawn_ring3 API instead of the direct enter-image handoff.
 #
 # Env knobs: SKIP_KERNEL=1 (reuse kernel), QEMU_MEM (default 512M),
-#            QEMU_TIMEOUT (default 40s), FSEXEC_DISK (default fat32-fsexec.img).
+#            QEMU_TIMEOUT (default 40s), FSEXEC_DISK (default fat32-fsexec.img),
+#            FSEXEC_EXPECTED_OUTPUT, FSEXEC_EXPECTED_EXIT_STATUS (default 0).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
-SIMPLE_VERSION="$(tr -d '[:space:]' <"${ROOT_DIR}/VERSION")"
-[ -n "$SIMPLE_VERSION" ] || exit 1
 
-SEED="src/compiler_rust/target/release/simple"
+COMPILER="${SIMPLE_BUILD_COMPILER:-}"
 ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_exec_prod_ring3_entry.spl"
 LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 OUT_DIR="build/os/elfexec"
 # Kernel output matches the catalog lane x86_64-q35-nvme-fat32-prod-ring3 output.
 KERNEL_OUTPUT="build/os/simpleos_x86_64_prod_ring3.elf"
-# FAT32 disk image holding /FSEXEC.ELF (built by build/os/elfexec/build-fsexec-img.spl).
+# FAT32 disk image holding the canonical SimpleOS toolchain filesystem.
 FSEXEC_DISK="${FSEXEC_DISK:-$OUT_DIR/fat32-fsexec.img}"
 NVME_SERIAL="fsexecnvme0"
 NVME_DRIVE_ID="nvme0"
 SERIAL_LOG="$OUT_DIR/prod_ring3_run.log"
 QEMU_MEM="${QEMU_MEM:-512M}"
 QEMU_TIMEOUT="${QEMU_TIMEOUT:-40}"
+QEMU_CPU="${QEMU_CPU:-qemu64}"
+FSEXEC_PROFILE="${FSEXEC_PROFILE:-version}"
+EXPECTED_EXIT_STATUS=0
 
 mkdir -p "$OUT_DIR" build/os/generated/generated
 
@@ -69,7 +70,7 @@ WEAK_FALLBACKS="$(nm "$COMPILER" | awk '
 
 case "$FSEXEC_PROFILE" in
     version)
-        EXPECTED_OUTPUT='Simple v1.0.0-beta'
+        EXPECTED_OUTPUT='Simple v1.0.0-RC'
         EXPECTED_DUMP=''
         cat >build/os/generated/generated/simpleos_fsexec_profile.spl <<'SPL'
 pub fn simpleos_fsexec_path() -> text:
@@ -190,17 +191,23 @@ SPL
     done
     echo "[prod-ring3] building kernel -> $KERNEL_OUTPUT"
     rm -f "$KERNEL_OUTPUT"
-    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
-    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
-    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
-        "$SEED" native-build \
+    BUILD_LOG="$OUT_DIR/prod_ring3_build.log"
+    if ! SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+        SIMPLE_NATIVE_CPU=x86-64-v1 \
+        SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+        PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$COMPILER" native-build \
         --source build/os/generated --source src/os --source src/lib \
         --source examples/09_embedded/simple_os/arch/x86_64 \
-        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --backend cranelift --opt-level=aggressive --log off \
         --entry-closure --entry "$ENTRY" \
         --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
-        --linker-script "$LINKER_SCRIPT" 2>&1 | tail -20
-    [ -f "$KERNEL_OUTPUT" ] || { echo "[prod-ring3] KERNEL BUILD FAILED"; exit 1; }
+        --linker-script "$LINKER_SCRIPT" >"$BUILD_LOG" 2>&1; then
+        tail -20 "$BUILD_LOG"
+        fail "kernel native-build failed"
+    fi
+    tail -20 "$BUILD_LOG"
+    [ -s "$KERNEL_OUTPUT" ] || fail "kernel build produced no ELF"
 fi
 SIMPLE_ALLOW_FREESTANDING_STUBS=1 sh scripts/check/check-simpleos-x86-kernel-elf.shs "$KERNEL_OUTPUT"
 echo "[prod-ring3] artifact kernel=$KERNEL_OUTPUT sha256=$(sha256sum "$KERNEL_OUTPUT" | awk '{print $1}')"
@@ -213,7 +220,7 @@ echo "[prod-ring3] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s disk=$
 set +e
 qemu-system-x86_64 \
     -no-user-config -monitor none -net none -nographic -no-reboot \
-    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -machine q35 -cpu "$QEMU_CPU" -m "$QEMU_MEM" \
     -kernel "$KERNEL_OUTPUT" \
     -serial "file:$SERIAL_LOG" \
     -drive "file=$FSEXEC_DISK,if=none,id=$NVME_DRIVE_ID,format=raw" \

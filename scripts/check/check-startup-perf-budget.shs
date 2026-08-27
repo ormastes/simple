@@ -1,31 +1,44 @@
 #!/bin/sh
 # check-startup-perf-budget.shs — startup perf-budget lane (test/05_perf/startup/).
 #
-# Measures p50 of N=7 runs of `bin/simple --version` and
-# `bin/simple run test/05_perf/startup/hello_fixture.spl` against budgets read
-# from the COMMITTED file test/05_perf/startup/budgets.sdn.
+# Six lanes, each p50-of-N=7 against budgets read from the COMMITTED file
+# test/05_perf/startup/budgets.sdn (plan: startup_perf_plan_2026-08-17.md,
+# Phase D "Owned files"):
+#   version        bin/simple --version                       (root version)
+#   help           bin/simple build   (prints HELP, exits)    (root help)
+#   run-hello-warm bin/simple run hello_fixture.spl, same path every sample
+#   run-hello-cold same, but the fixture is COPIED to a fresh path per sample
+#                  so no path-keyed state can be reused
+#   smf-load       bin/simple <hello.smf> (compiled once per run, then timed)
+#   compile-body   bin/simple compile of the fixture with a DIFFERENT function
+#                  body per sample (one-body-change compile lane)
+#
+# Per run an IMMUTABLE manifest is written under build/perf/startup/
+# (unique filename, never rewritten): binary path+sha256 digest+size+mtime,
+# host, loadavg, sample count, per-lane p50 AND p95 (N=7: p95 = max sample),
+# max RSS of one run-hello sample, opens/mmaps counts via strace when
+# available ("unavailable" otherwise, never fabricated).
 #
 # Detector-standard conformance (doc/07_guide/infra/detector/detector_standard.md):
-# - Fatal --selftest with must-FAIL (0ms budget), must-PASS (absurd budget) and
-#   must-ERROR (missing budgets file) fixtures; selftest failure is fatal.
+# - Fatal --selftest with must-FAIL (0ms budgets), must-PASS (absurd budgets),
+#   must-ERROR (missing budgets file) and must-ERROR (budgets file missing a
+#   lane key) fixtures; selftest failure is fatal.
 # - Non-vacuity: verdict is the last stdout line; a run that measured 0
 #   commands is ERROR (exit 2), never a pass.
-# - Three-way: PASS (exit 0) / SKIP folded into ERROR-vs-PASS explicitly:
-#   bin/simple missing/unresolvable => SKIP verdict, exit 0, clearly labeled,
-#   never counted as a measurement. FAIL (exit 1) names measured-vs-budget.
+# - Three-way PASS/SKIP/FAIL; bin/simple missing => labeled SKIP, exit 0,
+#   never counted as a measurement.
 # - Exit codes read on the line after the command, never through a pipe.
 # - Recorded escape: budgets change ONLY by editing budgets.sdn with a dated
 #   comment. No env var or flag overrides a budget.
-# - Binary identity (seed vs self-hosted) is recorded in the verdict line.
-# FP-RATE: not yet measured (advisory lane); budgets set at measured p50 x3 to
-# keep the expected FP rate from box noise near zero. Adjudicate before any
-# promotion to blocking.
+# - Binary identity (seed vs self-hosted, resolved path) in the verdict line.
+# FP-RATE: budgets set at measured p50 x3 (shared loaded box) so box noise
+# does not flap the lane. Adjudicate before any promotion to blocking.
 #
 # Verdict convention: last stdout line is
-#   PASS — <n> command(s) measured, ... (exit 0)
-#   SKIP — ...                          (exit 0)
-#   FAIL — ...                          (exit 1)
-#   ERROR — nothing was checked ...     (exit 2)
+#   PASS — <n> lane(s) measured, ...   (exit 0)
+#   SKIP — ...                         (exit 0)
+#   FAIL — ...                         (exit 1)
+#   ERROR — nothing was checked ...    (exit 2)
 
 set -u
 
@@ -33,6 +46,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 BUDGETS_DEFAULT="$ROOT/test/05_perf/startup/budgets.sdn"
 HELLO="$ROOT/test/05_perf/startup/hello_fixture.spl"
 N=7
+LANE_KEYS="version_ms help_ms run_hello_ms run_hello_cold_ms smf_load_ms compile_hello_ms"
 
 now_ms() { date +%s%N | sed 's/......$//'; }
 
@@ -41,30 +55,87 @@ read_budget() {
   sed -n "s/^$2:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p" "$1" | head -1
 }
 
-p50_of_7() {
-  # stdin: 7 integers -> prints the 4th sorted
-  sort -n | sed -n '4p'
+# stdin: N integers. Prints "p50 p95" (N=7: p50 = 4th sorted, p95 = 7th/max).
+p50_p95() {
+  sort -n | awk 'NR==4{p50=$1} END{print p50, $1}'
 }
 
-measure_p50() {
-  # measure_p50 <mode>  (mode: version|run) -> prints p50 ms, rc 0; rc 1 if a run failed
+lane_cmd() {
+  # lane_cmd <lane> <i>: run one sample of <lane>. Uses WORK (tmp dir).
+  case "$1" in
+    version)  "$SIMPLE_BIN" --version >/dev/null 2>&1 ;;
+    help)     "$SIMPLE_BIN" build >/dev/null 2>&1 ;;
+    warm)     "$SIMPLE_BIN" run "$HELLO" >/dev/null 2>&1 ;;
+    cold)     cp "$HELLO" "$WORK/cold_$2.spl" && "$SIMPLE_BIN" run "$WORK/cold_$2.spl" >/dev/null 2>&1 ;;
+    smf)      "$SIMPLE_BIN" "$WORK/hello.smf" >/dev/null 2>&1 ;;
+    compile)  printf 'fn main():\n    print("body change %s")\nmain()\n' "$2" > "$WORK/body.spl" && "$SIMPLE_BIN" compile "$WORK/body.spl" -o "$WORK/body_$2.smf" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+measure_lane() {
+  # measure_lane <lane> -> prints "p50 p95", rc 0; rc 1 if any sample failed
   _i=0
   _samples=""
   while [ $_i -lt $N ]; do
     _s=$(now_ms)
-    if [ "$1" = version ]; then
-      "$SIMPLE_BIN" --version >/dev/null 2>&1
-      _rc=$?
-    else
-      "$SIMPLE_BIN" run "$HELLO" >/dev/null 2>&1
-      _rc=$?
-    fi
+    lane_cmd "$1" "$_i"
+    _rc=$?
     _e=$(now_ms)
     if [ $_rc -ne 0 ]; then return 1; fi
     _samples="$_samples $((_e - _s))"
     _i=$((_i + 1))
   done
-  printf '%s\n' $_samples | p50_of_7
+  printf '%s\n' $_samples | p50_p95
+}
+
+write_manifest() {
+  # write_manifest <path>; uses globals REAL IDENT and P50_/P95_ vars.
+  _digest=$(sha256sum "$REAL" 2>/dev/null | awk '{print $1}')
+  [ -n "$_digest" ] || _digest="unavailable"
+  _statline=$(stat -c '%s %y' "$REAL" 2>/dev/null || echo unavailable)
+  _load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unavailable)
+  _rss="unavailable"; _opens="unavailable"; _mmaps="unavailable"
+  if [ -x /usr/bin/time ]; then
+    _tv=$("/usr/bin/time" -v "$SIMPLE_BIN" run "$HELLO" 2>&1 >/dev/null)
+    _rc=$?
+    if [ $_rc -eq 0 ]; then
+      _rss=$(printf '%s\n' "$_tv" | sed -n 's/.*Maximum resident set size (kbytes): //p')
+      [ -n "$_rss" ] || _rss="unavailable"
+    fi
+  fi
+  if command -v strace >/dev/null 2>&1; then
+    _st=$(strace -f -c -e trace=openat,open,mmap "$SIMPLE_BIN" run "$HELLO" 2>&1 >/dev/null)
+    _rc=$?
+    if [ $_rc -eq 0 ]; then
+      _o=$(printf '%s\n' "$_st" | awk '$NF=="openat"||$NF=="open"{s+=$4} END{print s+0}')
+      _m=$(printf '%s\n' "$_st" | awk '$NF=="mmap"{s+=$4} END{print s+0}')
+      [ "$_o" -gt 0 ] 2>/dev/null && _opens=$_o
+      [ "$_m" -gt 0 ] 2>/dev/null && _mmaps=$_m
+    fi
+  fi
+  {
+    echo "# startup perf manifest — immutable, one file per run. Generated by"
+    echo "# scripts/check/check-startup-perf-budget.shs. Do not edit or reuse."
+    echo "generated_utc: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "binary_path: $REAL"
+    echo "binary_identity: $IDENT"
+    echo "binary_sha256: $_digest"
+    echo "binary_size_mtime: $_statline"
+    echo "host: $(hostname 2>/dev/null || echo unavailable)"
+    echo "loadavg: $_load"
+    echo "sample_count: $N"
+    echo "version_p50_ms: $P50_V"; echo "version_p95_ms: $P95_V"
+    echo "help_p50_ms: $P50_H"; echo "help_p95_ms: $P95_H"
+    echo "run_hello_p50_ms: $P50_W"; echo "run_hello_p95_ms: $P95_W"
+    echo "run_hello_cold_p50_ms: $P50_C"; echo "run_hello_cold_p95_ms: $P95_C"
+    echo "smf_load_p50_ms: $P50_S"; echo "smf_load_p95_ms: $P95_S"
+    echo "compile_hello_p50_ms: $P50_B"; echo "compile_hello_p95_ms: $P95_B"
+    echo "run_hello_max_rss_kb: $_rss"
+    echo "run_hello_opens: $_opens"
+    echo "run_hello_mmaps: $_mmaps"
+  } > "$1"
+  chmod a-w "$1" 2>/dev/null
 }
 
 run_check() {
@@ -74,83 +145,116 @@ run_check() {
     echo "ERROR — nothing was checked: budgets file missing: $BF"
     return 2
   fi
-  BV=$(read_budget "$BF" version_ms)
-  BR=$(read_budget "$BF" run_hello_ms)
-  if [ -z "$BV" ] || [ -z "$BR" ]; then
-    echo "ERROR — nothing was checked: budgets file lacks version_ms/run_hello_ms: $BF"
-    return 2
-  fi
+  for k in $LANE_KEYS; do
+    v=$(read_budget "$BF" "$k")
+    if [ -z "$v" ]; then
+      echo "ERROR — nothing was checked: budgets file lacks key $k: $BF"
+      return 2
+    fi
+    eval "B_$k=$v"
+  done
   SIMPLE_BIN="$ROOT/bin/simple"
   if [ ! -e "$SIMPLE_BIN" ]; then
-    echo "SKIP — bin/simple missing at $SIMPLE_BIN; 0 command(s) measured (explicit skip, not a pass on measurements)"
+    echo "SKIP — bin/simple missing at $SIMPLE_BIN; 0 lane(s) measured (explicit skip, not a pass on measurements)"
     return 0
   fi
   REAL=$(readlink -f "$SIMPLE_BIN" 2>/dev/null)
   if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
-    echo "SKIP — bin/simple unresolvable/not executable ($SIMPLE_BIN); 0 command(s) measured"
+    echo "SKIP — bin/simple unresolvable/not executable ($SIMPLE_BIN); 0 lane(s) measured"
     return 0
   fi
   if [ ! -f "$HELLO" ]; then
     echo "ERROR — nothing was checked: hello fixture missing: $HELLO"
     return 2
   fi
-  # Binary identity: seed vs self-hosted, plus resolved path.
   IDENT="self-hosted-or-unknown"
   VOUT=$("$SIMPLE_BIN" --version 2>&1 | head -3)
   case "$VOUT" in *"bootstrap seed"*) IDENT="rust-seed";; esac
 
-  PV=$(measure_p50 version)
+  WORK=$(mktemp -d)
+  # SMF lane prerequisite: compile the fixture once (not timed as smf-load).
+  "$SIMPLE_BIN" compile "$HELLO" -o "$WORK/hello.smf" >/dev/null 2>&1
   _rc=$?
-  if [ $_rc -ne 0 ]; then
-    echo "ERROR — nothing was checked: bin/simple --version exited non-zero during measurement"
+  if [ $_rc -ne 0 ] || [ ! -s "$WORK/hello.smf" ]; then
+    rm -rf "$WORK"
+    echo "ERROR — nothing was checked: could not compile hello fixture to .smf for the smf-load lane"
     return 2
   fi
-  PR=$(measure_p50 run)
-  _rc=$?
-  if [ $_rc -ne 0 ]; then
-    echo "ERROR — nothing was checked: bin/simple run hello exited non-zero during measurement"
+
+  MEASURED=0
+  for lane in version help warm cold smf compile; do
+    out=$(measure_lane "$lane")
+    _rc=$?
+    if [ $_rc -ne 0 ] || [ -z "$out" ]; then
+      rm -rf "$WORK"
+      echo "ERROR — nothing was checked: lane '$lane' exited non-zero or yielded no samples"
+      return 2
+    fi
+    case "$lane" in
+      version) P50_V=${out% *}; P95_V=${out#* } ;;
+      help)    P50_H=${out% *}; P95_H=${out#* } ;;
+      warm)    P50_W=${out% *}; P95_W=${out#* } ;;
+      cold)    P50_C=${out% *}; P95_C=${out#* } ;;
+      smf)     P50_S=${out% *}; P95_S=${out#* } ;;
+      compile) P50_B=${out% *}; P95_B=${out#* } ;;
+    esac
+    MEASURED=$((MEASURED + 1))
+  done
+  rm -rf "$WORK"
+  if [ $MEASURED -eq 0 ]; then
+    echo "ERROR — nothing was checked: 0 lanes measured"
     return 2
   fi
-  if [ -z "$PV" ] || [ -z "$PR" ]; then
-    echo "ERROR — nothing was checked: p50 computation yielded no value"
-    return 2
-  fi
+
+  MDIR="$ROOT/build/perf/startup"
+  mkdir -p "$MDIR" 2>/dev/null
+  MPATH="$MDIR/startup_manifest_$(date -u +%Y%m%dT%H%M%SZ)_$$.sdn"
+  write_manifest "$MPATH"
+  echo "manifest: $MPATH"
+
   FAILS=""
-  [ "$PV" -gt "$BV" ] && FAILS="version p50=${PV}ms > budget ${BV}ms"
-  if [ "$PR" -gt "$BR" ]; then
-    [ -n "$FAILS" ] && FAILS="$FAILS; "
-    FAILS="${FAILS}run-hello p50=${PR}ms > budget ${BR}ms"
-  fi
+  add_fail() { [ -n "$FAILS" ] && FAILS="$FAILS; "; FAILS="$FAILS$1"; }
+  [ "$P50_V" -gt "$B_version_ms" ]        && add_fail "version p50=${P50_V}ms > budget ${B_version_ms}ms"
+  [ "$P50_H" -gt "$B_help_ms" ]           && add_fail "help p50=${P50_H}ms > budget ${B_help_ms}ms"
+  [ "$P50_W" -gt "$B_run_hello_ms" ]      && add_fail "run-hello-warm p50=${P50_W}ms > budget ${B_run_hello_ms}ms"
+  [ "$P50_C" -gt "$B_run_hello_cold_ms" ] && add_fail "run-hello-cold p50=${P50_C}ms > budget ${B_run_hello_cold_ms}ms"
+  [ "$P50_S" -gt "$B_smf_load_ms" ]       && add_fail "smf-load p50=${P50_S}ms > budget ${B_smf_load_ms}ms"
+  [ "$P50_B" -gt "$B_compile_hello_ms" ]  && add_fail "compile-body p50=${P50_B}ms > budget ${B_compile_hello_ms}ms"
+  SUMMARY="version p50=${P50_V}/p95=${P95_V}ms, help p50=${P50_H}/p95=${P95_H}ms, run-hello-warm p50=${P50_W}/p95=${P95_W}ms, run-hello-cold p50=${P50_C}/p95=${P95_C}ms, smf-load p50=${P50_S}/p95=${P95_S}ms, compile-body p50=${P50_B}/p95=${P95_B}ms"
   if [ -n "$FAILS" ]; then
-    echo "FAIL — 2 command(s) measured (N=$N, binary=$IDENT $REAL): $FAILS"
+    echo "FAIL — $MEASURED lane(s) measured (N=$N, binary=$IDENT $REAL): $FAILS [$SUMMARY]"
     return 1
   fi
-  echo "PASS — 2 command(s) measured (N=$N, binary=$IDENT $REAL): version p50=${PV}ms <= ${BV}ms, run-hello p50=${PR}ms <= ${BR}ms"
+  echo "PASS — $MEASURED lane(s) measured (N=$N, binary=$IDENT $REAL): $SUMMARY"
   return 0
 }
+
+all_zero_budgets() { for k in $LANE_KEYS; do echo "$k: 0"; done; }
+all_huge_budgets() { for k in $LANE_KEYS; do echo "$k: 99999999"; done; }
 
 selftest() {
   TMP=$(mktemp -d)
   ok=1
-  # Fixture 1: 0ms budget must FAIL (mutation proof — sabotaged budget).
-  printf 'version_ms: 0\nrun_hello_ms: 0\n' > "$TMP/zero.sdn"
+  # Fixture 1: 0ms budgets must FAIL (mutation proof — sabotaged budgets,
+  # every lane over budget; a vacuous detector cannot produce this FAIL).
+  all_zero_budgets > "$TMP/zero.sdn"
   out=$(run_check "$TMP/zero.sdn")
   rc=$?
   last=$(printf '%s\n' "$out" | tail -1)
   case "$last" in
-    FAIL\ *) : ;;
+    FAIL\ *) echo "selftest fixture1 (must-FAIL 0ms budgets): FAIL as required" ;;
     SKIP\ *) echo "selftest: fixture1 inconclusive (bin/simple absent): $last"; ok=0 ;;
-    *) echo "selftest FAILURE: 0ms budget did not FAIL (rc=$rc): $last"; ok=0 ;;
+    *) echo "selftest FAILURE: 0ms budgets did not FAIL (rc=$rc): $last"; ok=0 ;;
   esac
-  # Fixture 2: absurdly high budget must PASS.
-  printf 'version_ms: 99999999\nrun_hello_ms: 99999999\n' > "$TMP/huge.sdn"
+  # Fixture 2: absurdly generous budgets must PASS non-vacuously.
+  all_huge_budgets > "$TMP/huge.sdn"
   out=$(run_check "$TMP/huge.sdn")
   rc=$?
   last=$(printf '%s\n' "$out" | tail -1)
   case "$last" in
-    PASS\ *) : ;;
+    PASS\ *6\ lane*) echo "selftest fixture2 (must-PASS absurd budgets): PASS with 6 lanes as required" ;;
     SKIP\ *) echo "selftest: fixture2 inconclusive (bin/simple absent): $last"; ok=0 ;;
-    *) echo "selftest FAILURE: absurd budget did not PASS (rc=$rc): $last"; ok=0 ;;
+    *) echo "selftest FAILURE: absurd budgets did not PASS with 6 lanes (rc=$rc): $last"; ok=0 ;;
   esac
   # Fixture 3: missing budgets file must ERROR (exit 2).
   out=$(run_check "$TMP/nonexistent.sdn")
@@ -158,14 +262,32 @@ selftest() {
   last=$(printf '%s\n' "$out" | tail -1)
   if [ $rc -ne 2 ]; then
     echo "selftest FAILURE: missing budgets file gave rc=$rc, want 2: $last"; ok=0
+  else
+    case "$last" in
+      ERROR\ *) echo "selftest fixture3 (must-ERROR missing budgets file): ERROR as required" ;;
+      *) echo "selftest FAILURE: missing budgets verdict not ERROR: $last"; ok=0 ;;
+    esac
   fi
-  case "$last" in ERROR\ *) : ;; *) echo "selftest FAILURE: missing budgets verdict not ERROR: $last"; ok=0 ;; esac
+  # Fixture 4: budgets file lacking a lane key must ERROR (exit 2) — a lane
+  # can never be silently dropped by deleting its budget line.
+  printf 'version_ms: 400\nrun_hello_ms: 450\n' > "$TMP/partial.sdn"
+  out=$(run_check "$TMP/partial.sdn")
+  rc=$?
+  last=$(printf '%s\n' "$out" | tail -1)
+  if [ $rc -ne 2 ]; then
+    echo "selftest FAILURE: partial budgets file gave rc=$rc, want 2: $last"; ok=0
+  else
+    case "$last" in
+      ERROR\ *lacks\ key*) echo "selftest fixture4 (must-ERROR missing lane key): ERROR as required" ;;
+      *) echo "selftest FAILURE: partial budgets verdict not ERROR-lacks-key: $last"; ok=0 ;;
+    esac
+  fi
   rm -rf "$TMP"
   if [ $ok -ne 1 ]; then
     echo "ERROR — nothing was checked: selftest failed (fatal)"
     return 2
   fi
-  echo "selftest OK: 3 fixture(s) (must-FAIL 0ms, must-PASS absurd, must-ERROR missing file)"
+  echo "selftest OK: 4 fixture(s) (must-FAIL 0ms, must-PASS absurd, must-ERROR missing file, must-ERROR missing lane key)"
   return 0
 }
 

@@ -93,11 +93,26 @@ launch_flag_present() {
     esac
 }
 
-file_state() {
-    if [ -s "$1" ]; then
-        echo pass
+file_mtime_epoch() {
+    if stat -f %m "$1" >/dev/null 2>&1; then
+        stat -f %m "$1"
     else
+        stat -c %Y "$1" 2>/dev/null
+    fi
+}
+
+# file_state <file> [required_key ...]
+#   missing  — file absent or empty
+#   invalid  — file exists but one of the expected key=value lines is
+#              absent or empty (corrupt/truncated evidence is not evidence)
+#   stale    — file older than MAX_EVIDENCE_AGE_HOURS (or mtime unreadable)
+#   pass     — present, schema-valid, fresh
+file_state() {
+    state_file="$1"
+    shift
+    if [ ! -s "$state_file" ]; then
         echo missing
+        return
     fi
     for state_key in "$@"; do
         if [ "$(value_of "$state_key" "$state_file")" = "" ]; then
@@ -222,8 +237,9 @@ freshness_status() {
 }
 
 windows_vulkan_status() {
-    if [ "$(file_state "$WINDOWS_VULKAN_ENV")" != "pass" ]; then
-        echo missing
+    windows_vulkan_file_state="$(file_state "$WINDOWS_VULKAN_ENV" electron_vulkan_web_parity_windows_status)"
+    if [ "$windows_vulkan_file_state" != "pass" ]; then
+        echo "$windows_vulkan_file_state"
         return
     fi
     for key in \

@@ -52,31 +52,27 @@ const electronFeatureStatus = electronProof && electronProof.gpu_feature_status
 const electronBrowserGpuInfo = electronProof && electronProof.browser_target_gpu_info
   ? electronProof.browser_target_gpu_info
   : (electronArgb && electronArgb.browserTargetGpuInfo ? electronArgb.browserTargetGpuInfo : {});
-const electronAppGpuInfo = electronProof && electronProof.gpu_info
-  ? electronProof.gpu_info
-  : (electronArgb && electronArgb.gpuInfo ? electronArgb.gpuInfo : {});
-const electronGpuInfo = electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? electronBrowserGpuInfo : electronAppGpuInfo;
 const electronBrowserGpuInfoStatus = electronProof && electronProof.browser_target_gpu_info_status
   ? String(electronProof.browser_target_gpu_info_status)
   : (electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? "pass" : (electronBrowserGpuInfo && electronBrowserGpuInfo.error ? "fail" : "not-run"));
 const electronBrowserGpuInfoReason = electronBrowserGpuInfo && electronBrowserGpuInfo.error ? String(electronBrowserGpuInfo.error) : electronBrowserGpuInfoStatus;
+const electronGpuInfo = electronBrowserGpuInfoStatus === "pass" ? electronBrowserGpuInfo : {};
 const electronVulkan = String(electronFeatureStatus.vulkan || "");
 const electronGpuCompositing = String(electronFeatureStatus.gpu_compositing || "");
 const electronAux = gpuAux(electronGpuInfo);
-const electronAppAux = gpuAux(electronAppGpuInfo);
 const electronDisplay = String(electronAux.displayType || "");
-const electronHardware = Boolean(electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan);
-const electronGlParts = String(electronAux.glImplementationParts || electronAppAux.glImplementationParts || "");
-const electronSkiaBackend = String(electronAux.skiaBackendType || electronAppAux.skiaBackendType || "");
-const electronGlRenderer = String(electronAux.glRenderer || electronAppAux.glRenderer || "");
+const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);
+const electronGlParts = String(electronAux.glImplementationParts || "");
+const electronSkiaBackend = String(electronAux.skiaBackendType || "");
+const electronGlRenderer = String(electronAux.glRenderer || "");
 const electronEnabled = /enabled/i.test(electronVulkan);
 const electronGpuEnabled = /enabled/i.test(electronGpuCompositing);
 const electronMentionsVulkan = /vulkan/i.test(`${electronDisplay} ${electronGlParts} ${electronSkiaBackend} ${electronGlRenderer}`);
 const electronProofFileOk = electronProofFileStatus === "pass";
-const electronStatus = electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan && electronProofFileOk ? "pass" : "fail";
+const electronStatus = electronBrowserGpuInfoStatus === "pass" && electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan && electronProofFileOk ? "pass" : "fail";
 const electronReason = electronStatus === "pass"
   ? "electron-vulkan-backed"
-  : (!electronProofFileOk ? `electron-source-file-${electronProofFileStatus}` : (electronEnabled && !electronGpuEnabled ? "electron-vulkan-gpu-compositing-disabled" : (electronEnabled ? "electron-vulkan-enabled-without-angle-vulkan-proof" : `electron-vulkan-${electronVulkan || "unknown"}`)));
+  : (electronBrowserGpuInfoStatus !== "pass" ? `electron-browser-target-gpu-info-${electronBrowserGpuInfoStatus}` : (!electronProofFileOk ? `electron-source-file-${electronProofFileStatus}` : (electronEnabled && !electronGpuEnabled ? "electron-vulkan-gpu-compositing-disabled" : (electronEnabled ? "electron-vulkan-enabled-without-angle-vulkan-proof" : `electron-vulkan-${electronVulkan || "unknown"}`))));
 
 const chromeGpuInfo = chrome ? chrome.gpu_info : null;
 const chromeFeatureStatus = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.featureStatus || {} : {};

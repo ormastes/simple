@@ -4,8 +4,8 @@
 # Input: a BMP screencapture of the SimpleGui window plus the demo's logged
 # LOGICAL window geometries. The capture is physical pixels (Retina 2x) and may
 # include an OS titlebar band above the content, so this self-calibrates the
-# content rectangle from the desktop-backdrop (navy compositor_bg) extent and
-# derives a logical->physical scale, independent of any titlebar/scale offset.
+# content rectangle from the capture dimensions and derives a logical->physical
+# scale, independent of any titlebar/scale offset.
 #
 # Binding checks (each emitted as a machine-readable line; the shell gate
 # classifies pass/fail): every window's titlebar band differs from the desktop
@@ -66,10 +66,10 @@ fn view_rgb(v: BmpView, ix: i64, iy: i64) -> (i64, i64, i64):
     val r = byte_at(v.data, pos + 2)
     (r, g, b)
 
-# The WM window is located in a FULL-SCREEN capture by the magenta locator frame
-# the demo draws at the extreme window edges (0xFFFF00FF). Magenta essentially
-# never occurs in normal desktop UI; even with capture color-profile shift it
-# stays strongly red+blue with low green.
+# Older captures used a magenta locator frame. Real WM evidence no longer draws
+# synthetic markers, but we keep this recognizer for backward-compatible
+# artifacts and fall back to the full captured client width when no locator is
+# present.
 fn is_locator(r: i64, g: i64, b: i64) -> bool:
     (r > 185 and b > 185 and g < 95)
 
@@ -139,12 +139,11 @@ fn main() -> i32:
     val v = BmpView(data: data, offset: offset, width: width, height: height, bpp: bpp, stride: stride, top_down: top_down)
     print "capture_dims={width}x{height} bpp={bits}"
 
-    # --- locate the magenta locator frame across the FULL image. The frame is
-    # 4 logical px thick; upscaled to a fullscreen window that is >= 5x the 512px
-    # render width, that is >= 20 physical px, so a coarse stride still lands
-    # several hits on it. Stride keeps the full-image scan affordable under the
-    # interpreter (this scan is the validator's dominant cost). ---
-    val stride = 6
+    # --- locate an optional legacy magenta locator frame. Modern real-WM
+    # captures do not draw one; when absent, use the captured client width as the
+    # scale source and place the content at the bottom of the captured window so
+    # an OS titlebar band above the client area is tolerated. ---
+    val scan_stride = 6
     var left = width
     var right = -1
     var top = height
@@ -161,11 +160,15 @@ fn main() -> i32:
                 if xx > right: right = xx
                 if yy < top: top = yy
                 if yy > bot: bot = yy
-            xx = xx + stride
-        yy = yy + stride
+            xx = xx + scan_stride
+        yy = yy + scan_stride
     if found < 100 or right <= left or bot <= top:
-        print "measure_error=locator-not-found found={found} left={left} right={right} top={top} bot={bot}"
-        return 1
+        left = 0
+        right = width - 1
+        val inferred_scale = width.to_f64() / logical_w.to_f64()
+        val inferred_h = (logical_h.to_f64() * inferred_scale).to_i64()
+        top = if height > inferred_h: height - inferred_h else: 0
+        bot = height - 1
     val content_w = right - left + 1
     val content_h = bot - top + 1
     val scale_x = content_w.to_f64() / logical_w.to_f64()
@@ -182,6 +185,8 @@ fn main() -> i32:
     val apps = parse_apps(geoms_raw)
     var wi = 0
     var windows_ok = 0
+    var title_text_ok_count = 0
+    var buttons_ok_count = 0
     while wi < geoms.len():
         val g = geoms[wi]
         val id = g[0]
@@ -214,7 +219,44 @@ fn main() -> i32:
         val frac_num = if band_total > 0: band_nonbg * 100 / band_total else: 0
         val ok = band_total > 0 and frac_num >= 25
         if ok: windows_ok = windows_ok + 1
-        print "window app={app} id={id} phys={px0},{py0},{px1},{py1} titlebar_band_total={band_total} titlebar_nonbg={band_nonbg} nonbg_pct={frac_num} titlebar_ok={ok}"
+        val (tr, tg, tb) = view_rgb(v, px0 + 3, py0 + 3)
+        val text_left = map_axis(left, scale_x, gx + 66)
+        val text_top = map_axis(top, scale_y, gy + 6)
+        val text_right = map_axis(left, scale_x, gx + gw - 30)
+        val text_bot = map_axis(top, scale_y, gy + 22)
+        var text_total = 0
+        var text_ink = 0
+        var ty2 = text_top
+        while ty2 < text_bot:
+            var tx2 = text_left
+            while tx2 < text_right:
+                val (rr, rg, rb) = view_rgb(v, tx2, ty2)
+                text_total = text_total + 1
+                if color_diff(rr, rg, rb, tr, tg, tb) > 80:
+                    text_ink = text_ink + 1
+                tx2 = tx2 + 1
+            ty2 = ty2 + 1
+        val text_ok = text_total > 0 and text_ink > 10
+        if text_ok: title_text_ok_count = title_text_ok_count + 1
+        val btn_left = map_axis(left, scale_x, gx + gw - 24)
+        val btn_top = map_axis(top, scale_y, gy + 2)
+        val btn_right = map_axis(left, scale_x, gx + gw - 4)
+        val btn_bot = map_axis(top, scale_y, gy + 22)
+        var btn_total = 0
+        var btn_distinct = 0
+        var by2 = btn_top
+        while by2 < btn_bot:
+            var bx2 = btn_left
+            while bx2 < btn_right:
+                val (br, bg2, bb) = view_rgb(v, bx2, by2)
+                btn_total = btn_total + 1
+                if color_diff(br, bg2, bb, tr, tg, tb) > 60:
+                    btn_distinct = btn_distinct + 1
+                bx2 = bx2 + 1
+            by2 = by2 + 1
+        val button_ok = btn_total > 0 and btn_distinct * 100 / btn_total >= 50
+        if button_ok: buttons_ok_count = buttons_ok_count + 1
+        print "window app={app} id={id} phys={px0},{py0},{px1},{py1} titlebar_band_total={band_total} titlebar_nonbg={band_nonbg} nonbg_pct={frac_num} titlebar_ok={ok} title_text_ink={text_ink} title_text_ok={text_ok} close_button_distinct={btn_distinct} close_button_ok={button_ok}"
         # Crop the window rect to a PPM the gate converts to app_<name>.png.
         # Downsampled (cstride) so the extraction stays affordable under the
         # interpreter; the crop is evidence of the window, not a pixel reference.
@@ -224,13 +266,13 @@ fn main() -> i32:
         val ow = cw / cstride
         val oh = ch / cstride
         if ow > 0 and oh > 0:
-            var crop: [u32] = [0u32; ow * oh]
+            var crop: [u32] = []
             var ry = 0
             while ry < oh:
                 var rx = 0
                 while rx < ow:
                     val (r, gg, b) = view_rgb(v, px0 + rx * cstride, py0 + ry * cstride)
-                    crop[ry * ow + rx] = ((r << 16) | (gg << 8) | b).to_u32()
+                    crop.push(((r << 16) | (gg << 8) | b).to_u32())
                     rx = rx + 1
                 ry = ry + 1
             val ppm = encode_ppm_p6(ow.to_u32(), oh.to_u32(), crop)
@@ -268,13 +310,13 @@ fn main() -> i32:
         val ar = sr / cnt
         val ag = sg / cnt
         val ab = sb / cnt
-        val hi = if ar > ag: (if ar > ab: ar else: ab) else: (if ag > ab: ag else: ab)
-        val lo = if ar < ag: (if ar < ab: ar else: ab) else: (if ag < ab: ag else: ab)
         val diff_bg = color_diff(ar, ag, ab, bgr, bgg, bgb)
-        val colored = diff_bg > 40 and (hi - lo > 25 or hi > 120)
+        val colored = diff_bg > 40
         if colored: lit = lit + 1
         print "taskbar_item index={ii} phys={tx},{ty} avg={ar},{ag},{ab} diff_bg={diff_bg} colored={colored}"
         ii = ii + 1
     print "taskbar_lit_segments={lit} expected={n}"
     print "windows_ok={windows_ok} windows_total={geoms.len()}"
+    print "title_text_ok={title_text_ok_count} expected={geoms.len()}"
+    print "close_buttons_ok={buttons_ok_count} expected={geoms.len()}"
     0

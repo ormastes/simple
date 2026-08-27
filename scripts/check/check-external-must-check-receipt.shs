@@ -115,10 +115,6 @@ expected_acceptance_ids() {
     esac
 }
 
-db_server_v2_acceptance_ids() {
-    echo 'configurable-port,listen,readiness,query-bytes,result-bytes,kernel-io,ownership,stop,no-leak,build-origin'
-}
-
 [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail missing-receipt-blob
 [ -f "$artifact" ] && [ ! -L "$artifact" ] || fail missing-artifact-blob
 expected_ids=$(expected_acceptance_ids "$expected_gate") || fail unsupported-gate
@@ -127,12 +123,7 @@ require_eq_in "$artifact" evidence_schema simple.must-check-external-evidence/v2
 require_eq_in "$artifact" gate_id "$expected_gate"
 require_eq_in "$artifact" source_fingerprint "$expected_fingerprint"
 require_eq_in "$artifact" final_verdict PASS
-acceptance_contract=$(field "$artifact" acceptance_contract) || fail missing-or-duplicate-acceptance-contract
-if [ "$expected_gate" = db-server-request-port ] && [ "$acceptance_contract" = db-server-request-port/v2 ]; then
-    expected_ids=$(db_server_v2_acceptance_ids)
-else
-    [ "$acceptance_contract" = "${expected_gate}/v1" ] || fail acceptance_contract-mismatch
-fi
+require_eq_in "$artifact" acceptance_contract "${expected_gate}/v1"
 require_eq_in "$artifact" acceptance_ids "$expected_ids"
 run_id=$(require_token_in "$artifact" run_id)
 require_token_in "$artifact" produced_at_utc >/dev/null
@@ -141,40 +132,25 @@ require_token_in "$artifact" producer_kind >/dev/null
 reviewer_key_id=$(require_token_in "$artifact" reviewer_key_id)
 [ "$producer_id" != "$reviewer_key_id" ] || fail reviewer-must-be-independent
 
-# Startup v3 carries executable checker snapshots. Establish reviewer trust
-# before loading any evidence attachment: only the signature and the
-# policy-pinned public key are admissible pre-authentication blobs.
-signature_verified=0
-if [ "$expected_gate" = interpreter-startup-parity ]; then
-    signature_path=$(field "$receipt" reviewer_signature_path) || fail missing-or-duplicate-reviewer-signature-path
-    signature_sha=$(field "$receipt" reviewer_signature_sha256) || fail missing-or-duplicate-reviewer-signature-sha256
-    load_head_blob "$signature_path" "$signature_sha" "$work/reviewer.sig"
-    [ -f "$POLICY" ] && [ ! -L "$POLICY" ] || fail reviewer-policy-missing
-    [ "$(grep -c '^[[:space:]]*schema: "simple.must-check-reviewer-policy/v1"$' "$POLICY" 2>/dev/null || true)" -eq 1 ] || fail reviewer-policy-schema
-    _policy_row=$(awk -F, -v id="$reviewer_key_id" '{x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x==id) {print; n++}} END {if (n != 1) exit 1}' "$POLICY") || fail reviewer-not-trusted
-    _key_path=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
-    _key_sha=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
-    load_head_blob "$_key_path" "$_key_sha" "$work/reviewer.pem"
-    openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/reviewer.sig" "$artifact" >/dev/null 2>&1 || fail invalid-reviewer-signature
-    signature_verified=1
-fi
+# Establish reviewer authority before loading any external attachment or
+# invoking a gate-specific checker. In particular, no unsigned executable blob
+# may reach the v3 compiler/version or strip replay paths below.
+signature_path=$(field "$receipt" reviewer_signature_path) || fail missing-or-duplicate-reviewer-signature-path
+signature_sha=$(field "$receipt" reviewer_signature_sha256) || fail missing-or-duplicate-reviewer-signature-sha256
+load_head_blob "$signature_path" "$signature_sha" "$work/reviewer.sig"
+
+[ -f "$POLICY" ] && [ ! -L "$POLICY" ] || fail reviewer-policy-missing
+[ "$(grep -c '^[[:space:]]*schema: "simple.must-check-reviewer-policy/v1"$' "$POLICY" 2>/dev/null || true)" -eq 1 ] || fail reviewer-policy-schema
+_policy_row=$(awk -F, -v id="$reviewer_key_id" '{x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x==id) {print; n++}} END {if (n != 1) exit 1}' "$POLICY") || fail reviewer-not-trusted
+_key_path=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
+_key_sha=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
+load_head_blob "$_key_path" "$_key_sha" "$work/reviewer.pem"
+
+openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/reviewer.sig" "$artifact" >/dev/null 2>&1 || fail invalid-reviewer-signature
 
 for _kind in command_receipt target_identity toolchain_identity observations; do
     load_named_artifact_blob "$_kind"
 done
-
-if [ "$acceptance_contract" = web-server-request-port/v2 ]; then
-    for _kind in web_request_bytes web_response_bytes web_lifecycle web_source web_toolchain web_target; do
-        load_named_artifact_blob "$_kind" 104857600
-    done
-    load_named_executable_artifact_blob web_executable 104857600
-    sh "$ROOT/scripts/check/check-web-server-request-port-evidence.shs" \
-        --fingerprint "$expected_fingerprint" --run-id "$run_id" \
-        --request "$work/web_request_bytes" --response "$work/web_response_bytes" \
-        --lifecycle "$work/web_lifecycle" --executable "$work/web_executable" \
-        --source "$work/web_source" --toolchain "$work/web_toolchain" \
-        --target "$work/web_target" || fail web-server-request-port-semantic-evidence
-fi
 
 if [ "$expected_gate" = riscv32-riscv64-shared ]; then
     for _kind in shared_inventory rv32_projection rv64_projection; do
@@ -321,26 +297,6 @@ if [ "$expected_gate" = rust-go-benchmark-parity ]; then
         || fail rust-go-benchmark-semantic-evidence
 fi
 
-if [ "$expected_gate" = db-server-request-port ] && [ "$acceptance_contract" = db-server-request-port/v2 ]; then
-    # Signature authority was established above before any retained executable
-    # was loaded. Import is intentionally signature-first and data validation is
-    # replayed from immutable HEAD blobs rather than producer claims.
-    for _kind in db_session query_bytes result_bytes db_server_source_closure db_build_origin kernel_trace process_tree; do
-        load_named_artifact_blob "$_kind"
-    done
-    load_named_executable_artifact_blob db_server_executable 104857600
-    load_named_executable_artifact_blob stage4_compiler 104857600
-    load_named_artifact_blob stage4_provenance
-    sh "$ROOT/scripts/check/check-db-server-request-port-evidence.shs" \
-        --session "$work/db_session" --query "$work/query_bytes" --result "$work/result_bytes" \
-        --server-executable "$work/db_server_executable" --source-closure "$work/db_server_source_closure" \
-        --build-origin "$work/db_build_origin" --kernel-trace "$work/kernel_trace" --process-tree "$work/process_tree" \
-        --stage4-compiler "$work/stage4_compiler" --stage4-provenance "$work/stage4_provenance" \
-        --toolchain "$work/toolchain_identity" --target "$work/target_identity" \
-        --fingerprint "$expected_fingerprint" --run-id "$run_id" \
-        || fail db-server-request-port-semantic-evidence
-fi
-
 require_eq_in "$work/command_receipt" evidence_schema simple.must-check-command/v1
 require_eq_in "$work/command_receipt" gate_id "$expected_gate"
 require_eq_in "$work/command_receipt" source_fingerprint "$expected_fingerprint"
@@ -379,16 +335,4 @@ for _acceptance in $expected_ids; do
 done
 IFS=$_old_ifs
 
-if [ "$signature_verified" -ne 1 ]; then
-    signature_path=$(field "$receipt" reviewer_signature_path) || fail missing-or-duplicate-reviewer-signature-path
-    signature_sha=$(field "$receipt" reviewer_signature_sha256) || fail missing-or-duplicate-reviewer-signature-sha256
-    load_head_blob "$signature_path" "$signature_sha" "$work/reviewer.sig"
-    [ -f "$POLICY" ] && [ ! -L "$POLICY" ] || fail reviewer-policy-missing
-    [ "$(grep -c '^[[:space:]]*schema: "simple.must-check-reviewer-policy/v1"$' "$POLICY" 2>/dev/null || true)" -eq 1 ] || fail reviewer-policy-schema
-    _policy_row=$(awk -F, -v id="$reviewer_key_id" '{x=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); if (x==id) {print; n++}} END {if (n != 1) exit 1}' "$POLICY") || fail reviewer-not-trusted
-    _key_path=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
-    _key_sha=$(printf '%s\n' "$_policy_row" | awk -F, '{v=$3; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v}')
-    load_head_blob "$_key_path" "$_key_sha" "$work/reviewer.pem"
-    openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/reviewer.sig" "$artifact" >/dev/null 2>&1 || fail invalid-reviewer-signature
-fi
 echo "STATUS: PASS external-must-check-receipt — $expected_gate committed evidence and reviewer signature admitted"

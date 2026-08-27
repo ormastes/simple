@@ -562,45 +562,6 @@ time_samples() {
     done
 }
 
-write_warm_cli_metrics() {
-    sample_runs="${WARM_CLI_SAMPLES:-$RUNS}"
-    case "$sample_runs" in ''|*[!0-9]*|0) echo "samples=0"; echo "startup_p95_ms=0"; echo "max_rss_kib=0"; return 0;; esac
-    if [ ! -x "$SIMPLE_BINARY" ] || [ ! -x /usr/bin/time ] || ! have date; then
-        echo "samples=0"
-        echo "startup_p95_ms=0"
-        echo "max_rss_kib=0"
-        return 0
-    fi
-    sample_file="$BUILD_DIR/warm_cli.samples"
-    : >"$sample_file"
-    i=1
-    while [ "$i" -le "$sample_runs" ]; do
-        start_ns="$(date +%s%N)"
-        time_line="$({ /usr/bin/time -f 'max_rss_kib=%M' "$SIMPLE_BINARY" --version >/dev/null; } 2>&1 || true)"
-        end_ns="$(date +%s%N)"
-        max_rss="$(printf '%s\n' "$time_line" | sed -n 's/.*max_rss_kib=\([0-9][0-9]*\).*/\1/p' | tail -1)"
-        case "$max_rss" in ''|*[!0-9]*) max_rss=0;; esac
-        elapsed_ms=$(( (end_ns - start_ns + 999999) / 1000000 ))
-        [ "$elapsed_ms" -gt 0 ] || elapsed_ms=1
-        echo "$elapsed_ms|$max_rss" >>"$sample_file"
-        i=$((i + 1))
-    done
-    measured="$(wc -l <"$sample_file" | tr -d ' ')"
-    rank50=$(( (measured + 1) / 2 )); rank95=$(( (measured * 95 + 99) / 100 )); rank99=$(( (measured * 99 + 99) / 100 ))
-    p50="$(cut -d'|' -f1 "$sample_file" | sort -n | sed -n "${rank50}p")"
-    p95="$(cut -d'|' -f1 "$sample_file" | sort -n | sed -n "${rank95}p")"
-    p99="$(cut -d'|' -f1 "$sample_file" | sort -n | sed -n "${rank99}p")"
-    max_rss="$(cut -d'|' -f2 "$sample_file" | sort -n | tail -1)"
-    echo "samples=$measured"
-    echo "p50_ms=${p50:-0}"
-    echo "p95_ms=${p95:-0}"
-    echo "p99_ms=${p99:-0}"
-    echo "startup_p95_ms=${p95:-0}"
-    echo "max_rss_kib=${max_rss:-0}"
-    echo "baseline_p95_ms=${WARM_CLI_BASELINE_P95_MS:-0}"
-    echo "baseline_rss_kib=${WARM_CLI_BASELINE_RSS_KIB:-0}"
-}
-
 write_normalized_backend_samples() {
     sample_runs="${NORMALIZED_RUNS:-3}"
     time_path="$BUILD_DIR/simple_tui_standalone.time"
@@ -808,7 +769,6 @@ write_normalized_backend_samples
 write_gpu_device_backend_samples "cuda" "--measure-cuda-device-buffer" "$NORMALIZED_CUDA_REPORT_PATH"
 write_gpu_device_backend_samples "opencl" "--measure-opencl-device-buffer" "$NORMALIZED_OPENCL_REPORT_PATH"
 write_gpu_device_backend_samples "rocm" "--measure-rocm-device-buffer" "$NORMALIZED_ROCM_REPORT_PATH"
-write_warm_cli_metrics
 write_report
 
 echo "startup_size_perf_audit_ready=true"

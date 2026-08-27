@@ -7,7 +7,7 @@
 #   *_verify            the public admission predicate (currently == _bound)
 #
 # The canonical argv/env below are the CONTRACT with the producer,
-# scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs: the producer
+# scripts/bootstrap/bootstrap-from-scratch.sh planner-admission-v2: the producer
 # must execute the admitted planner under exactly these, and the verifier
 # re-derives them from the receipt's own fields rather than shape-checking the
 # recorded digests. That is what binds a receipt to a real planner execution.
@@ -119,45 +119,10 @@ bootstrap_planner_v2_reason_allowed() {
 }
 
 bootstrap_planner_v2_field() {
-    bootstrap_planner_v2_field_key=$1 bootstrap_planner_v2_field_receipt=$2
-    bootstrap_planner_v2_count=$(awk -F= -v k="$bootstrap_planner_v2_field_key" '$1 == k { n++ } END { print n + 0 }' "$bootstrap_planner_v2_field_receipt")
+    bootstrap_planner_v2_key=$1 bootstrap_planner_v2_receipt=$2
+    bootstrap_planner_v2_count=$(awk -F= -v k="$bootstrap_planner_v2_key" '$1 == k { n++ } END { print n + 0 }' "$bootstrap_planner_v2_receipt")
     [ "$bootstrap_planner_v2_count" -eq 1 ] || return 1
-    sed -n "s/^${bootstrap_planner_v2_field_key}=//p" "$bootstrap_planner_v2_field_receipt"
-}
-
-bootstrap_planner_v2_binding() {
-    bootstrap_planner_v2_field "$1" "$2"
-}
-
-bootstrap_planner_v2_capsule_artifact() {
-    bootstrap_planner_v2_capsule_key=$1
-    bootstrap_planner_v2_capsule_bindings=$2
-    bootstrap_planner_v2_capsule_root=$(bootstrap_planner_v2_binding capsule_root_descriptor "$bootstrap_planner_v2_capsule_bindings") || return 1
-    bootstrap_planner_v2_capsule_display=$(bootstrap_planner_v2_binding capsule_root_display "$bootstrap_planner_v2_capsule_bindings") || return 1
-    case "$bootstrap_planner_v2_capsule_key" in
-        runtime_snapshot) bootstrap_planner_v2_capsule_base=runtime.snapshot ;;
-        planner_source_closure_snapshot) bootstrap_planner_v2_capsule_base=planner-source-closure.snapshot ;;
-        planner) bootstrap_planner_v2_capsule_base=planner ;;
-        planner_smoke) bootstrap_planner_v2_capsule_base=planner-smoke.txt ;;
-        authorization_receipt) bootstrap_planner_v2_capsule_base=authorization.receipt ;;
-        *) return 1 ;;
-    esac
-    printf '%s\n%s\n' \
-        "$bootstrap_planner_v2_capsule_root/$bootstrap_planner_v2_capsule_base" \
-        "$bootstrap_planner_v2_capsule_display/$bootstrap_planner_v2_capsule_base"
-}
-
-bootstrap_planner_v2_capsule_input() {
-    bootstrap_planner_v2_capsule_key=$1
-    bootstrap_planner_v2_capsule_bindings=$2
-    case "$bootstrap_planner_v2_capsule_key" in
-        parent_compiler|parent_stage2_sanity|parent_stage2_provenance|planner_source|git_state)
-            bootstrap_planner_v2_capsule_descriptor=$(bootstrap_planner_v2_binding "${bootstrap_planner_v2_capsule_key}_descriptor" "$bootstrap_planner_v2_capsule_bindings") || return 1
-            bootstrap_planner_v2_capsule_display=$(bootstrap_planner_v2_binding "${bootstrap_planner_v2_capsule_key}_display" "$bootstrap_planner_v2_capsule_bindings") || return 1
-            ;;
-        *) return 1 ;;
-    esac
-    printf '%s\n%s\n' "$bootstrap_planner_v2_capsule_descriptor" "$bootstrap_planner_v2_capsule_display"
+    sed -n "s/^${bootstrap_planner_v2_key}=//p" "$bootstrap_planner_v2_receipt"
 }
 
 bootstrap_planner_v2_authorization_text() {
@@ -165,48 +130,8 @@ bootstrap_planner_v2_authorization_text() {
 }
 
 bootstrap_planner_v2_verify_structure() {
-    bootstrap_planner_v2_capsule=${3:-}
-    if [ -n "$bootstrap_planner_v2_capsule" ]; then
-        bootstrap_planner_v2_descriptor_dir "$bootstrap_planner_v2_capsule" || return 1
-        bootstrap_planner_v2_receipt="$bootstrap_planner_v2_capsule/planner-admission-v2.env"
-        [ "$1" = "$bootstrap_planner_v2_receipt" ] || return 1
-        [ -f "$bootstrap_planner_v2_receipt" ] && [ ! -L "$bootstrap_planner_v2_receipt" ] || return 1
-        bootstrap_planner_v2_display_path "$2" || return 1
-        bootstrap_planner_v2_root=$2
-        bootstrap_planner_v2_bindings="$bootstrap_planner_v2_capsule/descriptor-bindings.env"
-        [ -f "$bootstrap_planner_v2_bindings" ] && [ ! -L "$bootstrap_planner_v2_bindings" ] || return 1
-        bootstrap_planner_v2_binding_keys='schema status root_display capsule_root_descriptor capsule_root_display stage2_transaction_descriptor stage2_transaction_display parent_compiler_transaction_relative parent_stage2_sanity_transaction_relative parent_stage2_provenance_transaction_relative parent_compiler_descriptor parent_compiler_display parent_stage2_sanity_descriptor parent_stage2_sanity_display parent_stage2_provenance_descriptor parent_stage2_provenance_display runtime_dir_descriptor runtime_dir_display planner_source_descriptor planner_source_display git_state_descriptor git_state_display verifier_descriptor verifier_sha256 execution_path_mode canonical_digest_path_mode'
-        [ "$(wc -l <"$bootstrap_planner_v2_bindings" | tr -d ' ')" -eq 26 ] || return 1
-        [ "$(cut -d= -f1 "$bootstrap_planner_v2_bindings" | tr '\n' ' ' | sed 's/ $//')" = "$bootstrap_planner_v2_binding_keys" ] || return 1
-        [ "$(bootstrap_planner_v2_binding schema "$bootstrap_planner_v2_bindings")" = simple-bootstrap-planner-descriptor-bindings-v1 ] || return 1
-        [ "$(bootstrap_planner_v2_binding status "$bootstrap_planner_v2_bindings")" = bound ] || return 1
-        [ "$(bootstrap_planner_v2_binding execution_path_mode "$bootstrap_planner_v2_bindings")" = descriptor ] || return 1
-        [ "$(bootstrap_planner_v2_binding canonical_digest_path_mode "$bootstrap_planner_v2_bindings")" = display-binding ] || return 1
-        [ "$(bootstrap_planner_v2_binding root_display "$bootstrap_planner_v2_bindings")" = "$bootstrap_planner_v2_root" ] || return 1
-        [ "$(bootstrap_planner_v2_binding capsule_root_descriptor "$bootstrap_planner_v2_bindings")" = "$bootstrap_planner_v2_capsule" ] || return 1
-        bootstrap_planner_v2_capsule_display=$(bootstrap_planner_v2_binding capsule_root_display "$bootstrap_planner_v2_bindings") || return 1
-        bootstrap_planner_v2_descriptor_display "$bootstrap_planner_v2_capsule" "$bootstrap_planner_v2_capsule_display" || return 1
-        bootstrap_planner_v2_stage2_transaction=$(bootstrap_planner_v2_binding stage2_transaction_descriptor "$bootstrap_planner_v2_bindings") || return 1
-        bootstrap_planner_v2_stage2_transaction_display=$(bootstrap_planner_v2_binding stage2_transaction_display "$bootstrap_planner_v2_bindings") || return 1
-        bootstrap_planner_v2_descriptor_dir "$bootstrap_planner_v2_stage2_transaction" || return 1
-        bootstrap_planner_v2_descriptor_display "$bootstrap_planner_v2_stage2_transaction" "$bootstrap_planner_v2_stage2_transaction_display" || return 1
-        [ -f "$bootstrap_planner_v2_stage2_transaction/transaction.env" ] && [ ! -L "$bootstrap_planner_v2_stage2_transaction/transaction.env" ] || return 1
-        grep -Fxq 'schema=simple-bootstrap-stage2-transaction-v1' "$bootstrap_planner_v2_stage2_transaction/transaction.env" || return 1
-        grep -Fxq 'status=committed' "$bootstrap_planner_v2_stage2_transaction/transaction.env" || return 1
-        grep -Fxq 'exit_code=0' "$bootstrap_planner_v2_stage2_transaction/transaction.env" || return 1
-        [ -f "$bootstrap_planner_v2_stage2_transaction/evidence/result.env" ] && [ ! -L "$bootstrap_planner_v2_stage2_transaction/evidence/result.env" ] || return 1
-        grep -Fxq 'schema=simple-bootstrap-stage2-runner-v4' "$bootstrap_planner_v2_stage2_transaction/evidence/result.env" || return 1
-        grep -Fxq 'status=succeeded' "$bootstrap_planner_v2_stage2_transaction/evidence/result.env" || return 1
-        grep -Fxq 'exit_code=0' "$bootstrap_planner_v2_stage2_transaction/evidence/result.env" || return 1
-        bootstrap_planner_v2_verifier=$(bootstrap_planner_v2_binding verifier_descriptor "$bootstrap_planner_v2_bindings") || return 1
-        bootstrap_planner_v2_descriptor_file "$bootstrap_planner_v2_verifier" || return 1
-        bootstrap_planner_v2_verifier_sha=$(bootstrap_planner_v2_binding verifier_sha256 "$bootstrap_planner_v2_bindings") || return 1
-        bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_verifier_sha" || return 1
-        [ "$(bootstrap_planner_v2_hash_file "$bootstrap_planner_v2_verifier")" = "$bootstrap_planner_v2_verifier_sha" ] || return 1
-    else
-        bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") || return 1
-        bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
-    fi
+    bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") || return 1
+    bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
     bootstrap_planner_v2_keys='schema status platform target reason parent_compiler_path parent_compiler_sha256 parent_stage2_sanity_path parent_stage2_sanity_sha256 parent_stage2_provenance_path parent_stage2_provenance_sha256 runtime_dir runtime_snapshot_path runtime_snapshot_sha256 planner_source_path planner_source_sha256 planner_source_closure_snapshot_path planner_source_closure_snapshot_sha256 git_state_path git_state_sha256 build_argv_sha256 build_env_sha256 cache_scope_key planner_path planner_sha256 planner_smoke_path planner_smoke_sha256 authorization_receipt_path authorization_receipt_sha256'
     [ "$(wc -l <"$bootstrap_planner_v2_receipt" | tr -d ' ')" -eq 29 ] || return 1
     bootstrap_planner_v2_actual=$(cut -d= -f1 "$bootstrap_planner_v2_receipt" | tr '\n' ' ' | sed 's/ $//')
@@ -221,25 +146,7 @@ bootstrap_planner_v2_verify_structure() {
 
     for bootstrap_planner_v2_stem in parent_compiler parent_stage2_sanity parent_stage2_provenance runtime_snapshot planner_source planner_source_closure_snapshot git_state planner planner_smoke authorization_receipt; do
         bootstrap_planner_v2_file=$(bootstrap_planner_v2_field "${bootstrap_planner_v2_stem}_path" "$bootstrap_planner_v2_receipt") || return 1
-        if [ -n "$bootstrap_planner_v2_capsule" ]; then
-            case "$bootstrap_planner_v2_stem" in
-                parent_compiler|parent_stage2_sanity|parent_stage2_provenance|planner_source|git_state)
-                    bootstrap_planner_v2_pair=$(bootstrap_planner_v2_capsule_input "$bootstrap_planner_v2_stem" "$bootstrap_planner_v2_bindings") || return 1 ;;
-                *) bootstrap_planner_v2_pair=$(bootstrap_planner_v2_capsule_artifact "$bootstrap_planner_v2_stem" "$bootstrap_planner_v2_bindings") || return 1 ;;
-            esac
-            bootstrap_planner_v2_actual_file=$(printf '%s\n' "$bootstrap_planner_v2_pair" | sed -n '1p')
-            bootstrap_planner_v2_display_file=$(printf '%s\n' "$bootstrap_planner_v2_pair" | sed -n '2p')
-            [ "$bootstrap_planner_v2_file" = "$bootstrap_planner_v2_display_file" ] || return 1
-            case "$bootstrap_planner_v2_stem" in
-                parent_compiler|parent_stage2_sanity|parent_stage2_provenance|planner_source|git_state)
-                    bootstrap_planner_v2_descriptor_file "$bootstrap_planner_v2_actual_file" || return 1
-                    bootstrap_planner_v2_descriptor_display "$bootstrap_planner_v2_actual_file" "$bootstrap_planner_v2_display_file" || return 1 ;;
-                *) [ -f "$bootstrap_planner_v2_actual_file" ] && [ ! -L "$bootstrap_planner_v2_actual_file" ] || return 1 ;;
-            esac
-            bootstrap_planner_v2_file=$bootstrap_planner_v2_actual_file
-        else
-            bootstrap_planner_v2_file=$(bootstrap_planner_v2_canonical_file "$bootstrap_planner_v2_file") || return 1
-        fi
+        bootstrap_planner_v2_file=$(bootstrap_planner_v2_canonical_file "$bootstrap_planner_v2_file") || return 1
         bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "${bootstrap_planner_v2_stem}_sha256" "$bootstrap_planner_v2_receipt") || return 1
         bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" || return 1
         [ "$(bootstrap_planner_v2_hash_file "$bootstrap_planner_v2_file")" = "$bootstrap_planner_v2_sha" ] || return 1
@@ -247,16 +154,7 @@ bootstrap_planner_v2_verify_structure() {
     bootstrap_planner_v2_source=$(bootstrap_planner_v2_field planner_source_path "$bootstrap_planner_v2_receipt") || return 1
     [ "$bootstrap_planner_v2_source" = "$bootstrap_planner_v2_root/src/app/cli/bootstrap_reason_planner.spl" ] || return 1
     bootstrap_planner_v2_runtime=$(bootstrap_planner_v2_field runtime_dir "$bootstrap_planner_v2_receipt") || return 1
-    if [ -n "$bootstrap_planner_v2_capsule" ]; then
-        bootstrap_planner_v2_runtime_descriptor=$(bootstrap_planner_v2_binding runtime_dir_descriptor "$bootstrap_planner_v2_bindings") || return 1
-        [ "$bootstrap_planner_v2_runtime" = "$(bootstrap_planner_v2_binding runtime_dir_display "$bootstrap_planner_v2_bindings")" ] || return 1
-        bootstrap_planner_v2_descriptor_dir "$bootstrap_planner_v2_runtime_descriptor" || return 1
-        bootstrap_planner_v2_descriptor_display "$bootstrap_planner_v2_runtime_descriptor" "$bootstrap_planner_v2_runtime" || return 1
-        bootstrap_planner_v2_runtime_snapshot="$bootstrap_planner_v2_capsule/runtime.snapshot"
-        [ "$(cd "$bootstrap_planner_v2_runtime_descriptor" && find . -type f ! -path './vendor/*' -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum --)" = "$(cat -- "$bootstrap_planner_v2_runtime_snapshot")" ] || return 1
-    else
-        bootstrap_planner_v2_canonical_dir "$bootstrap_planner_v2_runtime" >/dev/null || return 1
-    fi
+    bootstrap_planner_v2_canonical_dir "$bootstrap_planner_v2_runtime" >/dev/null || return 1
     for bootstrap_planner_v2_name in build_argv_sha256 build_env_sha256 cache_scope_key; do
         bootstrap_planner_v2_sha=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_name" "$bootstrap_planner_v2_receipt") || return 1
         bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_sha" || return 1
@@ -265,9 +163,6 @@ bootstrap_planner_v2_verify_structure() {
     bootstrap_planner_v2_closure_sha=$(bootstrap_planner_v2_field planner_source_closure_snapshot_sha256 "$bootstrap_planner_v2_receipt") || return 1
     [ "$(printf '%s:%s\n' "$bootstrap_planner_v2_runtime_sha" "$bootstrap_planner_v2_closure_sha" | sha256sum | awk '{print $1}')" = "$(bootstrap_planner_v2_field cache_scope_key "$bootstrap_planner_v2_receipt")" ] || return 1
     bootstrap_planner_v2_auth=$(bootstrap_planner_v2_field authorization_receipt_path "$bootstrap_planner_v2_receipt") || return 1
-    if [ -n "$bootstrap_planner_v2_capsule" ]; then
-        bootstrap_planner_v2_auth="$bootstrap_planner_v2_capsule/authorization.receipt"
-    fi
     bootstrap_planner_v2_expected=$(bootstrap_planner_v2_authorization_text "$bootstrap_planner_v2_target" "$bootstrap_planner_v2_reason" "$(bootstrap_planner_v2_field parent_compiler_sha256 "$bootstrap_planner_v2_receipt")" "$bootstrap_planner_v2_runtime_sha" "$bootstrap_planner_v2_closure_sha" "$(bootstrap_planner_v2_field planner_sha256 "$bootstrap_planner_v2_receipt")")
     [ "$(cat -- "$bootstrap_planner_v2_auth")" = "$bootstrap_planner_v2_expected" ] || return 1
 }
@@ -311,61 +206,48 @@ bootstrap_planner_v2_hash_text() {
     printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
-# Path pinning plus argv/env re-derivation. Legacy receipts pin repository
-# paths. Capsule receipts pin retained descriptors to separate display strings
-# and place every producer-created artifact beneath one retained capsule root.
+# Path pinning plus argv/env re-derivation. Everything a receipt names must
+# live at a pinned location inside the repository root, so a receipt cannot
+# hash attacker-authored fixtures in /tmp and still verify.
 bootstrap_planner_v2_verify_bound() {
-    bootstrap_planner_v2_capsule=${3:-}
-    bootstrap_planner_v2_verify_structure "$1" "$2" "$bootstrap_planner_v2_capsule" || return 1
-    if [ -n "$bootstrap_planner_v2_capsule" ]; then
-        bootstrap_planner_v2_receipt="$bootstrap_planner_v2_capsule/planner-admission-v2.env"
-        bootstrap_planner_v2_root=$2
-        bootstrap_planner_v2_bindings="$bootstrap_planner_v2_capsule/descriptor-bindings.env"
-        bootstrap_planner_v2_adm=$(bootstrap_planner_v2_binding capsule_root_display "$bootstrap_planner_v2_bindings") || return 1
-    else
-        bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") || return 1
-        bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
-    fi
+    bootstrap_planner_v2_verify_structure "$1" "$2" || return 1
+    bootstrap_planner_v2_receipt=$(bootstrap_planner_v2_canonical_file "$1") || return 1
+    bootstrap_planner_v2_root=$(bootstrap_planner_v2_canonical_dir "$2") || return 1
 
     bootstrap_planner_v2_scope=$(bootstrap_planner_v2_field cache_scope_key "$bootstrap_planner_v2_receipt") || return 1
-    if [ -z "$bootstrap_planner_v2_capsule" ]; then
-        bootstrap_planner_v2_adm=$(bootstrap_planner_v2_admission_dir "$bootstrap_planner_v2_root" "$bootstrap_planner_v2_scope")
-    fi
+    bootstrap_planner_v2_adm=$(bootstrap_planner_v2_admission_dir "$bootstrap_planner_v2_root" "$bootstrap_planner_v2_scope")
 
-    # Parent-authority artifacts must come from a real stage2 tree in-repo.
-    for bootstrap_planner_v2_pair in \
-        "parent_compiler_path:$bootstrap_planner_v2_root/build/bootstrap/stage2/" \
-        "parent_stage2_sanity_path:$bootstrap_planner_v2_root/build/bootstrap/stage2/" \
-        "parent_stage2_provenance_path:$bootstrap_planner_v2_root/build/bootstrap/stage2/"; do
-        bootstrap_planner_v2_key=${bootstrap_planner_v2_pair%%:*}
-        bootstrap_planner_v2_prefix=${bootstrap_planner_v2_pair#*:}
-        bootstrap_planner_v2_got=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_key" "$bootstrap_planner_v2_receipt") || return 1
+    # Parent-authority artifacts must share one real stage2 directory beneath
+    # the repository's configurable build output.  Do not hardcode the default
+    # build/bootstrap name: bootstrap-from-scratch exposes --output.
+    bootstrap_planner_v2_parent=$(bootstrap_planner_v2_field parent_compiler_path "$bootstrap_planner_v2_receipt") || return 1
+    bootstrap_planner_v2_sanity=$(bootstrap_planner_v2_field parent_stage2_sanity_path "$bootstrap_planner_v2_receipt") || return 1
+    bootstrap_planner_v2_provenance=$(bootstrap_planner_v2_field parent_stage2_provenance_path "$bootstrap_planner_v2_receipt") || return 1
+    for bootstrap_planner_v2_got in "$bootstrap_planner_v2_parent" \
+        "$bootstrap_planner_v2_sanity" "$bootstrap_planner_v2_provenance"; do
         case "$bootstrap_planner_v2_got" in
-            "$bootstrap_planner_v2_prefix"*) ;;
+            "$bootstrap_planner_v2_root"/build/*/stage2/*) ;;
             *) return 1 ;;
         esac
         case "$bootstrap_planner_v2_got" in *..*) return 1 ;; esac
     done
+    bootstrap_planner_v2_parent_dir=$(dirname -- "$bootstrap_planner_v2_parent") || return 1
+    [ "$(dirname -- "$bootstrap_planner_v2_sanity")" = "$bootstrap_planner_v2_parent_dir" ] || return 1
+    [ "$(dirname -- "$bootstrap_planner_v2_provenance")" = "$bootstrap_planner_v2_parent_dir" ] || return 1
 
-    # Producer-derived artifacts are pinned by exact name in the admission
-    # directory. Capsule git state is an input capability, not a generated
-    # artifact; legacy mode retains its historical git-state.txt location.
-    bootstrap_planner_v2_generated_pairs='runtime_snapshot_path:runtime.snapshot
-planner_source_closure_snapshot_path:planner-source-closure.snapshot
-planner_path:planner
-planner_smoke_path:planner-smoke.txt
-authorization_receipt_path:authorization.receipt'
-    if [ -z "$bootstrap_planner_v2_capsule" ]; then
-        bootstrap_planner_v2_generated_pairs="$bootstrap_planner_v2_generated_pairs
-git_state_path:git-state.txt"
-    fi
-    printf '%s\n' "$bootstrap_planner_v2_generated_pairs" |
-    while IFS= read -r bootstrap_planner_v2_pair; do
+    # Producer-derived artifacts are pinned by exact name in the admission dir.
+    for bootstrap_planner_v2_pair in \
+        "runtime_snapshot_path:runtime.snapshot" \
+        "planner_source_closure_snapshot_path:planner-source-closure.snapshot" \
+        "git_state_path:git-state.txt" \
+        "planner_path:planner" \
+        "planner_smoke_path:planner-smoke.txt" \
+        "authorization_receipt_path:authorization.receipt"; do
         bootstrap_planner_v2_key=${bootstrap_planner_v2_pair%%:*}
         bootstrap_planner_v2_base=${bootstrap_planner_v2_pair#*:}
         bootstrap_planner_v2_got=$(bootstrap_planner_v2_field "$bootstrap_planner_v2_key" "$bootstrap_planner_v2_receipt") || return 1
         [ "$bootstrap_planner_v2_got" = "$bootstrap_planner_v2_adm/$bootstrap_planner_v2_base" ] || return 1
-    done || return 1
+    done
 
     bootstrap_planner_v2_rt=$(bootstrap_planner_v2_field runtime_dir "$bootstrap_planner_v2_receipt") || return 1
     case "$bootstrap_planner_v2_rt" in
@@ -396,9 +278,9 @@ git_state_path:git-state.txt"
 # structurally exact, names only pinned in-repo paths, and its recorded argv
 # and environment digests re-derive from its own fields — i.e. only a receipt
 # emitted by the canonical producer against a provenance-verified stage2 parent
-# can pass. See produce-bootstrap-planner-admission-v2.shs.
+# can pass. See the planner-admission-v2 subcommand of bootstrap-from-scratch.sh.
 bootstrap_planner_v2_verify() {
-    bootstrap_planner_v2_verify_bound "$1" "$2" "${3:-}" || {
+    bootstrap_planner_v2_verify_bound "$1" "$2" || {
         echo "bootstrap-policy-error: planner-admission-v2-unbound" >&2
         return 1
     }

@@ -3,12 +3,11 @@
 #
 # #138 progress gauge / memory note: "extended smoke matrix is mandatory
 # pre-deploy". For each language-feature probe below this script:
-#   1. Writes a tiny, uniquely-named .spl source under a repo-relative build
-#      directory. Bootstrap compilers reject absolute entry paths, and passing
-#      one used to send the first case into an unbounded full-tree build.
-#   2. Runs a bounded, cache-isolated native-build with explicit entry closure,
-#      runtime bundle, and one-binary mode. SIMPLE_BOOTSTRAP stays unset so the
-#      selected pure-Simple compiler remains authoritative.
+#   1. Writes a tiny, uniquely-named .spl source (timestamp+pid suffix, so the
+#      object cache keyed on source hash — #69 — never serves a stale build).
+#   2. Runs `env -u SIMPLE_BOOTSTRAP bin/simple native-build --entry <probe>
+#      -o <out> --clean` (SIMPLE_BOOTSTRAP unset so this always exercises the
+#      self-hosted pure-Simple compiler, per repo default-tooling rule).
 #   3. Executes the resulting binary and compares its exit code (rc) to the
 #      expected value.
 #   4. Classifies the result as PASS / FAIL / XFAIL / XPASS. Cases marked
@@ -21,62 +20,26 @@
 # Usage: sh scripts/check/native-smoke-matrix.shs
 # Env:   SIMPLE_BINARY (default bin/simple), NATIVE_SMOKE_BACKEND (default
 #        llvm), NATIVE_SMOKE_WORK_DIR (default /tmp/native-smoke-matrix.$$),
-#        NATIVE_SMOKE_SOURCE_DIR (repo-relative; default build/native-smoke-matrix-sources/$$),
-#        NATIVE_SMOKE_CACHE_DIR, NATIVE_SMOKE_BUILD_TIMEOUT (default 60s),
-#        NATIVE_SMOKE_TIMEOUT_BIN (optional timeout/gtimeout override),
 #        NATIVE_SMOKE_CASES (space-separated subset of case ids to run,
-#        default = all). NATIVE_SMOKE_BUILD_TIMEOUT_SECS and
-#        NATIVE_SMOKE_RUN_TIMEOUT_SECS bound each build and execution.
+#        default = all).
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
-NATIVE_SMOKE_BACKEND="${NATIVE_SMOKE_BACKEND:-llvm}"
-WORK_DIR="${NATIVE_SMOKE_WORK_DIR:-/tmp/native-smoke-matrix.$$}"
-BUILD_TIMEOUT_SECS="${NATIVE_SMOKE_BUILD_TIMEOUT_SECS:-180}"
-RUN_TIMEOUT_SECS="${NATIVE_SMOKE_RUN_TIMEOUT_SECS:-30}"
-mkdir -p "$WORK_DIR"
-if [ -n "${NATIVE_SMOKE_SOURCE_DIR:-}" ]; then
-    SOURCE_DIR="$NATIVE_SMOKE_SOURCE_DIR"
-else
-    case "$WORK_DIR" in
-        /*) SOURCE_DIR="build/native-smoke-matrix-sources/$$" ;;
-        *) SOURCE_DIR="$WORK_DIR/sources" ;;
-    esac
-fi
-reject_parent_or_drive_path NATIVE_SMOKE_SOURCE_DIR "$SOURCE_DIR"
-case "$SOURCE_DIR" in
-    /*) echo "error: NATIVE_SMOKE_SOURCE_DIR must be repo-relative: $SOURCE_DIR" >&2; exit 2 ;;
-esac
-mkdir -p "$SOURCE_DIR"
-NATIVE_CACHE="${NATIVE_SMOKE_CACHE_DIR:-$WORK_DIR/cache}"
-mkdir -p "$NATIVE_CACHE"
-BUILD_TIMEOUT="${NATIVE_SMOKE_BUILD_TIMEOUT:-60s}"
-BUILD_VMEM_KIB="${NATIVE_SMOKE_BUILD_VMEM_KIB:-6291456}"
-TIMEOUT_BIN="${NATIVE_SMOKE_TIMEOUT_BIN:-}"
-if [ -z "$TIMEOUT_BIN" ]; then
-    TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
-fi
-if [ -z "$TIMEOUT_BIN" ] || ! command -v "$TIMEOUT_BIN" >/dev/null 2>&1; then
-    echo "error: timeout or gtimeout is required for bounded native smoke builds" >&2
+if [ ! -x "$SIMPLE_BINARY" ]; then
+    echo "error: executable Simple compiler not found: $SIMPLE_BINARY (set SIMPLE_BINARY to a deployed pure-Simple compiler)" >&2
     exit 2
 fi
+NATIVE_SMOKE_BACKEND="${NATIVE_SMOKE_BACKEND:-llvm}"
+WORK_DIR="${NATIVE_SMOKE_WORK_DIR:-/tmp/native-smoke-matrix.$$}"
+mkdir -p "$WORK_DIR"
 
 case "$NATIVE_SMOKE_BACKEND" in
     llvm|cranelift) ;;
     *) echo "unsupported native smoke backend: $NATIVE_SMOKE_BACKEND" >&2; exit 2 ;;
 esac
-
-if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_TOOL="$(command -v timeout)"
-elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_TOOL="$(command -v gtimeout)"
-else
-    echo "native smoke matrix requires timeout or gtimeout" >&2
-    exit 2
-fi
 
 STAMP="$(date +%s)_$$"
 RESULTS_FILE="$WORK_DIR/results.tsv"
@@ -88,12 +51,6 @@ FAIL_N=0
 XFAIL_N=0
 XPASS_N=0
 FALLBACK_TOTAL=0
-
-run_with_timeout() {
-    seconds="$1"
-    shift
-    "$TIMEOUT_TOOL" -k 5s "${seconds}s" "$@"
-}
 
 # ---------------------------------------------------------------------------
 # Case source writers — one tiny .spl program per language feature.
@@ -224,12 +181,26 @@ write_case_enum_f64_payload_precision() {
     cp test/03_system/native/enum_f64_payload_precision.spl "$1"
 }
 
+write_case_option_f32_payload_roundtrip() {
+    cp test/03_system/native/option_try_unwrap_ifval_float.spl "$1"
+}
+
 write_case_string_concat() {
     cat >"$1" <<'EOF'
 fn main() -> i64:
     val a = "foo"
     val b = "bar"
     val c = a + b
+    if a.char_code_at(0) != 102:
+        return 91
+    if c.char_code_at(3) != 98:
+        return 92
+    if "é".char_code_at(0) != 233:
+        return 93
+    if "éX".char_code_at(1) != 88:
+        return 94
+    if a.char_code_at(-1) != 0 or a.char_code_at(99) != 0:
+        return 95
     return c.len
 EOF
 }
@@ -282,22 +253,6 @@ fn main() -> i64:
     if val v = x.?:
         return v
     return 0
-EOF
-}
-
-write_case_option_class_payload() {
-    cat >"$1" <<'EOF'
-class Box:
-    value: i64
-
-fn get_box() -> Box?:
-    return Some(Box(value: 7))
-
-fn main() -> i64:
-    val pending = get_box()
-    if pending == nil: return 0
-    val owned = pending.?
-    return owned.value
 EOF
 }
 
@@ -390,11 +345,80 @@ fn main() -> i64:
 EOF
 }
 
+write_case_tuple_return_across_call() {
+    cat >"$1" <<'EOF'
+fn tuple_parts(alternate: bool) -> (i64, i64, bool):
+    if alternate:
+        return (1, 2, false)
+    return (17, 37, true)
+
+fn tuple_clobber(alternate: bool) -> (i64, i64, bool):
+    if alternate:
+        return (3, 4, true)
+    return (91, 99, false)
+
+fn main() -> i64:
+    val parts = tuple_parts(false)
+    val clobber = tuple_clobber(false)
+    if clobber.0 != 91 or clobber.1 != 99 or clobber.2:
+        return 1
+    if parts.0 == 17 and parts.1 == 37 and parts.2:
+        return 42
+    return 2
+EOF
+}
+
+write_case_scalar_spill_across_loop_calls() {
+    cat >"$1" <<'EOF'
+fn scalar_seed() -> u32:
+    if false: return 1u32
+    0x10203040u32
+
+fn scalar_churn(iteration: i64) -> u32:
+    if iteration < 0: return 9u32
+    7u32
+
+fn main() -> i64:
+    val top: u32 = scalar_seed()
+    var iteration: i64 = 0
+    var total: u32 = 0u32
+    while iteration < 3:
+        val noise = scalar_churn(iteration)
+        total = total + top + noise
+        iteration = iteration + 1
+    if total == 811634901u32: return 42
+    1
+EOF
+}
+
+write_case_hyphenated_module_init() {
+    cp test/fixtures/compiler/native_module_global_initializer.spl "$1"
+}
+
+write_case_parse_f64() {
+    cp test/03_system/native/c9_string_parse_f64_to_upper.spl "$1"
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
-run_case() {
+require_nonempty_target_object() {
+    [ -s "$1" ]
+}
+
+require_runtime_exit() {
+    expected="$1"
+    target="$2"
+    log="$3"
+    set +e
+    "$target" >/dev/null 2>>"$log"
+    RUNTIME_RC=$?
+    set -e
+    [ "$RUNTIME_RC" -eq "$expected" ]
+}
+
+platform_case() {
     id="$1"
     desc="$2"
     writer="$3"
@@ -403,7 +427,7 @@ run_case() {
 
     TOTAL=$((TOTAL + 1))
 
-    src="$SOURCE_DIR/case_${id}_${STAMP}.spl"
+    src="$WORK_DIR/case_${id}_${STAMP}.spl"
     bin="$WORK_DIR/case_${id}_${STAMP}_bin"
     build_log="$WORK_DIR/case_${id}_${STAMP}.build.log"
 
@@ -412,9 +436,14 @@ run_case() {
     set -- "$SIMPLE_BINARY" native-build
     if [ "$NATIVE_SMOKE_BACKEND" = cranelift ]; then
         set -- "$@" --backend=cranelift
+        if [ "$id" = tuple_return_across_call ]; then
+            set -- "$@" --opt-level=aggressive
+        elif [ "$id" = scalar_spill_across_loop_calls ]; then
+            set -- "$@" --opt-level=aggressive
+        fi
     fi
     build_ok=1
-    if ! run_with_timeout "$BUILD_TIMEOUT_SECS" env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
+    if ! env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \
         "$@" --entry "$src" -o "$bin" --clean >"$build_log" 2>&1; then
         build_ok=0
     fi
@@ -424,16 +453,16 @@ run_case() {
     FALLBACK_TOTAL=$((FALLBACK_TOTAL + fallback_hits))
 
     got_rc="build-failed"
-    if [ "$build_rc" -eq 124 ] || [ "$build_rc" -eq 137 ]; then
-        got_rc="build-timeout"
-    fi
     if [ "$build_ok" -eq 1 ] && [ -x "$bin" ]; then
-        set +e
-        "$bin" >/dev/null 2>>"$build_log"
-        got_rc=$?
-        set -e
+        if require_nonempty_target_object "$bin"; then
+            if require_runtime_exit "$expected_rc" "$bin" "$build_log"; then
+                :
+            fi
+            got_rc="$RUNTIME_RC"
+        else
+            got_rc="empty-output"
+        fi
     fi
-
     base_status="FAIL"
     if [ "$got_rc" = "$expected_rc" ]; then
         base_status="PASS"
@@ -477,7 +506,7 @@ array_index_rw|(5) array literal + index read/write|write_case_array_index|71|no
 struct_field|(6) struct construct + field read|write_case_struct|71|no
 enum_construct|(7) enum construct (Shape.Circle)|write_case_enum_construct|42|no
 enum_match|(8) match on enum|write_case_enum_match|7|no
-string_concat_len|(9) string concat + len|write_case_string_concat|6|no
+string_concat_len|(9) string concat + len + char_code_at|write_case_string_concat|6|no
 string_interp|(10) string interpolation|write_case_string_interp|7|no
 nested_fn_3deep|(11) nested fn calls 3 deep|write_case_nested_fn|7|no
 closure_lambda|(12) closure/lambda|write_case_closure|7|no
@@ -488,7 +517,11 @@ match_value_position|(16) value-position match (val r = match n)|write_case_matc
 match_value_position_return|(17) value-position match, arm returns|write_case_match_value_return|7|no
 trait_default|(18) trait default method dispatch (#157)|write_case_trait_default|42|no
 dict_struct_value|(19) struct-valued Dict m[k].field + keys() text (#189)|write_case_dict_struct_value|73|no
-option_class_payload|(20) Option class payload (x.?)|write_case_option_class_payload|7|yes
+enum_f64_payload_precision|(20) LLVM enum f64 payload-word ABI|write_case_enum_f64_payload_precision|30|no
+tuple_return_across_call|(21) returned tuple survives another tuple call|write_case_tuple_return_across_call|42|no
+hyphenated_module_init|(22) ordered module init survives punctuated source path|write_case_hyphenated_module_init|45|no
+parse_f64|(23) text parse_f64 keeps nullable tagged ABI|write_case_parse_f64|42|no
+scalar_spill_across_loop_calls|(24) hoisted scalar survives call-bearing loop|write_case_scalar_spill_across_loop_calls|42|no
 "
 
 # NOTE: read from a file (not a pipe) so the loop body runs in THIS shell,
@@ -502,13 +535,13 @@ if [ -n "${NATIVE_SMOKE_CASES:-}" ]; then
         while IFS='|' read -r id desc writer rc xfail; do
             [ -z "$id" ] && continue
             [ "$id" = "$want_id" ] || continue
-            run_case "$id" "$desc" "$writer" "$rc" "$xfail"
+            platform_case "$id" "$desc" "$writer" "$rc" "$xfail"
         done <"$CASES_FILE"
     done
 else
     while IFS='|' read -r id desc writer rc xfail; do
         [ -z "$id" ] && continue
-        run_case "$id" "$desc" "$writer" "$rc" "$xfail"
+        platform_case "$id" "$desc" "$writer" "$rc" "$xfail"
     done <"$CASES_FILE"
 fi
 
@@ -527,7 +560,7 @@ if [ "$XPASS_N" -gt 0 ]; then
     echo "NOTE: $XPASS_N case(s) marked XFAIL now PASS — promote them to real PASS cases."
 fi
 
-if [ "$FAIL_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
+if [ "$TOTAL" -eq 0 ] || [ "$FAIL_N" -gt 0 ] || [ "$XPASS_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
     echo "native_smoke_matrix=false"
     exit 1
 fi
