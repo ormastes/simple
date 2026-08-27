@@ -406,3 +406,7 @@ passing placeholder.
     remain public unsafe APIs; scalar random/configuration wrappers remain
     direct. Do not add marshaling, allocations, lookup, locks, retries, or an
     extra dispatch to compatibility hot paths.
+74. Keep the interpreter error-handle facade unsafe-only. Its opaque handles
+    are allocator/registry owned by the Rust interpreter, with throw consuming
+    the handle. The evaluator's 18 existing error-only raw calls must remain
+    in smallest lexical scopes; normal evaluation gains no work.

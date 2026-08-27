@@ -447,3 +447,13 @@ a claim that SFFI v2 is complete.
   rejects extra symbol occurrences and records no allocation/lookup layer.
 - FAIL (global admission): provider identity, artifact admission, signature,
   and semantic verification remain absent at repository scope.
+
+## Follow-up: interpreter error-handle containment (2026-08-27)
+
+- PASS (static/source): nine opaque error-handle declarations are tagged
+  `unsafe(ffi)` and all 18 evaluator error-path calls are lexically scoped.
+  Handles are documented as interpreter-owned, with throw consuming its input.
+- PASS (performance shape): only existing exceptional branches changed; normal
+  expression evaluation retains its prior work and raw-call count.
+- FAIL (global admission): the interpreter registry/provider is not bound to a
+  signed artifact, ABI contract, or verification receipt. It remains unsafe.
