@@ -33,6 +33,31 @@ is retained as an append-only audit log and must not be read as current truth.
   PASS. Exact two-file commit pushed as `595ba6e449`. This admits raw fusion
   only; identity dominance, graph candidates/proximity, bounded adjustments,
   integrated explanations, and AC-4 remain open.
+- implementation-wave4-rerank-accepted: Added the authority-bound page-local
+  fixed-policy reranker and root-level fusion unit-test discovery bridge. Evidence:
+  syntax PASS, focused 13/13, full SPipe suite PASS (117/117 unit; Wave 2 9/9;
+  Wave 3 25/25; Wave 4 9/9; legacy/perf PASS), and pre-runtime/final xhigh PASS.
+  Exact three-file commit pushed as `44e65a6713`. Exact identity dominance,
+  graph candidate production, exposed search/provider integration, global pool
+  completeness, and AC-4 remain open.
+- implementation-wave4-complete-pool-v2-accepted: Added additive complete-pool
+  fusion/rerank v2 while preserving v1. Complete source/count/digest envelopes
+  admit up to 3,000 internal hits; reranking precedes the 1,000 public cap.
+  Evidence: syntax PASS, focused 38/38, full SPipe suite PASS, independent xhigh
+  PASS, including raw-rank-1001 to final-rank-793 promotion. Exact four-file
+  commit pushed as `32574ab884`. Identity/graph/provider integration and AC-4
+  remain open.
+- implementation-wave4-exact-identity-accepted: Added a snapshot/receipt/scope-
+  bound exact resolver over authorized canonical UID/key/active-alias rows.
+  Evidence: syntax PASS, focused 8/8, full SPipe suite/perf PASS, final xhigh
+  PASS. Exact two-file commit pushed as `d1b601697f`. Graph/provider/fusion
+  orchestration and AC-4 remain open.
+- implementation-wave4-rerank-pair-v3-accepted: Added ordered edge/receipt pair
+  evidence with shared-receipt support, derived display sets, evidence digest,
+  and verifier implementation binding while preserving v1/v2. Evidence: static
+  xhigh PASS, syntax PASS, focused 26/26, full package 142/142 plus Wave/legacy/
+  perf PASS, final xhigh PASS. Exact two-file commit pushed as `f89b120be7`.
+  Graph candidate generation and integrated AC-4 remain open.
 
 ## Raw Request
 `$sp_dev imlldoc/01_research/infra/spipe/spipe_knowledge_compiler.md with pherallel agents with detail guide and higher model review. make design plan details. sync push often gh main`

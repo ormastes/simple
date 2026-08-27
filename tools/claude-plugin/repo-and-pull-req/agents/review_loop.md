@@ -4,7 +4,8 @@
 
 Autonomous PR reviewer. Invoked on a schedule (cadence depends on `--level`)
 to check PR status, process review comments, fix code or reply, and (per
-`--level`) bot-approve / wait for human approval / merge.
+`--level`) obtain scoped admission or an eligible independent provider
+approval, then merge.
 
 ## Invocation
 
@@ -15,10 +16,10 @@ Procedure* below):
 # L1 (default — one-shot, current behavior preserved)
 /repo_and_pull_req review <pr-number>
 
-# L2 (bot-approves + auto-merges; poll 60s up to 24h)
+# L2 (scoped admission/provider approval + merge; poll 60s up to 24h)
 /schedule 60s /repo_and_pull_req review <pr-number> --level=2
 
-# L3 (waits for human approval + merges; poll 5m up to 7d)
+# L3 (waits for eligible independent provider User account; poll 5m up to 7d)
 /schedule 5m /repo_and_pull_req review <pr-number> --level=3
 ```
 
@@ -45,8 +46,16 @@ listed in *Step 1*):
   "level": 1,
   "approver": "codex",
   "verdict_source": "codex:rescue",
+  "review_head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_effort": "high",
+  "review_p0_count": 0,
+  "review_p1_count": 0,
   "bot_approved": false,
-  "human_approved": false,
+  "user_account_approved": false,
+  "self_review_admitted": false,
+  "admission_dispatched": false,
+  "admission_scope": null,
   "checks_passing": false,
   "merge_attempted": false,
   "cycle_count": 0,
@@ -57,9 +66,11 @@ listed in *Step 1*):
 }
 ```
 
-Status values: `watching` | `awaiting-bot` | `awaiting-human` |
-`awaiting-checks` | `merged` | `closed` | `max-cycles` |
-`blocked` | `blocked-conflict` | `blocked-auth`
+Status values: `watching` | `awaiting-bot` |
+`awaiting-self-review-admission` | `awaiting-provider-user` |
+`awaiting-checks` | `merged` | `closed` | `max-cycles` | `blocked` |
+`blocked-conflict` | `blocked-auth` | `blocked-provider-approval` |
+`blocked-self-review-admission`
 
 Any `blocked*` status MUST cancel the `/schedule` entry — see
 *Failure Modes* below. The bot must NEVER tight-loop on auth/policy
@@ -85,8 +96,19 @@ if [ -f "$STATE_FILE" ]; then
   LEVEL=$(jq       -r ".level // ${CLI_LEVEL:-1}"   "$STATE_FILE")
   TARGET=$(jq      -r ".target // \"${CLI_TARGET:-$DETECTED_TARGET}\"" "$STATE_FILE")
   APPROVER=$(jq    -r '.approver // "null"'         "$STATE_FILE")
+  REVIEW_HEAD_SHA=$(jq -r '.review_head_sha // "null"' "$STATE_FILE")
+  REVIEWER_MODEL=$(jq -r '.reviewer_model // "null"' "$STATE_FILE")
+  REVIEWER_EFFORT=$(jq -r '.reviewer_effort // "null"' "$STATE_FILE")
+  REVIEW_P0_COUNT=$(jq -r '.review_p0_count // -1' "$STATE_FILE")
+  REVIEW_P1_COUNT=$(jq -r '.review_p1_count // -1' "$STATE_FILE")
   BOT_APPROVED=$(jq -r '.bot_approved   // false'   "$STATE_FILE")
-  HUMAN_APPROVED=$(jq -r '.human_approved // false' "$STATE_FILE")
+  # Approval is provider state, not a durable capability. Ignore both the new
+  # audit field and legacy .human_approved here; Step 6 revalidates an
+  # independent provider User approval on the current exact head every cycle.
+  USER_ACCOUNT_APPROVED=false
+  SELF_REVIEW_ADMITTED=$(jq -r '.self_review_admitted // false' "$STATE_FILE")
+  ADMISSION_DISPATCHED=$(jq -r '.admission_dispatched // false' "$STATE_FILE")
+  ADMISSION_SCOPE=$(jq -r '.admission_scope // "null"' "$STATE_FILE")
   CHECKS_PASSING=$(jq -r '.checks_passing // false' "$STATE_FILE")
   MERGE_ATTEMPTED=$(jq -r '.merge_attempted // false' "$STATE_FILE")
 else
@@ -95,8 +117,16 @@ else
   LEVEL="${CLI_LEVEL:-1}"
   TARGET="${CLI_TARGET:-$DETECTED_TARGET}"
   APPROVER="null"
+  REVIEW_HEAD_SHA=null
+  REVIEWER_MODEL=null
+  REVIEWER_EFFORT=null
+  REVIEW_P0_COUNT=-1
+  REVIEW_P1_COUNT=-1
   BOT_APPROVED=false
-  HUMAN_APPROVED=false
+  USER_ACCOUNT_APPROVED=false
+  SELF_REVIEW_ADMITTED=false
+  ADMISSION_DISPATCHED=false
+  ADMISSION_SCOPE=null
   CHECKS_PASSING=false
   MERGE_ATTEMPTED=false
 fi
@@ -163,9 +193,14 @@ Record `approver` and `verdict_source` in state — this is the
 audit-trail key the PR UI uses to attribute the action to the bot's
 token-principal.
 
-If `verdict == approve`: call the approve API for the target (see
-`gh_pull_req_review.md` / `bb_pull_req_review.md`), set
-`bot_approved=true`, `status=awaiting-checks`.
+If `verdict == approve`, preserve its exact head, reviewer model/effort, and
+P0/P1 counts. For GitHub, compare stable provider actor and author IDs. An
+independent credential may call the provider approval API. A same-author
+credential must never do so: when the review is high-capability, effort is
+`high|xhigh|max|ultra`, and P0/P1 are both zero, dispatch
+`review-admission.yml` on `main` once for the exact head/base scope with
+`PASS:0:0`. Otherwise set a terminal blocked status and cancel. Follow
+`gh_pull_req_review.md` for the complete dispatch and invalidation contract.
 
 If `verdict == request-changes`: post inline comments (handled by
 sub-skill), set `bot_approved=false`, status stays `watching`.
@@ -195,13 +230,21 @@ if [ "$DECISION" = "APPROVED" ]; then
 fi
 ```
 
-#### L2 — Bot approves + auto-merges (poll 60s up to 24h)
+#### L2 — Scoped admission/provider approval + merge (poll 60s up to 24h)
 
-1. Run review pass (Step 3) and bot-verdict (Step 5).
-2. After bot-approve, poll checks: `gh pr checks ${PR_NUMBER} --json state`.
+1. Run the review pass and exact-head bot verdict. Same-author GitHub
+   credentials dispatch `SPipe Self Review Admission`; independent credentials
+   may submit provider approval. Persist the dispatch scope and never redispatch
+   it every cycle.
+2. Poll required checks and the exact-head admission when dispatched.
    - If green → `CHECKS_PASSING=true`, `status=awaiting-checks` cleared.
    - If failing → cycle continues, `status=watching`.
-3. If `BOT_APPROVED && CHECKS_PASSING && !MERGE_ATTEMPTED`:
+   - Admission `failure`, `action_required`, cancellation, timeout, or skip →
+     `status=blocked-self-review-admission`; save, comment once, cancel, exit.
+     Push/base/PR/policy/ruleset changes and expiry require a fresh review and
+     explicitly restarted dispatch.
+3. If `(BOT_APPROVED || SELF_REVIEW_ADMITTED) && CHECKS_PASSING &&
+   !MERGE_ATTEMPTED`:
    ```bash
    MERGE_ATTEMPTED=true
    gh pr merge "${PR_NUMBER}" --squash --delete-branch
@@ -209,18 +252,22 @@ fi
    Status = `merged` on success; otherwise classify failure (see
    *Failure Modes*).
 
-#### L3 — Wait for human approval + merge (poll 5m up to 7d)
+#### L3 — Wait for eligible independent provider user account
 
-1. Run review pass (Step 3). Do NOT bot-approve. Set
-   `status=awaiting-human`.
-2. Poll for human approval:
+1. Run review pass (Step 3). Do not bot-approve. Set
+   `status=awaiting-provider-user`.
+2. Reset `USER_ACCOUNT_APPROVED=false`, ignoring persisted
+   `user_account_approved` and legacy `human_approved`. Recompute it from the
+   current provider review records: require the current exact head, the latest
+   review per actor to be `APPROVED`, an actor ID different from the author,
+   and provider type `User`, not GitHub App/Bot. This account classification
+   does not prove that a human operated it. Use the fail-closed lookup in
+   `gh_pull_req_review.md`.
    ```bash
-   HUMAN=$(gh pr view "${PR_NUMBER}" --json reviews \
-     --jq '[.reviews[] | select(.state=="APPROVED")] | length')
-   if [ "$HUMAN" -gt 0 ]; then HUMAN_APPROVED=true; fi
+   # Resolve author, review actors, and each actor's provider type fail-closed.
    ```
 3. Poll checks (same as L2).
-4. If `HUMAN_APPROVED && CHECKS_PASSING && !MERGE_ATTEMPTED`:
+4. If `USER_ACCOUNT_APPROVED && CHECKS_PASSING && !MERGE_ATTEMPTED`:
    merge via `gh pr merge ${PR_NUMBER} --squash --delete-branch`.
 
 #### Compatibility note (L1 vs arch doc)
@@ -242,9 +289,12 @@ stderr for `HTTP 4xx`. Map:
 
 | HTTP | Status field        | Action                                                         |
 |------|---------------------|----------------------------------------------------------------|
-| 403  | `blocked`           | Post one comment ("Bot lacks merge permission — please merge manually"), save state, **cancel schedule, exit**. |
+| 403  | `blocked`           | Post one comment ("Credential lacks permission"), save state, **cancel schedule, exit**. |
 | 409  | `blocked-conflict`  | Post one comment ("Merge conflict — needs manual rebase"), save state, **cancel schedule, exit**. |
 | 401  | `blocked-auth`      | Post one comment ("Bot token expired/invalid — re-run setup"), save state, **cancel schedule, exit**. |
+| rejected provider approval | `blocked-provider-approval` | Same-author or ineligible/rejected provider approval: never retry; save, comment once, **cancel, exit**. |
+| rejected/invalid admission | `blocked-self-review-admission` | Save exact scope/error, comment once, **cancel, exit**. |
+| other nonzero API exit | `blocked` | Preserve diagnostics; do not retry an unclassified policy/auth failure. |
 
 `cancel_schedule()` is shorthand for the dispatcher's stop hook:
 `/repo_and_pull_req review stop <pr#>` — that's the actual mechanism
@@ -267,8 +317,16 @@ jq -n \
   --argjson level "$LEVEL" \
   --arg approver "$APPROVER" \
   --arg vsrc "${VERDICT_SOURCE:-null}" \
+  --arg review_head "$REVIEW_HEAD_SHA" \
+  --arg reviewer_model "$REVIEWER_MODEL" \
+  --arg reviewer_effort "$REVIEWER_EFFORT" \
+  --argjson review_p0 "$REVIEW_P0_COUNT" \
+  --argjson review_p1 "$REVIEW_P1_COUNT" \
   --argjson bot_app "$BOT_APPROVED" \
-  --argjson hum_app "$HUMAN_APPROVED" \
+  --argjson user_app "$USER_ACCOUNT_APPROVED" \
+  --argjson self_app "$SELF_REVIEW_ADMITTED" \
+  --argjson admission_sent "$ADMISSION_DISPATCHED" \
+  --arg admission_scope "$ADMISSION_SCOPE" \
   --argjson checks "$CHECKS_PASSING" \
   --argjson merged "$MERGE_ATTEMPTED" \
   --argjson cyc $((CYCLE_COUNT + 1)) \
@@ -278,7 +336,12 @@ jq -n \
   --arg status "${STATUS:-watching}" \
   '{pr_number:$pr, branch:$br, jira_key:$jk, target:$target, level:$level,
     approver:$approver, verdict_source:$vsrc,
-    bot_approved:$bot_app, human_approved:$hum_app,
+    review_head_sha:$review_head, reviewer_model:$reviewer_model,
+    reviewer_effort:$reviewer_effort, review_p0_count:$review_p0,
+    review_p1_count:$review_p1,
+    bot_approved:$bot_app, user_account_approved:$user_app,
+    self_review_admitted:$self_app, admission_dispatched:$admission_sent,
+    admission_scope:$admission_scope,
     checks_passing:$checks, merge_attempted:$merged,
     cycle_count:$cyc, last_check:$now,
     comments_processed:$cmts, fixes_applied:$fixes,
@@ -287,14 +350,14 @@ jq -n \
 
 ## Audit Trail (per arch §3-Level Review State Machine)
 
-- `approver` records WHICH bot agent produced the verdict (`codex` |
-  `claude` | `human`).
+- `approver` records which review source produced the verdict (`codex` |
+  `claude` | `provider-user`). `provider-user` is an account class, not proof
+  of human operation.
 - `verdict_source` records the agent name (e.g. `codex:rescue`,
   `claude:general-purpose`) for forensic traceability.
-- The PR UI shows the token-principal name (the bot account that owns
-  the GitHub/Bitbucket token) — that's the entity that POSTed the
-  approve. `approver` + `verdict_source` together let you tie the
-  POSTer to the agent that decided.
+- The PR UI shows the token principal only when a provider review was posted.
+  Same-author GitHub review instead produces an exact-head self-attested status
+  check; `approver` names the reviewing model, not a provider approver.
 
 ## Context Budget
 
@@ -311,8 +374,8 @@ comments.
 | Max cycles reached | `status=max-cycles`, cancel schedule, notify    |
 | 401/403/409        | `status=blocked*`, post one comment, **cancel** |
 | L1 + APPROVED      | Auto-rebase, merge, clean up                    |
-| L2 done            | bot-approve + checks + merge → `merged`         |
-| L3 done            | human-approve + checks + merge → `merged`       |
+| L2 done            | admission/provider approval + checks + merge → `merged` |
+| L3 done            | eligible provider `User` approval + checks + merge → `merged` |
 
 ## Conflict Resolution
 

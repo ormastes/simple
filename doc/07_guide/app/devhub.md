@@ -135,6 +135,45 @@ devhub github repo clone owner/name
 
 Requires: `gh` installed and authenticated.
 
+#### Protected PR handoff
+
+Use `devhub github pr review <PR> --approve` only from an account that is
+eligible to review that pull request. An author (including an agent acting
+through the author's `gh` credential) must not self-approve. In this repository,
+a high-capability exact-head review at `high` effort or above that reports zero
+P0/P1 findings can request the live scoped gate instead:
+
+```bash
+gh workflow run review-admission.yml --ref main \
+  -f pull_request_number="$PR_NUMBER" \
+  -f session_id="$SESSION_ID" \
+  -f reviewer_model="$REVIEWER_MODEL" \
+  -f reviewer_effort="$REVIEWER_EFFORT" \
+  -f self_attestation='PASS:0:0'
+```
+
+The trusted default-branch workflow resolves the PR head, base, merge base,
+diff, active protected ruleset, authorized dispatcher, and external policy
+server-side. On success it emits `SPipe Self Review Admission` on that exact
+head for ten minutes. This check is explicitly self-attested: it is neither a
+GitHub provider `APPROVED` review nor independent authentication. Do not
+describe the reviewing model as a provider approver.
+
+Dispatch only after the exact-head review has completed. Persist the dispatched
+head/base scope so a scheduled loop does not submit the same request every
+cycle. A later push, PR/base edit, protected-base push, policy/ruleset dispatch,
+or expiry invalidates the prior check. Stop/cancel the loop on a rejected or
+invalidated request; after correcting the cause, restart with a fresh review and
+new dispatch. The detailed policy contract is
+`doc/07_guide/infra/self_review_policy_db.md`.
+
+GitHub branch protection remains authoritative for required checks and any
+configured provider approvals. When protection requires a PR, push the reviewed
+branch rather than `main`, open/update the PR, and use auto-merge only after the
+repository can satisfy its protected policy; enabling it merely queues the
+merge. `--no-verify` skips local Git hooks only; it does not satisfy or bypass
+GitHub checks.
+
 ### `bb` (alias `b`) — Bitbucket Cloud
 
 Real REST client (`adapter_bitbucket_curl.spl`), not a passthrough — requires

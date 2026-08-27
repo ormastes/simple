@@ -1,0 +1,138 @@
+"""
+## Purpose and audience
+Purpose: Prove that SSH channel requests are bound to one live session channel.
+Audience: SimpleOS SSH and scheduler-boundary maintainers.
+"""
+# @req: REQ-OS-APPS-001
+
+use std.spipe.*
+use std.spec.step
+use os.apps.sshd.ssh_channel.{
+    ChannelTable, ChannelType, ChannelTerminalRequestV1,
+    DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET
+}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_string}
+use os.apps.sshd.ssh_session.{
+    ssh_channel_pty_request_payload_valid,
+    ssh_channel_window_change_payload_valid,
+    ssh_channel_exec_request_payload_valid,
+    ssh_scp_source_path_from_exec_payload_v1
+}
+
+describe "SSH channel request authority is fail-closed":
+    it "rejects terminal requests for unknown and non-session channels":
+        step("Reject requests that have no live session-channel owner")
+        var table = ChannelTable.new()
+        val forwarded = table.open(
+            ChannelType.DirectTcpip, 8u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.begin_terminal_request(
+            77u32, ChannelTerminalRequestV1.Exec)).to_be(false)
+        expect(table.begin_terminal_request(
+            forwarded, ChannelTerminalRequestV1.Exec)).to_be(false)
+
+    it "commits exactly one terminal request per session channel":
+        step("Commit one terminal request and reject every competing replay")
+        var table = ChannelTable.new()
+        val channel = table.open(
+            ChannelType.Session, 9u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Exec)).to_be(true)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Exec)).to_be(false)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Shell)).to_be(false)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Subsystem)).to_be(false)
+
+    it "binds shell input to one exact live channel and transfers only after close":
+        step("Keep sibling channel input outside the sole mutable shell owner")
+        var table = ChannelTable.new()
+        val owner = table.open(
+            ChannelType.Session, 21u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        val sibling = table.open(
+            ChannelType.Session, 22u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.begin_terminal_request(
+            owner, ChannelTerminalRequestV1.Shell)).to_be(true)
+        expect(table.shell_input_allowed(owner)).to_be(true)
+        expect(table.shell_input_allowed(sibling)).to_be(false)
+        expect(table.begin_terminal_request(
+            sibling, ChannelTerminalRequestV1.Shell)).to_be(false)
+
+        expect(table.close(owner)).to_be(true)
+        expect(table.shell_input_allowed(owner)).to_be(false)
+        expect(table.shell_input_allowed(sibling)).to_be(false)
+        expect(table.begin_terminal_request(
+            sibling, ChannelTerminalRequestV1.Shell)).to_be(true)
+        expect(table.shell_input_allowed(sibling)).to_be(true)
+
+    it "permits window changes only after a PTY-backed shell":
+        step("Bind geometry updates to the same PTY and shell owner")
+        var table = ChannelTable.new()
+        val channel = table.open(
+            ChannelType.Session, 10u32, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(table.window_change_allowed(channel)).to_be(false)
+        expect(table.mark_pty_requested_once(channel)).to_be(true)
+        expect(table.mark_pty_requested_once(channel)).to_be(false)
+        expect(table.window_change_allowed(channel)).to_be(false)
+        expect(table.begin_terminal_request(
+            channel, ChannelTerminalRequestV1.Shell)).to_be(true)
+        expect(table.window_change_allowed(channel)).to_be(true)
+
+    it "validates complete bounded pty exec and window bodies":
+        step("Reject truncation trailing bytes and empty executable commands")
+        var pty: [u8] = []
+        pty = ssh_put_text(pty, "xterm")
+        pty = ssh_put_u32(pty, 80u32)
+        pty = ssh_put_u32(pty, 24u32)
+        pty = ssh_put_u32(pty, 640u32)
+        pty = ssh_put_u32(pty, 480u32)
+        pty = ssh_put_string(pty, [0u8])
+        expect(ssh_channel_pty_request_payload_valid(pty, 0u64)).to_be(true)
+        pty.push(1u8)
+        expect(ssh_channel_pty_request_payload_valid(pty, 0u64)).to_be(false)
+
+        var geometry: [u8] = []
+        geometry = ssh_put_u32(geometry, 80u32)
+        geometry = ssh_put_u32(geometry, 24u32)
+        geometry = ssh_put_u32(geometry, 640u32)
+        geometry = ssh_put_u32(geometry, 480u32)
+        expect(ssh_channel_window_change_payload_valid(geometry, 0u64)).to_be(true)
+        geometry.push(0u8)
+        expect(ssh_channel_window_change_payload_valid(geometry, 0u64)).to_be(false)
+
+        val command = ssh_put_text([], "/bin/hello")
+        expect(ssh_channel_exec_request_payload_valid(command, 0u64)).to_be(true)
+        expect(ssh_channel_exec_request_payload_valid(
+            ssh_put_text([], ""), 0u64)).to_be(false)
+
+    it "admits only one exact SCP source command and safe absolute path":
+        step("Parse the bounded SSH exec string without shell interpretation")
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot/hello.o"), 0u64)
+        ).to_equal("/boot/hello.o".bytes())
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -t /boot/hello.o"), 0u64).len()
+        ).to_equal(0u64)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -pf /boot/hello.o"), 0u64).len()
+        ).to_equal(0u64)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot/hello.o extra"), 0u64).len()
+        ).to_equal(0u64)
+
+    it "rejects SCP traversal control bytes and trailing exec payload bytes":
+        step("Keep unsafe path bytes and ambiguous framing outside filesystem access")
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot/../secret"), 0u64).len()
+        ).to_equal(0u64)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            ssh_put_text([], "scp -f /boot//hello.o"), 0u64).len()
+        ).to_equal(0u64)
+        var control_path = ssh_put_text([], "scp -f /boot/hello")
+        control_path[control_path.len() - 1u64] = 10u8
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            control_path, 0u64).len()).to_equal(0u64)
+        var trailing = ssh_put_text([], "scp -f /boot/hello.o")
+        trailing.push(0u8)
+        expect(ssh_scp_source_path_from_exec_payload_v1(
+            trailing, 0u64).len()).to_equal(0u64)

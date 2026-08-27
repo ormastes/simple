@@ -200,6 +200,10 @@ scan_tree() {
           if (!(k in MOD)) MOD[k] = p
           else if (index(" " MOD[k] " ", " " p " ") == 0) MOD[k] = MOD[k] " " p
       }
+      function add_cr_key(k, p) {
+          if (!(k in CR_MOD)) CR_MOD[k] = p
+          else if (index(" " CR_MOD[k] " ", " " p " ") == 0) CR_MOD[k] = CR_MOD[k] " " p
+      }
 
       # ---- pass 1: build the module index ----------------------------------
       NR == FNR {
@@ -207,7 +211,13 @@ scan_tree() {
           NFILES = FNR
           p = $0
           MOD_PATHS[p] = 1
-          if (p ~ /^src\/lib\//) {
+          if (p ~ /^src\/compiler_rust\/lib\/std\/src\//) {
+              rest = p
+              sub(/^src\/compiler_rust\/lib\/std\/src\//, "", rest)
+              add_cr_key(keyify(rest), p)
+              add_cr_key("std." keyify(rest), p)
+              addkey("compiler_rust.lib.std.src." keyify(rest), p)
+          } else if (p ~ /^src\/lib\//) {
               rest = substr(p, 9)                     # after "src/lib/"
               addkey("std." keyify(rest), p)
               addkey(keyify(rest), p)                 # bare form: common.ui.widget
@@ -257,7 +267,7 @@ scan_tree() {
           printf("#COUNT %d\n", CHECKED)
       }
 
-      function scanfile(p,   line, n, j, t, kw, nm) {
+      function scanfile(p, depth,   line, n, j, t, kw, nm, mod, fl, nc, C, ci) {
           if (p in SCANNED) return
           SCANNED[p] = 1
           while ((getline line < p) > 0) {
@@ -293,6 +303,24 @@ scan_tree() {
                       if (nm != "") PUB[p SUBSEP nm] = 1
                   }
               }
+              # Public wildcard facades are part of the target module surface.
+              # Follow exactly one hop: enough for canonical
+              # `main.spl -> _Impl.*` facades without turning this cheap gate
+              # into a recursive loader or making cycles possible.
+              if (depth < 1 && line ~ /^[ \t]*(pub|export)[ \t]+use[ \t]+[A-Za-z_][A-Za-z_0-9.]*\.\*[ \t]*(#.*)?$/) {
+                  mod = line
+                  sub(/^[ \t]*(pub|export)[ \t]+use[ \t]+/, "", mod)
+                  sub(/\.\*[ \t]*(#.*)?$/, "", mod)
+                  fl = resolved_modfile(p, mod)
+                  if (fl != "") {
+                      nc = split(fl, C, / /)
+                      for (ci = 1; ci <= nc; ci++) {
+                          if (index(" " REEXPORT_FILES[p] " ", " " C[ci] " ") == 0)
+                              REEXPORT_FILES[p] = REEXPORT_FILES[p] " " C[ci]
+                          scanfile(C[ci], depth + 1)
+                      }
+                  }
+              }
               # whole-word token set (the precision-preserving fallback)
               n = split(line, W, /[^A-Za-z_0-9]+/)
               for (j = 1; j <= n; j++) if (W[j] != "") WORD[p SUBSEP W[j]] = 1
@@ -303,17 +331,66 @@ scan_tree() {
       # Resolve a module path to a space-separated candidate file list, or "".
       function modfile(m) { return (m in MOD) ? MOD[m] : "" }
 
+      # A bare module may name a sibling of the importing file (`use config`).
+      # Prefer explicit loader roots; use lexical fallback only for one segment
+      # so dotted and parent-relative paths are never guessed into existence.
+      function relative_modfile(p, m,   d, f, ini) {
+          if (m ~ /\./) return ""
+          d = p; sub(/\/[^\/]*$/, "", d)
+          f = d "/" m ".spl"
+          if (f in MOD_PATHS) return f
+          ini = d "/" m "/__init__.spl"
+          if (ini in MOD_PATHS) return ini
+          return ""
+      }
+      function cr_relative_modfile(p, m,   d, rel, f, ini) {
+          if (p !~ /^src\/compiler_rust\/lib\/std\//) return ""
+          d = p; sub(/\/[^\/]*$/, "", d)
+          rel = m
+          if (rel ~ /^\.\./) {
+              sub(/^\.\./, "", rel)
+              sub(/\/[^\/]*$/, "", d)
+          } else if (rel ~ /^\./) {
+              sub(/^\./, "", rel)
+          }
+          gsub(/\./, "/", rel)
+          f = d "/" rel ".spl"
+          if (f in MOD_PATHS) return f
+          ini = d "/" rel "/__init__.spl"
+          if (ini in MOD_PATHS) return ini
+          return ""
+      }
+      function resolved_modfile(p, m,   f) {
+          f = cr_relative_modfile(p, m)
+          if (f != "") return f
+          if (p ~ /^src\/compiler_rust\/lib\/std\// && (m in CR_MOD)) return CR_MOD[m]
+          f = modfile(m)
+          return (f != "") ? f : relative_modfile(p, m)
+      }
+
       # Does file f (plus its __init__ sibling, one hop) mention name s?
-      function one_mentions(f, s,   d, ini) {
+      function one_mentions(f, s,   d, ini, n, R, i) {
           if ((f SUBSEP s) in WORD) return 1
           d = f; sub(/\/[^\/]*$/, "", d); ini = d "/__init__.spl"
           if (ini != f && (ini in SCANNED) && ((ini SUBSEP s) in WORD)) return 1
+          n = split(REEXPORT_FILES[f] " " REEXPORT_FILES[ini], R, / /)
+          for (i = 1; i <= n; i++) if (R[i] != "" && ((R[i] SUBSEP s) in WORD)) return 1
           return 0
       }
-      function one_pub(f, s,   d, ini) {
+      function one_pub(f, s,   d, ini, n, R, i) {
           if ((f SUBSEP s) in PUB) return 1
           d = f; sub(/\/[^\/]*$/, "", d); ini = d "/__init__.spl"
           if (ini != f && (ini SUBSEP s) in PUB) return 1
+          n = split(REEXPORT_FILES[f] " " REEXPORT_FILES[ini], R, / /)
+          for (i = 1; i <= n; i++) if (R[i] != "" && ((R[i] SUBSEP s) in PUB)) return 1
+          return 0
+      }
+      function one_priv(f, s,   d, ini, n, R, i) {
+          if ((f SUBSEP s) in PRIV) return 1
+          d = f; sub(/\/[^\/]*$/, "", d); ini = d "/__init__.spl"
+          if (ini != f && (ini SUBSEP s) in PRIV) return 1
+          n = split(REEXPORT_FILES[f] " " REEXPORT_FILES[ini], R, / /)
+          for (i = 1; i <= n; i++) if (R[i] != "" && ((R[i] SUBSEP s) in PRIV)) return 1
           return 0
       }
       # Across ALL candidate files for the module key.
@@ -324,7 +401,7 @@ scan_tree() {
       }
       function any_priv(fl, s,   n, C, i) {
           n = split(fl, C, / /)
-          for (i = 1; i <= n; i++) if ((C[i] SUBSEP s) in PRIV) return 1
+          for (i = 1; i <= n; i++) if (one_priv(C[i], s)) return 1
           return 0
       }
       function any_mentions(fl, s,   n, C, i) {
@@ -368,6 +445,9 @@ scan_tree() {
               sub(/[})].*$/, "", mem)
           } else {
               mod = s; mem = ""
+              # Whole-module aliases bind the module under a local name; the
+              # alias is not part of the module path (`use M as local`).
+              sub(/[ \t]+as[ \t]+[A-Za-z_][A-Za-z_0-9]*[ \t]*$/, "", mod)
           }
           sub(/[ \t.]+$/, "", mod)
           gsub(/[ \t]/, "", mod)
@@ -388,7 +468,7 @@ scan_tree() {
           # the trailing segment as a MEMBER of the parent.
           if (!isglob && mem == "" && mod ~ /\.[A-Za-z_][A-Za-z_0-9]*$/) {
               par = mod; sub(/\.[^.]*$/, "", par)
-              pfl = modfile(par)
+              pfl = resolved_modfile(p, par)
               if (pfl != "") {
                   npc = split(pfl, PC, / /)
                   for (pci = 1; pci <= npc; pci++) {
@@ -400,7 +480,7 @@ scan_tree() {
               }
           }
           if (!isglob && mem != "") {
-              fl = modfile(mod)
+              fl = resolved_modfile(p, mod)
               if (fl != "") {
                   nc = split(fl, C, / /)
                   for (ci = 1; ci <= nc; ci++) {
@@ -424,7 +504,7 @@ scan_tree() {
           # a pure false positive, so the (short, explicit) list is named here
           # rather than silently absorbed by a wildcard.
           if (mod == "std.spec.step") return
-          f = modfile(mod)
+          f = resolved_modfile(p, mod)
           if (f == "") {
               # `use M.Symbol` with NO braces is a legal single-symbol import,
               # not a module path. Measured on this tree: 982 of 5,836
@@ -437,7 +517,7 @@ scan_tree() {
               if (par ~ /\.[A-Za-z_][A-Za-z_0-9]*$/) {
                   sym = par; sub(/^.*\./, "", sym)
                   sub(/\.[^.]*$/, "", par)
-                  pf = modfile(par)
+                  pf = resolved_modfile(p, par)
                   if (pf != "") {
                       if (any_pub(pf, sym)) return
                       if (any_mentions(pf, sym)) {
@@ -617,11 +697,89 @@ EOF
         *) echo "selftest FAIL: missing tracked bytes did not produce scanner ERROR" >&2; st_fail=1 ;;
     esac
 
+    # 11. A bare module resolves relative to the importing package, without
+    # becoming a basename-wide global alias.
+    rm -rf "$F/relative"; mkdir -p "$F/relative/src/app/pkg" "$F/relative/test"
+    cat > "$F/relative/src/app/pkg/config.spl" <<'EOF'
+pub class Config:
+    enabled: bool
+EOF
+    cat > "$F/relative/src/app/pkg/main.spl" <<'EOF'
+use config.{Config}
+EOF
+    run_scan "$F/relative" "$TMP/st11.txt"
+    if [ "$RS_COUNT" -eq 0 ] || [ -s "$TMP/st11.txt" ]; then
+        echo "selftest FAIL: relative sibling module did not resolve (count=$RS_COUNT)" >&2
+        cat "$TMP/st11.txt" >&2; st_fail=1
+    fi
+
+    # 12. Public wildcard facades expose only members actually provided by
+    # their direct implementation target.
+    rm -rf "$F/reexport"; mkdir -p "$F/reexport/src/app/lint" "$F/reexport/test"
+    cat > "$F/reexport/src/app/lint/impl.spl" <<'EOF'
+pub class Linter:
+    enabled: bool
+EOF
+    cat > "$F/reexport/src/app/lint/main.spl" <<'EOF'
+export use app.lint.impl.*
+EOF
+    cat > "$F/reexport/test/ok_spec.spl" <<'EOF'
+use app.lint.main.{Linter}
+EOF
+    run_scan "$F/reexport" "$TMP/st12-ok.txt"
+    if [ "$RS_COUNT" -eq 0 ] || grep -q '^\(MODULE_MISSING\|MEMBER_MISSING\)' "$TMP/st12-ok.txt"; then
+        echo "selftest FAIL: one-hop wildcard re-export did not resolve (count=$RS_COUNT)" >&2
+        cat "$TMP/st12-ok.txt" >&2; st_fail=1
+    fi
+    cat > "$F/reexport/test/bad_spec.spl" <<'EOF'
+use app.lint.main.{Absent}
+EOF
+    run_scan "$F/reexport" "$TMP/st12-bad.txt"
+    grep -q '^MEMBER_MISSING.*app\.lint\.main.*Absent' "$TMP/st12-bad.txt" || {
+        echo "selftest FAIL: wildcard re-export accepted an absent member" >&2; st_fail=1; }
+
+    # 13. The compiler-Rust stdlib has its own loader root. It must resolve for
+    # importers inside that package without polluting the repository std root.
+    rm -rf "$F/scoped-root"
+    mkdir -p "$F/scoped-root/src/lib/nogc_sync_mut" \
+        "$F/scoped-root/src/compiler_rust/lib/std/src" "$F/scoped-root/test"
+    cat > "$F/scoped-root/src/lib/nogc_sync_mut/foo.spl" <<'EOF'
+pub class GlobalFoo:
+    enabled: bool
+EOF
+    cat > "$F/scoped-root/src/compiler_rust/lib/std/src/foo.spl" <<'EOF'
+pub class LocalFoo:
+    enabled: bool
+EOF
+    cat > "$F/scoped-root/src/compiler_rust/lib/std/src/check.spl" <<'EOF'
+use std.foo.{LocalFoo}
+EOF
+    mkdir -p "$F/scoped-root/src/compiler_rust/lib/std/src/pkg/nested" \
+        "$F/scoped-root/src/compiler_rust/lib/std/src/pkg/child"
+    cat > "$F/scoped-root/src/compiler_rust/lib/std/src/pkg/nested/item.spl" <<'EOF'
+pub class NestedItem:
+    enabled: bool
+EOF
+    cat > "$F/scoped-root/src/compiler_rust/lib/std/src/pkg/main.spl" <<'EOF'
+use nested.item.{NestedItem}
+EOF
+    cat > "$F/scoped-root/src/compiler_rust/lib/std/src/pkg/child/main.spl" <<'EOF'
+use ..nested.item.{NestedItem}
+EOF
+    cat > "$F/scoped-root/test/root_spec.spl" <<'EOF'
+use std.foo.{GlobalFoo}
+EOF
+    run_scan "$F/scoped-root" "$TMP/st13.txt"
+    if [ "$RS_COUNT" -eq 0 ] || [ -s "$TMP/st13.txt" ]; then
+        echo "selftest FAIL: compiler-Rust loader root leaked or did not resolve (count=$RS_COUNT)" >&2
+        cat "$TMP/st13.txt" >&2; st_fail=1
+    fi
+
     if [ "$st_fail" -ne 0 ]; then
         echo "ERROR — nothing was checked (selftest failed)"
         exit 2
     fi
-    echo "selftest: 10 fixture(s) OK"
+    echo "selftest: 13 fixture(s) OK"
 }
 
 selftest

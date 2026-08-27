@@ -6,9 +6,11 @@
 
 use std.io_runtime.{platform_name}
 
-use std.io_runtime.{file_exists, file_read_bytes, env_get}
+use std.io_runtime.{file_exists, file_read_bytes, read_file_text, env_get}
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
-use app.io.rt_compile_stub.{rt_compile_to_llvm_ir}
+use app.io._CliCompile.compile_llvm_ir_facade.{
+    cli_compile_source_llvm_artifacts
+}
 
 # ============================================================================
 # Test programs
@@ -248,32 +250,35 @@ fn check_smf_compile() -> bool:
     smf_size >= 300
 
 # ============================================================================
-# Check 5: LLVM IR Generation (rt_compile_to_llvm_ir)
+# Check 5: LLVM IR Generation (real compiler pipeline)
 # ============================================================================
 
 fn check_llvm_ir_generation() -> bool:
     print ""
-    print "--- Check 5: LLVM IR Generation (rt_compile_to_llvm_ir) ---"
+    print "--- Check 5: LLVM IR Generation (source -> HIR -> MIR -> LLVM) ---"
 
     val test_src = "/tmp/bootstrap_check_ir.spl"
     file_write(test_src, get_hello_program())
 
-    val result = rt_compile_to_llvm_ir(test_src, "x86_64-unknown-linux-gnu", false)
-    val ir = result[0]
-    val errors = result[1]
-    val code = result[2]
+    val artifacts = cli_compile_source_llvm_artifacts(
+        test_src, "x86_64-unknown-linux-gnu", false,
+        "/tmp", "bootstrap_check_ir", false)
+    var ir = ""
+    if artifacts.is_success() and artifacts.unit_count() == 1:
+        ir = read_file_text(artifacts.ir_files[0])
 
     file_delete(test_src)
+    for ir_file in artifacts.ir_files:
+        file_delete(ir_file)
 
-    if code == 0 and ir.len() > 0:
+    if (artifacts.is_success() and ir.contains("Hello from bootstrap!") and
+        ir.contains("target triple = \"x86_64-unknown-linux-gnu\"") and
+        ir.contains("define ") and
+        not ir.contains("minimal stub")):
         print "  PASS: LLVM IR generated ({ir.len()} bytes)"
         return true
 
-    if errors.contains("not yet implemented"):
-        print "  WARN: rt_compile_to_llvm_ir is a stub (not implemented in bootstrap binary)"
-        print "  Info: {errors.split(\".\")[0]}"
-    else:
-        print "  FAIL: LLVM IR generation failed: {errors}"
+    print "  FAIL: real LLVM IR generation failed: {artifacts.error}"
 
     false
 
@@ -548,8 +553,7 @@ fn print_summary(results: [bool]):
     print ""
     print "Blockers for full self-hosting:"
     print "  1. SMF compile produces stub bytecode (ret-only, no real codegen)"
-    print "  2. rt_compile_to_llvm_ir not implemented in bootstrap binary"
-    print "  3. CompilerDriver can't load in interpreter (generics in MIR/HIR)"
+    print "  2. CompilerDriver can't load in interpreter (generics in MIR/HIR)"
     print ""
     print "Next steps (in priority order):"
     print "  A. Enhance native compile (Simple->C) to handle more language features"

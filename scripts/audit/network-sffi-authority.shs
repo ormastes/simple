@@ -1,0 +1,48 @@
+#!/bin/sh
+set -eu
+
+# Source-only ownership ratchet. This deliberately does not promote the
+# legacy providerless declarations: their absence is enforced, while the
+# backed raw owners remain unsafe and unsigned until evidence admission.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_async_mut/net/sffi.spl"
+sync_owner="$root/src/lib/nogc_sync_mut/net/sffi.spl"
+gc_facade="$root/src/lib/gc_async_mut/net/sffi.spl"
+legacy_facade="$root/src/lib/gc_async_mut/net/ffi.spl"
+runtime_symbols="$root/src/compiler_rust/common/src/runtime_symbols.rs"
+native_registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern"
+http_owner="$root/src/lib/nogc_sync_mut/net/http.spl"
+http_async_facade="$root/src/lib/nogc_async_mut/net/http.spl"
+http_gc_facade="$root/src/lib/gc_async_mut/net/http.spl"
+
+for facade in "$gc_facade" "$legacy_facade"; do
+    ! grep -q '^extern fn ' "$facade"
+    grep -q '^export use ' "$facade"
+done
+
+[ "$(grep -c '^extern fn ' "$owner")" -eq 1 ]
+[ "$(grep -c '^extern fn ' "$sync_owner")" -eq 0 ]
+grep -q '^export use std.nogc_async_mut.net.sffi.{bytes_to_string, file_write_bytes}$' "$sync_owner"
+grep -q '^export use std.nogc_async_mut.http.url.{url_encode, url_decode}$' "$owner"
+grep -q '^export use std.nogc_sync_mut.http.url.{url_encode, url_decode}$' "$sync_owner"
+
+! grep -q '^extern fn http_request(' "$owner" "$sync_owner"
+grep -q '"rt_http_request_v2"' "$runtime_symbols" "$native_registry"
+grep -R -q 'insert.*"rt_http_request_v2"' "$interpreter"
+grep -q 'http_request_v2_raw' "$http_owner"
+for facade in "$http_async_facade" "$http_gc_facade"; do
+    grep -q '^export use std.nogc_sync_mut.net.http.{' "$facade"
+    ! grep -q '^extern fn ' "$facade"
+    ! grep -q 'http_request_v2_raw(' "$facade"
+done
+
+# The sole backed declaration in this owner must remain distinct from the
+# providerless inventory.
+grep -q '^extern fn rt_file_write_bytes(path: text, data: \[u8\]) -> bool$' "$owner"
+grep -B1 -q '@unsafe(reason: .*contract: false means the write failed.*capabilities: \[ffi\])' "$owner"
+grep -q 'unsafe(capabilities: \[ffi\]):' "$owner"
+grep -q '"rt_file_write_bytes"' "$runtime_symbols" "$native_registry"
+
+echo "network SFFI authority: PASS (3 raw-free compatibility facades; canonical typed TCP/UDP/HTTP and Pure-Simple URL; 0 providerless identities; raw providers remain unsafe/unsigned/unverified)"

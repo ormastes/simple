@@ -18,7 +18,15 @@ use std.log.{debug, log_get_level, LOG_DEBUG}
 use compiler.mir.mir_data.*
 use compiler.interp.execir.{ExecIrModule, ExecIrArenaCtx, execir_encode_call, execir_binop_code}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{env_get_opt}
+
+@unsafe(reason: "raw enum discriminant used only for corrupt-value diagnostics", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+
+@always_inline
+fn _mir_interp_enum_discriminant_raw(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Cohesion split (2026-08-18): class-independent pieces live in sibling
 # modules; re-exported here so the public surface of this module is unchanged.
@@ -28,8 +36,6 @@ export use compiler.interp.mir_interp_runtime.{mir_interp_call_runtime_fn, f64_t
 # Miri-mode: dynamic UB checks too expensive for normal runs, gated behind
 # SIMPLE_STRICT_INTERP=1 so default interpreter perf/behavior is untouched.
 # Read once at interpreter creation (see MirInterpreter.strict_mode).
-extern fn rt_env_get(key: text) -> text
-
 
 # ============================================================================
 # MIR Interpreter
@@ -91,6 +97,7 @@ class MirInterpreter:
     execir_arenas: {text: ExecIrArenaCtx}
     execir_verdicts: {text: i64}
     execir_probe_count: i64
+    pending_exception_type_tag: i64
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -118,7 +125,7 @@ impl MirInterpreter:
             next_string_id: -1,
             # Read once at startup so default (unset) perf/behavior is untouched;
             # never re-read per instruction.
-            strict_mode: (rt_env_get("SIMPLE_STRICT_INTERP") ?? "") == "1",
+            strict_mode: (env_get_opt("SIMPLE_STRICT_INTERP") ?? "") == "1",
             current_function: "<toplevel>",
             error_frames: [],
             debug_enabled: dbg,
@@ -127,11 +134,12 @@ impl MirInterpreter:
             frame_locals_pool: [],
             frame_blocks_pool: [],
             # Read once at startup (default ON); never re-read per call.
-            execir_enabled: (rt_env_get("SIMPLE_EXECIR") ?? "") != "0",
+            execir_enabled: (env_get_opt("SIMPLE_EXECIR") ?? "") != "0",
             execir_modules: {},
             execir_arenas: {},
             execir_verdicts: {},
-            execir_probe_count: 0
+            execir_probe_count: 0,
+            pending_exception_type_tag: 0
         )
 
     fn execir_memo_size() -> i64:
@@ -606,6 +614,8 @@ impl MirInterpreter:
                 self._unsupported_inst("InlineAsm", inst.span)
             case LoadGlobal(_, _):
                 self._unsupported_inst("LoadGlobal", inst.span)
+            case GlobalAddr(_, _, _):
+                self._unsupported_inst("GlobalAddr", inst.span)
             case MaskedAdd(_, _, _, _):
                 self._unsupported_inst("MaskedAdd", inst.span)
             case MaskedFma(_, _, _, _, _):
@@ -661,7 +671,17 @@ impl MirInterpreter:
             case PredicatedMul(_, _, _, _, _, _):
                 self._unsupported_inst("PredicatedMul", inst.span)
             case ResultMatchSemantic(_, _, _, _, _, _, _):
-                self._unsupported_inst("ResultMatchSemantic", inst.span)
+                # Verification WITNESS, not an executable instruction. The whole
+                # Result match -- arm blocks, payload binds, result copies, merge
+                # terminator -- is ALREADY emitted before this marker is appended
+                # into the merge block (50.mir/_MirLoweringExpr/
+                # switch_operators_calls.spl:2848). It exists only so the Lean
+                # backend can recover the match shape (lean_mir_translate.spl:280,
+                # witness_count) and for perf_facts; verification_region_effects.spl
+                # :296 already classes it with Nop. Executable backends must skip
+                # it -- rejecting it made every Result-matching module
+                # native-unbuildable (E-BACKEND-LLVM-INST-ResultMatchSemantic).
+                ()
             case ScalableVecFence(_):
                 self._unsupported_inst("ScalableVecFence", inst.span)
             case SimdAddF32x4(_, _, _):
@@ -753,7 +773,7 @@ impl MirInterpreter:
                 # Not a variant: every MirInstKind has an arm above, so this is
                 # reachable only by a NEW upstream variant with no arm here, or a
                 # mis-decoded enum handle. Either way it is named and spanned.
-                val unknown_inst_disc = rt_enum_discriminant(inst.kind)
+                val unknown_inst_disc = _mir_interp_enum_discriminant_raw(inst.kind)
                 eprint("[mir-interp] E-INTERP-INST-Unknown disc={unknown_inst_disc} at={self._format_span(inst.span)}\n")
                 Some(InterpError.UnsupportedOperation(op: "E-INTERP-INST-Unknown: no interpreter arm for MIR instruction kind (discriminant {unknown_inst_disc}) at {self._format_span(inst.span)}"))
 
@@ -809,7 +829,7 @@ impl MirInterpreter:
                 # Lane C8: all eight MirConstValue variants have arms above; this
                 # is reachable only by a new upstream variant or a mis-decoded
                 # handle. It used to yield 0 silently.
-                val unknown_const_disc = rt_enum_discriminant(value)
+                val unknown_const_disc = _mir_interp_enum_discriminant_raw(value)
                 eprint("[mir-interp] E-INTERP-CONST-Unknown disc={unknown_const_disc}\n")
                 self.last_error = Some(InterpError.UnsupportedOperation(op: "E-INTERP-CONST-Unknown: no interpreter arm for MIR constant kind (discriminant {unknown_const_disc})"))
                 0
@@ -888,7 +908,7 @@ impl MirInterpreter:
             case _:
                 # Lane C8: all 23 MirBinOp variants have arms above; reachable
                 # only by a new upstream variant or a mis-decoded handle.
-                val unknown_binop_disc = rt_enum_discriminant(op)
+                val unknown_binop_disc = _mir_interp_enum_discriminant_raw(op)
                 eprint("[mir-interp] E-INTERP-BINOP-Unknown disc={unknown_binop_disc}\n")
                 return Some(InterpError.UnsupportedOperation(op: "E-INTERP-BINOP-Unknown: no interpreter arm for MIR binop (discriminant {unknown_binop_disc})"))
 
@@ -1111,6 +1131,12 @@ impl MirInterpreter:
     me _execute_intrinsic(name: text, args: [MirOperand]) -> i64:
         """Execute a built-in intrinsic by name and return result."""
         match name:
+            case "__simple_exception_type_tag":
+                self.pending_exception_type_tag
+            case "__simple_exception_set_type_tag":
+                if args.len() > 0:
+                    self.pending_exception_type_tag = self.get_operand(args[0])
+                self.pending_exception_type_tag
             case "__simple_ssa_phi":
                 # Pseudo-phi args are either plain values or predecessor/value pairs.
                 if args.len() >= 4:
@@ -1222,7 +1248,9 @@ impl MirInterpreter:
         Name + block/local counts alone collide when two functions share both
         but differ in const payloads, so fold the entry block's instruction
         kinds and const immediates into the key (cheap, no full encode)."""
-        var key = "{func.name}#{func.blocks.len()}#{func.locals.len()}"
+        # Build each byte-identical piece once, then flatten once. Repeated
+        # `key = key + piece` recopied the whole prefix for every instruction.
+        var key_parts: [text] = ["{func.name}#{func.blocks.len()}#{func.locals.len()}"]
         val entry_id = func.entry_block.id
         for block in func.blocks:
             if block.id.id == entry_id:
@@ -1238,8 +1266,12 @@ impl MirInterpreter:
                         case BinOp(dest, op, left, right): "|o{execir_binop_code(op)}"
                         case UnaryOp(dest, op, operand): "|u"
                         case _: "|x"
-                    key = key + piece
-        key
+                    key_parts.append(piece)
+                # MIR has one entry block. Stop here rather than scanning the
+                # remaining blocks; join preserves the prior key byte-for-byte.
+                return key_parts.join("")
+        # Malformed MIR with an absent entry retains the old base-only key.
+        key_parts.join("")
 
     me execute_function(func: MirFunction) -> (i64?, InterpError?):
         """Execute a MIR function and return result.
@@ -1369,7 +1401,14 @@ impl MirInterpreter:
                 self.has_returned = true
                 Some(InterpError.RuntimeError(message: "Abort: {message}"))
 
-            case CallTerminator(dest, call_target, args, normal, unwind):
+            case Throw(payload, type_tag):
+                Some(InterpError.Exception(payload: self.get_operand(payload), type_tag: self.get_operand(type_tag)))
+
+            case Resume(payload, type_tag):
+                Some(InterpError.Exception(payload: self.get_operand(payload), type_tag: self.get_operand(type_tag)))
+
+            case CallTerminator(dest, call_target, args, normal, unwind,
+                                unwind_payload_dest, unwind_type_tag_dest):
                 val func_name = _extract_func_name(call_target)
                 if func_name.?:
                     val name = func_name.unwrap()
@@ -1378,12 +1417,22 @@ impl MirInterpreter:
                         val callee = callee_opt.unwrap()
                         val call_result = self._call_function(callee, args)
                         if call_result[1].?:
-                            # Error during call - jump to unwind if available
-                            if unwind.?:
-                                self.previous_block = self.current_block
-                                self.current_block = Some(unwind.unwrap().id)
-                                return nil
-                            return call_result[1]
+                            val call_error = call_result[1].unwrap()
+                            # Runtime faults remain diagnostics. Only an
+                            # explicit language exception selects `unwind`.
+                            match call_error:
+                                case InterpError.Exception(payload, type_tag):
+                                    if unwind.?:
+                                        self.pending_exception_type_tag = type_tag
+                                        if unwind_payload_dest.?:
+                                            self.set_local(unwind_payload_dest.unwrap(), payload)
+                                        if unwind_type_tag_dest.?:
+                                            self.set_local(unwind_type_tag_dest.unwrap(), type_tag)
+                                        self.previous_block = self.current_block
+                                        self.current_block = Some(unwind.unwrap().id)
+                                        return nil
+                                    return Some(call_error)
+                                case _: return Some(call_error)
                         if dest.?:
                             val ret = call_result[0] ?? 0
                             self.set_local(dest.unwrap(), ret)

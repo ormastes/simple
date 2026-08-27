@@ -43,11 +43,14 @@ given backend (calling a spec-less pointer-returning `rt_*` can even crash — s
 `doc/08_tracking/bug/interp_missing_pointer_extern_nil_deref_sigsegv_2026-06-18.md`).
 The std aliases are stable, documented, and backed by registered intrinsics.
 
-**Enforcement:** the compiler's `raw_rt_access` lint (RAW-RT-001, default *warn*)
-flags any `extern fn rt_*` declared outside the privileged tiers (`src/lib`,
-`src/runtime`, `src/compiler`). Genuinely low-level modules (emulators, baremetal
-MMIO, crypto/protocol implementations) may opt out with a file-level
-`@runtime_intrinsics` / `#[runtime_intrinsics]` marker. See `doc/07_guide/app/lint.md`.
+**Enforcement:** the compiler's `raw_rt_access` lint (default *warn*) diagnoses
+raw declarations (`RAW-RT-001`), direct imports/calls (`RAW-RT-002`), and
+product-side aliases (`RAW-RT-003`). Provider privilege is narrow and comes
+from `scripts/check/no_direct_rt_allowlist.txt`; whole `src/lib` or
+`src/compiler` trees are not exempt. Genuinely low-level modules (emulators,
+baremetal MMIO, crypto/protocol implementations) may opt out with a file-level
+`@runtime_intrinsics` / `#[runtime_intrinsics]` marker. See
+`doc/07_guide/app/lint.md`.
 
 ---
 
@@ -196,6 +199,41 @@ str_pad_left("42", 5, "0") # "00042"
 Simple has distinct APIs for OS threads, cooperative green threads, pool-backed
 tasks, and channels. Use the API name when searching the codebase; searching only
 for `fiber` or scheduler runtime terms can miss the implemented stdlib module.
+
+### SimpleRing/task/profile V1 foundation
+
+The V1 foundation is a contract layer, not another scheduler. Its common
+records are in `src/lib/common/contracts/execution`; the hosted bounded ring is
+in `src/lib/nogc_async_mut/async_ring`. A caller performs an explicit
+reserve/commit, a provider takes committed work, and exactly one typed terminal
+completion is consumed. `RingToken` generation checks make reset and slot reuse
+reject stale completions; completion metadata carries the exact task key rather
+than requiring a scan of all Futures.
+
+| V1 surface | Path | Status and boundary |
+|------------|------|---------------------|
+| `SimpleRing<Op, Cpl>` | `src/lib/nogc_async_mut/async_ring/simple_ring.spl` | Fixed-capacity, single-owner lifecycle with metadata/payload leases, batches, explicit cancellation/reset, and bounded telemetry; not an executor or native queue provider |
+| `StacklessAsyncTask`, `AsyncTaskFrame`, `TaskContext`, `TaskPollResult` | `src/lib/common/contracts/execution/simple_ring_async_v1.spl` | Callable nonblocking poll contract and validated value vocabulary; no compiler-generated frames or implicit await |
+| `AsyncProfile` V1 presets and fingerprint | `src/lib/common/contracts/execution/async_profile_v1.spl` | Configuration/validation only; `mission_alloc` and `mission_pool` do not provide static storage or a migrated mission executor |
+| Software provider and hosted mission adapter | `src/lib/nogc_async_mut/async_ring` | Bounded reference mapping and resource admission; explicit evidence flags remain false for link-time-static/allocation-free proof |
+| Async trace ring | `src/lib/nogc_async_mut_noalloc/async/async_trace_ring.spl` | Fixed-capacity owner-bound trace records with explicit overflow policy; placement is not proven static |
+
+Do not conflate the V1 surfaces with the APIs in the table below:
+
+- `Future`/`HostFuture` (`src/lib/nogc_async_mut/async/future.spl` and
+  `src/lib/nogc_async_mut/async_host/future.spl`) retain their own poll/waker
+  and chaining behavior.
+- `cooperative_green_spawn` is a single-carrier cooperative queue; it is not
+  CPU-parallel and does not implement the V1 ring/task ABI.
+- `multicore_green_spawn` and `task_spawn` are pool-backed compatibility/task
+  facades with their own handles and runtime-pool evidence requirements.
+- `thread_spawn` creates an OS thread and is not a green task or SimpleRing
+  provider.
+
+The intended migration is additive: adapters may translate these surfaces to
+V1 values while preserving blocking, fallback, ownership, cancellation, and
+completion facts. Until such adapters and executable parity gates exist, keep
+their profile rows and performance claims separate.
 
 | Need | API | Implementation | Notes |
 |------|-----|----------------|-------|

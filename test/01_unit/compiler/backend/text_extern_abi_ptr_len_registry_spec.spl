@@ -92,6 +92,28 @@ fn compile_registry_fixture() -> text:
     MirToLlvm.create("test.llvm.text_abi_registry", CodegenTarget.X86_64, nil).translate_module(mir)
 
 describe "pure-Simple compiler: text-extern-ABI registry fix (end-to-end)":
+    it "expands all ten bundle3 text arguments to the native scalar ABI":
+        step("Lower a real bundle3 call through the frontend, HIR, MIR, and LLVM backend")
+        val source = "extern fn rt_hosted_safe_artifact_bundle3_begin_v1(root: i64, source0: text, source1: text, source2: text, bundle: text, payload0: text, scr10: text, payload1: text, scr11: text, payload2: text, scr12: text, bound: i64) -> i64\n\nfn begin(root: i64, suffix: i64) -> i64:\n    val dynamic = \"clang-\" + suffix.to_text()\n    rt_hosted_safe_artifact_bundle3_begin_v1(root, dynamic, \"lld\", \"hello.elf\", \"bundle\", \"clang\", \"clang.scr1\", \"ld.lld\", \"ld.lld.scr1\", \"hello.elf\", \"hello.elf.scr1\", 4096)\n"
+        val ast = parse_full_frontend(source, "bundle3_text_abi_fixture.spl",
+            "bundle3_text_abi_fixture.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("bundle3_text_abi_fixture.spl")
+        val hir = hir_lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        var errors = ""
+        for err in mir_lowering.errors: errors = errors + err.message + "\n"
+        expect(errors).to_equal("")
+        val output = MirToLlvm.create(
+            "test.llvm.bundle3_text_abi", CodegenTarget.X86_64, nil
+        ).translate_module(mir)
+        val call_line = find_call_line(
+            output, "rt_hosted_safe_artifact_bundle3_begin_v1(")
+        expect(call_line != "").to_be(true)
+        # root + ten (ptr,len) text pairs + aggregate bound.
+        expect(top_level_call_arg_count(call_line,
+            "rt_hosted_safe_artifact_bundle3_begin_v1(")).to_equal(22)
+
     it "splits a non-literal text arg to a registry-listed extern into (ptr, len)":
         val output = compile_registry_fixture()
         print("[text_extern_abi_registry] mir_lowering_errors_guard = " + (if output.starts_with("MIR_LOWERING_ERRORS:"): output else: "none"))

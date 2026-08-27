@@ -5,7 +5,33 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
 source_dir="$root/src/os/kernel/arch/arm32/cosmos"
 test_source="$root/test/02_integration/os/cosmos/cosmos_hal_mmio_test.c"
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-hal-mmio.XXXXXX")
+fsbl_vectors="$root/test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv"
+fsbl_oracle="$root/test/fixtures/os/cosmos/cosmos_fsbl_oracle.c"
+production_fsbl="$source_dir/cosmos_fsbl.c"
 trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+[ -s "$fsbl_vectors" ] || {
+    echo "missing Cosmos FSBL vector fixture: $fsbl_vectors" >&2
+    exit 1
+}
+export COSMOS_FSBL_VECTOR_TSV="$fsbl_vectors"
+
+semantic_c_hash() {
+    [ "$(grep -c '^#include "cosmos_hal.h"$' "$1")" -eq 1 ] || return 1
+    sed -n '/^#include "cosmos_hal.h"$/,$p' "$1" | sha256sum | awk '{print $1}'
+}
+oracle_sha=$(semantic_c_hash "$fsbl_oracle") || {
+    echo "invalid Cosmos FSBL oracle extraction: $fsbl_oracle" >&2
+    exit 1
+}
+production_sha=$(semantic_c_hash "$production_fsbl") || {
+    echo "invalid production Cosmos FSBL extraction: $production_fsbl" >&2
+    exit 1
+}
+[ "$oracle_sha" = "$production_sha" ] || {
+    echo "Cosmos FSBL oracle has drifted from production C" >&2
+    exit 1
+}
 
 cc \
     -std=c11 -O2 -g \
@@ -18,9 +44,27 @@ cc \
     -include "$source_dir/cosmos_profile_openssd2_8ch8way_v300.h" \
     -I"$source_dir" \
     "$test_source" \
-    "$source_dir/cosmos_fsbl.c" \
+    "$fsbl_oracle" \
     "$source_dir/cosmos_nfc.c" \
     "$source_dir/cosmos_pcie.c" \
     -o "$build_dir/cosmos_hal_mmio_test"
 
-"$build_dir/cosmos_hal_mmio_test"
+# One normal process per case isolates the production drivers' private static
+# state. Its normal exit also lets any enabled process coverage handler flush;
+# the former fork()+_exit() children bypassed exit handlers.
+case_count=$("$build_dir/cosmos_hal_mmio_test" --count)
+case "$case_count" in
+    ''|*[!0-9]*)
+        echo "invalid cosmos HAL case count: $case_count" >&2
+        exit 1
+        ;;
+esac
+[ "$case_count" -gt 0 ] || {
+    echo "invalid cosmos HAL case count: $case_count" >&2
+    exit 1
+}
+case_index=0
+while [ "$case_index" -lt "$case_count" ]; do
+    "$build_dir/cosmos_hal_mmio_test" "$case_index"
+    case_index=$((case_index + 1))
+done

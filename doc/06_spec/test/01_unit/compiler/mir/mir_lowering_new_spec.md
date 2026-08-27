@@ -159,16 +159,17 @@ expect(source).to_contain("match type_.kind:")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = read_mir_source("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
 
-expect(source).to_contain("val maybe_receiver_type_for_call = receiver.type_")
+expect(source).to_contain("val maybe_receiver_type_for_call: HirType? = if receiver.has_type_: receiver.type_ else: nil")
 expect(source).to_contain("if found_receiver_type != nil:")
 expect(source).to_contain("receiver_type = self.lower_type(found_receiver_type)")
 expect(source).to_contain("len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)")
+expect(source.contains("val maybe_receiver_type_for_call = receiver.type_")).to_be(false)
 expect(source).to_contain("if type_ == nil:")
 expect(source).to_contain("return \"\"")
 expect(source).to_contain("val maybe_elem_type = elem.type_")

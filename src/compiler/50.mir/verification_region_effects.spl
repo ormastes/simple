@@ -69,9 +69,12 @@ impl MirRegionEffectManifestV1:
 
     fn state_model_semantic_hash() -> text:
         var atoms: [text] = []
+        var seen: {text: bool} = {}
         for effect in self.effects:
             val atom = effect.region_id + "@" + effect.value_type_identity
-            if not atoms.contains(atom): atoms.push(atom)
+            if not seen.has(atom):
+                seen[atom] = true
+                atoms.push(atom)
         atoms.sort()
         sha256_text("mir-open-global-state-v1|typed-regions=" + atoms.join(","))
 
@@ -81,11 +84,16 @@ impl MirRegionEffectManifestV1:
 
     fn verification_effects() -> [VerificationEffectV1]:
         var result: [VerificationEffectV1] = []
+        var seen_reads: {text: bool} = {}
+        var seen_writes: {text: bool} = {}
         for effect in self.effects:
-            var candidate = VerificationEffectV1.Write(effect.region_id)
             if effect.access == MirRegionAccessV1.Read:
-                candidate = VerificationEffectV1.Read(effect.region_id)
-            if not result.contains(candidate): result.push(candidate)
+                if not seen_reads.has(effect.region_id):
+                    seen_reads[effect.region_id] = true
+                    result.push(VerificationEffectV1.Read(effect.region_id))
+            elif not seen_writes.has(effect.region_id):
+                seen_writes[effect.region_id] = true
+                result.push(VerificationEffectV1.Write(effect.region_id))
         if result.is_empty(): [VerificationEffectV1.Pure] else: result
 
 struct MirRegionFrameObligationV1:
@@ -191,17 +199,33 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
 ) -> MirRegionEffectManifestV1:
     val execution_hash = sha256_text(serialize_mir_function(func))
     var effects: [MirRegionEffectV1] = []
+    var region_types: {text: text} = {}
+    var local_positions: {i64: i64} = {}
+    var local_type_identities: {i64: text} = {}
+    var local_index_ready = false
+    var local_lookup_count = 0
     for block in func.blocks:
         for instruction in block.instructions:
             var source_span = ""
-            if val span = instruction.span:
-                if span.file != "" and span.line > 0 and span.col > 0 and
-                        span.start >= 0 and span.end >= span.start:
-                    source_span = "file=" + span.file + "|start=" +
-                        span.start.to_string() + "|end=" + span.end.to_string() +
-                        "|line=" + span.line.to_string() + "|col=" + span.col.to_string()
+            if verification_region_instruction_requires_span_v1(instruction.kind):
+                if val span = instruction.span:
+                    if span.file != "" and span.line > 0 and span.col > 0 and
+                            span.start >= 0 and span.end >= span.start:
+                        source_span = "file=" + span.file + "|start=" +
+                            span.start.to_string() + "|end=" + span.end.to_string() +
+                            "|line=" + span.line.to_string() + "|col=" + span.col.to_string()
+            var local_type_identity = ""
+            if val local_id = verification_region_instruction_local_id_v1(instruction.kind):
+                local_lookup_count = local_lookup_count + 1
+                if local_lookup_count == 2:
+                    local_positions = verification_local_position_index_v1(func)
+                    local_index_ready = true
+                local_type_identity = verification_local_type_identity_v1(
+                    func, local_positions, local_index_ready,
+                    local_type_identities, local_id)
             match verification_region_effect_from_instruction_v1(
-                    func, instruction.kind, source_span, internal_call_names):
+                    func, instruction.kind, source_span, local_type_identity,
+                    internal_call_names):
                 case Err(message):
                     return MirRegionEffectManifestV1(
                         "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
@@ -212,13 +236,14 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
                         if diagnostic != "": return MirRegionEffectManifestV1(
                             "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
                             execution_hash, [], "", diagnostic)
-                        for prior in effects:
-                            if prior.region_id == present.region_id and
-                                    prior.value_type_identity != present.value_type_identity:
+                        if val prior_type = region_types.get(present.region_id):
+                            if prior_type != present.value_type_identity:
                                 return MirRegionEffectManifestV1(
                                     "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
                                     execution_hash, [], "",
                                     "FV2-E-REGION-TYPE-MISMATCH: one region has inconsistent MIR value types")
+                        else:
+                            region_types[present.region_id] = present.value_type_identity
                         effects.push(present)
         if not verification_region_terminator_supported_v1(block.terminator):
             return MirRegionEffectManifestV1(
@@ -232,27 +257,50 @@ fn verification_region_effect_manifest_with_internal_calls_v1(
         "MirRegionEffectManifest-v1", func.symbol.id.to_string(), execution_hash,
         effects, frame_hash, "")
 
+fn verification_region_instruction_requires_span_v1(instruction: MirInstKind) -> bool:
+    match instruction:
+        case MirInstKind.LoadGlobal(_, _) | MirInstKind.StoreGlobal(_, _) | MirInstKind.GlobalAddr(_, _, _): true
+        case _: false
+
+fn verification_region_instruction_local_id_v1(instruction: MirInstKind) -> LocalId?:
+    match instruction:
+        case MirInstKind.LoadGlobal(dest, _): Some(dest)
+        case MirInstKind.GlobalAddr(dest, _, _): Some(dest)
+        case MirInstKind.StoreGlobal(_, value):
+            match value.kind:
+                case MirOperandKind.Copy(local) | MirOperandKind.Move(local): Some(local)
+                case _: nil
+        case _: nil
+
 fn verification_region_effect_from_instruction_v1(
     func: MirFunction,
     instruction: MirInstKind,
     source_span: text,
+    local_type_identity: text,
     internal_call_names: [text]
 ) -> Result<MirRegionEffectV1?, text>:
     match instruction:
-        case MirInstKind.LoadGlobal(dest, symbol):
-            val type_identity = verification_local_type_identity_v1(func, dest)
-            if type_identity == "": return Err("FV2-E-REGION-LOAD-TYPE: global load destination has no exact MIR type")
+        case MirInstKind.LoadGlobal(_, symbol):
+            if local_type_identity == "": return Err("FV2-E-REGION-LOAD-TYPE: global load destination has no exact MIR type")
             if source_span == "": return Err("FV2-E-REGION-SPAN: global load requires exact source provenance")
             Ok(Some(MirRegionEffectV1(
                 "global:" + symbol.id.to_string(), MirRegionAccessV1.Read,
-                type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
+                local_type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
         case MirInstKind.StoreGlobal(symbol, value):
-            val type_identity = verification_operand_type_identity_v1(func, value)
+            val type_identity = verification_operand_type_identity_v1(
+                value, local_type_identity)
             if type_identity == "": return Err("FV2-E-REGION-STORE-TYPE: global store value has no exact MIR type")
             if source_span == "": return Err("FV2-E-REGION-SPAN: global store requires exact source provenance")
             Ok(Some(MirRegionEffectV1(
                 "global:" + symbol.id.to_string(), MirRegionAccessV1.Write,
                 type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
+        case MirInstKind.GlobalAddr(_, symbol, mutable):
+            if local_type_identity == "": return Err("FV2-E-REGION-ADDR-TYPE: global address destination has no exact MIR type")
+            if source_span == "": return Err("FV2-E-REGION-SPAN: global address requires exact source provenance")
+            val access = if mutable: MirRegionAccessV1.Write else: MirRegionAccessV1.Read
+            Ok(Some(MirRegionEffectV1(
+                "global:" + symbol.id.to_string(), access,
+                local_type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
         case MirInstKind.Const(_, _, _) | MirInstKind.Copy(_, _) | MirInstKind.Move(_, _) | MirInstKind.BinOp(_, _, _, _) | MirInstKind.UnaryOp(_, _, _) | MirInstKind.CheckedBinOp(_, _, _, _) | MirInstKind.Aggregate(_, _, _) | MirInstKind.GetField(_, _, _) | MirInstKind.Cast(_, _, _) | MirInstKind.Bitcast(_, _, _) | MirInstKind.DebugValue(_, _) | MirInstKind.Nop | MirInstKind.ResultMatchSemantic(_, _, _, _, _, _, _): Ok(nil)
         case MirInstKind.Call(_, callee, _):
             val name = verification_region_direct_call_name_v1(callee)
@@ -268,15 +316,41 @@ fn verification_region_effect_from_instruction_v1(
         case _:
             Err("FV2-E-REGION-UNSUPPORTED: MIR instruction has unmodeled external, synchronization, device, or mutation effects")
 
-fn verification_local_type_identity_v1(func: MirFunction, local_id: LocalId) -> text:
-    for local in func.locals:
-        if local.id.id == local_id.id: return serialize_mir_type(local.type_)
-    ""
+fn verification_local_position_index_v1(func: MirFunction) -> {i64: i64}:
+    var positions: {i64: i64} = {}
+    var position = 0
+    while position < func.locals.len():
+        val local_id = func.locals[position].id.id
+        if not positions.has(local_id): positions[local_id] = position
+        position = position + 1
+    positions
 
-fn verification_operand_type_identity_v1(func: MirFunction, operand: MirOperand) -> text:
+fn verification_local_type_identity_v1(
+    func: MirFunction,
+    positions: {i64: i64},
+    index_ready: bool,
+    mut identities: {i64: text},
+    local_id: LocalId
+) -> text:
+    if val identity = identities.get(local_id.id): return identity
+    var identity = ""
+    if index_ready:
+        if val position = positions.get(local_id.id):
+            identity = serialize_mir_type(func.locals[position].type_)
+    else:
+        for local in func.locals:
+            if local.id.id == local_id.id:
+                identity = serialize_mir_type(local.type_)
+                break
+    if identity != "": identities[local_id.id] = identity
+    identity
+
+fn verification_operand_type_identity_v1(
+    operand: MirOperand,
+    local_type_identity: text
+) -> text:
     match operand.kind:
-        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
-            verification_local_type_identity_v1(func, local)
+        case MirOperandKind.Copy(_) | MirOperandKind.Move(_): local_type_identity
         case MirOperandKind.Const(_, type_): serialize_mir_type(type_)
 
 fn verification_region_direct_call_name_v1(callee: MirOperand) -> text:
@@ -286,10 +360,13 @@ fn verification_region_direct_call_name_v1(callee: MirOperand) -> text:
 
 fn verification_written_region_atoms_v1(effects: [MirRegionEffectV1]) -> [text]:
     var atoms: [text] = []
+    var seen: {text: bool} = {}
     for effect in effects:
         if effect.access == MirRegionAccessV1.Write:
             val atom = effect.region_id + "@" + effect.value_type_identity
-            if not atoms.contains(atom): atoms.push(atom)
+            if not seen.has(atom):
+                seen[atom] = true
+                atoms.push(atom)
     atoms.sort()
     atoms
 

@@ -157,22 +157,24 @@ fn runtime_symbol_declaration(
         "rt_ptr_write_bytes_raw" => "(addr: i64, offset: i64, src: *const u8, len: i64) -> i64",
         "rt_memset" => "(dst: *mut u8, val: i8, n: i64) -> *mut u8",
         "rt_memcpy" => "(dst: *mut u8, src: *const u8, n: i64) -> *mut u8",
-        "rt_atomic_compare_exchange" =>
-            "(atomic: i64, expected: i64, new_value: i64, result_ptr: *mut i64) -> i64",
+        "rt_atomic_compare_exchange" => "(atomic: i64, expected: i64, new_value: i64, result_ptr: *mut i64) -> i64",
         "rt_atomic_bool_new" => "(initial: bool) -> i64",
         "rt_atomic_bool_load" => "(handle: i64) -> bool",
         "rt_atomic_bool_store" => "(handle: i64, value: bool)",
         "rt_atomic_bool_swap" => "(handle: i64, value: bool) -> bool",
-        "rt_atomic_int_compare_exchange" =>
-            "(handle: i64, current: i64, new_value: i64) -> bool",
+        "rt_atomic_bool_compare_exchange" => "(handle: i64, current: bool, new_value: bool) -> bool",
+        "rt_atomic_bool_fetch_and" => "(handle: i64, value: bool) -> bool",
+        "rt_atomic_bool_fetch_or" => "(handle: i64, value: bool) -> bool",
+        "rt_atomic_bool_fetch_not" => "(handle: i64) -> bool",
+        "rt_atomic_int_compare_exchange" => "(handle: i64, current: i64, new_value: i64) -> bool",
         "rt_atomic_flag_test_and_set" => "(handle: i64) -> bool",
-        "rt_file_mmap" =>
-            "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
+        "rt_atomic_flag_load" => "(handle: i64) -> bool",
+        "rt_spin_loop_hint" => "()",
+        "rt_file_mmap" => "(addr: *mut u8, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> *mut u8",
         "rt_file_munmap" => "(addr: *mut u8, length: u64) -> i32",
         "rt_file_madvise" => "(addr: *mut u8, length: u64, advice: i32) -> i32",
         "rt_file_msync" => "(addr: *mut u8, length: u64, flags: i32) -> i32",
-        "rt_file_lock" =>
-            "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
+        "rt_file_lock" => "(path_ptr: *const u8, path_len: u64, timeout_secs: i64) -> i64",
         "rt_file_unlock" => "(handle: i64) -> bool",
         "rt_file_read_text_at_checked" => "(path: i64, offset: i64, size: i64) -> i64",
         "rt_time_now_nanos" | "rt_time_now_micros" | "rt_time_now_unix_micros" => "() -> i64",
@@ -200,9 +202,7 @@ fn canonical_runtime_symbol_declaration(
         [ty] => format!(" -> {}", rust_abi_type(ty)),
         many => {
             let tuple = many.iter().map(|ty| rust_abi_type(ty)).collect::<Vec<_>>().join(", ");
-            return format!(
-                "#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});"
-            );
+            return format!("#[allow(improper_ctypes)]\n        pub fn {alias}({params}) -> ({tuple});");
         }
     };
     format!("pub fn {alias}({params}){result};")
@@ -286,9 +286,8 @@ fn compile_c_runtime_sources() {
         // baremetal object and the freestanding sysroot archives never get the
         // hosted one, so neither lane needs -z muldefs. Do NOT add
         // startup/baremetal/runtime_log.c to this list), and the standalone
-        // rt_socket_set_nonblocking
-        // extraction (see that file's header comment for why the whole
-        // async_linux_epoll.c it was extracted from is not linked here).
+        // prepare/commit/mask syscall shim used by the canonical Pure-Simple
+        // rt_socket_set_nonblocking owner.
         // runtime_framebuffer.c (rt_fb_*, 2 names) already appears above in
         // this same list -- only its interpreter dispatch entry was missing.
         "runtime_image.c",
@@ -304,13 +303,13 @@ fn compile_c_runtime_sources() {
         // also declares extern "C" live in runtime_packed_span.c, also never
         // registered here.
         "runtime_packed_span.c",
-        // rt_process_run_owned_bounded_value + rt_process_owned_* (Vulkan
+        // rt_process_run_owned_bounded_value / observed sibling + rt_process_owned_* (Vulkan
         // Engine2D native-JIT blocker, doc/08_tracking/bug/
         // vulkan_engine2d_native_jit_missing_rt_struct_receiver_valid_2026-08-12.md
         // follow-up): the names are in the runtime_symbols.rs manifest and
         // declared by JIT codegen, but this list never included the source
         // file, so the JIT hit "unresolved external symbol
-        // 'rt_process_run_owned_bounded_value'" and dropped whole modules to
+        // 'rt_process_run_owned_bounded_value' (or observed sibling)" and dropped whole modules to
         // the interpreter. Its only cross-file C dependency, rt_free_deep
         // (runtime_native.c, not compiled here), is swapped for the Rust
         // rt_string_free via SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE below --
@@ -331,6 +330,9 @@ fn compile_c_runtime_sources() {
     // See the runtime_process_owned.c comment above: rt_free_deep lives in
     // runtime_native.c, which this crate does not compile.
     build.define("SIMPLE_RUNTIME_PROCESS_OWNED_STRING_FREE", None);
+    // Bootstrap-only compatibility: the seed cannot link the canonical Pure
+    // Simple timestamp module. Stage4 never enables this provider.
+    build.define("SIMPLE_BOOTSTRAP_TIMESTAMP_COMPAT", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     } else {

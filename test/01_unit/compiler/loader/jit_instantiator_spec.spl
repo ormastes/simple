@@ -42,6 +42,53 @@ describe "Jit Instantiator":
         expect(found != nil).to_equal(true)
         expect(found.unwrap()[0]).to_equal("vec.smf")
 
+    it "keeps global symbol replacement and removal exact across mappers":
+        step("Verify: keyed global registry preserves replacement, precedence, and removal")
+        val mapper = JitMapper()
+        var first = JitExecMapper(records: {}, symbols: [], owners: [], addresses: [])
+        var second = JitExecMapper(records: {}, symbols: [], owners: [], addresses: [])
+
+        _ = mapper.map(first, "owner-a", "shared_registry_symbol", [1])
+        _ = mapper.map(second, "owner-b", "shared_registry_symbol", [2])
+
+        val replaced = first.lookup("shared_registry_symbol").unwrap()
+        expect(replaced.owner_id).to_equal("owner-b")
+        expect(replaced.address).to_equal(1)
+
+        _global_remove("shared_registry_symbol")
+        val local_fallback = first.lookup("shared_registry_symbol").unwrap()
+        expect(local_fallback.owner_id).to_equal("owner-a")
+        expect(second.lookup("shared_registry_symbol").unwrap().owner_id).to_equal("owner-b")
+
+    it "uses the indexed mapper record before compatibility arrays":
+        step("Verify: JIT mapper resolves its canonical indexed record")
+        # @req: REQ-COMPILER-LOADER-001
+        val indexed = MappedRecord(owner_id: "indexed-owner", address: 41)
+        var mapper = JitExecMapper(
+            records: {"indexed_symbol": indexed},
+            symbols: ["indexed_symbol"],
+            owners: ["legacy-owner"],
+            addresses: [7]
+        )
+
+        val found = mapper.lookup("indexed_symbol").unwrap()
+        expect(found.owner_id).to_equal("indexed-owner")
+        expect(found.address).to_equal(41)
+
+    it "retains array-only mapper compatibility fallback":
+        step("Verify: JIT mapper retains compatibility-array fallback")
+        # @req: REQ-COMPILER-LOADER-001
+        var mapper = JitExecMapper(
+            records: {},
+            symbols: ["legacy_symbol"],
+            owners: ["legacy-owner"],
+            addresses: [7]
+        )
+
+        val found = mapper.lookup("legacy_symbol").unwrap()
+        expect(found.owner_id).to_equal("legacy-owner")
+        expect(found.address).to_equal(7)
+
     it "returns cached code without changing depth":
         step("Verify: returns cached code without changing depth")
         var jit = JitInstantiator.new(default_jit_config())
@@ -73,7 +120,12 @@ describe "Jit Instantiator":
         match result:
             case JitInstantiationResult.Success(code, symbol, address):
                 expect(symbol).to_equal("Map$text_i64")
-                expect(code.len()).to_be_greater_than(0)
+                expect(code).to_equal([
+                    77, 97, 112, 58,
+                    116, 101, 120, 116, 44, 105, 54, 52, 58,
+                    77, 97, 112, 36, 116, 101, 120, 116, 95, 105, 54, 52,
+                    195
+                ])
                 expect(address != nil).to_equal(true)
             case _:
                 fail("expected compile success")
@@ -83,6 +135,50 @@ describe "Jit Instantiator":
         expect(jit.stats().compile_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(jit.loaded_metadata["map.smf"].possible.len()).to_equal(0)
         expect(jit.loaded_metadata["map.smf"].instantiations.len()).to_equal(1)
+
+    it "preserves empty fields and multibyte UTF-8 in compiled bytes":
+        step("Verify: preserves exact framing without a byte-array temporary")
+        val config = JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 50,
+            enabled: true,
+            verbose: false
+        )
+
+        var empty_jit = JitInstantiator.new(config)
+        empty_jit.set_metadata_for_test("empty.smf", LoadedMetadata(
+            possible: [PossibleInstantiation(
+                template_name: "",
+                type_args: "",
+                mangled_name: ""
+            )],
+            instantiations: []
+        ))
+        match empty_jit.try_jit_instantiate(""):
+            case JitInstantiationResult.Success(code, _, _):
+                expect(code).to_equal([58, 58, 195])
+            case _:
+                fail("expected empty-field compile success")
+
+        var utf8_jit = JitInstantiator.new(config)
+        utf8_jit.set_metadata_for_test("utf8.smf", LoadedMetadata(
+            possible: [PossibleInstantiation(
+                template_name: "Café",
+                type_args: "Té",
+                mangled_name: "Café$Té"
+            )],
+            instantiations: []
+        ))
+        match utf8_jit.try_jit_instantiate("Café$Té"):
+            case JitInstantiationResult.Success(code, _, _):
+                expect(code).to_equal([
+                    67, 97, 102, 195, 169, 58,
+                    84, 195, 169, 58,
+                    67, 97, 102, 195, 169, 36, 84, 195, 169,
+                    195
+                ])
+            case _:
+                fail("expected UTF-8 compile success")
 
     it "detects direct circular dependencies":
         step("Verify: detects direct circular dependencies")

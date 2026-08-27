@@ -1,0 +1,60 @@
+"""ARM firmware-census publication for the cross-architecture CPU identity owner.
+
+Callers must supply the complete MPIDR census obtained from firmware or the
+boot protocol.  The executing BSP is placed at logical CPU zero and every
+remaining processing element retains firmware order.  Empty, duplicate, or
+BSP-incomplete censuses fail closed; this module never manufactures CPU zero.
+"""
+
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CPU_TOPOLOGY_IDENTITY_CAPACITY_V1,
+    CpuHardwareIdentityKindV1,
+    CpuTopologyIdentityOwnerV1,
+    cpu_hardware_identity_canonical_v1,
+}
+use os.kernel.smp.cpu_identity_runtime_surface_v1.{
+    cpu_identity_runtime_publish_v1,
+}
+
+pub fn arm_publish_firmware_mpidr_census_v1(
+    firmware_mpidrs: [u64], bsp_mpidr: u64
+) -> bool:
+    """Seal and one-shot publish an exact firmware MPIDR census."""
+    if firmware_mpidrs.len() == 0:
+        return false
+    if firmware_mpidrs.len() > CPU_TOPOLOGY_IDENTITY_CAPACITY_V1:
+        return false
+
+    val canonical_bsp = cpu_hardware_identity_canonical_v1(
+        CpuHardwareIdentityKindV1.ArmMpidr, bsp_mpidr)
+    var bsp_present = false
+    var i: i32 = 0
+    while i < firmware_mpidrs.len():
+        val canonical = cpu_hardware_identity_canonical_v1(
+            CpuHardwareIdentityKindV1.ArmMpidr, firmware_mpidrs[i])
+        if canonical == canonical_bsp:
+            bsp_present = true
+        i = i + 1
+    if not bsp_present:
+        return false
+
+    var owner = CpuTopologyIdentityOwnerV1.create(
+        CpuHardwareIdentityKindV1.ArmMpidr)
+    if not owner.register_arm_mpidr(0u32, canonical_bsp):
+        return false
+
+    var logical = 1u32
+    i = 0
+    while i < firmware_mpidrs.len():
+        val canonical = cpu_hardware_identity_canonical_v1(
+            CpuHardwareIdentityKindV1.ArmMpidr, firmware_mpidrs[i])
+        if canonical != canonical_bsp:
+            if not owner.register_arm_mpidr(logical, canonical):
+                return false
+            logical = logical + 1u32
+        i = i + 1
+
+    val sealed = owner.seal()
+    if not sealed.accepted or sealed.cpu_count != firmware_mpidrs.len().to_u32():
+        return false
+    cpu_identity_runtime_publish_v1(sealed.snapshot)

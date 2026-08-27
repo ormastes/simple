@@ -11,7 +11,10 @@ Audience: compiler and tooling engineers who maintain this spec.
 # Note: Some tests may be slow or require specific system permissions.
 
 use app.io.mod.{process_run_with_limits, ProcessResult}
+use app.io.mod.{process_run_observed_bounded}
+use app.io.mod.{detect_violation}
 use std.platform.{is_windows}
+use std.common.perf.execution_metrics.{ResourceEvidenceQuality, TerminationCause}
 
 fn slow_it(name: text, block: fn()):
     it(name, block)
@@ -145,6 +148,15 @@ describe "process_run_with_limits process count enforcement":
             expect(result.exit_code).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
 describe "process_run_with_limits edge cases":
+    it "does not infer timeout or OOM from exit 137 or 139":
+        step("Verify: ambiguous signal-derived exit codes remain ordinary failures")
+        val (kill_exceeded, kill_type) = detect_violation(137, "")
+        val (segv_exceeded, segv_type) = detect_violation(139, "")
+        expect(kill_exceeded).to_be(false)
+        expect(kill_type).to_equal("")
+        expect(segv_exceeded).to_be(false)
+        expect(segv_type).to_equal("")
+
     it "handles zero limits as unlimited":
         step("Verify: handles zero limits as unlimited")
         val result = process_run_with_limits("echo", ["test"], 0, 0, 0, 0, 0)
@@ -180,6 +192,28 @@ describe "process_run_with_limits edge cases":
         val result = process_run_with_limits("ls", ["/nonexistent/path/12345"], 5000, 100000000, 5, 100, 10)
         expect(result.exit_code).to_be_greater_than(0)
         expect(result.limit_exceeded).to_equal(false)
+
+describe "observed process evidence":
+    it "reports direct-child resource evidence without calling it tree RSS":
+        step("Run a child tree and collect resource evidence")
+        if is_windows():
+            val result = process_run_observed_bounded("cmd", ["/c", "echo observed"], 5000, 1048576)
+            expect(result.usage.evidence_quality).to_equal(ResourceEvidenceQuality.Unavailable)
+        else:
+            val result = process_run_observed_bounded("sh", ["-c", "python3 -c 'x=bytearray(8388608); print(len(x))'"], 5000, 1048576)
+            expect(result.usage.exit_code).to_equal(0)
+            expect(result.usage.termination).to_equal(TerminationCause.Exited)
+            expect(result.usage.evidence_quality).to_equal(ResourceEvidenceQuality.ExactDirectChild)
+            expect(result.usage.peak_direct_child_rss_bytes).to_be_greater_than(0)
+            expect(result.usage.peak_tree_charge_bytes).to_equal(0)
+
+    slow_it "classifies its own watchdog timeout from affirmative evidence":
+        step("Classify termination from affirmative evidence")
+        if is_windows():
+            0
+        else:
+            val result = process_run_observed_bounded("sh", ["-c", "sleep 5"], 100, 1048576)
+            expect(result.usage.termination).to_equal(TerminationCause.WallTimeout)
 
 describe "process_run_with_limits Windows fallback":
     it "uses timeout-only mode on Windows":

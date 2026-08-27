@@ -1521,3 +1521,112 @@ census is 12,296 declaration rows and 3,170 distinct symbols: 808 unsafe-tagged,
 Implementations found are C++ 219, C 2,323, Rust 2,161, and Simple 558.
 `rt_torch` remains 162 unsafe rows, 35 minimized, zero untouched, and zero
 verified/signed. Therefore Torch and SFFI globally are not yet verified safe.
+
+### Interpreter debug boundary audit (2026-08-26)
+
+`src/lib/nogc_sync_mut/debug/interpreter_backend.spl` and its app mirror used
+15 direct raw declarations. The repository-owned Rust provider proves that
+`rt_debug_add_breakpoint` returns `-1` for a null/invalid UTF-8/negative input,
+and `rt_debug_remove_breakpoint` returns `-1` for the same rejected contract,
+but each facade previously converted those failures into `Result.Ok`. The
+facades now retain only their twelve used declarations, label each
+`unsafe(ffi)`, use minimal lexical scopes, and map run/non-positive add/negative
+remove statuses to `Result.Err`. The normal activation, stack, locals, and
+successful-breakpoint paths retain the same direct calls, data layout, loops,
+and public boolean API; there is no per-call allocation, registry lookup,
+hashing, or generic dispatch. The bootstrap source check and new static
+authority audit pass. Both optimizer reports identify only two pre-existing
+collection-capacity opportunities in conversion loops; no unsupported
+micro-optimization was applied. This is source-level containment and contract
+repair, not provider verification or signed admission.
+
+### Advanced scalar math boundary audit (2026-08-26)
+
+The canonical `std.nogc_sync_mut.io.math` facade has twelve fixed-`f64` Rust
+exports for logarithmic, inverse-trigonometric, hyperbolic, and rounding
+operations. The provider delegates each directly to Rust IEEE-754 operations;
+NaN and infinities are valid results, not null/error sentinels. A pure-Simple
+floor/ceil counterpart exists, but replacing the native scalar operation would
+add cast/branch work and risk a hot-path regression. The facade therefore keeps
+direct scalar calls, marks every raw declaration `unsafe(ffi)`, and places every
+call in a minimal lexical FFI scope. The static authority audit verifies all
+twelve declarations, thirteen call sites (including `math_round`), provider
+exports, and absence of per-call admission/lookup/hash/dispatch. The existing
+math specification passes 13/13; the optimizer reports no general pattern.
+This preserves values and performance shape but is not an artifact signature or
+semantic verification claim.
+
+### Interpreter error-handle boundary audit (2026-08-26)
+
+The legacy `std.ffi.error` module duplicated all nine raw error-handle
+declarations from `std.sffi.error`. It is now a compile-time re-export of the
+canonical owner. The canonical declarations are explicitly `unsafe(ffi)` and
+their wrappers use minimal lexical scopes; the compatibility-named
+`error_index_out_of_bounds` now routes through the checked wrapper instead of
+bypassing that scope. The interpreter provider rejects invalid handles by
+raising `CompileError`, rather than returning a fabricated message or handle.
+The owner audit and source check pass, and optimizer review reports no general
+pattern. These remain opaque interpreter-owned handles with no artifact-bound
+signature/evidence admission, so the public wrappers are contained but not
+verified safe across all execution lanes.
+
+### Counterpart ABI boundary audit (2026-08-26)
+
+The canonical counterpart provider shim performs dlopen/dlsym, ABI negotiation,
+opaque-handle lifecycle, and caller-owned text buffering in C. Its Simple owner
+now marks all nine raw calls `unsafe(ffi)` and scopes each call lexically. The
+wrapper no longer coerces a missing foreign manifest/response/trace/loader
+detail to empty text; an empty manifest remains a documented fail-closed
+rejection. The static guard prevents unscoped calls, nil-to-empty coercion, and
+per-call admission work. Source check passes, while the executable counterpart
+spec is blocked because the deployed bootstrap artifact lacks source-registered
+`rt_counterpart_*` handlers (7/8 examples fail before provider invocation).
+Optimizer review reports one pre-existing collection-capacity suggestion. This
+is not signed-provider admission or cross-lane verification.
+
+### Ed25519 evidence-admission algorithm policy (2026-08-26)
+
+The canonical evidence-admission verifier recomputes every artifact, source,
+build-input, compiler, ABI-registry, and verification-report digest, scopes the
+trust-store key to a provider, and checks a raw 64-byte signature. Its prior
+`pkeyutl -rawin` invocation nevertheless did not prove that the trusted public
+key was Ed25519, despite reporting an Ed25519 admission. The verifier now
+inspects the public-key algorithm first and rejects every non-Ed25519 key
+before signature processing. The focused contract test admits the normal
+Ed25519 fixture and rejects an otherwise trusted RSA key, along with its
+existing tamper, stale-report, trust-scope, canonicalization, and substituted
+signature cases. This is load-time-only admission work: it adds no per-call
+hashing, lookup, allocation, copy, loop, or dispatch. Repository-wide signed
+admission remains zero because no exact provider artifact job has yet been
+supplied.
+
+### AES-XTS raw boundary containment (2026-08-26)
+
+`os.crypto.aes_xts` has three direct runtime ABI declarations: byte-array
+access, capacity allocation, and inverse AES block transformation. All are now
+explicitly `unsafe(ffi)` and their sixteen uses are lexical FFI scopes. The
+new authority audit fixes this exact declaration/call inventory, confirms the
+Rust inverse-block export, and rejects per-call hash, signature, lookup, or
+generic-dispatch additions. The source check passes. Optimizer review reports
+113 existing MIR opportunities and zero general patterns; no copy, allocation,
+loop, data-layout, or direct-call behavior was changed. The existing IEEE 1619
+KAT is still blocked upstream by interpreter `u8` array lifting, so this is
+boundary containment only—not behavioral cryptographic proof, artifact signing,
+or global SFFI verification.
+
+### Channel admission-status boundary repair (2026-08-26)
+
+The channel provider already defines `rt_channel_send` as `1` only for an
+admitted message and `0` for full, closed, disconnected, invalid, or
+non-transferable inputs. The Simple declaration discarded that result and
+`Channel.try_send` first queried closed state, then fabricated `true` after a
+rejected send. The declaration now carries the status, `try_send` consumes it
+directly, and all six raw channel declarations plus thirteen uses are lexical
+`unsafe(ffi)`. The Rust interpreter and both concurrent provider backends now
+preserve the same boolean admission result instead of laundering it through
+unit/nil. This removes the extra closed-state call from `try_send`; it adds no
+allocation, copy, lookup, hash, generic dispatch, or loop. The static guard and
+optimizer review pass (19 MIR-only, zero general patterns). Focused Rust tests
+are blocked by unrelated missing imports in `interpreter/expr/collections.rs`,
+and the deployed bootstrap binary remains stale, so this is not a completed
+cross-lane verification or signed-admission claim.

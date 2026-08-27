@@ -31,6 +31,10 @@ int main(void) {
     const char* argv[] = {"never-spawned", NULL};
     assert(!rt_process_owned_start_v2(argv[0], argv, 1000, 100, 16, &token, &start));
     assert(start.runtime_error == ENOTSUP && token.high == 0 && token.low == 0);
+    RtOwnedProcessObservationV1 observation;
+    assert(!rt_process_owned_observation_v1(token, &observation));
+    assert(observation.version == RT_OWNED_PROCESS_OBSERVATION_VERSION);
+    assert(observation.evidence_flags == 0 && observation.runtime_error == ENOTSUP);
     int64_t* tuple = rt_process_run_owned_bounded_value(NULL, 0, NULL, 0, 0);
     assert(tuple);
     SplArray* receipt = (SplArray*)(uintptr_t)tuple[2];
@@ -38,6 +42,14 @@ int main(void) {
     assert(rt_array_get(receipt, 0) == RT_OWNED_PROCESS_RECEIPT_VERSION);
     assert(rt_array_get(receipt, 10) == -1);
     assert(rt_array_get(receipt, 18) == ENOTSUP);
+    int64_t* observed_tuple = rt_process_run_owned_observed_bounded_value(NULL, 0, NULL, 0, 0);
+    assert(observed_tuple);
+    SplArray* observed_fields = (SplArray*)(uintptr_t)observed_tuple[2];
+    assert(rt_array_len(observed_fields) == 30);
+    assert(rt_array_get(observed_fields, 19) == RT_OWNED_PROCESS_OBSERVATION_VERSION);
+    assert(rt_array_get(observed_fields, 20) == 0);
+    assert(rt_array_get(observed_fields, 28) == 0);
+    assert(rt_array_get(observed_fields, 29) == ENOTSUP);
     puts("runtime_process_owned_nonunix_selfcheck: PASS");
     return 0;
 }

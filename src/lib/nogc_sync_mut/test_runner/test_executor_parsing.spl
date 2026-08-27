@@ -5,13 +5,17 @@
 #
 # Split from test_runner_execute.spl for maintainability.
 
-use std.test_runner.test_runner_types.{TestFileResult, TestOptions}
+use std.test_runner.test_runner_types.{
+    TestFileResult, TestOptions, TestOmissionEvidence, TestOmissionStatus
+}
+use std.test_runner.test_runner_mcdc_report.{test_runner_result_with_mcdc_evidence}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.io.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out}
 use std.io.{env_get}
 use std.sffi.cli.{cli_get_args}
 use std.string_core.{char_code}
+use lib.common.env_access.model.{env_canonical_evidence_artifact_path}
 
 # std::fs::canonicalize — resolves a symlink chain in-process.
 # Declared locally, mirroring std.spec.engine_probe, which uses the same symbol
@@ -42,6 +46,10 @@ val COVERAGE_BEGIN = "__SIMPLE_COVERAGE_SDN_BEGIN__"
 val COVERAGE_END = "__SIMPLE_COVERAGE_SDN_END__"
 val COMPILER_COVERAGE_BEGIN = "__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__"
 val COMPILER_COVERAGE_END = "__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"
+val MCDC_OBLIGATION_BEGIN = "__SIMPLE_MCDC_OBLIGATION_MANIFEST_BEGIN__"
+val MCDC_OBLIGATION_END = "__SIMPLE_MCDC_OBLIGATION_MANIFEST_END__"
+val MCDC_EVIDENCE_OUTPUT_BEGIN = "__SIMPLE_MCDC_EVIDENCE_BEGIN__"
+val MCDC_EVIDENCE_OUTPUT_END = "__SIMPLE_MCDC_EVIDENCE_END__"
 
 # RESTORED 2026-07-30. Added by 3dc58bd607 "feat(test): ingest compiler
 # coverage manifests", then deleted by f119f8b712 "chore: consolidate completed
@@ -84,6 +92,25 @@ fn strip_compiler_coverage_manifest_blocks(output: text) -> text:
         elif not in_block:
             outside_lines.push(raw_line)
     outside_lines.join("\n")
+
+fn extract_compiler_mcdc_obligation_manifest(output: text) -> (text, bool):
+    """Extract exactly one compiler-owned obligations-only MC/DC manifest."""
+    var in_block = false
+    var complete_blocks = 0
+    var result = ""
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean == MCDC_OBLIGATION_BEGIN:
+            if in_block or complete_blocks != 0: return ("", false)
+            in_block = true
+        elif clean == MCDC_OBLIGATION_END:
+            if not in_block: return ("", false)
+            in_block = false
+            complete_blocks = complete_blocks + 1
+        elif in_block:
+            if result != "": result = result + "\n"
+            result = result + raw_line
+    (result, complete_blocks == 1 and not in_block and result.trim() != "")
 
 fn find_simple_new_binary() -> text:
     ""
@@ -208,7 +235,71 @@ fn extract_error_message(output: text) -> text:
             count = count + 1
             if count >= 3:
                 break
+    if result != "":
+        return result
+    # Fallback: no compiler/runtime error line. A BDD assertion failure prints
+    # `✗ <example name>` followed by `expected <got> to <matcher> <want>`; with
+    # neither matched above, the caller collapsed 100+ real assertion failures
+    # into the opaque "Process exited with code 1"
+    # (doc/08_tracking/bug/test_01_unit_process_exit_cluster_2026-08-26.md).
+    # Surface the first failing example and its expectation instead.
+    var prev_was_failure = false
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("✗"):
+            if result != "":
+                break
+            result = clean
+            prev_was_failure = true
+        elif prev_was_failure and clean.starts_with("expected "):
+            result = result + " -- " + clean
+            break
+        else:
+            prev_was_failure = false
     result
+
+val SCENARIO_OMISSION_PREFIX = "__SIMPLE_SCENARIO_OMISSION_V1__|"
+
+fn parse_test_omission_evidence(output: text) -> ([TestOmissionEvidence], text):
+    var evidence: [TestOmissionEvidence] = []
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if not clean.starts_with(SCENARIO_OMISSION_PREFIX):
+            continue
+        if evidence.len() >= 64:
+            return (evidence, "SCENARIO-E-OMISSION-CAP")
+        val fields = clean.split("|")
+        if fields.len() != 9:
+            return (evidence, "SCENARIO-E-OMISSION-WIRE")
+        val status = if fields[1] == "BLOCKED":
+            TestOmissionStatus.Blocked
+        elif fields[1] == "UNSUPPORTED":
+            TestOmissionStatus.Unsupported
+        else:
+            return (evidence, "SCENARIO-E-OMISSION-STATUS")
+        if (fields[2].trim() == "" or fields[3].trim() == "" or
+            fields[4].trim() == "" or fields[5].trim() == "" or
+            fields[6].trim() == "" or fields[7].trim() == "" or
+            fields[8].trim() == ""):
+            return (evidence, "SCENARIO-E-OMISSION-INCOMPLETE")
+        var artifacts: [text] = []
+        if fields[7].trim() != "":
+            for artifact in fields[7].split(";"):
+                if (not env_canonical_evidence_artifact_path(artifact) or
+                    artifacts.len() >= 64):
+                    return (evidence, "SCENARIO-E-OMISSION-ARTIFACT")
+                artifacts.push(artifact.trim())
+        evidence.push(TestOmissionEvidence(
+            status: status,
+            scenario_id: fields[2],
+            reason: fields[3],
+            prerequisite: fields[4],
+            owner: fields[5],
+            tracking_id: fields[6],
+            artifact_paths: artifacts,
+            resume_command: fields[8]
+        ))
+    (evidence, "")
 
 fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_passed = 0
@@ -545,6 +636,33 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, setup_ms: 0, error: "child output was truncated by the bounded capture; example counts are unverifiable (see runtime_fork.c FORK_CAPTURE_LIMIT)", timed_out: false, cached: false)
 
     val (passed, failed, skipped, pending) = parse_test_output(combined)
+    val (omissions, omission_problem) = parse_test_omission_evidence(combined)
+    if omission_problem != "":
+        return TestFileResult(
+            path: file_path, passed: passed, failed: 1, skipped: skipped,
+            pending: pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "ERROR: {omission_problem}", timed_out: false, cached: false)
+    if omissions.len() > 0:
+        var blocked = 0
+        var unsupported = 0
+        for omission in omissions:
+            if omission.status == TestOmissionStatus.Blocked:
+                blocked = blocked + 1
+            else:
+                unsupported = unsupported + 1
+        val status = if failed > 0 or exit_code != 0:
+            "ERROR"
+        elif blocked > 0:
+            "BLOCKED"
+        else:
+            "UNSUPPORTED"
+        val first = omissions[0]
+        return test_runner_result_with_mcdc_evidence(TestFileResult(
+            path: file_path, passed: passed, failed: failed, skipped: skipped,
+            pending: pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "{status}: {first.reason}; prerequisite={first.prerequisite}; owner={first.owner}; tracking={first.tracking_id}; resume={first.resume_command}",
+            timed_out: false, cached: false, blocked: blocked,
+            unsupported: unsupported, omission_evidence: omissions), combined)
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
@@ -580,7 +698,10 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         if error == "" and exit_code != 0:
             error = "Process exited with code {exit_code}"
 
-    TestFileResult(path: file_path, passed: passed, failed: effective_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false)
+    test_runner_result_with_mcdc_evidence(
+        TestFileResult(path: file_path, passed: passed, failed: effective_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
+        combined
+    )
 
 fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
@@ -610,7 +731,42 @@ fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: t
     if exit_code == -1 or (exit_code > 128 and exit_code < 192):
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
     val combined = stdout + "\n" + stderr
+    if combined.contains("[output truncated:"):
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "child output was truncated; typed scenario status is unverifiable",
+            timed_out: false, cached: false)
     val (_, _, skipped, pending) = parse_test_output(combined)
+    val (omissions, omission_problem) = parse_test_omission_evidence(combined)
+    if omission_problem != "":
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: skipped,
+            pending: pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "ERROR: {omission_problem}", timed_out: false, cached: false)
+    if omissions.len() > 0:
+        var blocked = 0
+        var unsupported = 0
+        for omission in omissions:
+            if omission.status == TestOmissionStatus.Blocked:
+                blocked = blocked + 1
+            else:
+                unsupported = unsupported + 1
+        val first = omissions[0]
+        val (structured_passed, structured_failed, _) = read_structured_test_evidence(evidence_path)
+        val status = if structured_failed > 0 or exit_code != 0:
+            "ERROR"
+        elif blocked > 0:
+            "BLOCKED"
+        else:
+            "UNSUPPORTED"
+        return test_runner_result_with_mcdc_evidence(TestFileResult(
+            path: file_path, passed: structured_passed, failed: structured_failed,
+            skipped: skipped, pending: pending, duration_ms: duration_ms,
+            setup_ms: 0,
+            error: "{status}: {first.reason}; prerequisite={first.prerequisite}; owner={first.owner}; tracking={first.tracking_id}; resume={first.resume_command}",
+            timed_out: false, cached: false, blocked: blocked,
+            unsupported: unsupported, omission_evidence: omissions), combined)
     val (passed, evidence_failed, valid) = read_structured_test_evidence(evidence_path)
     if exit_code != 0:
         val failed = if evidence_failed > 0: evidence_failed else: 1
@@ -618,7 +774,10 @@ fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: t
     if valid == 0 or passed + evidence_failed == 0:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no BDD examples executed", timed_out: false, cached: false)
     val error = if evidence_failed > 0: "test-runner: spec failed" else: ""
-    TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false)
+    test_runner_result_with_mcdc_evidence(
+        TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
+        combined
+    )
 
 # =========================================================================
 # Coverage Wrapper Generation
@@ -631,7 +790,10 @@ fn coverage_wrapper_suffix(file_path: text) -> text:
         ".spl"
 
 fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text):
-    if not options.coverage:
+    val configured_mcdc = env_get("SIMPLE_MCDC_MODE") ?? ""
+    val mcdc_enabled = configured_mcdc == "on" or
+        configured_mcdc == "dynamic"
+    if not options.coverage and not mcdc_enabled:
         return (file_path, "")
     val content = read_file_content(file_path)
     if content == "":
@@ -642,21 +804,63 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
     val tmp_path = _tp_get_temp_dir() + "/simple_cov_" + base + coverage_wrapper_suffix(file_path)
 
     var lines: [text] = []
+    if mcdc_enabled:
+        lines.push("use std.io.{env_get, file_is_regular_no_follow, file_read_text_bounded}")
+        lines.push("use std.sffi.cli.{cli_get_args}")
+        lines.push("use std.common.convert.{try_parse_int}")
+        lines.push("use std.common.crypto.sha256.{sha256_text}")
+        lines.push("use std.common.mcdc.model.{McdcMode, mcdc_default_policy}")
+        lines.push("use std.test_runner.test_runner_mcdc_runtime.{test_runner_prepare_mcdc_recording, test_runner_produce_mcdc_evidence_v1}")
+        lines.push("use std.nogc_sync_mut.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_owner}")
+        lines.push("use std.spec.scenario_governance.{scenario_governance_mcdc_exclusions_reset, scenario_governance_mcdc_exclusions_snapshot}")
+        lines.push("")
+        lines.push("fn __simple_mcdc_manifest_arg(prefix: text) -> text:")
+        lines.push("    var found = \"\"")
+        lines.push("    for arg in cli_get_args():")
+        lines.push("        if arg.starts_with(prefix):")
+        lines.push("            if found != \"\": panic(\"test-runner: duplicate MC/DC manifest contract\")")
+        lines.push("            found = arg.replace(prefix, \"\")")
+        lines.push("    found")
+        lines.push("")
+        lines.push("val __simple_mcdc_manifest_path = __simple_mcdc_manifest_arg(\"--simple-mcdc-manifest=\")")
+        lines.push("val __simple_mcdc_manifest_length = try_parse_int(__simple_mcdc_manifest_arg(\"--simple-mcdc-manifest-length=\"))")
+        lines.push("val __simple_mcdc_manifest_sha256 = __simple_mcdc_manifest_arg(\"--simple-mcdc-manifest-sha256=\")")
+        lines.push("if __simple_mcdc_manifest_path == \"\" or __simple_mcdc_manifest_length == nil or __simple_mcdc_manifest_length.unwrap() < 0 or __simple_mcdc_manifest_length.unwrap() > 67108864 or __simple_mcdc_manifest_sha256.len() != 64 or not file_is_regular_no_follow(__simple_mcdc_manifest_path): panic(\"test-runner: invalid MC/DC manifest contract\")")
+        lines.push("val __simple_mcdc_manifest = file_read_text_bounded(__simple_mcdc_manifest_path, __simple_mcdc_manifest_length.unwrap()) ?? \"\"")
+        lines.push("if __simple_mcdc_manifest.len() != __simple_mcdc_manifest_length.unwrap() or sha256_text(__simple_mcdc_manifest) != __simple_mcdc_manifest_sha256: panic(\"test-runner: MC/DC manifest integrity mismatch\")")
+        lines.push("")
+        lines.push("val __simple_mcdc_mode = if (env_get(\"SIMPLE_MCDC_MODE\") ?? \"\") == \"dynamic\": McdcMode.DynamicAspect else: McdcMode.StaticOn")
+        lines.push("scenario_governance_mcdc_exclusions_reset()")
+        lines.push("val __simple_mcdc_ready = test_runner_prepare_mcdc_recording(__simple_mcdc_mode, mcdc_default_policy(__simple_mcdc_mode))")
+        lines.push("if not __simple_mcdc_ready: panic(\"test-runner: MC/DC recorder preparation failed\")")
+        lines.push("if __simple_mcdc_mode == McdcMode.DynamicAspect and not mcdc_dynamic_probe_controller_load_builtin_current_owner(): panic(\"test-runner: dynamic MC/DC aspect load failed\")")
+        lines.push("")
     lines.push(content)
     lines.push("")
-    lines.push("# === Coverage Dump (auto-generated) ===")
-    lines.push("extern fn rt_coverage_enabled() -> bool")
-    lines.push("extern fn rt_coverage_dump_sdn() -> text")
-    lines.push("")
-    lines.push("fn __simple_cov_dump():")
-    lines.push("    if not rt_coverage_enabled():")
-    lines.push("        return")
-    lines.push("    val sdn = rt_coverage_dump_sdn()")
-    lines.push("    print \"" + COVERAGE_BEGIN + "\"")
-    lines.push("    print sdn")
-    lines.push("    print \"" + COVERAGE_END + "\"")
-    lines.push("")
-    lines.push("__simple_cov_dump()")
+    if options.coverage:
+        lines.push("# === Coverage Dump (auto-generated) ===")
+        lines.push("extern fn rt_coverage_enabled() -> bool")
+        lines.push("extern fn rt_coverage_dump_sdn() -> text")
+        lines.push("")
+        lines.push("fn __simple_cov_dump():")
+        lines.push("    if not rt_coverage_enabled():")
+        lines.push("        return")
+        lines.push("    val sdn = rt_coverage_dump_sdn()")
+        lines.push("    print \"" + COVERAGE_BEGIN + "\"")
+        lines.push("    print sdn")
+        lines.push("    print \"" + COVERAGE_END + "\"")
+        lines.push("")
+        lines.push("__simple_cov_dump()")
+    if mcdc_enabled:
+        lines.push("")
+        lines.push("fn __simple_mcdc_dump():")
+        lines.push("    val exclusions = scenario_governance_mcdc_exclusions_snapshot()")
+        lines.push("    val evidence = test_runner_produce_mcdc_evidence_v1(__simple_mcdc_mode, __simple_mcdc_manifest, exclusions)")
+        lines.push("    print \"" + MCDC_EVIDENCE_OUTPUT_BEGIN + "\"")
+        lines.push("    print evidence")
+        lines.push("    print \"" + MCDC_EVIDENCE_OUTPUT_END + "\"")
+        lines.push("")
+        lines.push("__simple_mcdc_dump()")
 
     val wrapped = lines.join("\n")
     file_write(tmp_path, wrapped)
@@ -739,9 +943,11 @@ fn extract_static_test_name(line: text) -> text:
 # =========================================================================
 
 export COVERAGE_BEGIN, COVERAGE_END, COMPILER_COVERAGE_BEGIN, COMPILER_COVERAGE_END
+export MCDC_OBLIGATION_BEGIN, MCDC_OBLIGATION_END
 export extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks
+export extract_compiler_mcdc_obligation_manifest
 export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
-export extract_error_message, parse_test_output
+export extract_error_message, parse_test_output, parse_test_omission_evidence
 export extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
 export coverage_wrapper_suffix, build_coverage_wrapper

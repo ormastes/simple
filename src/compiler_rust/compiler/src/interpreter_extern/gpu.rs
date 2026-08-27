@@ -278,6 +278,7 @@ mod cuda_dlopen {
     type CuDeviceGetName = unsafe extern "C" fn(*mut i8, i32, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
+    type CuCtxGetCurrent = unsafe extern "C" fn(*mut *mut c_void) -> i32;
     type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxSynchronize = unsafe extern "C" fn() -> i32;
     type CuEventCreate = unsafe extern "C" fn(*mut *mut c_void, u32) -> i32;
@@ -291,6 +292,11 @@ mod cuda_dlopen {
     type CuMemsetD8 = unsafe extern "C" fn(u64, u8, usize) -> i32;
     type CuMemcpyHtoD = unsafe extern "C" fn(u64, *const c_void, usize) -> i32;
     type CuMemcpyDtoH = unsafe extern "C" fn(*mut c_void, u64, usize) -> i32;
+    type CuStreamCreate = unsafe extern "C" fn(*mut *mut c_void, u32) -> i32;
+    type CuStreamDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
+    type CuStreamSynchronize = unsafe extern "C" fn(*mut c_void) -> i32;
+    type CuMemcpyHtoDAsync = unsafe extern "C" fn(u64, *const c_void, usize, *mut c_void) -> i32;
+    type CuMemcpyDtoHAsync = unsafe extern "C" fn(*mut c_void, u64, usize, *mut c_void) -> i32;
     type CuDeviceGetCount = unsafe extern "C" fn(*mut i32) -> i32;
     type CuModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> i32;
     type CuModuleUnload = unsafe extern "C" fn(*mut c_void) -> i32;
@@ -326,6 +332,13 @@ mod cuda_dlopen {
         pub event_synchronize: Option<CuEventSynchronize>,
         pub event_elapsed_time: Option<CuEventElapsedTime>,
         pub event_destroy: Option<CuEventDestroy>,
+        // Streams + async copies (plan E2). Optional like the events above.
+        pub ctx_get_current: Option<CuCtxGetCurrent>,
+        pub stream_create: Option<CuStreamCreate>,
+        pub stream_destroy: Option<CuStreamDestroy>,
+        pub stream_synchronize: Option<CuStreamSynchronize>,
+        pub memcpy_htod_async: Option<CuMemcpyHtoDAsync>,
+        pub memcpy_dtoh_async: Option<CuMemcpyDtoHAsync>,
         pub mem_alloc: CuMemAlloc,
         pub mem_free: CuMemFree,
         pub memset_d32: CuMemsetD32,
@@ -457,6 +470,12 @@ mod cuda_dlopen {
             event_synchronize: sym_opt!("cuEventSynchronize"),
             event_elapsed_time: sym_opt!("cuEventElapsedTime"),
             event_destroy: sym_opt!("cuEventDestroy"),
+            ctx_get_current: sym_opt!("cuCtxGetCurrent"),
+            stream_create: sym_opt!("cuStreamCreate"),
+            stream_destroy: sym_opt!("cuStreamDestroy_v2"),
+            stream_synchronize: sym_opt!("cuStreamSynchronize"),
+            memcpy_htod_async: sym_opt!("cuMemcpyHtoDAsync_v2"),
+            memcpy_dtoh_async: sym_opt!("cuMemcpyDtoHAsync_v2"),
             device_get: sym!("cuDeviceGet"),
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_name: sym!("cuDeviceGetName"),
@@ -504,6 +523,9 @@ use simple_runtime::cuda_runtime::{
     rt_cuda_launch_kernel, rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod,
     rt_cuda_memcpy_htod, rt_cuda_memset, rt_cuda_memset_d32, rt_cuda_module_get_function, rt_cuda_module_load,
     rt_cuda_module_load_data, rt_cuda_module_load_data_bytes, rt_cuda_module_unload, rt_cuda_sync,
+    rt_cuda_stream_create, rt_cuda_stream_destroy, rt_cuda_stream_synchronize, rt_cuda_event_create,
+    rt_cuda_event_destroy, rt_cuda_event_record, rt_cuda_event_synchronize, rt_cuda_event_elapsed_ms,
+    rt_cuda_event_elapsed_ns, rt_cuda_memcpy_htod_async, rt_cuda_memcpy_dtoh_async, rt_cuda_launch_kernel_ex,
 };
 
 use simple_runtime::metal_graphics_runtime::{
@@ -555,11 +577,13 @@ pub(super) fn c_string_or_error(text: String, name: &str) -> Result<CString, Com
     CString::new(text).map_err(|_| CompileError::semantic(format!("{name} does not accept embedded NUL bytes")))
 }
 
-fn c_ptr_to_string(ptr: *const std::os::raw::c_char) -> String {
+fn c_ptr_to_string(ptr: *const std::os::raw::c_char, name: &str) -> Result<String, CompileError> {
     if ptr.is_null() {
-        String::new()
+        Err(CompileError::runtime(format!(
+            "{name}: foreign text contract returned null"
+        )))
     } else {
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        Ok(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
     }
 }
 
@@ -606,9 +630,9 @@ pub(super) fn arg_bytes_ptr(
 }
 
 fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize) -> Result<Box<[u8]>, CompileError> {
-    let value = args.get(index).ok_or_else(|| {
-        CompileError::semantic(format!("{name} expects {expected} arguments"))
-    })?;
+    let value = args
+        .get(index)
+        .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     if let Some(bytes) = value.byte_array_view() {
         return Ok(bytes.to_vec().into_boxed_slice());
     }
@@ -625,9 +649,10 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
     let mut bytes = Vec::with_capacity(items.len());
     for item in items {
         let raw = item.as_int()?;
-        bytes.push(u8::try_from(raw).map_err(|_| {
-            CompileError::semantic(format!("{name} byte value {raw} is out of bounds"))
-        })?);
+        bytes.push(
+            u8::try_from(raw)
+                .map_err(|_| CompileError::semantic(format!("{name} byte value {raw} is out of bounds")))?,
+        );
     }
     Ok(bytes.into_boxed_slice())
 }
@@ -651,11 +676,18 @@ fn release_runtime_owner(owner: simple_runtime::value::RuntimeValue) {
 }
 
 fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) -> Result<Vec<i64>, CompileError> {
-    let value = args.get(index).ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
+    let value = args
+        .get(index)
+        .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     let items = match value {
         Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
         Value::FixedSizeArray { data, .. } => data.as_ref(),
-        other => return Err(CompileError::semantic(format!("{name} argument {index} must be [i64], got {}", other.type_name()))),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} argument {index} must be [i64], got {}",
+                other.type_name()
+            )))
+        }
     };
     items.iter().map(Value::as_int).collect()
 }
@@ -832,7 +864,7 @@ pub fn rt_metal_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
         0,
         "rt_metal_device_name",
         1,
-    )?))))
+    )?), "rt_metal_device_name")?))
 }
 
 pub fn rt_metal_device_memory_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -926,12 +958,9 @@ pub fn rt_metal_compile_shader_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(rt_metal_destroy_shader(arg_i64(
-        args,
-        0,
-        "rt_metal_destroy_shader",
-        1,
-    )?) != 0))
+    Ok(Value::Bool(
+        rt_metal_destroy_shader(arg_i64(args, 0, "rt_metal_destroy_shader", 1)?) != 0,
+    ))
 }
 
 pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -947,12 +976,9 @@ pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Comp
 }
 
 pub fn rt_metal_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(rt_metal_destroy_pipeline(arg_i64(
-        args,
-        0,
-        "rt_metal_destroy_pipeline",
-        1,
-    )?) != 0))
+    Ok(Value::Bool(
+        rt_metal_destroy_pipeline(arg_i64(args, 0, "rt_metal_destroy_pipeline", 1)?) != 0,
+    ))
 }
 
 pub fn rt_metal_create_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1122,7 +1148,10 @@ pub fn rt_metal_wait_completed_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_get_last_error_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(c_ptr_to_string(rt_metal_get_last_error())))
+    Ok(Value::text(c_ptr_to_string(
+        rt_metal_get_last_error(),
+        "rt_metal_get_last_error",
+    )?))
 }
 
 pub fn rt_metal_create_sampler_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -1299,7 +1328,9 @@ pub fn rt_cuda_device_name_fn(args: &[Value]) -> Result<Value, CompileError> {
     let device = arg_i64(args, 0, "rt_cuda_device_name", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Str(c_ptr_to_string(rt_cuda_device_name(device)).into()));
+        return Ok(Value::Str(
+            c_ptr_to_string(rt_cuda_device_name(device), "rt_cuda_device_name")?.into(),
+        ));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -1413,117 +1444,442 @@ pub fn rt_cuda_ctx_synchronize_fn(_args: &[Value]) -> Result<Value, CompileError
     }
 }
 
-// ---------------------------------------------------------------------------
-// CUDA device timing (events). Honesty rule: every failure path returns -1.
-// 0 is never used to mean "unknown" because 0 ns is a legitimate measurement.
-// ---------------------------------------------------------------------------
+// Device-timing events + streams + async copies + extended launch (plan E2).
+// Two backends: the `cuda` cargo feature routes to simple_runtime::cuda_runtime
+// (the same exports native code links against); the default build dlopens
+// libcuda directly. Handle contract in both: positive handle on success,
+// negative on failure (-1 bad input / symbol unavailable, -(CUresult) driver
+// error, -3 no driver). Stream handle 0 is the legacy default stream.
 
-pub fn rt_cuda_event_create_fn(_args: &[Value]) -> Result<Value, CompileError> {
+#[cfg(not(feature = "cuda"))]
+fn dl_status(rc: i32) -> i64 {
+    if rc == 0 {
+        0
+    } else {
+        -(rc as i64)
+    }
+}
+
+/// dlopen twin of cuda_runtime::ensure_default_context_current: the stream /
+/// event / async entries below must work before the program made a context
+/// explicitly (the seed path does the same). Creates one default context on
+/// device 0 lazily and makes it current; 0 on success, negative on failure.
+#[cfg(not(feature = "cuda"))]
+static DL_DEFAULT_CTX: OnceLock<i64> = OnceLock::new();
+
+#[cfg(not(feature = "cuda"))]
+fn dl_ensure_context(fns: &cuda_dlopen::CudaFns) -> i64 {
+    if let Some(get) = fns.ctx_get_current {
+        let mut cur: *mut std::ffi::c_void = std::ptr::null_mut();
+        if unsafe { get(&mut cur as *mut _) } == 0 && !cur.is_null() {
+            return 0;
+        }
+    }
+    let ctx = *DL_DEFAULT_CTX.get_or_init(|| unsafe {
+        let rc = (fns.init)(0);
+        if rc != 0 {
+            return -(rc as i64);
+        }
+        let mut dev: i32 = 0;
+        let rc = (fns.device_get)(&mut dev, 0);
+        if rc != 0 {
+            return -(rc as i64);
+        }
+        let mut ctx: *mut std::ffi::c_void = std::ptr::null_mut();
+        let rc = (fns.ctx_create)(&mut ctx as *mut _, 0, dev);
+        if rc != 0 || ctx.is_null() {
+            return if rc != 0 { -(rc as i64) } else { -1 };
+        }
+        ctx as i64
+    });
+    if ctx <= 0 {
+        return ctx;
+    }
+    dl_status(unsafe { (fns.ctx_set_current)(ctx as *mut std::ffi::c_void) })
+}
+
+/// `rt_cuda_event_create(flags = 0)`; the flags argument is optional so the
+/// pre-existing 0-arg declaration in gpu_lane/cuda_native_profile.spl keeps working.
+pub fn rt_cuda_event_create_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let flags = match args.first() {
+        Some(Value::Int(f)) => *f,
+        _ => 0,
+    };
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_event_create(flags)));
+    }
     #[cfg(not(feature = "cuda"))]
     {
         if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
             if let Some(f) = fns.event_create {
                 let mut ev: *mut std::ffi::c_void = std::ptr::null_mut();
-                // CU_EVENT_DEFAULT = 0 (blocking-free, timing enabled)
-                let rc = unsafe { f(&mut ev as *mut _, 0) };
-                if rc != 0 || ev.is_null() {
+                let rc = unsafe { f(&mut ev as *mut _, flags as u32) };
+                if rc != 0 {
+                    return Ok(Value::Int(dl_status(rc)));
+                }
+                if ev.is_null() {
                     return Ok(Value::Int(-1));
                 }
                 return Ok(Value::Int(ev as i64));
             }
+            return Ok(Value::Int(-1));
         }
+        Ok(Value::Int(-3))
     }
-    Ok(Value::Int(-1))
 }
 
 pub fn rt_cuda_event_record_fn(args: &[Value]) -> Result<Value, CompileError> {
     let event = arg_i64(args, 0, "rt_cuda_event_record", 2)?;
     let stream = arg_i64(args, 1, "rt_cuda_event_record", 2)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_event_record(event, stream)));
+    }
     #[cfg(not(feature = "cuda"))]
     {
-        if event > 0 {
-            if let Some(fns) = get_cuda_dl() {
-                if let Some(f) = fns.event_record {
-                    let rc = unsafe {
-                        f(
-                            event as *mut std::ffi::c_void,
-                            stream as *mut std::ffi::c_void,
-                        )
-                    };
-                    return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
-                }
-            }
+        if event <= 0 || stream < 0 {
+            return Ok(Value::Int(-1));
         }
+        if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            if let Some(f) = fns.event_record {
+                let rc = unsafe { f(event as *mut std::ffi::c_void, stream as *mut std::ffi::c_void) };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
     }
-    #[cfg(feature = "cuda")]
-    let _ = (event, stream);
-    Ok(Value::Int(-1))
 }
 
 pub fn rt_cuda_event_synchronize_fn(args: &[Value]) -> Result<Value, CompileError> {
     let event = arg_i64(args, 0, "rt_cuda_event_synchronize", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_event_synchronize(event)));
+    }
     #[cfg(not(feature = "cuda"))]
     {
-        if event > 0 {
-            if let Some(fns) = get_cuda_dl() {
-                if let Some(f) = fns.event_synchronize {
-                    let rc = unsafe { f(event as *mut std::ffi::c_void) };
-                    return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
-                }
-            }
+        if event <= 0 {
+            return Ok(Value::Int(-1));
         }
+        if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            if let Some(f) = fns.event_synchronize {
+                let rc = unsafe { f(event as *mut std::ffi::c_void) };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
     }
+}
+
+/// Elapsed milliseconds as f64; negative on error (-1 / -(CUresult) / -3).
+pub fn rt_cuda_event_elapsed_ms_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let start = arg_i64(args, 0, "rt_cuda_event_elapsed_ms", 2)?;
+    let end = arg_i64(args, 1, "rt_cuda_event_elapsed_ms", 2)?;
     #[cfg(feature = "cuda")]
-    let _ = event;
-    Ok(Value::Int(-1))
+    {
+        return Ok(Value::Float(rt_cuda_event_elapsed_ms(start, end)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if start <= 0 || end <= 0 {
+            return Ok(Value::Float(-1.0));
+        }
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(f) = fns.event_elapsed_time {
+                let mut ms: f32 = 0.0;
+                let rc = unsafe {
+                    f(
+                        &mut ms as *mut f32,
+                        start as *mut std::ffi::c_void,
+                        end as *mut std::ffi::c_void,
+                    )
+                };
+                if rc != 0 {
+                    return Ok(Value::Float(-(rc as f64)));
+                }
+                if !ms.is_finite() || ms < 0.0 {
+                    return Ok(Value::Float(-1.0));
+                }
+                // cuEventElapsedTime reports MILLISECONDS as f32.
+                return Ok(Value::Float(f64::from(ms)));
+            }
+            return Ok(Value::Float(-1.0));
+        }
+        Ok(Value::Float(-3.0))
+    }
 }
 
 pub fn rt_cuda_event_elapsed_ns_fn(args: &[Value]) -> Result<Value, CompileError> {
     let start = arg_i64(args, 0, "rt_cuda_event_elapsed_ns", 2)?;
     let end = arg_i64(args, 1, "rt_cuda_event_elapsed_ns", 2)?;
-    #[cfg(not(feature = "cuda"))]
-    {
-        if start > 0 && end > 0 {
-            if let Some(fns) = get_cuda_dl() {
-                if let Some(f) = fns.event_elapsed_time {
-                    let mut ms: f32 = 0.0;
-                    let rc = unsafe {
-                        f(
-                            &mut ms as *mut f32,
-                            start as *mut std::ffi::c_void,
-                            end as *mut std::ffi::c_void,
-                        )
-                    };
-                    if rc != 0 || !ms.is_finite() || ms < 0.0 {
-                        return Ok(Value::Int(-1));
-                    }
-                    // cuEventElapsedTime reports MILLISECONDS as f32.
-                    return Ok(Value::Int((f64::from(ms) * 1_000_000.0) as i64));
-                }
-            }
-        }
+    match rt_cuda_event_elapsed_ms_fn(&[Value::Int(start), Value::Int(end)])? {
+        Value::Float(ms) if ms >= 0.0 => Ok(Value::Int((ms * 1_000_000.0) as i64)),
+        // Honesty rule for the ns entry: every failure path is -1 (0 ns is a
+        // legitimate measurement, so it never means "unknown").
+        _ => Ok(Value::Int(-1)),
     }
-    #[cfg(feature = "cuda")]
-    let _ = (start, end);
-    Ok(Value::Int(-1))
 }
 
 pub fn rt_cuda_event_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
     let event = arg_i64(args, 0, "rt_cuda_event_destroy", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_event_destroy(event)));
+    }
     #[cfg(not(feature = "cuda"))]
     {
-        if event > 0 {
-            if let Some(fns) = get_cuda_dl() {
-                if let Some(f) = fns.event_destroy {
-                    let rc = unsafe { f(event as *mut std::ffi::c_void) };
-                    return Ok(Value::Int(if rc == 0 { 0 } else { -1 }));
-                }
-            }
+        if event <= 0 {
+            return Ok(Value::Int(-1));
         }
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(f) = fns.event_destroy {
+                let rc = unsafe { f(event as *mut std::ffi::c_void) };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
     }
+}
+
+pub fn rt_cuda_stream_create_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let flags = arg_i64(args, 0, "rt_cuda_stream_create", 1)?;
     #[cfg(feature = "cuda")]
-    let _ = event;
-    Ok(Value::Int(-1))
+    {
+        return Ok(Value::Int(rt_cuda_stream_create(flags)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            if let Some(f) = fns.stream_create {
+                let mut s: *mut std::ffi::c_void = std::ptr::null_mut();
+                let rc = unsafe { f(&mut s as *mut _, flags as u32) };
+                if rc != 0 {
+                    return Ok(Value::Int(dl_status(rc)));
+                }
+                if s.is_null() {
+                    return Ok(Value::Int(-1));
+                }
+                return Ok(Value::Int(s as i64));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_stream_destroy_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let stream = arg_i64(args, 0, "rt_cuda_stream_destroy", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_stream_destroy(stream)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if stream < 0 {
+            return Ok(Value::Int(-1));
+        }
+        if stream == 0 {
+            return Ok(Value::Int(0));
+        }
+        if let Some(fns) = get_cuda_dl() {
+            if let Some(f) = fns.stream_destroy {
+                let rc = unsafe { f(stream as *mut std::ffi::c_void) };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_stream_synchronize_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let stream = arg_i64(args, 0, "rt_cuda_stream_synchronize", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_stream_synchronize(stream)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if stream < 0 {
+            return Ok(Value::Int(-1));
+        }
+        if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            if let Some(f) = fns.stream_synchronize {
+                let rc = unsafe { f(stream as *mut std::ffi::c_void) };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_memcpy_htod_async_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst = arg_i64(args, 0, "rt_cuda_memcpy_htod_async", 4)?;
+    let src = arg_i64(args, 1, "rt_cuda_memcpy_htod_async", 4)?;
+    let size = arg_i64(args, 2, "rt_cuda_memcpy_htod_async", 4)?;
+    let stream = arg_i64(args, 3, "rt_cuda_memcpy_htod_async", 4)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memcpy_htod_async(dst, src, size, stream)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if stream < 0 || size < 0 {
+            return Ok(Value::Int(-1));
+        }
+        if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            if let Some(f) = fns.memcpy_htod_async {
+                let rc = unsafe {
+                    f(
+                        dst as u64,
+                        src as *const std::os::raw::c_void,
+                        size as usize,
+                        stream as *mut std::ffi::c_void,
+                    )
+                };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_memcpy_dtoh_async_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst = arg_i64(args, 0, "rt_cuda_memcpy_dtoh_async", 4)?;
+    let src = arg_i64(args, 1, "rt_cuda_memcpy_dtoh_async", 4)?;
+    let size = arg_i64(args, 2, "rt_cuda_memcpy_dtoh_async", 4)?;
+    let stream = arg_i64(args, 3, "rt_cuda_memcpy_dtoh_async", 4)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_memcpy_dtoh_async(dst, src, size, stream)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if stream < 0 || size < 0 {
+            return Ok(Value::Int(-1));
+        }
+        if let Some(fns) = get_cuda_dl() {
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            if let Some(f) = fns.memcpy_dtoh_async {
+                let rc = unsafe {
+                    f(
+                        dst as *mut std::os::raw::c_void,
+                        src as u64,
+                        size as usize,
+                        stream as *mut std::ffi::c_void,
+                    )
+                };
+                return Ok(Value::Int(dl_status(rc)));
+            }
+            return Ok(Value::Int(-1));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+/// `rt_cuda_launch_kernel` + dynamic shared memory + stream slot (11 args:
+/// module, func_name, gx, gy, gz, bx, by, bz, shared_bytes, stream, args_ptr).
+pub fn rt_cuda_launch_kernel_ex_fn(args: &[Value]) -> Result<Value, CompileError> {
+    const N: usize = 11;
+    let module = arg_i64(args, 0, "rt_cuda_launch_kernel_ex", N)?;
+    let func_name = arg_text(args, 1, "rt_cuda_launch_kernel_ex", N)?;
+    let grid_x = arg_i64(args, 2, "rt_cuda_launch_kernel_ex", N)?;
+    let grid_y = arg_i64(args, 3, "rt_cuda_launch_kernel_ex", N)?;
+    let grid_z = arg_i64(args, 4, "rt_cuda_launch_kernel_ex", N)?;
+    let block_x = arg_i64(args, 5, "rt_cuda_launch_kernel_ex", N)?;
+    let block_y = arg_i64(args, 6, "rt_cuda_launch_kernel_ex", N)?;
+    let block_z = arg_i64(args, 7, "rt_cuda_launch_kernel_ex", N)?;
+    let shared_bytes = arg_i64(args, 8, "rt_cuda_launch_kernel_ex", N)?;
+    let stream = arg_i64(args, 9, "rt_cuda_launch_kernel_ex", N)?;
+    let args_ptr = arg_i64(args, 10, "rt_cuda_launch_kernel_ex", N)?;
+    #[cfg(feature = "cuda")]
+    {
+        let name = func_name.as_bytes();
+        return Ok(Value::Int(rt_cuda_launch_kernel_ex(
+            module,
+            name.as_ptr(),
+            name.len() as u64,
+            grid_x,
+            grid_y,
+            grid_z,
+            block_x,
+            block_y,
+            block_z,
+            shared_bytes,
+            stream,
+            args_ptr,
+        )));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if shared_bytes < 0 || stream < 0 {
+            return Ok(Value::Int(-1));
+        }
+        if let Some(fns) = get_cuda_dl() {
+            let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel_ex")?;
+            let ctx_rc = dl_ensure_context(fns);
+            if ctx_rc != 0 {
+                return Ok(Value::Int(ctx_rc));
+            }
+            let mut func: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let r = unsafe {
+                (fns.module_get_function)(&mut func, module as *mut std::os::raw::c_void, c_name.as_ptr().cast())
+            };
+            if r != 0 {
+                return Ok(Value::Int(-(r as i64)));
+            }
+            let r = unsafe {
+                (fns.launch_kernel)(
+                    func,
+                    grid_x as u32,
+                    grid_y as u32,
+                    grid_z as u32,
+                    block_x as u32,
+                    block_y as u32,
+                    block_z as u32,
+                    shared_bytes as u32,
+                    stream as *mut std::os::raw::c_void,
+                    args_ptr as *mut *mut std::os::raw::c_void,
+                    std::ptr::null_mut(), // extra
+                )
+            };
+            return Ok(Value::Int(dl_status(r)));
+        }
+        Ok(Value::Int(-3))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1948,11 +2304,11 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
     let args_ptr = arg_i64(args, 8, "rt_cuda_launch_kernel", 9)?;
     #[cfg(feature = "cuda")]
     {
-        let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
+        let name = func_name.as_bytes();
         return Ok(Value::Int(rt_cuda_launch_kernel(
             module,
-            c_name.as_ptr() as *const u8,
-            c_name.as_bytes().len() as u64,
+            name.as_ptr(),
+            name.len() as u64,
             grid_x,
             grid_y,
             grid_z,
@@ -2013,7 +2369,9 @@ pub fn rt_cuda_get_error_string_fn(args: &[Value]) -> Result<Value, CompileError
     let error_code = arg_i64(args, 0, "rt_cuda_get_error_string", 1)?;
     #[cfg(feature = "cuda")]
     {
-        return Ok(Value::Str(c_ptr_to_string(rt_cuda_get_error_string(error_code)).into()));
+        return Ok(Value::Str(
+            c_ptr_to_string(rt_cuda_get_error_string(error_code), "rt_cuda_get_error_string")?.into(),
+        ));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -5433,5 +5791,16 @@ mod cuda_status_tests {
         assert_eq!(cuda_driver_status(0), 0);
         assert_eq!(cuda_driver_status(1), -1);
         assert_eq!(cuda_driver_status(100), -100);
+    }
+}
+
+#[cfg(test)]
+mod foreign_text_tests {
+    use super::c_ptr_to_string;
+
+    #[test]
+    fn null_foreign_text_is_a_contract_error() {
+        let error = c_ptr_to_string(std::ptr::null(), "rt_metal_device_name").unwrap_err();
+        assert!(format!("{error:?}").contains("foreign text contract returned null"));
     }
 }

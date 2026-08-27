@@ -44,7 +44,12 @@ pub fn print_resolve_stats() {
         let hit_rate = if calls > 0 { (hits * 100) / calls } else { 0 };
         eprintln!(
             "[resolve-stats] calls={} cache_hits={} hit_rate={}% dir_list={} stat_calls={} stat_misses={}",
-            calls, hits, hit_rate, dir_lists, STAT_CALLS.load(Ordering::Relaxed), STAT_MISSES.load(Ordering::Relaxed)
+            calls,
+            hits,
+            hit_rate,
+            dir_lists,
+            STAT_CALLS.load(Ordering::Relaxed),
+            STAT_MISSES.load(Ordering::Relaxed)
         );
     }
 }
@@ -332,9 +337,7 @@ fn resolve_with_numbered_dirs_recursive(current: &Path, parts: &[String], depth:
                 if p_is_file(&init_path) {
                     return Some(init_path);
                 }
-            } else if let Some(found) =
-                resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + window)
-            {
+            } else if let Some(found) = resolve_with_numbered_dirs_recursive(&dotted_dir, parts, depth + window) {
                 return Some(found);
             }
         }

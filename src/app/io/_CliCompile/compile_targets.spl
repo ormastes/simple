@@ -16,10 +16,9 @@ use std.nogc_sync_mut.shell.file (rename)
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
-use compiler.driver.driver_source_loading.{
-    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths,
-    _driver_resolve_entry_import, _driver_text_bucket_set_new,
-    _driver_text_bucket_set_has, _driver_text_bucket_set_add
+use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
+use app.io._CliCompile.compile_llvm_ir_facade.{
+    cli_compile_source_llvm_artifacts
 }
 # Dict.entries currently lowers to this implementation; keep its object in the
 # entry closure even though this walker no longer constructs a custom HashMap.
@@ -34,7 +33,6 @@ use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResul
 use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
 use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
 
-extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 use std.io_runtime.{read_file_text}
 extern fn rt_path_absolute(path: text) -> text
 
@@ -87,6 +85,14 @@ fn cli_native_build_resolve_output(output: text, output_explicit: bool, entry_po
         output
     else:
         "build/native/{_cli_native_build_stem(entry_point)}"
+
+# A dynload build currently produces the native artifact plus an ordinary SMF,
+# but no automatic aspect pack. Keep that partial success visible until the
+# pack producer publishes a real emission count into this success funnel.
+fn cli_native_build_dynload_pack_notice(build_mode: text, non_launchable_output: bool, automatic_pack_count: i64) -> text:
+    if build_mode != "dynload" or non_launchable_output or automatic_pack_count > 0:
+        return ""
+    "warning: W-NATIVE-BUILD-DYNLOAD-ASPECT-PACK-NOT-PRODUCED: --mode dynload completed without an automatically produced aspect pack; the native artifact remains usable, but dynamic aspect acquisition is unavailable (use --mode one-binary for the implemented artifact contract; automatic aspect-pack packaging is not yet available)"
 
 fn cli_native_build_is_entry_arg(arg: text) -> bool:
     arg == "--entry" or arg.starts_with("--entry=")
@@ -266,7 +272,7 @@ fn compile_simpleos(source_file: text, target: text, emit: text, output_file: te
         _cli_eprint("Supported: x86_64-simpleos, x86_64-unknown-simpleos, simpleos")
         return 1
 
-    val target_triple = "{arch}-unknown-none-elf"
+    val target_triple = "{arch}-unknown-simpleos"
 
     if verbose:
         print "Compiling {source_file} for SimpleOS ({target})"
@@ -280,24 +286,21 @@ fn compile_simpleos(source_file: text, target: text, emit: text, output_file: te
         _cli_eprint("Error: Failed to create build/simpleos directory")
         return 1
 
-    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
+    val artifacts = cli_compile_source_llvm_artifacts(
+        source_file, target_triple, true, "build/simpleos",
+        "simpleos_kernel", emit != "llvm-ir")
 
-    if compile_exit != 0 or llvm_ir == "":
+    if not artifacts.is_success():
         _cli_eprint("Error: LLVM IR generation failed for SimpleOS target")
-        if compile_err != "":
-            _cli_eprint(compile_err)
+        if artifacts.error != "":
+            _cli_eprint(artifacts.error)
         return 1
-
-    val base_name = "simpleos_kernel"
-    val ir_file = "build/simpleos/{base_name}.ll"
-    if not _cli_file_write_impl(ir_file, llvm_ir):
-        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
-        return 1
-
-    if verbose:
-        print "  Generated: {ir_file}"
 
     if emit == "llvm-ir":
+        if artifacts.unit_count() != 1:
+            _cli_eprint("Error: --emit=llvm-ir requires a single-module source closure; use ELF output for multi-module programs")
+            return 1
+        val ir_file = artifacts.ir_files[0]
         if output_file != "":
             if not _cli_file_copy_impl(ir_file, output_file):
                 _cli_eprint("Error: Failed to copy to {output_file}")
@@ -307,26 +310,11 @@ fn compile_simpleos(source_file: text, target: text, emit: text, output_file: te
             print "Output: {ir_file}"
         return 0
 
-    if verbose:
-        print "Compiling LLVM IR -> Object file..."
-
-    val obj_file = "build/simpleos/{base_name}.o"
-    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
-        "--filetype=obj",
-        "--relocation-model=static",
-        ir_file,
-        "-o", obj_file
-    ])
-
-    if llc_exit != 0:
-        _cli_eprint("Error: llc compilation failed")
-        _cli_eprint(llc_err)
-        return 1
-
-    if verbose:
-        print "  Generated: {obj_file}"
-
     if emit == "object":
+        if artifacts.unit_count() != 1:
+            _cli_eprint("Error: --emit=object requires a single-module source closure; use ELF output for multi-module programs")
+            return 1
+        val obj_file = artifacts.object_files[0]
         if output_file != "":
             if not _cli_file_copy_impl(obj_file, output_file):
                 _cli_eprint("Error: Failed to copy to {output_file}")
@@ -344,24 +332,36 @@ fn compile_simpleos(source_file: text, target: text, emit: text, output_file: te
     else:
         "build/simpleos/kernel.elf"
 
+    if not artifacts.entry_symbol_defined:
+        _cli_eprint("Error: SimpleOS ELF output requires a source-defined _start entry function")
+        return 1
+
     # Use ld.lld for SimpleOS (matches toolchain_simpleos_x86_64 in llvm_cross_target.spl)
     val linker = "ld.lld"
-    val (ld_out, ld_err, ld_exit) = _cli_process_run(linker, [
-        "--no-relax",
-        "-nostdlib",
-        "--entry=_start",
-        obj_file,
-        "-o", elf_file
-    ])
+    var linker_args: [text] = [""; artifacts.object_files.len() + 5]
+    linker_args[0] = "--no-relax"
+    linker_args[1] = "-nostdlib"
+    linker_args[2] = "--entry=_start"
+    var object_index = 0
+    while object_index < artifacts.object_files.len():
+        linker_args[object_index + 3] = artifacts.object_files[object_index]
+        object_index = object_index + 1
+    linker_args[artifacts.object_files.len() + 3] = "-o"
+    linker_args[artifacts.object_files.len() + 4] = elf_file
+    val (ld_out, ld_err, ld_exit) = _cli_process_run(linker, linker_args)
 
     if ld_exit != 0:
         # Fallback to ld if ld.lld is not available
-        val (ld2_out, ld2_err, ld2_exit) = _cli_process_run("ld", [
-            "-nostdlib",
-            "--entry=_start",
-            obj_file,
-            "-o", elf_file
-        ])
+        var fallback_args: [text] = [""; artifacts.object_files.len() + 4]
+        fallback_args[0] = "-nostdlib"
+        fallback_args[1] = "--entry=_start"
+        object_index = 0
+        while object_index < artifacts.object_files.len():
+            fallback_args[object_index + 2] = artifacts.object_files[object_index]
+            object_index = object_index + 1
+        fallback_args[artifacts.object_files.len() + 2] = "-o"
+        fallback_args[artifacts.object_files.len() + 3] = elf_file
+        val (ld2_out, ld2_err, ld2_exit) = _cli_process_run("ld", fallback_args)
         if ld2_exit != 0:
             _cli_eprint("Error: Linking failed for SimpleOS target")
             _cli_eprint(ld2_err)
@@ -491,7 +491,7 @@ fn cli_native_build(args: [text]) -> i64:
             print "  -o <path>            Output binary path"
             print "  --entry <file>       Entry file"
             print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
-            print "  --mode <name>        Build mode: dynload (default) or one-binary"
+            print "  --mode <name>        Build mode: dynload (default; warns until automatic aspect-pack packaging is available) or one-binary"
             print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
             print "  --release            Release build (standard optimization profile)"
             print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
@@ -958,6 +958,7 @@ fn cli_native_build(args: [text]) -> i64:
             opt_level = cli_native_default_opt_level()
 
         val _nb_target_opt_ctx = target_opt_context_default()
+        driver_entry_scan_cache_reset()
 
         val result = if emit_smf:
             # --emit-smf: produce native binary + SMF cache file
@@ -1135,6 +1136,11 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint("[native-build] Build successful: {output}")
                     if not non_launchable_output:
                         _cli_eprint("[native-build] Launch metadata: {metadata_path}")
+                # TODO(dynload-visible-skip): replace the zero with the real
+                # automatic pack emission receipt when CLI packaging lands.
+                val dynload_pack_notice = cli_native_build_dynload_pack_notice(build_mode, non_launchable_output, 0)
+                if dynload_pack_notice != "":
+                    _cli_eprint(dynload_pack_notice)
                 return 0
             case _:
                 _cli_file_remove_impl(staged_output)

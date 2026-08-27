@@ -326,6 +326,21 @@ impl CommonMistake {
 
 /// Detect common mistakes from token sequences
 pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&Token>) -> Option<CommonMistake> {
+    detect_common_mistake_lookahead(current, previous, next, None)
+}
+
+/// Same detection with one extra token of lookahead.
+///
+/// `after_next` is the token following `next`. Only the `identifier[Type` rule
+/// uses it, and only to tell a GENERIC APPLICATION apart from an INDEX whose key
+/// happens to start with a capital letter. Callers that cannot supply it pass
+/// `None`, which preserves the original (over-eager) behaviour.
+pub fn detect_common_mistake_lookahead(
+    current: &Token,
+    previous: &Token,
+    next: Option<&Token>,
+    after_next: Option<&Token>,
+) -> Option<CommonMistake> {
     // Check for Python-style 'def'
     if current.lexeme == "def" && matches!(current.kind, TokenKind::Identifier { .. }) {
         return Some(CommonMistake::PythonDef);
@@ -466,12 +481,32 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
     }
 
     // Check for wrong brackets in generics: identifier[
+    //
+    // `List[T]` (the mistake) and `dict[Key(...)]` / `arr[MAX_LEN]` (correct
+    // index expressions) are lexically identical up to the capitalized name, so
+    // the capital letter alone is NOT evidence. Two extra discriminators, both
+    // cheap and both false-positive-only (they can suppress a report, never
+    // create one):
+    //
+    //   * what follows the name -- a type list continues with `]` or `,`, while
+    //     an index key continues with `(` (call / struct literal), `.`, `[`, an
+    //     operator, and so on. `recovered_constants[SymbolId(id: idx)] = c` is
+    //     the shape that made this fire 284 times in one run over the compiler.
+    //   * the NAME shape -- SCREAMING_SNAKE_CASE is a constant, never a type
+    //     parameter, so `buf[MAX_LEN]` is an index.
+    //
+    // With no `after_next` available the original behaviour is kept, so callers
+    // that cannot look that far ahead are unaffected.
     if matches!(current.kind, TokenKind::LBracket) && matches!(previous.kind, TokenKind::Identifier { .. }) {
-        // This could be array indexing, but if followed by type-like identifier, likely generic
         if let Some(next_token) = next {
-            // Check if next token looks like a type (capitalized identifier)
             if let TokenKind::Identifier { name, .. } = &next_token.kind {
-                if name.chars().next().is_some_and(|c: char| c.is_uppercase()) {
+                let capitalized = name.chars().next().is_some_and(|c: char| c.is_uppercase());
+                let screaming_const = name.contains('_') && name.chars().all(|c: char| !c.is_lowercase());
+                let closes_like_type_list = match after_next {
+                    None => true,
+                    Some(t) => matches!(t.kind, TokenKind::RBracket | TokenKind::Comma),
+                };
+                if capitalized && !screaming_const && closes_like_type_list {
                     return Some(CommonMistake::WrongBrackets);
                 }
             }

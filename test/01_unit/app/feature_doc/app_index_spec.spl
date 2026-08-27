@@ -1,0 +1,76 @@
+"""App-index ordering, rendering, and path regression oracles."""
+
+use app.feature_doc.app_index.{generate_app_index, extract_app_index_filename}
+use app.feature_doc.types.{FeatureFileInfo, FeatureFileMeta, DescribeBlock, ContextBlock, ItBlock}
+use std.spec.step
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+fn _app_info(path: text, title: text, status: text, first_count: i64, second_count: i64) -> FeatureFileInfo:
+    var first_its: [ItBlock] = []
+    var index = 0
+    while index < first_count:
+        first_its.push(ItBlock(name: "first {index}", expects: []))
+        index = index + 1
+    var second_its: [ItBlock] = []
+    index = 0
+    while index < second_count:
+        second_its.push(ItBlock(name: "second {index}", expects: []))
+        index = index + 1
+    val describe = DescribeBlock(
+        name: "describe", doc: "",
+        contexts: [
+            ContextBlock(name: "first", doc: "", its: first_its),
+            ContextBlock(name: "second", doc: "", its: second_its)
+        ])
+    FeatureFileInfo(
+        file_path: path, title: title,
+        metadata: FeatureFileMeta(feature_ids: "", category: "", status: status),
+        doc_blocks: [], describes: [describe], test_type: "app")
+
+describe "feature documentation app index":
+    it "extracts filename stems with historical slash and suffix behavior":
+        step("Avoid allocating path segment arrays")
+        expect(extract_app_index_filename("test/app/alpha_spec.spl")).to_equal("alpha")
+        expect(extract_app_index_filename("nested/beta.spl")).to_equal("beta")
+        expect(extract_app_index_filename("plain")).to_equal("plain")
+        expect(extract_app_index_filename("nested/")).to_equal("")
+
+    it "renders exact rows in input order":
+        step("Join complete Markdown fragments once")
+        val output_dir = "/tmp/simple_feature_doc_app_index_spec"
+        val output_path = "{output_dir}/INDEX.md"
+        val _ = rt_file_delete(output_path)
+        val infos = [
+            _app_info("tools/first_spec.spl", "First", "ready", 1, 1),
+            _app_info("tools/second_spec.spl", "Second", "", 1, 2)
+        ]
+        val generated = generate_app_index(infos, output_dir)
+        val markdown = rt_file_read_text(generated)
+        expect(rt_file_delete(output_path)).to_equal(true)
+        val expected = "# App Feature Documentation Index\n\n" +
+            "CLI and tool system tests with manual-style documentation.\n\n" +
+            "**Total commands/tools:** 2\n\n---\n\n" +
+            "| Command/Tool | Status | Details |\n" +
+            "|-------------|--------|---------|\n" +
+            "| [First](first.md) | ready | 2 behaviors |\n" +
+            "| [Second](second.md) | N/A | 3 behaviors |\n\n"
+        expect(generated).to_equal(output_path)
+        expect(markdown).to_equal(expected)
+
+    it "renders exact table framing for empty input":
+        step("Preserve the final newline with no rows")
+        val output_dir = "/tmp/simple_feature_doc_app_index_empty_spec"
+        val output_path = "{output_dir}/INDEX.md"
+        val _ = rt_file_delete(output_path)
+        val generated = generate_app_index([], output_dir)
+        val markdown = rt_file_read_text(generated)
+        expect(rt_file_delete(output_path)).to_equal(true)
+        val expected = "# App Feature Documentation Index\n\n" +
+            "CLI and tool system tests with manual-style documentation.\n\n" +
+            "**Total commands/tools:** 0\n\n---\n\n" +
+            "| Command/Tool | Status | Details |\n" +
+            "|-------------|--------|---------|\n\n"
+        expect(generated).to_equal(output_path)
+        expect(markdown).to_equal(expected)

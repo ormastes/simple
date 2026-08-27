@@ -32,16 +32,17 @@ use compiler.core.interpreter.interp_resource_tracker.{
     irt_track_struct_owned,
     irt_unload_module
 }
+use std.io_runtime.{env_get_opt, file_read_result}
 
-extern fn rt_env_get(key: text) -> text
+var _gc_warning_trace_state: i64 = -1
 
+@always_inline
 fn gc_warning_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    if _gc_warning_trace_state < 0:
+        _gc_warning_trace_state = if env_get_opt("SIMPLE_COMPILER_TRACE") == Some("1"): 1 else: 0
+    _gc_warning_trace_state == 1
 use compiler.core.interpreter.module_loader_resolve.{resolve_module_path, module_resolve_cache_reset}
 use compiler.core.interpreter.module_loader_lazy.{lazy_parse_enabled, lazy_in_fallback, load_module_lazy}
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_path_join(base: text, rel: text) -> text
 
 # AST Declaration Tags (from ast.spl)
 val DECL_FN = 1
@@ -176,6 +177,7 @@ fn module_loader_init():
     deferred_module_imports = []
     deferred_module_set = {}
     _gc_warn_emitted = {}
+    _gc_warning_trace_state = -1
     module_resolve_cache_reset()
     irt_init()
 
@@ -267,12 +269,9 @@ fn import_admission_get_deny() -> bool:
 
 # ===== Module Loading =====
 
-fn load_module_source(file_path: text) -> text:
+fn load_module_source(file_path: text) -> Result<text, text>:
     # Read module source file
-    val source = rt_file_read_text(file_path)
-    if source == nil:
-        return ""
-    source
+    file_read_result(file_path)
 
 fn parse_module_ast(source: text, path: text) -> i64:
     # Parse module into AST using APPEND mode to preserve caller's AST.
@@ -377,7 +376,11 @@ fn load_module_parse_only(module_name: text, current_file: text) -> i64:
         return 1
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
-    val source = load_module_source(resolved_path)
+    val source = match load_module_source(resolved_path):
+        case Ok(content): content
+        case Err(_):
+            _module_load_depth = _module_load_depth - 1
+            return 0
     if source == "":
         _module_load_depth = _module_load_depth - 1
         return 0
@@ -400,7 +403,11 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
         return 1
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
-    val source = load_module_source(resolved_path)
+    val source = match load_module_source(resolved_path):
+        case Ok(content): content
+        case Err(_):
+            _module_load_depth = _module_load_depth - 1
+            return 0
     if source == "":
         _module_load_depth = _module_load_depth - 1
         return 0
@@ -447,7 +454,11 @@ fn load_module(module_name: text, current_file: text) -> i64:
     check_gc_family_boundary(current_file, resolved_path, module_name)
 
     # Load source
-    val source = load_module_source(resolved_path)
+    val source = match load_module_source(resolved_path):
+        case Ok(content): content
+        case Err(_):
+            _module_load_depth = _module_load_depth - 1
+            return 0
     if source == "":
         _module_load_depth = _module_load_depth - 1
         return 0

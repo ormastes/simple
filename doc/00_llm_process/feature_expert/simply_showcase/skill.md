@@ -45,3 +45,63 @@ the recursion guards between simply and this repo.
 5. Replace `update_site.sh` with a `.spl` generator once a released `simple`
    binary is consumable in simply's CI, and wire simply's daily job to read
    the `groups`/`total_pending` JSON to flip registry statuses.
+
+## Update 2026-08-26
+
+- `test --json` is native on every seed dispatch lane (`193af515043`,
+  `590a2676e8e`); simply's `data/test_results.json` is verbatim output.
+- simply gained `doc/plan/completion_criteria.md` (three gates + status
+  ladder) and `data/tests.sdn` (id|kind|path test lists).
+- Full `test/01_unit` sweep drives a fix campaign; landed so far:
+  `b1ded64c8e4` (sha1_x4 tuple annotation + module import), `8d8d11097a0`
+  (`expect_not` export, layout/installer imports), `88fe280bb0f` (tmux
+  `to_int_or`), `05b134ac502` (`invalid_node_id` fixtures). Recurring defect
+  classes: wrong import module path, missing export, bad tuple annotation,
+  auto-id-0 DOM fixtures, stale-API specs from the sspec-modernization waves.
+- Process state: `.spipe/simply_showcase/state.md`.
+
+## Update 2026-08-26 (wave 2, parallel agents)
+
+- Five agents, one per ~80-file slice (sorted path) of the 401 FAILs seen at
+  3,550/8,807, landed `dddd834f996` `c433e5d091d` `6e7b2eb616a` `9c5595b146d`
+  `4907ce1da97` `e5a10e3ee78` `f65ae4a5f9c` `d9ca9d78b1d` `2f3f215003b` —
+  48 specs green. Lib bugs fixed: jwt/encode + os/crypto/jwt (block-scoped
+  `idx3`), date/*, html/entities, composition (`.to_bytes`→`.bytes`),
+  search/inverted_index, engine/{rect,color}, skia/{ot_parser_glyf,
+  ot_layout_gpos,glyph_cache,font_loader}, text_advanced, regex_match,
+  h2_connection imports, dbfs_engine ctor aliases, ndarray.
+- Non-mechanical residue (grammar, interpreter, missing SFFI, spec drift):
+  `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md`.
+- Lessons: slice by sorted path so each agent owns coherent directories; make
+  agents run specs in the foreground (one stalled waiting on a background
+  batch); give each a private scratch dir (two collided on `out3/`).
+
+## Update 2026-08-26 (waves 3-5, sweep completion)
+
+- Wave 3 `676241b1db3` `9db7dbb836d` (16 specs); wave 4 (compiler tree, 19
+  specs + clobber restore) `97c30fce71e` `c8f1bf0c2c2` `bfe408434dd`
+  `179e18fc740` `45b92648ff8` `4345c8e197b` `8e9ef608092`.
+- Wave 5 (~34 specs, four slices): slice0 `7971f2bffbb` `6a02c0f8c4c`
+  `745540b000e` `5c219ddf6d2`; slice1 `a41ef500f83` `64f8098101d`
+  `11c816c21d9` `06fa37dc08f` `284ce63b0ac`; slice2 `dc58fec5f1b`
+  `8da31723373`; slice3 `e5a7528f063` `46bb8524167` `1f3c1225f8b`
+  `aa0fbd39bdf`.
+- Wave 5 defect classes were mostly *grammar*, not library: multi-line `if`
+  conditions the seed parser rejects when a continuation starts with `self`/`_`
+  or when body indent equals continuation indent; inline `unsafe(caps): expr`;
+  an undiagnosed "expected expression, found Dedent" in three
+  `src/os/port/*.spl`; cross-module `fn x_*(self: X)` method resolution;
+  HIR→MIR nil internals for multi-fn sources using `and`/`or`. Recorded as
+  items 23-30 in `doc/08_tracking/bug/unit_sweep_language_and_interpreter_gaps_2026-08-26.md`.
+- **Sweep-runner lesson (cost a whole session's worth of wall clock).**
+  `bin/simple test --json <many files>` silently **stops for good** at the
+  first spec that hangs — the 8,807-file sweep died at file 1,340
+  (`test/01_unit/app/ui/semantic_backend_helpers_spec.spl`) and every later
+  file simply never got a verdict. The fix is `--timeout <seconds>`, which
+  gives each file its own budget, emits an `UNVERIFIED <path>: TIMEOUT` line,
+  and **continues to the next file**. Do not add `--no-session-daemon`
+  alongside it: with both flags the runner processes only the FIRST path on
+  the command line and exits 0, which looks like a clean short run rather than
+  a broken one. Resume protocol when a sweep dies: diff the file list against
+  `^(PASS|FAIL) ` verdicts, and the first unverdicted file in original order is
+  the offender.

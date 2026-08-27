@@ -21,7 +21,8 @@ use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptio
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
 use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1,
-    FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1}
+    FrozenNativeModuleCapsuleV1, FrozenNativeModuleCapsuleBatchV1,
+    frozen_native_capsule_batch_find_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
@@ -37,19 +38,71 @@ use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind, BuildUnitOutco
     build_outcome_retained_diagnostic_count}
 use compiler.driver.driver_log_helpers.{log_build_progress}
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, process_run}
 
+@unsafe(reason: "raw filesystem text-write ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw nullable filesystem text-read ABI", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+@unsafe(reason: "raw filesystem existence ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw filesystem copy ABI", capabilities: [ffi])
 extern fn rt_file_copy(src: text, dst: text) -> bool
+@unsafe(reason: "raw directory-create ABI", capabilities: [ffi])
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
+@unsafe(reason: "raw recursive directory-remove ABI", capabilities: [ffi])
 extern fn rt_dir_remove_all(path: text) -> bool
-extern fn rt_env_set(key: text, value: text) -> bool
+@unsafe(reason: "raw platform path-join ABI", capabilities: [ffi])
 extern fn rt_path_join(a: text, b: text) -> text
-extern fn rt_env_get(key: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+@unsafe(reason: "raw deterministic text-hash ABI", capabilities: [ffi])
 extern fn rt_hash_text(content: text) -> i64
+@unsafe(reason: "raw stdout flush ABI", capabilities: [ffi])
 extern fn rt_stdout_flush()
+
+@always_inline
+fn _sffi_file_write_text(path: text, content: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
+
+@always_inline
+fn _sffi_file_read_text(path: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
+
+@always_inline
+fn _sffi_file_exists(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+@always_inline
+fn _sffi_file_copy(src: text, dst: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_copy(src, dst)
+
+@always_inline
+fn _sffi_dir_create(path: text, recursive: bool) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_dir_create(path, recursive)
+
+@always_inline
+fn _sffi_dir_remove_all(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_dir_remove_all(path)
+
+@always_inline
+fn _sffi_path_join(a: text, b: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_path_join(a, b)
+
+@always_inline
+fn _sffi_hash_text(content: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_hash_text(content)
+
+@always_inline
+fn _sffi_stdout_flush():
+    unsafe(capabilities: [ffi]):
+        rt_stdout_flush()
 
 fn driver_log_info(log: Logger, message: text):
     if log.level >= 4:
@@ -117,7 +170,7 @@ fn driver_native_report_module_outcomes_v1(outcomes: BuildOutcomeSet) -> text:
     if outcomes.all_ok():
         return ""
     print outcomes.summary()
-    rt_stdout_flush()
+    _sffi_stdout_flush()
     outcomes.verdict()
 
 fn driver_effective_native_opt_level(ctx: CompileContext, is_release: bool) -> i64:
@@ -128,7 +181,7 @@ fn driver_effective_native_opt_level(ctx: CompileContext, is_release: bool) -> i
     0
 
 fn driver_native_build_threads() -> i64:
-    val raw = rt_env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
+    val raw = env_get_nullable("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
     if raw == "":
         return 0
     val parsed = raw.to_i64() ?? 0
@@ -137,16 +190,22 @@ fn driver_native_build_threads() -> i64:
     parsed
 
 fn driver_native_build_cache_dir() -> text:
-    val dir = rt_env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+    val dir = env_get_nullable("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
     if dir == "":
         "build/native_cache"
     else:
         dir
 
 fn driver_native_build_cache_path(cache_dir: text) -> text:
-    rt_path_join(cache_dir, "build_cache.sdn")
+    _sffi_path_join(cache_dir, "build_cache.sdn")
 
+@unsafe(reason: "raw host SIMD capability-query ABI", capabilities: [ffi])
 extern fn rt_simd_has_avx2() -> bool
+
+@always_inline
+fn _sffi_simd_has_avx2() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_simd_has_avx2()
 
 fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
                                    target_cpu: text, opt_level: i64,
@@ -155,7 +214,7 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
     val compiler_id = native_build_compiler_identity()
         + if symbol_mode == "": "" else: "-" + symbol_mode
         + "-storage-" + sha256_text(storage_identity)
-    val host_avx2 = target == "" and rt_simd_has_avx2()
+    val host_avx2 = target == "" and _sffi_simd_has_avx2()
     val capability_key = "native-avx2-policy-v1:cpu={target_cpu};host={host_avx2}"
     val scope_raw = native_build_cache_scope_key(
         Some(backend), raw_target, [capability_key], opt_level as i32, compiler_id)
@@ -170,7 +229,7 @@ fn driver_native_build_cache_scope(backend: text, cache_dir: text, target: text,
         scope_raw
     else:
         scope_raw.substring(0, 160) + ";digest=" + sha256_text(scope_raw)
-    val cache_scope_root = rt_path_join(cache_dir, scope)
+    val cache_scope_root = _sffi_path_join(cache_dir, scope)
     (cache_scope_root, scope)
 
 fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> text:
@@ -194,23 +253,23 @@ fn driver_native_module_cache_source(ctx: CompileContext, module_name: text) -> 
         ""
 
 pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
-    if not capsule.identity_valid() or not rt_file_exists(capsule.object_path):
+    if not capsule.identity_valid() or not _sffi_file_exists(capsule.object_path):
         return false
     val receipt_path = capsule.object_path + ".capsule-receipt"
-    if not rt_file_exists(receipt_path): return false
+    if not _sffi_file_exists(receipt_path): return false
     val object_fp = FileFingerprint.from_file(capsule.object_path)
     if not object_fp.?: return false
     var expected = ""
     if val fp = object_fp:
         expected = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
-    (rt_file_read_text(receipt_path) ?? "") == expected
+    (_sffi_file_read_text(receipt_path) ?? "") == expected
 
 pub fn driver_native_collect_capsule_result_v1(
     batch: FrozenNativeModuleCapsuleBatchV1, build_cache: BuildCache,
     module_name: text, object_path: text
 ) -> text:
     """Owner-only authenticated cache checkpoint for one completed capsule."""
-    val capsule = batch.find(module_name)
+    val capsule = frozen_native_capsule_batch_find_v1(batch, module_name)
     if not capsule.ok or object_path != capsule.object_path:
         return "native-capsule-result-mismatch:{module_name}"
     if not driver_native_capsule_result_valid_v1(capsule):
@@ -383,10 +442,10 @@ pub fn driver_native_sources_fingerprint(sources: [SourceFile]) -> text:
             log_phase("phase1:fingerprint:source idx={fp_idx} of={sources.len()} path={source.path} bytes={source.content.len()}")
         fp_idx = fp_idx + 1
         val interface_text = driver_native_source_interface_text(source.content)
-        val content_hash = rt_hash_text(interface_text)
+        val content_hash = _sffi_hash_text(interface_text)
         rows = rows.push("{source.path.len()}:{source.path}{source.module_name.len()}:{source.module_name}{interface_text.len()}:{content_hash}")
     val manifest = rows.join("\n")
-    "{rt_hash_text(manifest)}n{sources.len()}"
+    "{_sffi_hash_text(manifest)}n{sources.len()}"
 
 pub fn driver_native_module_is_export_facade(mir: MirModule, parsed_module: ParserModule?) -> bool:
     if mir.functions.keys().len() > 0 or mir.statics.keys().len() > 0 or mir.constants.keys().len() > 0 or mir.types.keys().len() > 0:
@@ -551,8 +610,8 @@ fn driver_native_extern_decl_site(ctx: CompileContext, name: text) -> text:
     """
     for source in ctx.sources:
         var content = source.content
-        if content == "" and source.path != "" and rt_file_exists(source.path):
-            content = rt_file_read_text(source.path)
+        if content == "" and source.path != "" and _sffi_file_exists(source.path):
+            content = _sffi_file_read_text(source.path) ?? ""
         val shown = if source.authored_path != "": source.authored_path else: source.path
         val site = driver_native_extern_decl_site_in(content, shown, name)
         if site != "":
@@ -612,7 +671,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
             "typed storage registry is malformed before bootstrap native compile")
     val is_release = ctx.options.release
     val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
-    val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] bootstrap direct backend_name={backend_name}, is_release={is_release}"
     val effective_backend = get_effective_backend_name(backend_name, is_release)
@@ -621,7 +680,7 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
 
     val entry_module_name = bootstrap_entry_module_name(ctx)
     val capsules = ctx.freeze_native_module_capsules_v1([entry_module_name],
-        output, backend_name, "", rt_env_get("SIMPLE_NATIVE_CPU") ?? "",
+        output, backend_name, "", env_get_nullable("SIMPLE_NATIVE_CPU") ?? "",
         driver_opt_level, is_release)
     if not capsules.ok:
         return CompileResult.CodegenError(capsules.reason)
@@ -668,15 +727,15 @@ impl CompilerDriver:
         val backend_name = ctx.options.backend
         val is_release = ctx.options.release
         val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
-        val stage4_requested = (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
-        val native_output_mode = rt_env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
+        val stage4_requested = (env_get_nullable("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1"
+        val native_output_mode = env_get_nullable("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
         val emit_object_requested = native_output_mode == "1"
         val emit_archive_requested = native_output_mode == "archive"
         val emit_shared_requested = native_output_mode == "shared"
-        val no_mangle_requested = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
+        val no_mangle_requested = (env_get_nullable("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
         if stage4_requested and (emit_object_requested or emit_archive_requested or emit_shared_requested):
             return CompileResult.CodegenError("Stage4 strict profile does not support object, archive, or shared output")
-        val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+        val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
         if trace:
             print "[NATIVE] backend_name={backend_name}, is_release={is_release}"
         val effective_backend = get_effective_backend_name(backend_name, is_release)
@@ -685,9 +744,11 @@ impl CompilerDriver:
 
         # Load build cache
         val cache_dir = driver_native_build_cache_dir()
-        rt_dir_create(cache_dir, true)
-        val native_target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-        val native_cpu = rt_env_get("SIMPLE_NATIVE_CPU") ?? ""
+        if not _sffi_dir_create(cache_dir, true):
+            return CompileResult.CodegenError(
+                "native-build failed to create cache directory {cache_dir}")
+        val native_target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val native_cpu = env_get_nullable("SIMPLE_NATIVE_CPU") ?? ""
         val symbol_mode = if no_mangle_requested: "no-mangle" else: ""
         val storage_identity = ctx.freeze_storage_registry()
         if storage_identity == "invalid":
@@ -700,27 +761,40 @@ impl CompilerDriver:
             return CompileResult.CodegenError(
                 "native build source fingerprint missing before cache setup")
         val sources_fingerprint = ctx.native_sources_fingerprint
-        val cache_scope_root = rt_path_join(base_cache_scope_root, "sources-{sources_fingerprint}")
+        val cache_scope_root = _sffi_path_join(base_cache_scope_root, "sources-{sources_fingerprint}")
         # --clean requested a clean build: drop this entry's cache scope so no
         # previously compiled object in this scope can be reused. Consume the
         # flag (clear the env) so it applies to this build only.
-        if (rt_env_get("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1":
-            rt_dir_remove_all(base_cache_scope_root)
-            rt_env_set("SIMPLE_NATIVE_BUILD_CLEAN", "")
-        rt_dir_create(cache_scope_root, true)
+        if (env_get_nullable("SIMPLE_NATIVE_BUILD_CLEAN") ?? "") == "1":
+            if not _sffi_dir_remove_all(base_cache_scope_root):
+                return CompileResult.CodegenError(
+                    "native-build failed to remove clean cache scope {base_cache_scope_root}")
+            if not env_set("SIMPLE_NATIVE_BUILD_CLEAN", ""):
+                return CompileResult.CodegenError(
+                    "native-build failed to consume SIMPLE_NATIVE_BUILD_CLEAN")
+        if not _sffi_dir_create(cache_scope_root, true):
+            return CompileResult.CodegenError(
+                "native-build failed to create cache scope {cache_scope_root}")
         # Phase marker: frontend parsing + MIR construction already completed
         # (compile_to_native is only reached after that phase finishes), so a
         # killed run that leaves this file behind proves it died in codegen,
         # not frontend. See doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md.
-        rt_file_write_text(rt_path_join(cache_scope_root, "phase.marker"), "frontend-done, codegen-started\n")
+        if not _sffi_file_write_text(
+            _sffi_path_join(cache_scope_root, "phase.marker"),
+            "frontend-done, codegen-started\n"):
+            return CompileResult.CodegenError(
+                "native-build failed to write cache phase marker")
         # Lane ownership marker: records which private-cache lane last wrote this
         # scope so a SCRIPT can check ownership without running a compiler (see
         # scripts/check/check-cache-scope-ownership.shs). Reuse itself is already
         # partitioned by the scope DIRECTORY, which now carries `lane=`.
-        rt_file_write_text(rt_path_join(base_cache_scope_root, ".cache_scope"),
-                           "lane={native_build_cache_lane()}\n")
+        if not _sffi_file_write_text(
+            _sffi_path_join(base_cache_scope_root, ".cache_scope"),
+            "lane={native_build_cache_lane()}\n"):
+            return CompileResult.CodegenError(
+                "native-build failed to write cache ownership marker")
         val cache_path = driver_native_build_cache_path(cache_dir)
-        val object_base = rt_path_join(cache_scope_root, "object")
+        val object_base = _sffi_path_join(cache_scope_root, "object")
         var build_cache: BuildCache = BuildCache.load(cache_path)
         var cache_hit_count: i64 = 0
         var cache_miss_count: i64 = 0
@@ -739,7 +813,7 @@ impl CompilerDriver:
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
-            rt_stdout_flush()
+            _sffi_stdout_flush()
 
         # Guard (bug #119): refuse empty mir_modules. A requested --entry that
         # produces no modules is likely a misconfiguration (isolated entry with
@@ -788,7 +862,7 @@ impl CompilerDriver:
                     # stale build_cache.sdn entries behind).
                     var outputs_exist = true
                     for obj in scoped_outputs:
-                        if not rt_file_exists(obj):
+                        if not _sffi_file_exists(obj):
                             outputs_exist = false
                     if all_in_scope and scoped_outputs.len() > 0 and outputs_exist:
                         print "[NATIVE] cache hit: {name}"
@@ -898,7 +972,7 @@ impl CompilerDriver:
             # objects at this stable path, so reconstruct from uncached_names.
             var reconstructed_outputs: [text] = []
             for name in uncached_names:
-                val capsule = capsules.find(name)
+                val capsule = frozen_native_capsule_batch_find_v1(capsules, name)
                 val obj_path = if capsule.ok: capsule.object_path else: ""
                 if capsule.ok and driver_native_capsule_result_valid_v1(capsule):
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
@@ -948,7 +1022,7 @@ impl CompilerDriver:
             total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
         if trace and (cache_hit_count > 0 or cache_miss_count > 0):
             print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
-            rt_stdout_flush()
+            _sffi_stdout_flush()
 
         # Link object files into final executable
         # Guard (bug #119): refuse to silently fallback when no object files were produced.
@@ -964,7 +1038,7 @@ impl CompilerDriver:
             if object_files.len() == 0:
                 return CompileResult.CodegenError("emit-object requested but no object files were produced")
             if object_files.len() == 1:
-                if not rt_file_copy(object_files[0], output):
+                if not _sffi_file_copy(object_files[0], output):
                     return CompileResult.CodegenError("emit-object failed to copy {object_files[0]} to {output}")
             else:
                 var args: [text] = ["-r"]
@@ -972,7 +1046,7 @@ impl CompilerDriver:
                     args = args.push(obj)
                 args = args.push("-o")
                 args = args.push(output)
-                val (_stdout, stderr, code) = rt_process_run("ld.lld", args)
+                val (_stdout, stderr, code) = process_run("ld.lld", args)
                 if code != 0:
                     return CompileResult.CodegenError("emit-object relocatable link failed: {stderr}")
             driver_log_info(log, "Native object written to {output}")
@@ -995,7 +1069,7 @@ impl CompilerDriver:
                 args = [archive_flags, output]
             for obj in object_files:
                 args = args.push(obj)
-            val (_stdout, stderr, code) = rt_process_run(archiver, args)
+            val (_stdout, stderr, code) = process_run(archiver, args)
             if code != 0:
                 return CompileResult.CodegenError("emit-archive failed: {stderr}")
             driver_log_info(log, "Native archive written to {output}")
@@ -1084,7 +1158,7 @@ fn _compile_frozen_module_capsule(
     """Compile one parent-frozen module capsule without CompileContext/cache access."""
     if not batch.ok:
         return Err("AOT compile error in {name}: invalid-capsule-batch")
-    val capsule = batch.find(name)
+    val capsule = frozen_native_capsule_batch_find_v1(batch, name)
     if not capsule.ok or capsule.module_name != name:
         return Err("AOT compile error in {name}: capsule-not-found")
     if not driver_native_capsule_inputs_valid_v1(capsule, backend_name, target,
@@ -1092,10 +1166,10 @@ fn _compile_frozen_module_capsule(
         return Err("AOT compile error in {name}: capsule-identity-mismatch")
     if capsule.storage_snapshot.registry_identity != batch.registry_identity:
         return Err("AOT compile error in {name}: capsule-registry-mismatch")
-    val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    val trace = (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
-        rt_stdout_flush()
+        _sffi_stdout_flush()
     val result = _compile_selected_module(backend_name, is_release, opt_level,
         capsule.output_base,
         name, capsule.mir_module, capsule.storage_snapshot,
@@ -1114,7 +1188,7 @@ fn _compile_frozen_module_capsule(
             var receipt = ""
             if val fp = object_fp:
                 receipt = "native-capsule-result-v1\n{capsule.capsule_identity}\n{capsule.object_path}\n{fp.size}\n{fp.content_hash}\n"
-            if not rt_file_write_text(receipt_path, receipt):
+            if not _sffi_file_write_text(receipt_path, receipt):
                 return Err("AOT compile error in {name}: capsule-receipt-write-failed")
             Ok(object_path)
 
@@ -1124,18 +1198,18 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             frozen_target_cpu: text) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
         return Err("AOT compile error in {name}: storage-snapshot-module-mismatch")
-    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+    if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0:
         return Err("AOT compile error in {name}: MIR module has no functions")
-    val empty_native_obj = rt_env_get("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
+    val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
         val c_path = "{output_base}.{name}.bootstrap_empty.c"
         val obj_path = "{output_base}.{name}.o"
-        val c_ok = rt_file_write_text(c_path, "int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }\n")
+        val c_ok = _sffi_file_write_text(c_path, "int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }\n")
         if not c_ok:
             return Err("Failed to write bootstrap empty C file {c_path}")
-        val (_cc_out, cc_err, cc_code) = rt_process_run("cc", ["-c", c_path, "-o", obj_path])
+        val (_cc_out, cc_err, cc_code) = process_run("cc", ["-c", c_path, "-o", obj_path])
         if cc_code != 0:
             return Err("Bootstrap empty object compile failed: {cc_err}")
         return Ok(obj_path)
@@ -1158,9 +1232,9 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
         case Ok(module):
             if val obj_bytes = module.object_code:
                 val obj_path = "{output_base}.{name}.o"
-                if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                if (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bootstrap_obj = llvm_bootstrap_last_object_path()
-                    if bootstrap_obj != "" and rt_file_copy(bootstrap_obj, obj_path):
+                    if bootstrap_obj != "" and _sffi_file_copy(bootstrap_obj, obj_path):
                         return Ok(obj_path)
                 match write_elf_bytes_to_file(obj_path, obj_bytes):
                     case Ok(_):

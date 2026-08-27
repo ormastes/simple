@@ -40,6 +40,66 @@ bootstrap_planner_v2_canonical_dir() {
     printf '%s\n' "$bootstrap_planner_v2_path"
 }
 
+bootstrap_planner_v2_parent_binding_fail() {
+    printf 'bootstrap-policy-error: %s\n' "$1" >&2
+    return 1
+}
+
+# Bind the planner receipt's measured parent to both the Stage 2 artifact that
+# produced the admission and the frozen copy that Stage 3 is about to execute.
+# Call this immediately before consumption so any intervening rebuild or
+# replacement fails closed.
+bootstrap_planner_v2_verify_parent_compiler_binding() {
+    bootstrap_planner_v2_binding_receipt=$(bootstrap_planner_v2_canonical_file "$1") || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-receipt-not-canonical
+        return 1
+    }
+    bootstrap_planner_v2_binding_produced=$(bootstrap_planner_v2_canonical_file "$2") || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-produced-not-canonical
+        return 1
+    }
+    bootstrap_planner_v2_binding_consumed=$(bootstrap_planner_v2_canonical_file "$3") || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-consumed-not-canonical
+        return 1
+    }
+    bootstrap_planner_v2_binding_parent=$(
+        bootstrap_planner_v2_field parent_compiler_path "$bootstrap_planner_v2_binding_receipt"
+    ) || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-path-missing
+        return 1
+    }
+    bootstrap_planner_v2_binding_parent=$(
+        bootstrap_planner_v2_canonical_file "$bootstrap_planner_v2_binding_parent"
+    ) || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-path-not-canonical
+        return 1
+    }
+    [ "$bootstrap_planner_v2_binding_parent" = "$bootstrap_planner_v2_binding_produced" ] || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-path-mismatch
+        return 1
+    }
+    bootstrap_planner_v2_binding_sha=$(
+        bootstrap_planner_v2_field parent_compiler_sha256 "$bootstrap_planner_v2_binding_receipt"
+    ) || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-sha-missing
+        return 1
+    }
+    bootstrap_planner_v2_is_sha256 "$bootstrap_planner_v2_binding_sha" || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-sha-invalid
+        return 1
+    }
+    [ "$(bootstrap_planner_v2_hash_file "$bootstrap_planner_v2_binding_produced")" = \
+      "$bootstrap_planner_v2_binding_sha" ] || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-produced-sha-mismatch
+        return 1
+    }
+    [ "$(bootstrap_planner_v2_hash_file "$bootstrap_planner_v2_binding_consumed")" = \
+      "$bootstrap_planner_v2_binding_sha" ] || {
+        bootstrap_planner_v2_parent_binding_fail planner-parent-consumed-sha-mismatch
+        return 1
+    }
+}
+
 bootstrap_planner_v2_reason_allowed() {
     case "$1:$2" in
         //bootstrap:stage3:seed-missing|\
@@ -50,6 +110,7 @@ bootstrap_planner_v2_reason_allowed() {
         //bootstrap:stage3:bootstrap-runtime-abi-major-changed|\
         //bootstrap:stage3:bootstrap-artifact-format-major-changed|\
         //bootstrap:stage3:bootstrap-core-interface-major-changed|\
+        //bootstrap:stage3:verify-landed-compiler-fix|\
         //bootstrap:stage4:self-host-convergence-check|\
         //bootstrap:stage4:release-trust-verification|\
         //bootstrap:stage4:diverse-double-compilation) return 0 ;;

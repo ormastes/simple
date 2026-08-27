@@ -8,8 +8,11 @@ use std.io.tcp.{tcp_backend_socket_create, tcp_backend_bind_fd, tcp_backend_list
     tcp_backend_set_nodelay, tcp_backend_close}
 use std.io.platform_event.{PlatformEvent, EventMode}
 
+@unsafe(reason: "raw accepted descriptor; negative sentinel means accept failed", capabilities: [ffi])
 extern fn rt_io_tcp_accept(fd: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
 
 fn main():
@@ -42,7 +45,8 @@ fn main():
             if efd == fd:
                 var j = 0
                 while j < 64:
-                    val cfd = rt_io_tcp_accept(fd)
+                    val cfd = unsafe(capabilities: [ffi]):
+                        rt_io_tcp_accept(fd)
                     if cfd < 0:
                         j = 64
                     else:
@@ -51,10 +55,15 @@ fn main():
                         pe.register(epfd, cfd, EventMode.Read)
                     j = j + 1
             else:
-                val data = rt_io_tcp_read(efd, 4096)
-                if data.len() > 0:
-                    rt_io_tcp_write_text(efd, resp)
-                    count = count + 1
+                val data = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_read(efd, 4096)
+                if data != nil and data!.len() > 0:
+                    val written = unsafe(capabilities: [ffi]):
+                        rt_io_tcp_write_text(efd, resp)
+                    if written == resp.len():
+                        count = count + 1
+                    else:
+                        tcp_backend_close(efd)
                 else:
                     tcp_backend_close(efd)
             i = i + 1

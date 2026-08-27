@@ -1,0 +1,89 @@
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut_noalloc.async.mission_ready_set.{
+    MissionReadySet64, MissionReadySetPhase, MissionReadySetError
+}
+
+fn ready_set(capacity: u64) -> MissionReadySet64:
+    var set = match MissionReadySet64.create(41u64, capacity):
+        case Ok(value): value
+        case Err(_): panic("valid ready set creation failed")
+    match set.seal(41u64):
+        case Ok(_): ()
+        case Err(_): panic("valid ready set seal failed")
+    set
+
+describe "mission scalar ready set":
+    it "rejects invalid owners and capacities":
+        expect(MissionReadySet64.create(0u64, 1u64)).to_equal(
+            Err(MissionReadySetError.InvalidOwner))
+        expect(MissionReadySet64.create(1u64, 0u64)).to_equal(
+            Err(MissionReadySetError.InvalidCapacity))
+        expect(MissionReadySet64.create(1u64, 65u64)).to_equal(
+            Err(MissionReadySetError.InvalidCapacity))
+
+    it "seals once and reports only evidence the source can support":
+        var set = match MissionReadySet64.create(41u64, 64u64):
+            case Ok(value): value
+            case Err(_): panic("create failed")
+        expect(set.phase()).to_equal(MissionReadySetPhase.Configuring)
+        expect(set.seal(9u64)).to_equal(Err(MissionReadySetError.WrongOwner))
+        val receipt = match set.seal(41u64):
+            case Ok(value): value
+            case Err(_): panic("seal failed")
+        expect(receipt.inline_scalar_shape).to_be(true)
+        expect(receipt.source_has_no_explicit_allocation).to_be(true)
+        expect(receipt.compiler_placement_proven).to_be(false)
+        expect(receipt.link_time_static_proven).to_be(false)
+        expect(receipt.backend_allocation_free_proven).to_be(false)
+        expect(set.seal(41u64)).to_equal(Err(MissionReadySetError.AlreadyReady))
+
+    it "admits and wakes one exact slot without scanning":
+        var set = ready_set(8u64)
+        val token = match set.admit(41u64, 5u64):
+            case Ok(value): value
+            case Err(_): panic("admit failed")
+        expect(set.is_occupied(5u64)).to_be(true)
+        expect(set.is_ready(5u64)).to_be(false)
+        expect(set.post_ready(41u64, token)).to_equal(Ok(()))
+        expect(set.is_ready(5u64)).to_be(true)
+        expect(set.claim_ready(41u64, token)).to_equal(Ok(()))
+        expect(set.is_ready(5u64)).to_be(false)
+        expect(set.claim_ready(41u64, token)).to_equal(
+            Err(MissionReadySetError.NotPosted))
+
+    it "rejects duplicate, vacant, out-of-range, and wrong-owner operations":
+        var set = ready_set(2u64)
+        val token = match set.admit(41u64, 1u64):
+            case Ok(value): value
+            case Err(_): panic("admit failed")
+        expect(set.admit(41u64, 1u64)).to_equal(
+            Err(MissionReadySetError.SlotOccupied))
+        expect(set.admit(41u64, 2u64)).to_equal(
+            Err(MissionReadySetError.InvalidSlot))
+        expect(set.post_ready(9u64, token)).to_equal(
+            Err(MissionReadySetError.WrongOwner))
+        expect(set.release(41u64, token)).to_equal(Ok(()))
+        expect(set.post_ready(41u64, token)).to_equal(
+            Err(MissionReadySetError.SlotVacant))
+
+    it "invalidates all pre-reset tokens by generation":
+        var set = ready_set(4u64)
+        val old_token = match set.admit(41u64, 2u64):
+            case Ok(value): value
+            case Err(_): panic("admit failed")
+        val reset_receipt = match set.reset(41u64):
+            case Ok(value): value
+            case Err(_): panic("reset failed")
+        expect(reset_receipt.generation).to_equal(2u64)
+        expect(set.post_ready(41u64, old_token)).to_equal(
+            Err(MissionReadySetError.StaleGeneration))
+        expect(set.is_occupied(2u64)).to_be(false)
+
+    it "quiesces terminally and rejects subsequent operations":
+        var set = ready_set(2u64)
+        expect(set.quiesce(41u64)).to_equal(Ok(()))
+        expect(set.phase()).to_equal(MissionReadySetPhase.Quiesced)
+        expect(set.admit(41u64, 0u64)).to_equal(
+            Err(MissionReadySetError.NotReady))
+        expect(set.quiesce(41u64)).to_equal(
+            Err(MissionReadySetError.AlreadyQuiesced))

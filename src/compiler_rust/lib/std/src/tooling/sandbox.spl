@@ -9,28 +9,36 @@
 # SFFI Declarations for sandbox operations
 # ============================================================================
 
+@unsafe(reason: "raw process-global sandbox reset; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_reset()
+@unsafe(reason: "raw process-global CPU-limit mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_cpu_time(seconds: u64)
+@unsafe(reason: "raw process-global memory-limit mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_memory(bytes: u64)
+@unsafe(reason: "raw process-global descriptor-limit mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_fd_limit(count: u64)
+@unsafe(reason: "raw process-global thread-limit mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_thread_limit(count: u64)
+@unsafe(reason: "raw process-global network-mode mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_disable_network()
+@unsafe(reason: "raw process-global allowlist-mode mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_network_allowlist()
+@unsafe(reason: "raw process-global blocklist-mode mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_network_blocklist()
+@unsafe(reason: "raw text ABI and process-global allowlist mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_add_allowed_domain(domain: text)
+@unsafe(reason: "raw text ABI and process-global blocklist mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_add_blocked_domain(domain: text)
+@unsafe(reason: "raw process-global filesystem-mode mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_fs_readonly()
+@unsafe(reason: "raw process-global filesystem-mode mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_set_fs_restricted()
-extern fn rt_sandbox_set_fs_overlay()
+@unsafe(reason: "raw text ABI and process-global read-path mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_add_read_path(path: text)
+@unsafe(reason: "raw text ABI and process-global write-path mutation; final apply status validates the transaction", capabilities: [ffi])
 extern fn rt_sandbox_add_write_path(path: text)
+@unsafe(reason: "raw irreversible process sandbox admission; false means no sandbox was admitted", capabilities: [ffi])
 extern fn rt_sandbox_apply() -> bool
-extern fn rt_sandbox_cleanup()
-extern fn rt_sandbox_is_configured() -> bool
-extern fn rt_sandbox_get_cpu_time() -> u64
-extern fn rt_sandbox_get_memory() -> u64
-extern fn rt_sandbox_get_network_mode() -> u8
-extern fn rt_sandbox_get_fs_mode() -> u8
 
 fn str_to_u64(s: text) -> Result<u64, text>:
     match parse_int(s):
@@ -288,53 +296,75 @@ fn parse_sandbox_config(args: List<text>) -> Option<SandboxConfig>:
 
 # Apply sandbox configuration to the current process
 # Uses builder-style SFFI functions to construct config piece by piece
+@unsafe(reason: "process-global sandbox mutation is irreversible and the provider artifact is not admitted", capabilities: [ffi])
 fn apply_sandbox(config: SandboxConfig) -> Result<(), text>:
     # Reset any previous configuration
-    rt_sandbox_reset()
+    unsafe(capabilities: [ffi]):
+        rt_sandbox_reset()
 
     # Set resource limits
     match config.time_limit_secs:
-        Some(secs): rt_sandbox_set_cpu_time(secs)
+        Some(secs):
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_set_cpu_time(secs)
         None: pass
 
     match config.memory_limit_bytes:
-        Some(bytes): rt_sandbox_set_memory(bytes)
+        Some(bytes):
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_set_memory(bytes)
         None: pass
 
     match config.fd_limit:
-        Some(count): rt_sandbox_set_fd_limit(count)
+        Some(count):
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_set_fd_limit(count)
         None: pass
 
     match config.thread_limit:
-        Some(count): rt_sandbox_set_thread_limit(count)
+        Some(count):
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_set_thread_limit(count)
         None: pass
 
     # Set network configuration
     if config.no_network:
-        rt_sandbox_disable_network()
+        unsafe(capabilities: [ffi]):
+            rt_sandbox_disable_network()
     elif config.network_allowlist.len() > 0:
-        rt_sandbox_set_network_allowlist()
+        unsafe(capabilities: [ffi]):
+            rt_sandbox_set_network_allowlist()
         for domain in config.network_allowlist:
-            rt_sandbox_add_allowed_domain(domain)
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_add_allowed_domain(domain)
     elif config.network_blocklist.len() > 0:
-        rt_sandbox_set_network_blocklist()
+        unsafe(capabilities: [ffi]):
+            rt_sandbox_set_network_blocklist()
         for domain in config.network_blocklist:
-            rt_sandbox_add_blocked_domain(domain)
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_add_blocked_domain(domain)
 
     # Set filesystem configuration
     if config.read_paths.len() > 0 and config.write_paths.len() == 0:
-        rt_sandbox_set_fs_readonly()
+        unsafe(capabilities: [ffi]):
+            rt_sandbox_set_fs_readonly()
         for path in config.read_paths:
-            rt_sandbox_add_read_path(path)
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_add_read_path(path)
     elif config.read_paths.len() > 0 or config.write_paths.len() > 0:
-        rt_sandbox_set_fs_restricted()
+        unsafe(capabilities: [ffi]):
+            rt_sandbox_set_fs_restricted()
         for path in config.read_paths:
-            rt_sandbox_add_read_path(path)
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_add_read_path(path)
         for path in config.write_paths:
-            rt_sandbox_add_write_path(path)
+            unsafe(capabilities: [ffi]):
+                rt_sandbox_add_write_path(path)
 
     # Apply the sandbox
-    if rt_sandbox_apply():
+    val applied = unsafe(capabilities: [ffi]):
+        rt_sandbox_apply()
+    if applied:
         Ok(())
     else:
         Err("Failed to apply sandbox configuration")

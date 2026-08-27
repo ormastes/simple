@@ -158,6 +158,130 @@ pub fn rt_http_request(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Lossless synchronous HTTP contract.
+///
+/// Simple ABI:
+/// `rt_http_request_v2(method, url, headers, body_bytes, timeout_ms)`
+/// `-> (status, reason, raw_headers, body_bytes, transport_error)`.
+pub fn rt_http_request_v2(args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Read;
+
+    const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+
+    fn result_tuple(
+        status: i64,
+        reason: String,
+        headers: String,
+        body: Vec<u8>,
+        error: String,
+    ) -> Value {
+        Value::Tuple(vec![
+            Value::Int(status),
+            Value::text(reason),
+            Value::text(headers),
+            Value::byte_array(body),
+            Value::text(error),
+        ])
+    }
+
+    fn error_tuple(message: impl Into<String>) -> Value {
+        result_tuple(-1, String::new(), String::new(), Vec::new(), message.into())
+    }
+
+    fn is_http_token(value: &str) -> bool {
+        !value.is_empty() && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+        })
+    }
+
+    let method = match args.first() {
+        Some(Value::Str(value)) if is_http_token(value) => value.as_str(),
+        _ => return Ok(error_tuple("rt_http_request_v2: invalid method")),
+    };
+    let url = match args.get(1) {
+        Some(Value::Str(value)) => value.as_str(),
+        _ => return Ok(error_tuple("rt_http_request_v2: invalid URL")),
+    };
+    let body = match args.get(3).and_then(Value::byte_array_view) {
+        Some(value) => value,
+        None => return Ok(error_tuple("rt_http_request_v2: body must be bytes")),
+    };
+    let timeout_ms = match args.get(4) {
+        Some(Value::Int(value)) if *value >= 0 => *value,
+        _ => return Ok(error_tuple("rt_http_request_v2: invalid timeout")),
+    };
+
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    let agent = AGENT.get_or_init(|| ureq::builder().redirects(0).build());
+    let mut request = agent.request(method, url);
+    if timeout_ms > 0 {
+        request = request.timeout(std::time::Duration::from_millis(timeout_ms as u64));
+    }
+    if let Some(Value::Array(headers) | Value::FrozenArray(headers)) = args.get(2) {
+        if headers.len() > 1024 {
+            return Ok(error_tuple("rt_http_request_v2: too many headers"));
+        }
+        let mut header_bytes = 0usize;
+        for header in headers.iter() {
+            let Value::Str(header) = header else {
+                return Ok(error_tuple("rt_http_request_v2: headers must contain text"));
+            };
+            let Some(separator) = header.find(':') else {
+                return Ok(error_tuple("rt_http_request_v2: malformed header"));
+            };
+            let name = header[..separator].trim();
+            let value = header[separator + 1..].trim();
+            header_bytes = match header_bytes.checked_add(header.len()) {
+                Some(total) if total <= 1024 * 1024 => total,
+                _ => return Ok(error_tuple("rt_http_request_v2: headers exceed 1 MiB")),
+            };
+            if !is_http_token(name) || value.contains('\r') || value.contains('\n') {
+                return Ok(error_tuple("rt_http_request_v2: invalid header"));
+            }
+            request = request.set(name, value);
+        }
+    } else {
+        return Ok(error_tuple("rt_http_request_v2: headers must be an array"));
+    }
+
+    let response = if body.is_empty() { request.call() } else { request.send_bytes(body) };
+    let response = match response {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => return Ok(error_tuple(format!("rt_http_request_v2 error: {error}"))),
+    };
+    let status = response.status() as i64;
+    let reason = response.status_text().to_string();
+    if reason.len() > 8192 {
+        return Ok(error_tuple("rt_http_request_v2: status reason exceeds 8 KiB"));
+    }
+    let mut raw_headers = String::new();
+    let response_header_names = response.headers_names();
+    if response_header_names.len() > 1024 {
+        return Ok(error_tuple("rt_http_request_v2: too many response headers"));
+    }
+    for name in response_header_names {
+        if let Some(value) = response.header(&name) {
+            let added = name.len().saturating_add(value.len()).saturating_add(4);
+            if raw_headers.len().saturating_add(added) > 1024 * 1024 {
+                return Ok(error_tuple("rt_http_request_v2: response headers exceed 1 MiB"));
+            }
+            raw_headers.push_str(&name);
+            raw_headers.push_str(": ");
+            raw_headers.push_str(value);
+            raw_headers.push_str("\r\n");
+        }
+    }
+    let mut body_bytes = Vec::new();
+    let mut reader = response.into_reader().take(MAX_RESPONSE_BYTES + 1);
+    if let Err(error) = reader.read_to_end(&mut body_bytes) {
+        return Ok(error_tuple(format!("rt_http_request_v2 read error: {error}")));
+    }
+    if body_bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return Ok(error_tuple("rt_http_request_v2: response exceeds 64 MiB"));
+    }
+    Ok(result_tuple(status, reason, raw_headers, body_bytes, String::new()))
+}
+
 /// Stub for async WebSocket raw read — not available in interpreter mode.
 ///
 /// Returns empty list (List<i64>).
@@ -176,4 +300,34 @@ pub fn rt_async_ws_read_raw(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_async_ws_write_raw(_args: &[Value]) -> Result<Value, CompileError> {
     // WebSocket raw I/O is not supported in interpreter mode
     Ok(Value::Int(-1))
+}
+
+#[cfg(test)]
+mod http_v2_tests {
+    use super::*;
+
+    fn assert_typed_error(value: Value) {
+        let Value::Tuple(fields) = value else { panic!("expected HTTP v2 tuple") };
+        assert_eq!(fields.len(), 5);
+        assert!(matches!(fields[0], Value::Int(-1)));
+        assert!(matches!(&fields[3], value if value.byte_array_view() == Some(&[][..])));
+        assert!(matches!(&fields[4], Value::Str(message) if !message.is_empty()));
+    }
+
+    #[test]
+    fn http_v2_invalid_arguments_fail_as_typed_tuple() {
+        assert_typed_error(rt_http_request_v2(&[]).expect("typed failure"));
+    }
+
+    #[test]
+    fn http_v2_rejects_header_injection_before_io() {
+        let args = vec![
+            Value::text("GET".to_string()),
+            Value::text("http://127.0.0.1/".to_string()),
+            Value::array(vec![Value::text("X-Test: ok\r\nInjected: yes".to_string())]),
+            Value::byte_array(Vec::new()),
+            Value::Int(1),
+        ];
+        assert_typed_error(rt_http_request_v2(&args).expect("typed failure"));
+    }
 }

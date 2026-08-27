@@ -249,7 +249,8 @@ impl LlvmEmitter<'_> {
         global.set_initializer(&text);
         global.set_constant(true);
         let pointer = global.as_pointer_value();
-        let value = self.builder
+        let value = self
+            .builder
             .build_ptr_to_int(pointer, self.backend.runtime_int_type(), "coverage_file_ptr")
             .map_err(|e| format!("LLVM coverage file pointer conversion failed: {e}"))?;
         Ok(value.into())
@@ -345,7 +346,7 @@ impl LlvmEmitter<'_> {
             "to_string" | "str" => Some("rt_to_string"),
             "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
             "to_int" | "to_i64" => Some("rt_string_to_int"),
-                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
+            "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
             // Receiver-polymorphic: `index_of` must NOT go straight to the
             // string-only `rt_string_find`, which returns its -1 receiver-
             // mismatch sentinel for an array receiver. That made every
@@ -423,7 +424,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_aggregate_copy(&mut self, dest: VReg, src: VReg, byte_size: u32, deep_fields: &[crate::mir::AggregateFieldCopy]) -> Result<(), String> {
+    fn emit_aggregate_copy(
+        &mut self,
+        dest: VReg,
+        src: VReg,
+        byte_size: u32,
+        deep_fields: &[crate::mir::AggregateFieldCopy],
+    ) -> Result<(), String> {
         self.backend
             .compile_aggregate_copy(dest, src, byte_size, deep_fields, self.vreg_map, self.builder)
             .map_err(|e| e.to_string())
@@ -1738,7 +1745,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         Ok(())
     }
 
-    fn emit_enum_with(&mut self, dest: VReg, _enum_name: &str, _variant_name: &str, payload: VReg) -> Result<(), String> {
+    fn emit_enum_with(
+        &mut self,
+        dest: VReg,
+        _enum_name: &str,
+        _variant_name: &str,
+        payload: VReg,
+    ) -> Result<(), String> {
         let pay = self.get(payload)?;
         let result = self.call_runtime("rt_enum_with", &[pay])?;
         self.set(dest, result);
@@ -2434,7 +2447,9 @@ mod tests {
         // assertions below would match their own text and be vacuous in both
         // directions.
         let src = include_str!("emitter.rs");
-        let split = src.find("#[cfg(all(test, feature = \"llvm\"))]").expect("test module marker");
+        let split = src
+            .find("#[cfg(all(test, feature = \"llvm\"))]")
+            .expect("test module marker");
         let code = &src[..split];
 
         // Negative: legacy helpers omit file/line/column and cannot yield an
@@ -2462,9 +2477,9 @@ mod tests {
             );
         }
         assert!(
-            code.contains("fn coverage_file_value") &&
-                code.contains("build_ptr_to_int(pointer") &&
-                code.contains("bytes.push(0)"),
+            code.contains("fn coverage_file_value")
+                && code.contains("build_ptr_to_int(pointer")
+                && code.contains("bytes.push(0)"),
             "coverage lowering must retain a NUL-terminated immutable file name"
         );
         assert!(

@@ -198,10 +198,7 @@ impl RuntimeValue {
     /// immutable object handle, or ownership envelope instead.
     #[inline]
     pub const fn is_inline_transfer_value(self) -> bool {
-        matches!(
-            self.tag(),
-            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL
-        )
+        matches!(self.tag(), tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL)
     }
 
     /// Get the tag bits (lowest 3 bits)
@@ -577,12 +574,10 @@ impl RuntimeValue {
     pub fn clone_for_isolated_thread(self) -> Option<Self> {
         match self.tag() {
             tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL => Some(self),
-            tags::TAG_HEAP => {
-                match super::heap::registered_heap_type(self) {
-                    Some(HeapObjectType::Channel) => Some(self),
-                    _ => None,
-                }
-            }
+            tags::TAG_HEAP => match super::heap::registered_heap_type(self) {
+                Some(HeapObjectType::Channel) => Some(self),
+                _ => None,
+            },
             _ => None,
         }
     }

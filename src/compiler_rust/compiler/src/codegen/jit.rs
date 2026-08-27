@@ -83,6 +83,8 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
+            .is_some_and(|value| value != "0");
         // Pre-compile guard against the broken JIT lambda/closure ABI.
         //
         // `compile_closure_create` builds a closure as a bare `rt_alloc` block
@@ -138,8 +140,21 @@ impl JitCompiler {
             )));
         }
 
-        // Compile all functions
+        // Compile all functions. This is intentionally stage-traced rather
+        // than per-function traced: the compiler worker may contain thousands
+        // of bodies, while a bounded bootstrap diagnosis only needs to know
+        // whether it is blocked before codegen, inside codegen, or finalizing.
+        if stage_trace {
+            eprintln!(
+                "[jit-stage] compile_all:start functions={} globals={}",
+                mir.functions.len(),
+                mir.globals.len()
+            );
+        }
         let functions = self.backend.compile_all_functions(mir)?;
+        if stage_trace {
+            eprintln!("[jit-stage] compile_all:done compiled={}", functions.len());
+        }
 
         // Pre-finalize guard against NULL-jump crashes.
         //
@@ -181,10 +196,16 @@ impl JitCompiler {
         }
 
         // Finalize all functions (make them executable)
+        if stage_trace {
+            eprintln!("[jit-stage] finalize:start");
+        }
         self.backend
             .module
             .finalize_definitions()
             .map_err(|e| BackendError::ModuleError(e.to_string()))?;
+        if stage_trace {
+            eprintln!("[jit-stage] finalize:done");
+        }
 
         // Store function pointers
         for func in &functions {
@@ -313,9 +334,9 @@ impl JitCompiler {
                     {
                         let _ = callee;
                         if !(crate::codegen::jit_closure_abi_supports(*return_type)
-                                && param_types
-                                    .iter()
-                                    .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
+                            && param_types
+                                .iter()
+                                .all(|ty| crate::codegen::jit_closure_abi_supports(*ty)))
                         {
                             return Some((
                                 func.name.clone(),

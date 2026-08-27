@@ -1,0 +1,144 @@
+# ARM32 authenticated filesystem-exec owner.
+
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.arch_adapt.user_entry.{dispatch_fs_exec_user_handoff}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check_caps}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    executable_authority_snapshot_armed_preparation_v1
+}
+use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_read_exact_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno,
+    executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.spawn_authority.{
+    spawn_authority_check_spawn, spawn_authority_spawn_caps
+}
+use os.kernel.loader.spawn_recipes.{
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
+    spawn_recipe_launch_contract_valid
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.arch_adapt.arm32_user_mapping.{
+    Arm32UserPageTableStateV1, Arm32UserPageTableErrorV1,
+    arm32_user_page_table_prepare_with_launch_v1,
+    arm32_user_page_table_reserve_adoption_v1,
+    arm32_user_page_table_destroy_v1
+}
+use os.kernel.scheduler.scheduler_arm32_executable_adoption_v1.{
+    scheduler_arm32_adopt_reserved_authenticated_v1
+}
+use os.kernel.loader.fs_exec_spawn.{FsExecAuthenticatedRunResultV1}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.scheduler.scheduler.{
+    wait_collect_result_error, wait_collect_result_pid,
+    wait_collect_result_status
+}
+use os.kernel.scheduler.process_execution_observation.{
+    SchedulerExecutionDeliveryStatusV2,
+    scheduler_execution_compare_and_deliver_reaped_v2,
+    scheduler_execution_discard_terminal_v2
+}
+
+extern fn serial_println(msg: text)
+
+fn _arm32_parent_caps_v1(caller: i64, recipe: i64) -> CapabilitySet:
+    if not spawn_recipe_is_migrated(recipe): return CapabilitySet.empty()
+    val owner = if caller < 0: 0u64 else: caller.to_u64()
+    spawn_recipe_seed_parent_caps(recipe, owner)
+
+pub(package) fn arm32_fs_exec_spawn_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecAuthenticatedRunResultV1:
+    """Map, publish, enter, reap, and evidence one ARM32 executable."""
+    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
+    if launch_result.is_err():
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: executable_launch_arguments_v1_errno(
+                launch_result.unwrap_err()) as i64,
+            evidence: nil, scheduler: scheduler)
+    val launch = launch_result.unwrap()
+    if not spawn_recipe_launch_contract_valid(
+        recipe, launch.path, launch.argv, launch.envp):
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
+    if gate != 0:
+        return FsExecAuthenticatedRunResultV1(exit_code: gate as i64, evidence: nil, scheduler: scheduler)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecAuthenticatedRunResultV1(exit_code: allowed as i64, evidence: nil, scheduler: scheduler)
+
+    val preparation_result = executable_authority_snapshot_armed_preparation_v1(
+        authorities, token)
+    if preparation_result.is_err():
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
+    val preparation = preparation_result.unwrap()
+    if (not preparation.identity.has_entry_identity or
+        preparation.identity.entry_point != entry_point or
+        preparation.identity.canonical_source_path != launch.path or
+        preparation.image_handle.canonical_source_path != launch.path or
+        preparation.identity.target.os != "simpleos" or
+        preparation.identity.target.arch != "arm" or
+        preparation.identity.target.abi != "simpleos"):
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
+    val source = executable_prepare_read_exact_v1(
+        table, preparation.image_handle)
+    if source == nil:
+        return FsExecAuthenticatedRunResultV1(exit_code: -5, evidence: nil, scheduler: scheduler)
+
+    val mapped = arm32_user_page_table_prepare_with_launch_v1(
+        preparation.identity, preparation.image_handle, consumer,
+        source.unwrap(), entry_point, launch)
+    if mapped.state != Arm32UserPageTableStateV1.MappedBlocked or
+        mapped.error != Arm32UserPageTableErrorV1.None:
+        return FsExecAuthenticatedRunResultV1(exit_code: -8, evidence: nil, scheduler: scheduler)
+    val reserved = arm32_user_page_table_reserve_adoption_v1(mapped)
+    if reserved.state != Arm32UserPageTableStateV1.AdoptionReserved or
+        reserved.error != Arm32UserPageTableErrorV1.None:
+        _ = arm32_user_page_table_destroy_v1(mapped)
+        return FsExecAuthenticatedRunResultV1(exit_code: -13, evidence: nil, scheduler: scheduler)
+
+    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
+    val adopted = scheduler_arm32_adopt_reserved_authenticated_v1(
+        scheduler, table, authorities, token, preparation, reserved,
+        launch, caps)
+    if adopted.pid <= 0:
+        return FsExecAuthenticatedRunResultV1(
+            exit_code: adopted.pid, evidence: nil, scheduler: adopted.scheduler)
+
+    serial_println("[fs-exec] spawn:pid={adopted.pid} path={path}")
+    val child = TaskId(id: adopted.pid.to_u64())
+    val exit_code = dispatch_fs_exec_user_handoff(
+        Architecture.Arm32, child.id, adopted.scheduler)
+    var owner = adopted.scheduler
+    owner.exit_task_by_id(child, exit_code.to_i32())
+    val collected = owner.wait_for_collect(TaskId(id: 0u64), child, false)
+    if wait_collect_result_error(collected) != 0 or
+        wait_collect_result_pid(collected) != child.id or
+        wait_collect_result_status(collected) != exit_code.to_i32():
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
+    val delivered = scheduler_execution_compare_and_deliver_reaped_v2(
+        child.id, path, argv)
+    if delivered.status != SchedulerExecutionDeliveryStatusV2.Delivered:
+        _ = scheduler_execution_discard_terminal_v2(child.id)
+        return FsExecAuthenticatedRunResultV1(exit_code: -10, evidence: nil, scheduler: owner)
+    FsExecAuthenticatedRunResultV1(
+        exit_code: exit_code, evidence: delivered.token, scheduler: owner)

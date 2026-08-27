@@ -1,0 +1,102 @@
+"""Serialized mutation epoch for the authenticated `/usr/include` tree."""
+
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+
+pub(package) struct VfsIncludeMutationTicketV1:
+    _epoch: u64
+
+pub(package) struct VfsIncludeProofSnapshotV1:
+    _epoch: u64
+
+pub(package) struct VfsIncludeSealInfoV1:
+    target_triple: text
+    manifest_sha256: text
+    root_sha256: text
+    exact_files_sha256: text
+    entry_count: i64
+    total_bytes: i64
+
+val _include_tree_mutex_v1: i64 = mutex_raw_create()
+var _include_tree_epoch_v1: u64 = 2u64
+var _include_tree_sealed_v1: bool = false
+var _include_tree_quarantined_v1: bool = false
+var _include_tree_seal_info_v1: VfsIncludeSealInfoV1? = nil
+
+fn _include_path_v1(path: text) -> bool:
+    path == "/usr/include" or path.starts_with("/usr/include/") or
+        path == "/usr/share/simpleos/simpleos.ld" or
+        path == "/usr/lib/crt0.o" or path == "/usr/lib/libsimpleos_c.a" or
+        path == "/usr/lib/libsimple_runtime.a" or path == "/usr/lib/libm.a"
+
+fn _lock_v1() -> bool:
+    _include_tree_mutex_v1 > 0 and not _include_tree_quarantined_v1 and
+        mutex_raw_lock(_include_tree_mutex_v1)
+
+fn _unlock_v1() -> bool:
+    if mutex_raw_unlock(_include_tree_mutex_v1): return true
+    _include_tree_quarantined_v1 = true
+    false
+
+pub(package) fn vfs_include_mutation_begin_v1(
+    path: text
+) -> Result<VfsIncludeMutationTicketV1?, text>:
+    if not _include_path_v1(path): return Ok(nil)
+    if not _lock_v1(): return Err("include-tree-serialization-unavailable")
+    if _include_tree_sealed_v1 or (_include_tree_epoch_v1 & 1u64) == 1u64 or
+       _include_tree_epoch_v1 >= 0xfffffffffffffffeu64:
+        _ = _unlock_v1()
+        return Err("include-tree-sealed")
+    _include_tree_epoch_v1 = _include_tree_epoch_v1 + 1u64
+    val ticket = VfsIncludeMutationTicketV1(_epoch: _include_tree_epoch_v1)
+    if not _unlock_v1(): return Err("include-tree-mutation-begin-unknown")
+    Ok(Some(ticket))
+
+pub(package) fn vfs_include_mutation_finish_v1(
+    ticket: VfsIncludeMutationTicketV1?
+) -> bool:
+    if not ticket.?: return true
+    if not _lock_v1(): return false
+    val valid = _include_tree_epoch_v1 == ticket.unwrap()._epoch and
+        (_include_tree_epoch_v1 & 1u64) == 1u64
+    if valid: _include_tree_epoch_v1 = _include_tree_epoch_v1 + 1u64
+    val unlocked = _unlock_v1()
+    valid and unlocked
+
+pub(package) fn vfs_include_proof_snapshot_begin_v1(
+) -> Result<VfsIncludeProofSnapshotV1, text>:
+    if not _lock_v1(): return Err("include-tree-serialization-unavailable")
+    val epoch = _include_tree_epoch_v1
+    val valid = not _include_tree_sealed_v1 and (epoch & 1u64) == 0u64
+    if not _unlock_v1(): return Err("include-tree-snapshot-begin-unknown")
+    if not valid: return Err("include-tree-not-snapshotable")
+    Ok(VfsIncludeProofSnapshotV1(_epoch: epoch))
+
+pub(package) fn vfs_include_seal_info_v1(
+    target_triple: text, manifest_sha256: text, root_sha256: text,
+    exact_files_sha256: text
+) -> VfsIncludeSealInfoV1?:
+    if not _lock_v1(): return nil
+    val current = _include_tree_seal_info_v1
+    var matches = false
+    if current.?:
+        val info = current.unwrap()
+        matches = info.target_triple == target_triple and
+            info.manifest_sha256 == manifest_sha256 and
+            info.root_sha256 == root_sha256 and
+            info.exact_files_sha256 == exact_files_sha256
+    if not _unlock_v1() or not matches: return nil
+    current
+
+pub(package) fn vfs_include_proof_snapshot_seal_v1(
+    snapshot: VfsIncludeProofSnapshotV1,
+    info: VfsIncludeSealInfoV1
+) -> bool:
+    if not _lock_v1(): return false
+    val valid = not _include_tree_sealed_v1 and
+        snapshot._epoch != 0u64 and snapshot._epoch == _include_tree_epoch_v1 and
+        (_include_tree_epoch_v1 & 1u64) == 0u64
+    if valid:
+        _include_tree_sealed_v1 = true
+        _include_tree_seal_info_v1 = Some(info)
+    val unlocked = _unlock_v1()
+    valid and unlocked

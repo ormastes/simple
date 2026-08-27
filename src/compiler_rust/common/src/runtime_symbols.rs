@@ -576,6 +576,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_time_now_nanos",
     "rt_time_now_micros",
     "rt_time_now_unix_micros",
+    "rt_progress_clock_now_nanos",
+    "rt_progress_tls_clear",
+    "rt_progress_tls_is_initialized",
+    "rt_progress_tls_start_nanos",
+    "rt_progress_tls_store_start_nanos",
     "rt_swi_build",
     "rt_swi_char_to_byte",
     "rt_swi_byte_to_char",
@@ -833,6 +838,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_peer_addr",
     "rt_io_tcp_set_nodelay",
     "rt_io_tcp_set_nonblocking",
+    "rt_socket_nonblock_prepare",
+    "rt_socket_nonblock_commit",
+    "rt_socket_nonblock_mask",
     "rt_io_tcp_set_reuseaddr",
     "rt_io_tcp_set_reuseport",
     "rt_io_tcp_set_read_timeout",
@@ -849,9 +857,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_tls_client_connect_with_sni",
     "rt_tls_client_connect_address_with_sni_timeout",
     "rt_tls_client_write",
-    "rt_tls_client_read",
+    "rt_tls_client_read_checked",
     "rt_tls_client_write_timeout",
-    "rt_tls_client_read_timeout",
+    "rt_tls_client_read_timeout_checked",
     "rt_tls_client_close",
     "rt_tls_get_protocol_version",
     "rt_platform_name",
@@ -897,7 +905,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cli_run_gen_lean",
     "rt_compile_to_native",
     "rt_compile_to_native_with_opt",
-    "rt_compile_to_llvm_ir",
     "rt_decision_probe",
     "rt_condition_probe",
     "rt_path_probe",
@@ -1458,6 +1465,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_async_spawn",
     "rt_async_spawn_task",
     "rt_atomic_bool_free",
+    "rt_atomic_bool_compare_exchange",
+    "rt_atomic_bool_fetch_and",
+    "rt_atomic_bool_fetch_not",
+    "rt_atomic_bool_fetch_or",
     "rt_atomic_bool_load",
     "rt_atomic_bool_new",
     "rt_atomic_bool_store",
@@ -1626,6 +1637,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cuda_event_synchronize",
     "rt_cuda_event_elapsed_ns",
     "rt_cuda_event_destroy",
+    "rt_cuda_event_elapsed_ms",
+    "rt_cuda_stream_create",
+    "rt_cuda_stream_destroy",
+    "rt_cuda_stream_synchronize",
+    "rt_cuda_memcpy_htod_async",
+    "rt_cuda_memcpy_dtoh_async",
+    "rt_cuda_launch_kernel_ex",
     "rt_vulkan_timestamp_supported",
     "rt_vulkan_timestamp_period_fnum",
     "rt_vulkan_query_elapsed_ns",
@@ -1849,7 +1867,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_package_exists",
     "rt_package_extract_tarball",
     "rt_package_file_size",
-    "rt_package_free_string",
     "rt_package_is_dir",
     "rt_package_mkdir_all",
     "rt_package_remove_dir_all",
@@ -1881,6 +1898,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_run_timeout",
     "rt_process_run_bounded",
     "rt_process_run_owned_bounded_value",
+    "rt_process_run_owned_observed_bounded_value",
     "rt_process_run_with_limits",
     "rt_profiler_is_active",
     "rt_profiler_record_call",
@@ -2014,42 +2032,22 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_ed25519_sign_seed",
     "rt_tls13_ed25519_sign",
     "rt_tls_clear",
-    "rt_tls_client_config_add_root_cert",
-    "rt_tls_client_config_enable_sni",
-    "rt_tls_client_config_free",
-    "rt_tls_client_config_new",
-    "rt_tls_client_config_set_alpn",
-    "rt_tls_client_config_set_verify_mode",
     "rt_tls_free",
-    "rt_tls_free_cert",
-    "rt_tls_generate_self_signed_cert",
     "rt_tls_get",
-    "rt_tls_get_cert_expiry",
-    "rt_tls_get_cert_issuer",
-    "rt_tls_get_cert_subject",
     "rt_tls_get_cipher_suite",
     "rt_tls_get_negotiated_alpn",
-    "rt_tls_get_peer_cert",
-    "rt_tls_hash_cert",
     "rt_tls_is_handshake_complete",
-    "rt_tls_load_cert",
-    "rt_tls_load_key",
     "rt_tls_new",
     "rt_tls_remove",
     "rt_tls_server_accept",
     "rt_tls_server_close_connection",
-    "rt_tls_server_config_free",
-    "rt_tls_server_config_new",
-    "rt_tls_server_config_require_client_cert",
-    "rt_tls_server_config_set_alpn",
     "rt_tls_server_create",
     "rt_tls_server_create_from_der",
-    "rt_tls_server_read",
+    "rt_tls_server_read_checked",
     "rt_tls_server_shutdown",
     "rt_tls_server_write",
     "rt_tls_server_write_bytes",
     "rt_tls_set",
-    "rt_tls_verify_cert",
     "rt_tuple_free",
     "rt_typed_bytes_u8_data_at",
     "rt_typed_words_u32_data_at",
@@ -2087,7 +2085,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // the native struct-receiver guard, and dict insert) and DEFINED in the
     // runtime, but were never listed here. `runtime/build.rs` generates
     // RUNTIME_SYMBOL_ENTRIES purely from this list, so an unlisted symbol is
-    // never registered with the JIT -> "unresolved external symbol" at run
+    // never registered with the JIT -> unresolved external symbol at run
     // time and a silent fallback to the interpreter. Listing is the whole
     // registration mechanism; do not emit a call to a symbol absent here.
     "rt_dict_insert",
@@ -2214,6 +2212,27 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_weak_new",
     "rt_weak_upgrade",
     "rt_ws_mask_bytes",
+    // Codegen-reachable, unconditionally exported runtime projection. Keep
+    // this block lexicographically ordered so manifest updates are stable.
+    "rt_array_free_deep",
+    "rt_array_remove",
+    "rt_atomic_flag_load",
+    "rt_collection_remove",
+    "rt_cuda_memset_d32",
+    "rt_file_exists_probe_begin",
+    "rt_file_exists_probe_end",
+    "rt_find",
+    "rt_io_file_delete",
+    "rt_io_file_exists",
+    "rt_io_file_open",
+    "rt_mem_snapshot_close",
+    "rt_mem_snapshot_open",
+    "rt_mem_snapshot_record",
+    "rt_string_parse_int",
+    "rt_value_as_bool",
+    "rt_value_is_bool",
+    "rt_value_is_int",
+    "rt_value_is_nil",
     // ---- Codegen aliases (resolved via #[export_name] wrappers in runtime/src) ----
     // The compiler emits these Simple-facing names; the AOT loader rewrites them, but the
     // Cranelift JIT registers symbols by exact name, so each is exported as a real symbol
@@ -2237,6 +2256,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_font_load_array",
     "rt_file_write_bytes_array",
     "rt_metal_load_library_array",
+    "rt_metal_buffer_upload_raw",
+    "rt_metal_buffer_download_raw",
+    "rt_metal_set_bytes_raw",
+    "rt_metal_compile_shader_raw",
+    "rt_metal_load_library_raw",
+    "rt_metal_create_compute_pipeline_raw",
     // SimpleOS syscall adapters consume owning RuntimeValues.  Byte backing is
     // projected only inside the target runtime provider; these names must not
     // be replaced with a raw array-data pointer escape.
@@ -2250,7 +2275,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simpleos_socket_recv_bytes",
     "spl_wffi_call_i64_with_bytes",
     "spl_wffi_call_i64_with_bytes_checked",
+    "spl_dlopen_checked",
+    "spl_dlsym_checked",
+    "spl_dlsym_process_checked",
     "spl_wffi_call_i64_checked",
+    "spl_wffi_try_call_i64_out",
+    "spl_wffi_call_bool0_checked",
+    "spl_wffi_call_bool1_checked",
     "spl_wffi_call_f64_checked",
     "spl_fonts_call_init_blob",
     "spl_fonts_call_init_path",
@@ -2286,7 +2317,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_selected_device_name",
     "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
-    // Native socket / HTTP externs. These are `#[no_mangle] extern "C"` in
+    // Native socket / HTTP externs. These use the no_mangle C ABI in
     // `simple_runtime` (`value/net_tcp.rs`, `value/net_udp.rs`) and are already
     // classified `Sys` by `symbol_tier_of` above and stubbed by the native
     // linker (`compiler/src/linker/native_binary/stubs.rs`) — but they were
@@ -2294,11 +2325,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // thing `register_runtime_symbols_from_provider`
     // (`compiler/src/codegen/jit.rs:387`) iterates. A symbol missing here is
     // never handed to `JITBuilder::symbol`, so any module declaring one failed
-    // Cranelift JIT compilation with "unresolved external symbol" and the WHOLE
+    // Cranelift JIT compilation with an unresolved external symbol and the WHOLE
     // module was silently demoted to the tree-walk interpreter. That made every
     // `SIMPLE_EXECUTION_MODE=jit` networking claim false and unfalsifiable.
     // See doc/08_tracking/bug/jit_cannot_resolve_native_socket_externs_2026-08-09.md
     "native_http_send",
+    "rt_http_request_v2",
     "native_tcp_accept",
     "native_tcp_bind",
     "native_tcp_close",
@@ -2337,6 +2369,20 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "native_udp_set_read_timeout",
     "native_udp_set_ttl",
     "native_udp_set_write_timeout",
+    "rt_io_udp_bind",
+    "rt_io_udp_close",
+    "rt_io_udp_connect",
+    "rt_io_udp_local_addr",
+    "rt_io_udp_join_multicast",
+    "rt_io_udp_leave_multicast",
+    "rt_io_udp_recv",
+    "rt_io_udp_recv_from",
+    "rt_io_udp_send",
+    "rt_io_udp_send_to",
+    "rt_io_udp_set_broadcast",
+    "rt_io_udp_set_multicast_loop",
+    "rt_io_udp_set_nonblocking",
+    "rt_io_udp_set_read_timeout",
     "sys_get_args", // -> rt_get_args
     "sys_exit",     // -> rt_exit
 ];

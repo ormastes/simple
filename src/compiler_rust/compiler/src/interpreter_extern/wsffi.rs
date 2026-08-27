@@ -19,7 +19,7 @@ static LOADED_LIBS: std::sync::LazyLock<Mutex<HashMap<String, usize>>> =
 /// Open a shared library and return its handle as i64.
 ///
 /// Callable from Simple as: `spl_dlopen(path: text) -> i64`
-/// Returns 0 on failure.
+/// Boundary failures are typed interpreter errors; they never become a handle.
 pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("spl_dlopen requires 1 argument (path)"));
@@ -34,7 +34,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     {
         let c_path = match CString::new(path.as_str()) {
             Ok(c) => c,
-            Err(_) => return Ok(Value::Int(0)),
+            Err(_) => return Err(CompileError::runtime("spl_dlopen: path contains an interior NUL")),
         };
 
         let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL) };
@@ -45,7 +45,7 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
                 let err_str = unsafe { CStr::from_ptr(err) }.to_string_lossy();
                 tracing::warn!("spl_dlopen failed for '{}': {}", path, err_str);
             }
-            Ok(Value::Int(0))
+            Err(CompileError::runtime(format!("spl_dlopen failed for '{path}'")))
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -55,13 +55,13 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     {
         use windows_sys::Win32::System::LibraryLoader::LoadLibraryW;
         if path.contains('\0') {
-            return Ok(Value::Int(0));
+            return Err(CompileError::runtime("spl_dlopen: path contains an interior NUL"));
         }
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let handle = unsafe { LoadLibraryW(wide.as_ptr()) };
         if handle.is_null() {
             tracing::warn!("spl_dlopen failed for '{}'", path);
-            Ok(Value::Int(0))
+            Err(CompileError::runtime(format!("spl_dlopen failed for '{path}'")))
         } else {
             Ok(Value::Int(handle as usize as i64))
         }
@@ -70,14 +70,36 @@ pub fn spl_dlopen(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(not(any(unix, windows)))]
     {
         tracing::warn!("spl_dlopen not supported on this platform");
-        Ok(Value::Int(0))
+        Err(CompileError::runtime("spl_dlopen is unsupported on this platform"))
+    }
+}
+
+/// Status/out dynload ABI. Failure initializes the output and returns a
+/// non-zero status, preserving a legitimate foreign integer zero elsewhere.
+pub fn spl_dlopen_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "spl_dlopen_checked requires 2 arguments (path, out_handle)",
+        ));
+    }
+    let output = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => return Err(CompileError::runtime("spl_dlopen_checked: output must be &mut i64")),
+    };
+    *output.inner_mut() = Value::Int(0);
+    match spl_dlopen(&args[..1]) {
+        Ok(Value::Int(handle)) if handle != 0 => {
+            *output.inner_mut() = Value::Int(handle);
+            Ok(Value::Int(0))
+        }
+        _ => Ok(Value::Int(2)),
     }
 }
 
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
-/// Returns 0 if the symbol is not found.
+/// Boundary failures are typed interpreter errors; they never become a symbol.
 pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() < 2 {
         return Err(CompileError::runtime("spl_dlsym requires 2 arguments (handle, name)"));
@@ -87,6 +109,9 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
         Value::Int(h) => *h as usize,
         _ => return Err(CompileError::runtime("spl_dlsym: handle must be an integer")),
     };
+    if handle_val == 0 {
+        return Err(CompileError::runtime("spl_dlsym: null provider handle"));
+    }
 
     let name = match &args[1] {
         Value::Str(s) => s.clone(),
@@ -95,14 +120,18 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
 
     let c_name = match CString::new(name.as_str()) {
         Ok(c) => c,
-        Err(_) => return Ok(Value::Int(0)),
+        Err(_) => return Err(CompileError::runtime("spl_dlsym: name contains an interior NUL")),
     };
 
     #[cfg(unix)]
     {
         let handle = handle_val as *mut libc::c_void;
         let sym = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
-        Ok(Value::Int(sym as usize as i64))
+        if sym.is_null() {
+            Err(CompileError::runtime(format!("spl_dlsym: unresolved symbol '{name}'")))
+        } else {
+            Ok(Value::Int(sym as usize as i64))
+        }
     }
 
     #[cfg(windows)]
@@ -111,13 +140,84 @@ pub fn spl_dlsym(args: &[Value]) -> Result<Value, CompileError> {
             fn GetProcAddress(hModule: isize, lpProcName: *const u8) -> *mut std::ffi::c_void;
         }
         let sym = unsafe { GetProcAddress(handle_val as isize, c_name.as_ptr() as *const u8) };
-        Ok(Value::Int(sym as usize as i64))
+        if sym.is_null() {
+            Err(CompileError::runtime(format!("spl_dlsym: unresolved symbol '{name}'")))
+        } else {
+            Ok(Value::Int(sym as usize as i64))
+        }
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        Ok(Value::Int(0))
+        Err(CompileError::runtime("spl_dlsym is unsupported on this platform"))
     }
+}
+
+/// Status/out symbol-resolution ABI.
+pub fn spl_dlsym_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime(
+            "spl_dlsym_checked requires 3 arguments (handle, name, out_symbol)",
+        ));
+    }
+    let output = match &args[2] {
+        Value::BorrowMut(value) => value,
+        _ => return Err(CompileError::runtime("spl_dlsym_checked: output must be &mut i64")),
+    };
+    *output.inner_mut() = Value::Int(0);
+    match spl_dlsym(&args[..2]) {
+        Ok(Value::Int(symbol)) if symbol != 0 => {
+            *output.inner_mut() = Value::Int(symbol);
+            Ok(Value::Int(0))
+        }
+        _ => Ok(Value::Int(3)),
+    }
+}
+
+/// Checked current-process symbol resolution, separate from null-handle lookup.
+pub fn spl_dlsym_process_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::runtime(
+            "spl_dlsym_process_checked requires 2 arguments (name, out_symbol)",
+        ));
+    }
+    let output = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => return Err(CompileError::runtime("spl_dlsym_process_checked: output must be &mut i64")),
+    };
+    *output.inner_mut() = Value::Int(0);
+    let name = match &args[0] {
+        Value::Str(value) if !value.is_empty() => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    let c_name = match CString::new(name.as_str()) {
+        Ok(value) => value,
+        Err(_) => return Ok(Value::Int(1)),
+    };
+
+    #[cfg(unix)]
+    let symbol = unsafe { libc::dlsym(std::ptr::null_mut(), c_name.as_ptr()) };
+    #[cfg(windows)]
+    let symbol = unsafe {
+        extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> isize;
+            fn GetProcAddress(module: isize, name: *const u8) -> *mut std::ffi::c_void;
+        }
+        let process = GetModuleHandleW(std::ptr::null());
+        if process == 0 {
+            std::ptr::null_mut()
+        } else {
+            GetProcAddress(process, c_name.as_ptr() as *const u8)
+        }
+    };
+    #[cfg(not(any(unix, windows)))]
+    let symbol: *mut std::ffi::c_void = std::ptr::null_mut();
+
+    if symbol.is_null() {
+        return Ok(Value::Int(3));
+    }
+    *output.inner_mut() = Value::Int(symbol as usize as i64);
+    Ok(Value::Int(0))
 }
 
 /// Close a loaded library.
@@ -178,15 +278,8 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("spl_wffi_call_i64: null function pointer"));
     }
 
-    let call_args: Vec<i64> = match &args[1] {
-        Value::Array(arr) => arr
-            .iter()
-            .map(|v| match v {
-                Value::Int(n) => Ok(*n),
-                Value::Bool(b) => Ok(if *b { 1i64 } else { 0i64 }),
-                _ => Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+    let supplied = match &args[1] {
+        Value::Array(arr) => arr,
         _ => return Err(CompileError::runtime("spl_wffi_call_i64: args must be an array")),
     };
 
@@ -199,10 +292,17 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     if nargs > 8 {
         return Err(CompileError::runtime("spl_wffi_call_i64: max 8 arguments supported"));
     }
-    if nargs > call_args.len() {
+    if nargs > supplied.len() {
         return Err(CompileError::runtime(
             "spl_wffi_call_i64: nargs exceeds supplied argument array",
         ));
+    }
+    let mut call_args = [0i64; 8];
+    for (index, value) in supplied.iter().take(nargs).enumerate() {
+        call_args[index] = match value {
+            Value::Int(number) => *number,
+            _ => return Err(CompileError::runtime("spl_wffi_call_i64: args must be integers")),
+        };
     }
 
     // Safety: we trust the caller has provided a valid function pointer
@@ -278,6 +378,48 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result))
 }
 
+/// Allocation-free typed C-boolean call with no arguments.
+pub fn spl_wffi_call_bool0_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Ok(Value::Int(1));
+    }
+    let fptr = match args[0] {
+        Value::Int(value) if value != 0 => value as usize,
+        _ => return Ok(Value::Int(2)),
+    };
+    let output = match &args[1] {
+        Value::BorrowMut(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    *output.inner_mut() = Value::Bool(false);
+    let function: extern "C" fn() -> bool = unsafe { std::mem::transmute(fptr) };
+    *output.inner_mut() = Value::Bool(function());
+    Ok(Value::Int(0))
+}
+
+/// Allocation-free typed C-boolean call with one i64 argument.
+pub fn spl_wffi_call_bool1_checked(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Ok(Value::Int(1));
+    }
+    let fptr = match args[0] {
+        Value::Int(value) if value != 0 => value as usize,
+        _ => return Ok(Value::Int(2)),
+    };
+    let arg0 = match args[1] {
+        Value::Int(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    let output = match &args[2] {
+        Value::BorrowMut(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    *output.inner_mut() = Value::Bool(false);
+    let function: extern "C" fn(i64) -> bool = unsafe { std::mem::transmute(fptr) };
+    *output.inner_mut() = Value::Bool(function(arg0));
+    Ok(Value::Int(0))
+}
+
 /// Checked WFFI transport. Returns `[status, value]`; value is meaningful only
 /// for status zero. Bridge failures never masquerade as a foreign zero result.
 pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> {
@@ -291,7 +433,7 @@ pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> 
         Value::Array(values)
             if values
                 .iter()
-                .all(|value| matches!(value, Value::Int(_) | Value::Bool(_))) =>
+                .all(|value| matches!(value, Value::Int(_))) =>
         {
             values.len()
         }
@@ -312,6 +454,45 @@ pub fn spl_wffi_call_i64_checked(args: &[Value]) -> Result<Value, CompileError> 
     }
     let value = spl_wffi_call_i64(args)?;
     Ok(Value::array(vec![Value::Int(0), value]))
+}
+
+/// Allocation-free checked integer transport with caller-owned scalar output.
+pub fn spl_wffi_try_call_i64_out(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Ok(Value::Int(1));
+    }
+    let output = match &args[3] {
+        Value::BorrowMut(value) => value,
+        _ => return Ok(Value::Int(1)),
+    };
+    *output.inner_mut() = Value::Int(0);
+    if !matches!(args[0], Value::Int(pointer) if pointer != 0) {
+        return Ok(Value::Int(2));
+    }
+    let supplied = match &args[1] {
+        Value::Array(values) if values.iter().all(|value| matches!(value, Value::Int(_))) => values.len(),
+        _ => return Ok(Value::Int(1)),
+    };
+    let nargs = match args[2] {
+        Value::Int(value) => match usize::try_from(value) {
+            Ok(value) => value,
+            Err(_) => return Ok(Value::Int(1)),
+        },
+        _ => return Ok(Value::Int(1)),
+    };
+    if nargs > 8 {
+        return Ok(Value::Int(3));
+    }
+    if nargs > supplied {
+        return Ok(Value::Int(1));
+    }
+    match spl_wffi_call_i64(&args[..3])? {
+        Value::Int(value) => {
+            *output.inner_mut() = Value::Int(value);
+            Ok(Value::Int(0))
+        }
+        _ => Ok(Value::Int(1)),
+    }
 }
 
 /// Call a function pointer with f64 arguments and return an f64 result.
@@ -551,6 +732,10 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    extern "C" fn return_i64(value: i64) -> i64 {
+        value
+    }
+
     extern "C" fn add_scaled(a: f64, b: f64, scale: f64) -> f64 {
         (a + b) * scale
     }
@@ -570,5 +755,26 @@ mod tests {
             Value::Float(v) => assert_eq!(v, 2.0),
             other => panic!("expected float result, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dynload_rejects_interior_nul_instead_of_returning_zero() {
+        assert!(spl_dlopen(&[Value::text("invalid\0library")]).is_err());
+    }
+
+    #[test]
+    fn symbol_lookup_rejects_null_handle_instead_of_returning_zero() {
+        assert!(spl_dlsym(&[Value::Int(0), Value::text("missing")]).is_err());
+    }
+
+    #[test]
+    fn integer_bridge_rejects_boolean_coercion() {
+        let values = Value::Array(Arc::new(vec![Value::Bool(true)]));
+        assert!(spl_wffi_call_i64(&[
+            Value::Int(return_i64 as usize as i64),
+            values,
+            Value::Int(1),
+        ])
+        .is_err());
     }
 }

@@ -1,7 +1,8 @@
 # AES-256-GCM — Pure Simple Implementation
 #
 # AES-256 in Galois/Counter Mode per NIST SP 800-38D.
-# No SFFI/Rust SFFI — pure Simple language, suitable for baremetal.
+# The cryptographic fallback is pure Simple and suitable for baremetal. Hosted
+# lanes optionally use explicitly unsafe runtime byte-access/AES-GCM fast paths.
 # Mirrors src/os/crypto/aes128_gcm.spl post-T3-cleanup.
 #
 # Reference: FIPS 197 (AES) — §5.2 key expansion, AES-256 special case
@@ -13,7 +14,12 @@
 use std.simd_crypto.{Vec16u8, simd_aes_round, simd_aes_round_last}
 use os.crypto.gcm_gf128.{gcm_gf128_mul, gcm_ghash_block, gcm_pad_to_16, gcm_ghash}
 
+@unsafe(reason: "foreign byte indexing requires caller-proven array bounds", capabilities: [ffi])
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+@unsafe(reason: "foreign AES-GCM fast path has ambiguous empty-result failure semantics", capabilities: [ffi])
+extern fn rt_tls13_aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
+@unsafe(reason: "foreign AES-GCM fast path has ambiguous empty-result failure semantics", capabilities: [ffi])
+extern fn rt_tls13_aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
 
 # Baremetal-safe array allocation. rt_array_new_with_cap is an interpreter-only
 # extern with no native/baremetal runtime symbol, so importing this module into a
@@ -25,6 +31,7 @@ fn _new_u8(_cap: i64) -> [u8]:
     var a: [u8] = []
     a
 
+@unsafe(reason: "caller must prove the foreign byte index is in bounds", capabilities: [ffi])
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
@@ -412,6 +419,7 @@ fn _xor_v16(a: Vec16u8, b: Vec16u8) -> Vec16u8:
         u15: a.u15 ^ b.u15,
     )
 
+@unsafe(reason: "reads sixteen foreign byte lanes from a caller-validated key schedule", capabilities: [ffi])
 fn _load_round_key_v(schedule: [u8], round_idx: u64) -> Vec16u8:
     """Load the 16-byte round key R from the 240-byte AES-256 schedule
     into a Vec16u8 (round_idx in 0..=14).
@@ -444,6 +452,7 @@ fn _load_round_key_v(schedule: [u8], round_idx: u64) -> Vec16u8:
         u15: rt_bytes_u8_at(schedule, base + 15),
     )
 
+@unsafe(reason: "reads sixteen foreign byte lanes from a caller-validated AES block", capabilities: [ffi])
 fn _load_block_v(block: [u8]) -> Vec16u8:
     """Load a 16-byte plaintext / counter block into a Vec16u8.
 
@@ -624,6 +633,7 @@ fn _aes256_gcm_make_j0(nonce: [u8]) -> [u8]:
     j0.push(0x01)
     j0
 
+@unsafe(reason: "foreign fast-path empty output ambiguously falls back and input extents are caller-owned", capabilities: [ffi])
 fn aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]:
     """AES-256-GCM authenticated encryption.
 
@@ -667,6 +677,7 @@ fn aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
 # AES-256-GCM Decryption
 # ============================================================================
 
+@unsafe(reason: "foreign fast-path empty output ambiguously falls back and input extents are caller-owned", capabilities: [ffi])
 fn aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> Aes256GcmResult:
     """AES-256-GCM authenticated decryption with constant-time tag check.
 

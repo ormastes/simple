@@ -943,6 +943,22 @@ int64_t rt_browser_renderer_write_protocol_some(
     return -1;
 }
 
+int64_t rt_process_pin_executable(const char* canonical_path) {
+    (void)canonical_path;
+    return -1;
+}
+
+bool rt_process_close_pinned_executable(int64_t handle) {
+    (void)handle;
+    return false;
+}
+
+int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args) {
+    (void)executable_handle;
+    (void)args;
+    return -1;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -950,8 +966,10 @@ int64_t rt_browser_renderer_write_protocol_some(
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <poll.h>
 #ifdef __APPLE__
@@ -959,6 +977,7 @@ int64_t rt_browser_renderer_write_protocol_some(
 #include <spawn.h>
 #endif
 #ifdef __linux__
+#include <elf.h>
 #include <stddef.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
@@ -1219,8 +1238,152 @@ done:
     if (actions_initialized) (void)posix_spawn_file_actions_destroy(&actions);
     return pid;
 }
+
+/* Reject all runtime-loaded ELF images. Static PIE is intentionally excluded:
+ * admitting its loader/dependency closure requires a separate pinned manifest. */
+#ifdef __linux__
+static bool rt_hal_static_elf_fd(int fd, off_t size) {
+    unsigned char ident[EI_NIDENT];
+    if (pread(fd, ident, sizeof(ident), 0) != (ssize_t)sizeof(ident) ||
+        memcmp(ident, ELFMAG, SELFMAG) != 0 || ident[EI_DATA] != ELFDATA2LSB)
+        return false;
+#define RT_HAL_CHECK_ELF(bits) do { \
+    Elf##bits##_Ehdr eh; \
+    if (pread(fd, &eh, sizeof(eh), 0) != (ssize_t)sizeof(eh) || \
+        eh.e_type != ET_EXEC || eh.e_phentsize != sizeof(Elf##bits##_Phdr) || \
+        eh.e_phnum == 0 || eh.e_phoff > (Elf##bits##_Off)size || \
+        (uint64_t)eh.e_phnum * sizeof(Elf##bits##_Phdr) > \
+            (uint64_t)size - eh.e_phoff) return false; \
+    for (Elf##bits##_Half i = 0; i < eh.e_phnum; i++) { \
+        Elf##bits##_Phdr ph; \
+        off_t at = (off_t)(eh.e_phoff + (Elf##bits##_Off)i * sizeof(ph)); \
+        if (pread(fd, &ph, sizeof(ph), at) != (ssize_t)sizeof(ph)) return false; \
+        if (ph.p_type == PT_INTERP || ph.p_type == PT_DYNAMIC) return false; \
+    } \
+    return true; \
+} while (0)
+    if (ident[EI_CLASS] == ELFCLASS64) RT_HAL_CHECK_ELF(64);
+    if (ident[EI_CLASS] == ELFCLASS32) RT_HAL_CHECK_ELF(32);
+#undef RT_HAL_CHECK_ELF
+    return false;
+}
+#endif
+
+/* Linux-only race-free executable pinning for the RT/HAL comparator host.
+ * The caller hashes /proc/self/fd/<returned-fd>; later spawns execute this same
+ * open file description with fexecve, so pathname replacement cannot change
+ * the admitted image. The descriptor remains caller-owned and reusable. */
+int64_t rt_process_pin_executable(const char* canonical_path) {
+#ifndef __linux__
+    (void)canonical_path;
+    return -1;
 #else
-static void proc_close_inherited_fds(void) {
+    if (!canonical_path || canonical_path[0] != '/') return -1;
+    int source = open(canonical_path, O_RDONLY | O_NOFOLLOW);
+    if (source < 0) return -1;
+    struct stat st;
+    if (fstat(source, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || st.st_size > (off_t)(64 * 1024 * 1024) ||
+        (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0 ||
+        !rt_hal_static_elf_fd(source, st.st_size)) {
+        close(source);
+        return -1;
+    }
+#if !defined(SYS_memfd_create) || !defined(F_ADD_SEALS) || \
+    !defined(F_SEAL_WRITE) || !defined(F_SEAL_GROW) || \
+    !defined(F_SEAL_SHRINK) || !defined(F_SEAL_SEAL)
+    close(source);
+    return -1;
+#else
+    int pinned = (int)syscall(SYS_memfd_create, "simple-rthal", 0x0002U);
+    if (pinned < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    for (;;) {
+        ssize_t count = read(source, buffer, sizeof(buffer));
+        if (count == 0) break;
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(pinned); return -1;
+        }
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t written = write(
+                pinned, buffer + offset, (size_t)(count - offset));
+            if (written < 0 && errno == EINTR) continue;
+            if (written <= 0) {
+                close(source); close(pinned); return -1;
+            }
+            offset += written;
+        }
+    }
+    close(source);
+    if (lseek(pinned, 0, SEEK_SET) < 0 || fchmod(pinned, 0500) != 0 ||
+        fcntl(pinned, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0 ||
+        fcntl(pinned, F_SETFD, FD_CLOEXEC) != 0) {
+        close(pinned);
+        return -1;
+    }
+    return (int64_t)pinned;
+#endif
+#endif
+}
+
+bool rt_process_close_pinned_executable(int64_t handle) {
+#ifndef __linux__
+    (void)handle;
+    return false;
+#else
+    if (handle < 3 || handle > INT_MAX) return false;
+    return close((int)handle) == 0;
+#endif
+}
+
+int64_t rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args) {
+#ifndef __linux__
+    (void)executable_handle;
+    (void)args;
+    return -1;
+#else
+    if (executable_handle < 3 || executable_handle > INT_MAX) return -1;
+    int fd = (int)executable_handle;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) return -1;
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0 || argc > 64) return -1;
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
+    if (!argv) return -1;
+    argv[0] = (char*)"rt-hal-worker";
+    for (int64_t i = 0; i < argc; i++) {
+        const uint8_t* data = rt_string_data(rt_array_get(args, i));
+        argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
+    }
+    argv[argc + 1] = NULL;
+    int64_t pid = rt_process_spawn_piped_argv(
+        "rt-hal-worker", argv, false, fd);
+    free(argv);
+    return pid;
+#endif
+}
+#else
+static void proc_close_inherited_fds_except(int keep_fd) {
+    if (keep_fd >= 3) {
+#if defined(__linux__) && defined(SYS_close_range)
+        if (keep_fd > 3) {
+            (void)syscall(SYS_close_range, 3U, (unsigned int)keep_fd - 1U, 0U);
+        }
+        (void)syscall(
+            SYS_close_range, (unsigned int)keep_fd + 1U, ~0U, 0U);
+        return;
+#else
+        long max_fd = sysconf(_SC_OPEN_MAX);
+        if (max_fd < 0 || max_fd > 1048576) max_fd = 1048576;
+        for (int fd = 3; fd < max_fd; fd++) {
+            if (fd != keep_fd) close(fd);
+        }
+        return;
+#endif
+    }
 #if defined(__linux__) && defined(SYS_close_range)
     if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) return;
 #elif defined(__FreeBSD__)
@@ -1231,12 +1394,60 @@ static void proc_close_inherited_fds(void) {
     if (max_fd < 0 || max_fd > 1048576) max_fd = 1048576;
     for (int fd = 3; fd < max_fd; fd++) close(fd);
 }
+
+#ifdef __linux__
+/* A comparator is one scalar worker, never a process/thread launcher. Denying
+ * creation and session/group escape makes the parent's process-group kill a
+ * complete containment boundary rather than a convention the child can evade. */
+static bool rt_hal_worker_contain_process_tree(void) {
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                 (uint32_t)offsetof(struct seccomp_data, nr)),
+#ifdef __NR_fork
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fork, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_vfork
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_vfork, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_clone
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_clone3
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone3, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_setsid
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setsid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_setpgid
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_setpgid, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+#ifdef __NR_unshare
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_unshare, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter
+    };
+    return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 &&
+        syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &program) == 0;
+}
+#endif
 #endif
 
 /* ===== Public API ===== */
 
 static int64_t rt_process_spawn_piped_argv(
-        const char* cmd, char** argv, bool sandboxed_renderer) {
+        const char* cmd, char** argv, bool sandboxed_renderer,
+        int pinned_executable_fd) {
     if (!cmd || !*cmd) return -1;
 #ifndef __linux__
     if (sandboxed_renderer) return -1;
@@ -1327,12 +1538,14 @@ static int64_t rt_process_spawn_piped_argv(
             dup2(
                 sandboxed_renderer ? null_fd : stdout_pipe[1],
                 STDOUT_FILENO) < 0 ||
-            (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0)) {
+            (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0) ||
+            (pinned_executable_fd >= 0 &&
+             dup2(stdout_pipe[1], STDERR_FILENO) < 0)) {
             _exit(127);
         }
 
         /* Close all parent-side fds */
-        proc_close_inherited_fds();
+        proc_close_inherited_fds_except(pinned_executable_fd);
 
         /* Reset signal handlers */
         signal(SIGINT,  SIG_DFL);
@@ -1345,6 +1558,15 @@ static int64_t rt_process_spawn_piped_argv(
             argv[0] = (char*)"simple-browser-renderer";
             if (chdir("/") != 0) _exit(127);
             execve(cmd, argv, empty_environment);
+#endif
+        } else if (pinned_executable_fd >= 0) {
+#ifdef __linux__
+            char* rt_hal_environment[] = {
+                (char*)"LANG=C", (char*)"LC_ALL=C", (char*)"TZ=UTC",
+                (char*)"PATH=/nonexistent", NULL
+            };
+            if (!rt_hal_worker_contain_process_tree()) _exit(127);
+            fexecve(pinned_executable_fd, argv, rt_hal_environment);
 #endif
         } else {
             execvp(cmd, argv);
@@ -1400,7 +1622,7 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
         argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
     }
     argv[argc + 1] = NULL;
-    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, false);
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, false, -1);
     free(argv);
     return pid;
 }
@@ -1422,7 +1644,7 @@ int64_t rt_browser_renderer_spawn_sandboxed(
         argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
     }
     argv[argc + 1] = NULL;
-    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, true);
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, true, -1);
     free(argv);
     return pid;
 #endif
@@ -1511,7 +1733,7 @@ int64_t rt_editor_spawn_simple_dap(void) {
         "src/app/dap/simple_dap_main.spl",
         NULL
     };
-    return rt_process_spawn_piped_argv(argv[0], argv, false);
+    return rt_process_spawn_piped_argv(argv[0], argv, false, -1);
 }
 
 bool rt_editor_start_simple_dap(int64_t pid) {

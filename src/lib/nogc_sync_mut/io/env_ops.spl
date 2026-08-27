@@ -1,15 +1,22 @@
 # Environment Operations - Pure Simple I/O
 # Extracted from mod.spl for modularity
 
-# Extern fn declarations (runtime resolves at file level)
-extern fn rt_env_get(key: text) -> text?
-extern fn rt_env_vars() -> Dict<text, text>
-use std.io_runtime.{process_run, env_set as io_env_set}
-extern fn rt_env_cwd() -> text
+# The environment snapshot is runtime-owned and may fail allocation. Preserve
+# its tuple-array representation; converting it to a Dict here would both lie
+# about the ABI and allocate on every snapshot.
+@unsafe(reason: "raw nullable environment snapshot returns a runtime-owned tuple array", capabilities: [ffi])
+extern fn rt_env_vars() -> [(text, text)]?
+use std.io_runtime.{process_run, env_set as io_env_set, env_get_opt}
+use std.io_runtime.{cwd as io_runtime_cwd}
+
+@always_inline
+fn _env_vars_raw() -> [(text, text)]?:
+    unsafe(capabilities: [ffi]):
+        rt_env_vars()
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
-    val os_env = rt_env_get("OS")
+    val os_env = env_get_opt("OS")
     if os_env == nil:
         false
     else:
@@ -39,27 +46,24 @@ fn _env_shell_output_trimmed(command: text, default: text) -> text:
 # widening. Callers that must tell unset from explicitly-empty use
 # std.io_runtime.env_get_opt, which is nil-for-unset by construction.
 fn env_get(key: text) -> text:
-    rt_env_get(key) ?? ""
+    env_get_opt(key) ?? ""
 
 # reason: positional io env_ops API
 fn env_set(key: text, value: text) -> bool:
     io_env_set(key, value)
 
 fn cwd() -> text:
-    val result = rt_env_cwd()
-    if result != nil and result != "":
-        result
-    else:
-        "."
+    io_runtime_cwd()
 
 # TOTAL with the documented default "": HOME unset is reported as empty,
 # matching std.io_runtime.env_get's documented ""-for-unset convention.
 # Callers needing to distinguish unset use std.io_runtime.env_get_opt.
 fn home() -> text:
-    rt_env_get("HOME") ?? ""
+    env_get_opt("HOME") ?? ""
 
-fn env_vars() -> Dict<text, text>:
-    rt_env_vars()
+@unsafe(reason: "environment snapshot ownership and allocation failure remain visible to the caller", capabilities: [ffi])
+fn env_vars() -> [(text, text)]?:
+    _env_vars_raw()
 
 fn host_arch() -> text:
     if _is_windows_platform():
@@ -96,4 +100,3 @@ fn host_os() -> text:
             case "OpenBSD": "openbsd"
             case "NetBSD": "netbsd"
             case _: os.lower()
-

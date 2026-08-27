@@ -74,6 +74,38 @@ fn spipe_inline_helpers() -> text:
     "    expect value != nil\n\n" +
     "# === end spipe inline helpers ===\n"
 
+fn spipe_scenario_inline_helpers() -> text:
+    "# === typed scenario omission helpers ===\n" +
+    "fn scenario_wire_field(value: text) -> text:\n" +
+    "    value.replace(\"|\", \"/\").replace(\"\\n\", \" \").replace(\"\\r\", \" \").trim()\n\n" +
+    "fn scenario_artifacts_wire(paths: [text]) -> text:\n" +
+    "    var safe: [text] = []\n" +
+    "    for path in paths:\n" +
+    "        safe.push(scenario_wire_field(path).replace(\";\", \",\"))\n" +
+    "    safe.join(\";\")\n\n" +
+    "fn emit_scenario_omission(status: ScenarioOmissionStatus, selection: EnvScenarioSelection):\n" +
+    "    val label = scenario_omission_status_name(status)\n" +
+    "    print \"__SIMPLE_SCENARIO_OMISSION_V1__|\{label\}|\{scenario_wire_field(selection.scenario_id)\}|\{scenario_wire_field(selection.reason)\}|\{scenario_wire_field(selection.prerequisite)\}|\{scenario_wire_field(selection.owner)\}|\{scenario_wire_field(selection.tracking_id)\}|\{scenario_artifacts_wire(selection.artifact_paths)\}|\{scenario_wire_field(selection.resume_command)\}\"\n\n" +
+    "fn unavailable_scenario(name: text, status: ScenarioOmissionStatus, selection: EnvScenarioSelection):\n" +
+    "    val validation = validate_scenario_omission(selection, status)\n" +
+    "    if not validation.ok:\n" +
+    "        print \"    \{name\} ... FAILED (omission rejected: \{validation.message\})\"\n" +
+    "        panic(\"test-runner: typed scenario omission rejected\")\n" +
+    "    val label = scenario_omission_status_name(status)\n" +
+    "    print \"    \{name\} ... \{label\} (\{selection.reason\}; owner=\{selection.owner\}; tracking=\{selection.tracking_id\})\"\n\n" +
+    "    emit_scenario_omission(status, selection)\n\n" +
+    "fn blocked_scenario(name: text, selection: EnvScenarioSelection):\n" +
+    "    unavailable_scenario(name, ScenarioOmissionStatus.Blocked, selection)\n\n" +
+    "fn unsupported_scenario(name: text, selection: EnvScenarioSelection):\n" +
+    "    unavailable_scenario(name, ScenarioOmissionStatus.Unsupported, selection)\n\n" +
+    "fn excluded_mcdc_scenario(name: text, semantic_decision_id: text, condition_ordinal: i64, identity_version: text, selection: EnvScenarioSelection):\n" +
+    "    val problem = scenario_governance_collect_mcdc_exclusion(selection, semantic_decision_id, condition_ordinal, identity_version)\n" +
+    "    if problem != \"\":\n" +
+    "        print \"    \{name\} ... FAILED (exclusion rejected: \{problem\})\"\n" +
+    "        panic(\"test-runner: MC/DC exclusion rejected\")\n" +
+    "    print \"    \{name\} ... EXCLUDED (\{semantic_decision_id\} condition=\{condition_ordinal\}; \{selection.reason\}; owner=\{selection.owner\}; tracking=\{selection.tracking_id\}; identity-version=\{identity_version\})\"\n" +
+    "# === end typed scenario omission helpers ===\n"
+
 fn spipe_last_index_of(haystack: text, needle: text) -> i64:
     if needle.len() == 0 or haystack.len() < needle.len():
         return -1
@@ -308,6 +340,15 @@ fn spipe_helpers_used(body: text, top_level: text, native_result: bool) -> bool:
         i = i + 1
     false
 
+fn spipe_scenario_helpers_used(body: text, top_level: text) -> bool:
+    val names: [text] = [
+        "blocked_scenario(", "unsupported_scenario(", "excluded_mcdc_scenario("
+    ]
+    for name in names:
+        if body.contains(name) or top_level.contains(name):
+            return true
+    false
+
 fn spipe_write_native_wrapper(wrapped: text) -> text:
     val stamp = time_now_unix_micros()
     var attempt = 0
@@ -455,7 +496,15 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     val imports = import_parts.join("\n")
     val top_level = top_level_parts.join("\n")
     val body = body_parts.join("\n")
-    val helpers = if spipe_helpers_used(body, top_level, native_result): spipe_inline_helpers() else: ""
+    val scenario_helpers = spipe_scenario_helpers_used(body, top_level)
+    val scenario_imports = if scenario_helpers:
+        "use lib.common.env_access.model.EnvScenarioSelection\n" +
+        "use std.spec.scenario_governance.{ScenarioOmissionStatus, scenario_omission_status_name, validate_scenario_omission, scenario_governance_collect_mcdc_exclusion}\n"
+    else:
+        ""
+    var helpers = if spipe_helpers_used(body, top_level, native_result): spipe_inline_helpers() else: ""
+    if scenario_helpers:
+        helpers = helpers + "\n" + spipe_scenario_inline_helpers()
     val native_decls = if native_result:
         "extern fn rt_bdd_clear_state()\n" +
         "extern fn rt_bdd_format_results() -> i64\n" +
@@ -477,7 +526,7 @@ fn _preprocess_spipe_file(file_path: text, native_result: bool) -> text:
     else:
         ""
     val main_decl = if native_result: "fn main() -> i64:\n" else: "fn main():\n"
-    val wrapped = imports + "\n" + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
+    val wrapped = imports + "\n" + scenario_imports + native_decls + helpers + "\n" + top_level + "\n" + main_decl + native_start + body + native_end
     if native_result:
         return spipe_write_native_wrapper(wrapped)
     val tmp_path = "/tmp/spipe_wrapped_" + file_path.replace("/", "_")

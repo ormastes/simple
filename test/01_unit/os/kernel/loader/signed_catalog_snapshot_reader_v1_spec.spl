@@ -1,0 +1,62 @@
+"""Focused contracts for loader-owned signed catalog snapshot reads."""
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use os.kernel.loader.signed_catalog_snapshot_reader_v1.*
+
+fn _catalog_table_v1(path: text, bytes: [u8]) -> MountTable:
+    var table = MountTable.new()
+    table.mount(
+        "/", DriverInstance.DbFs(DbFsDriver.new_hosted()),
+        MountOptions.default()).unwrap()
+    val file = table.open(path, OpenFlags.create_write()).unwrap()
+    table.positioned_write_bytes(
+        file.id, PositionedDriverKind.Dbfs, 0u64, bytes).unwrap()
+    table.close(file).unwrap()
+    table
+
+describe "signed catalog stable snapshot reader v1":
+    it "streams a payload digest across chunks without returning payload bytes":
+        val bytes: [u8] = [113u8; 65537]
+        var table = _catalog_table_v1("/payload.bin", bytes)
+        val digested = signed_catalog_snapshot_digest_v1(
+            table, "/payload.bin", 268435456u64).unwrap()
+        expect(digested.size).to_equal(65537u64)
+        expect(digested.content_sha256).to_equal(sha256_u8_hex(bytes))
+        expect(digested.seal.content_sha256).to_equal(digested.content_sha256)
+        table.unmount("/").unwrap()
+
+    it "reads across 64 KiB boundaries seals the exact bytes and closes":
+        val bytes: [u8] = [97u8; 65537]
+        var table = _catalog_table_v1("/catalog.scr1", bytes)
+        val read = signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 65537u64).unwrap()
+        expect(read.bytes).to_equal(bytes)
+        expect(read.seal.size).to_equal(65537u64)
+        expect(read.seal.content_sha256).to_equal(sha256_u8_hex(bytes))
+        expect(read.seal.canonical_source_path).to_equal("/catalog.scr1")
+        table.unmount("/").unwrap()
+
+    it "rejects invalid bounds oversize files and missing paths without leases":
+        var table = _catalog_table_v1(
+            "/catalog.scr1", [1u8, 2u8, 3u8, 4u8])
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 0u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-bound-invalid")
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 16777217u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-bound-invalid")
+        expect(signed_catalog_snapshot_digest_v1(
+            table, "/catalog.scr1", 268435457u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-bound-invalid")
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/catalog.scr1", 3u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-open-failed")
+        expect(signed_catalog_snapshot_read_v1(
+            table, "/missing.scr1", 16u64).unwrap_err()).to_equal(
+                "signed-catalog-snapshot-open-failed")
+        table.unmount("/").unwrap()

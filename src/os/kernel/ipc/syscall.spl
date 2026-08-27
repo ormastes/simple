@@ -22,6 +22,7 @@ use os.kernel.ipc.syscall_file
 use os.kernel.ipc.syscall_memory
 use os.kernel.ipc.syscall_net
 use os.kernel.ipc.syscall_dbfs_mount_capability
+use os.kernel.ipc.syscall_server_startup_evidence
 use os.kernel.ipc.syscall_spm
 
 # Re-export handlers from sub-modules so external callers (syscall_shim.spl)
@@ -38,6 +39,7 @@ use os.kernel.ipc.syscall_file.{_handle_file_open, _handle_file_read, _handle_fi
 use os.kernel.ipc.syscall_memory.{_handle_memory_map, _handle_memory_unmap, _handle_memory_protect}
 use os.kernel.ipc.syscall_net.{_handle_net_socket, _handle_net_bind, _handle_net_listen, _handle_net_connect, _handle_net_accept, _handle_net_send_to, _handle_net_recv_from, _handle_net_if_config}
 use os.kernel.ipc.syscall_dbfs_mount_capability.{_handle_dbfs_vfs_mount_capability}
+use os.kernel.ipc.syscall_server_startup_evidence.{_handle_server_startup_evidence_consume}
 use os.kernel.ipc.syscall_spm.{_handle_privctl, _handle_mem_grant, _handle_mem_revoke, _handle_safecopy_from, _handle_safecopy_to, _handle_brk_for_task, _handle_system_reboot, _handle_sys_mmap, _handle_sys_munmap, _handle_spm_priv_check, _handle_spm_win_register, _handle_spm_approval_request, _handle_spm_send, _handle_spm_listen, _handle_spm_claim, _handle_dataset_create, _handle_dataset_create_from_file, _handle_dataset_write, _handle_dataset_seal, _handle_dataset_map, _handle_dataset_unmap, _handle_dataset_close, _handle_queue_create, _handle_queue_send, _handle_queue_recv, _handle_queue_poll, _handle_queue_close, syscall_current_vmspace, g_current_vmspace}
 
 # ============================================================================
@@ -331,6 +333,10 @@ fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcMa
         case 61:    # WaitPid (always allowed — own child state)
             val st = _handle_waitpid_state(args, scheduler)
             IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 116:   # Current-TCB startup evidence; registry mutation is global
+            IpcSyscallState(
+                result: _handle_server_startup_evidence_consume(scheduler),
+                scheduler: scheduler, ipc: ipc)
         case _:
             IpcSyscallState(result: syscall_handler(args, scheduler, ipc, klog), scheduler: scheduler, ipc: ipc)
 
@@ -574,7 +580,7 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
         case 79:    # DbfsVfsMountCapability (read-only mount-owner fact)
             if not _cap_check(ipc, caller, CapabilityKind.FileRead(path_prefix: "")):
                 return SyscallResult(value: SYSCALL_EPERM)
-            _handle_dbfs_vfs_mount_capability()
+            _handle_dbfs_vfs_mount_capability(scheduler)
 
         # -- Device ----------------------------------------------------------
         case 80:    # DevEnumerate
@@ -743,6 +749,10 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             if not _cap_check(ipc, caller, CapabilityKind.SystemPrivilege):
                 return SyscallResult(value: SYSCALL_EPERM)
             _handle_spm_claim(caller.id)
+
+        # -- Loader-issued current-execution startup evidence ---------------
+        case 116:   # consume once; handler accepts no caller identity fields
+            _handle_server_startup_evidence_consume(scheduler)
 
         # -- SOSIX immutable process sharing --------------------------------
         case 120:   # dataset_create

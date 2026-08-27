@@ -80,3 +80,45 @@ describe "scv structural diff over stored parse roots":
         val out = _run_roots_script(script)
         expect(out).to_contain("structural_source=text-blocks code.spl")
         expect(out).to_contain("moved alpha")
+    it "loads REAL P-05 CST roots keyed by revision+ContentId and discriminates a move":
+        """
+        ### D-01 completion: cst-roots precedence over syntax objects
+
+        v1 is stored in the P-05 root store (`scv cst-store`, keyed by the
+        pre-snapshot revision + v1 ContentId) AND parse-gated; after the
+        snapshot the file is edited so alpha/beta swap order and alpha gains
+        a body line, then stored again (post-snapshot revision + v2
+        ContentId).  `diff --structural` must resolve BOTH roots — head by
+        exact key, base by the bounded ContentId scan across revisions —
+        label the file `structural_source=cst-roots`, print both keys in the
+        provenance line, and report the swap as MOVES of named declarations
+        (which the fallback-line syntax objects could not discriminate).
+        The interim builder is `cst-spl-1` (see structural_match.spl header).
+        """
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-roots-cst.XXXXXX)\nprintf 'fn alpha():\\n    pass\\nfn beta():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nR=\"$REPO/bin/simple run $REPO/src/app/scv/main.spl\"\nexport SIMPLE_LIB=\"$REPO/src\"\n$R init >/dev/null\n$R cst-store code.spl | grep -q 'cst-root ' || { printf 'FAIL: cst-store v1\\n'; exit 9; }\n$R parse-gate code.spl >/dev/null\n$R snapshot >/dev/null\nprintf 'fn beta():\\n    pass\\nfn alpha():\\n    pass\\n    x = 1\\n' > code.spl\n$R cst-store code.spl >/dev/null\n$R parse-gate code.spl >/dev/null\nOUT=$($R diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'structural_source=syntax-roots'*|*'structural_source=text-blocks'*) printf 'FAIL: stored CST roots were not preferred\\n'; exit 9;; esac\n"
+        val out = _run_roots_script(script)
+        expect(out).to_contain("structural_source=cst-roots code.spl")
+        expect(out).to_contain("cst-roots code.spl: base=op_")
+        expect(out).to_contain(" head=op_")
+        expect(out).to_contain("moved fn beta")
+        expect(out).to_contain("moved fn alpha")
+        expect(out).to_contain("updated fn alpha")
+
+    it "reports a rename over CST roots and never silently accepts an ambiguous one":
+        """
+        ### D-01 completion: rename vs ambiguity contract
+
+        Two runs over CST roots.  (1) `beta` is renamed to `gamma` with an
+        identical body: the bottom-up stage has exactly one candidate above
+        min_dice, so the diff reports `renamed fn beta -> fn gamma`.  (2)
+        `beta` is replaced by `gamma` AND `delta` with identical bodies: the
+        two candidates tie within the ambiguity margin, so the diff must
+        report `ambiguous fn beta` and list both as added — a tie is never
+        folded into a rename.
+        """
+        val script = "set -eu\nREPO=$(pwd)\nR=\"$REPO/bin/simple run $REPO/src/app/scv/main.spl\"\nexport SIMPLE_LIB=\"$REPO/src\"\nTMP=$(mktemp -d /tmp/scv-roots-rename.XXXXXX)\nprintf 'fn alpha():\\n    a = 1\\nfn beta():\\n    b = 2\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\n$R init >/dev/null\n$R cst-store code.spl >/dev/null\n$R snapshot >/dev/null\nprintf 'fn alpha():\\n    a = 1\\nfn gamma():\\n    b = 2\\n' > code.spl\n$R cst-store code.spl >/dev/null\nOUT1=$($R diff --structural)\nprintf 'ONE:%s\\n' \"$OUT1\"\nTMP2=$(mktemp -d /tmp/scv-roots-ambig.XXXXXX)\nprintf 'fn alpha():\\n    a = 1\\nfn beta():\\n    b = 2\\n' > \"$TMP2/code.spl\"\ncd \"$TMP2\"\n$R init >/dev/null\n$R cst-store code.spl >/dev/null\n$R snapshot >/dev/null\nprintf 'fn alpha():\\n    a = 1\\nfn gamma():\\n    b = 2\\nfn delta():\\n    b = 2\\n' > code.spl\n$R cst-store code.spl >/dev/null\nOUT2=$($R diff --structural)\nprintf 'TWO:%s\\n' \"$OUT2\"\ncase \"$OUT2\" in *'renamed fn beta'*) printf 'FAIL: ambiguous rename was accepted\\n'; exit 9;; esac\n"
+        val out = _run_roots_script(script)
+        expect(out).to_contain("renamed fn beta -> fn gamma")
+        expect(out).to_contain("ambiguous fn beta")
+        expect(out).to_contain("added fn gamma")
+        expect(out).to_contain("added fn delta")

@@ -6,12 +6,10 @@
 # Shift operators are avoided in the byte/limb conversion hot path because the
 # current bootstrap can miscompile them for these mixed-width integer values.
 
-extern fn serial_println(msg: text)
+@unsafe(reason: "foreign byte indexing requires caller-proven 32-byte input bounds", capabilities: [ffi])
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
-fn _sl_curve_debug(msg: text):
-    nil
-
+@unsafe(reason: "caller must prove the foreign byte index is in bounds", capabilities: [ffi])
 fn _u8_at_i(data: [u8], idx: i64) -> u8:
     rt_bytes_u8_at(data, idx).to_u8()
 
@@ -46,9 +44,11 @@ fn _x25519_fe_one() -> [u64]:
 fn _x25519_fe_p() -> [u64]:
     [67108845,33554431,67108863,33554431,67108863,33554431,67108863,33554431,67108863,33554431]
 
+@unsafe(reason: "reads three bytes from a caller-proven 32-byte input", capabilities: [ffi])
 fn _load3(b: [u8], off: i64) -> u64:
     _u8_at_i(b, off).to_u64() | (_u8_at_i(b, off + 1).to_u64() * 256) | (_u8_at_i(b, off + 2).to_u64() * 65536)
 
+@unsafe(reason: "reads four bytes from a caller-proven 32-byte input", capabilities: [ffi])
 fn _load4(b: [u8], off: i64) -> u64:
     _u8_at_i(b, off).to_u64() | (_u8_at_i(b, off + 1).to_u64() * 256) | (_u8_at_i(b, off + 2).to_u64() * 65536) | (_u8_at_i(b, off + 3).to_u64() * 16777216)
 
@@ -357,6 +357,7 @@ fn _x25519_fe_mul(a: [u64], b: [u64]) -> [u64]:
 fn _x25519_fe_sq(a: [u64]) -> [u64]:
     _x25519_fe_mul(a, a)
 
+@unsafe(reason: "decodes a caller-proven 32-byte field element", capabilities: [ffi])
 fn _x25519_fe_from_bytes(b: [u8]) -> [u64]:
     [
         _load4(b, 0) & MASK26,
@@ -520,8 +521,8 @@ fn fe_cswap(a: [u64], b: [u64], swap: i64) -> X25519Swap4:
         return X25519Swap4(x2: a, x3: b, z2: [], z3: [])
     X25519Swap4(x2: b, x3: a, z2: [], z3: [])
 
+@unsafe(reason: "clamps a caller-proven 32-byte scalar", capabilities: [ffi])
 fn _sl_clamp_scalar(scalar: [u8]) -> [u8]:
-    _sl_curve_debug("_clamp_scalar start len={scalar.len()}")
     var clamped: [u8] = []
     var i: i64 = 0
     while i < 32:
@@ -532,11 +533,10 @@ fn _sl_clamp_scalar(scalar: [u8]) -> [u8]:
             b = (b & 0x7F) | 0x40
         clamped = _push_byte(clamped, b.to_u64())
         i = i + 1
-    _sl_curve_debug("_clamp_scalar done")
     clamped
 
+@unsafe(reason: "masks a caller-proven 32-byte u-coordinate", capabilities: [ffi])
 fn _mask_u_coord(u_coord: [u8]) -> [u8]:
-    _sl_curve_debug("_mask_u_coord start len={u_coord.len()}")
     var masked: [u8] = []
     var i: i64 = 0
     while i < 32:
@@ -545,7 +545,6 @@ fn _mask_u_coord(u_coord: [u8]) -> [u8]:
             b = b & 0x7F
         masked = _push_byte(masked, b.to_u64())
         i = i + 1
-    _sl_curve_debug("_mask_u_coord done")
     masked
 
 fn _bit_div(bit_idx: i64) -> i64:
@@ -576,13 +575,10 @@ fn _bit_is_set(byte_val: u8, bit_idx: i64) -> bool:
         v = v - period
     v >= bit
 
+@unsafe(reason: "requires exact 32-byte scalar and u-coordinate extents", capabilities: [ffi])
 fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
-    _sl_curve_debug("x25519_smalllimb start")
-    serial_println("[x25519-small] start")
     val k = _sl_clamp_scalar(scalar)
-    _sl_curve_debug("after clamp")
     val u = _x25519_fe_from_bytes(_mask_u_coord(u_coord))
-    _sl_curve_debug("after fe_from_bytes")
 
     var x_2 = _x25519_fe_one()
     var z_2 = _x25519_fe_zero()
@@ -593,10 +589,6 @@ fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
     while bit_pos >= 0:
         val byte_idx = bit_pos / 8
         val bit_idx = bit_pos % 8
-        if bit_pos == 254:
-            serial_println("[x25519-small] iter254 enter")
-        elif bit_pos == 253:
-            serial_println("[x25519-small] iter253 enter")
         val k_bit: i64 =
             if _bit_is_set(_u8_at_i(k, byte_idx), bit_idx):
                 1
@@ -612,11 +604,6 @@ fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
             val swap_z = z_2
             z_2 = z_3
             z_3 = swap_z
-        if bit_pos == 254:
-            serial_println("[x25519-small] iter254 swap done")
-        elif bit_pos == 253:
-            serial_println("[x25519-small] iter253 swap done")
-
         val a = _x25519_fe_add(x_2, z_2)
         val aa = _x25519_fe_sq(a)
         val b = _x25519_fe_sub(x_2, z_2)
@@ -643,24 +630,6 @@ fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
         z_2 = new_z2
         x_3 = new_x3
         z_3 = new_z3
-        if bit_pos == 254:
-            serial_println("[x25519-small] iter254 step done")
-            serial_println("[x25519-small] iter254 post-assign")
-        elif bit_pos == 253:
-            serial_println("[x25519-small] iter253 step done")
-        elif bit_pos == 252:
-            serial_println("[x25519-small] iter252 step done")
-        elif bit_pos == 251:
-            serial_println("[x25519-small] iter251 step done")
-        elif bit_pos == 250:
-            serial_println("[x25519-small] iter250 step done")
-        elif bit_pos == 249:
-            serial_println("[x25519-small] iter249 step done")
-        elif bit_pos == 248:
-            serial_println("[x25519-small] iter248 step done")
-        elif bit_pos == 244:
-            serial_println("[x25519-small] iter244 step done")
-
         if bit_pos == 0:
             if prev_bit != 0:
                 val swap_x = x_2
@@ -670,53 +639,35 @@ fn x25519_smalllimb(scalar: [u8], u_coord: [u8]) -> [u8]:
                 z_2 = z_3
                 z_3 = swap_z
 
-            serial_println("[x25519-small] ladder done")
-            serial_println("[x25519-small] invert start")
             val z_inv = _x25519_fe_invert(z_2)
-            serial_println("[x25519-small] invert done")
             val result = _x25519_fe_mul(x_2, z_inv)
-            serial_println("[x25519-small] mul done")
             return _x25519_fe_to_bytes(result)
 
-        if bit_pos == 254:
-            serial_println("[x25519-small] iter254 pre-decrement")
         bit_pos = bit_pos - 1
-        if bit_pos == 253:
-            serial_println("[x25519-small] iter253 ready")
-        elif bit_pos == 252:
-            serial_println("[x25519-small] iter252 ready")
-        elif bit_pos == 251:
-            serial_println("[x25519-small] iter251 ready")
-        elif bit_pos == 250:
-            serial_println("[x25519-small] iter250 ready")
-        elif bit_pos == 249:
-            serial_println("[x25519-small] iter249 ready")
-        elif bit_pos == 248:
-            serial_println("[x25519-small] iter248 ready")
-        elif bit_pos == 244:
-            serial_println("[x25519-small] iter244 ready")
 
     val z_inv = _x25519_fe_invert(z_2)
     val result = _x25519_fe_mul(x_2, z_inv)
     _x25519_fe_to_bytes(result)
 
+@unsafe(reason: "requires an exact 32-byte scalar extent", capabilities: [ffi])
 fn x25519_base_smalllimb(scalar: [u8]) -> [u8]:
-    _sl_curve_debug("x25519_base_smalllimb start")
     var base_point: [u8] = []
     base_point = _push_byte(base_point, 9)
     var i: i64 = 1
     while i < 32:
         base_point = _push_byte(base_point, 0)
         i = i + 1
-    _sl_curve_debug("x25519_base_smalllimb base point ready")
     x25519_smalllimb(scalar, base_point)
 
+@unsafe(reason: "requires an exact 32-byte u-coordinate extent", capabilities: [ffi])
 fn x25519_smalllimb_roundtrip_probe(u_coord: [u8]) -> [u8]:
     _x25519_fe_to_bytes(_x25519_fe_from_bytes(_mask_u_coord(u_coord)))
 
+@unsafe(reason: "requires an exact 32-byte u-coordinate extent", capabilities: [ffi])
 fn x25519_smalllimb_mask_probe(u_coord: [u8]) -> [u8]:
     _mask_u_coord(u_coord)
 
+@unsafe(reason: "requires an exact 32-byte scalar extent", capabilities: [ffi])
 fn x25519_smalllimb_clamp_probe(scalar: [u8]) -> [u8]:
     _sl_clamp_scalar(scalar)
 
@@ -728,4 +679,3 @@ fn x25519_smalllimb_base_point_probe() -> [u8]:
         base_point = _push_byte(base_point, 0)
         i = i + 1
     base_point
-

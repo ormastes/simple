@@ -1,5 +1,16 @@
 #!/bin/sh
 
+# Keep helper subcommands on the canonical bootstrap entrypoint.  Dispatch
+# before the strategy/session wrappers: progress-watch observes another process
+# and must not acquire bootstrap ownership or create its own process group.
+bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
+case "${1:-}" in
+  progress-watch)
+    shift
+    exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
+    ;;
+esac
+
 # The coordinated strategy supervisor is the default entry for an ordinary
 # multi-stage bootstrap. Single-stage recovery, receipt validation, help, and
 # diagnostic sweeps keep their direct fail-closed paths. The supervisor sets
@@ -37,7 +48,6 @@ fi
 
 # Keep bootstrap and every non-detached descendant in one dedicated kernel
 # process group. Lock recovery remains fail-closed while any group member lives.
-bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_session_helper=\
 "${bootstrap_entry_dir}/../check/lib/portable-session-exec.pl"
 if [ "${SIMPLE_BOOTSTRAP_SESSION_READY:-0}" = 1 ]; then
@@ -93,6 +103,10 @@ SimpleOS / --target=simpleos-x86_64:
   for the underlying x86_64-simpleos lane.
 
 Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
+
+Subcommands:
+  progress-watch --pid=N --progress-log=PATH [options]
+                     Standalone bootstrap progress/liveness watcher
 
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm; cranelift also supported)
@@ -548,7 +562,8 @@ repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 cd "${repo_root}"
 BOOTSTRAP_STAGE3_FACADE_PATH=\
 "${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
-export BOOTSTRAP_STAGE3_FACADE_PATH
+BOOTSTRAP_STAGE3_VERSION_ROOT=${repo_root}
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "${BOOTSTRAP_STAGE3_FACADE_PATH}"
 PORTABLE_LOCK_ATOMIC_HELPER_PATH=\
 "${repo_root}/scripts/check/lib/portable-hardlink-lock.pl"
@@ -689,7 +704,7 @@ if [ -n "${progress_log}" ]; then
   : >"${progress_log}"
   : >"${build_progress_events}"
   bootstrap_progress_mark starting ""
-  sh "${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs" \
+  sh "${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh" progress-watch \
     --pid="$$" --state-file="${bootstrap_progress_state}" \
     --event-file="${build_progress_events}" \
     --progress-log="${progress_log}" --interval="${progress_interval}" &
@@ -1138,22 +1153,8 @@ bootstrap_stage_sanity() (
   # Fail-closed: an unreadable/empty VERSION, or a VERSION that disagrees with
   # bootstrap_identity.spl, is an ERROR (sanity_status=error), never a pass.
   version_expect_status=0
-  version_expected=
-  if [ -r "${sanity_repo_root}/VERSION" ]; then
-    version_expected=$(sed -n '1s/[[:space:]]*$//p' "${sanity_repo_root}/VERSION")
-  fi
-  if [ -z "${version_expected}" ]; then
-    version_expect_status=1
-  else
-    # Cross-check the compiled-in source of truth against ./VERSION. Drift
-    # between these two is the exact defect this gate failed to survive.
-    version_identity=$(sed -n 's/^[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' \
-      "${sanity_repo_root}/src/app/cli/bootstrap_identity.spl" | sed -n '1p')
-    if [ -z "${version_identity}" ] ||
-      [ "${version_identity}" != "${version_expected}" ]; then
-      version_expect_status=2
-    fi
-  fi
+  version_expected=$(bootstrap_stage3_canonical_version \
+    "${sanity_repo_root}") || version_expect_status=1
   version_status=0
   version=$(run_timeout 10 "${candidate}" --version 2>&1) ||
     version_status=$?
@@ -1223,10 +1224,8 @@ bootstrap_stage_sanity() (
   # all, which is why a stale version literal cost a full 30-minute bootstrap to
   # even localise.
   if [ "${sanity_status}" != pass ]; then
-    case "${version_expect_status}" in
-      1) echo "error: sanity ERROR - cannot read ${sanity_repo_root}/VERSION" >&2 ;;
-      2) echo "error: sanity ERROR - ./VERSION ('${version_expected}') disagrees with src/app/cli/bootstrap_identity.spl ('${version_identity}')" >&2 ;;
-    esac
+    [ "${version_expect_status}" -eq 0 ] ||
+      echo "error: sanity ERROR - canonical release version or its projections are invalid under ${sanity_repo_root}" >&2
     [ "${version_status}" -eq 0 ] ||
       echo "error: sanity FAIL - --version exited ${version_status}" >&2
     { [ "${version_expect_status}" -ne 0 ] || [ "${version_match_status}" -eq 0 ]; } ||
@@ -2315,7 +2314,8 @@ else
         "$(absolute_path "${tool_authority_before}")" \
         "${stage2_build_args_sha256}" \
         "$(absolute_path "${stage2_sanity_evidence}")" \
-        "$(absolute_path "${stage2_receiver_evidence}")"; then
+        "$(absolute_path "${stage2_receiver_evidence}")" \
+        "${repo_root}"; then
         chmod u+w "${stage2_admitted_bin}"
         rm -f "${stage2_admitted_bin}" "${stage2_admission_receipt}"
         rmdir "${stage2_admitted_dir}" 2>/dev/null || true
@@ -2851,7 +2851,7 @@ stage3_acceptance_sanity=$(bootstrap_stage3_manifest_value \
   exit 1
 }
 bootstrap_stage3_verify_sanity_evidence_receipt \
-  "${stage3_acceptance_sanity}" "${stage3}" || {
+  "${stage3_acceptance_sanity}" "${stage3}" "${repo_root}" || {
   echo "error: Stage 3 acceptance sanity receipt did not re-verify" >&2
   exit 1
 }

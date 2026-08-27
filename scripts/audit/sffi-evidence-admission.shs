@@ -196,6 +196,15 @@ esac
 test -f "$public_key" || {
     echo 'sffi evidence admission: trusted public key is missing' >&2; exit 1;
 }
+# `pkeyutl -rawin` does not itself impose an algorithm policy. Keep this
+# verifier's Ed25519 contract fail-closed: a trusted RSA/ECDSA/etc. key must
+# not silently select a different signature scheme merely because OpenSSL can
+# parse it. The inspection emits no key material into admission output.
+openssl pkey -pubin -in "$public_key" -text_pub -noout 2>/dev/null |
+    grep -qx 'ED25519 Public-Key:' || {
+    echo 'sffi evidence admission: trusted public key is not Ed25519' >&2
+    exit 1
+}
 test "$(wc -c <"$signature" | tr -d ' ')" -eq 64 || {
     echo 'sffi evidence admission: Ed25519 signature must be 64 raw bytes' >&2
     exit 1
@@ -208,10 +217,19 @@ openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin \
 
 umask 077
 stage=${output}.part.$$
+manifest_hash=$(sha256sum "$manifest" | awk '{ print $1 }')
 {
-    printf 'symbol\tsource_signature_sha256\tartifact_sha256\tevidence_verified\tsignature_verified\n'
+    printf 'schema\tsimple.sffi-admission.v1\n'
+    printf 'provider_id\t%s\n' "$provider_id"
+    printf 'target\t%s\n' "$target"
+    printf 'signer_key_id\t%s\n' "$signer_key_id"
+    printf 'artifact_sha256\t%s\n' "$artifact_hash"
+    printf 'abi_registry_sha256\t%s\n' "$abi_hash"
+    printf 'signed_manifest_sha256\t%s\n' "$manifest_hash"
+    printf 'verification_report_sha256\t%s\n' "$report_hash"
+    printf 'symbol_count\t%s\n' "$symbol_count"
     while IFS="$(printf '\t')" read -r symbol source_signature; do
-        printf '%s\t%s\t%s\ttrue\ttrue\n' "$symbol" "$source_signature" "$artifact_hash"
+        printf 'symbol\t%s\t%s\ttrue\ttrue\n' "$symbol" "$source_signature"
     done <"$symbols"
 } >"$stage"
 mv "$stage" "$output"

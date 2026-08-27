@@ -1,0 +1,219 @@
+"""Regression coverage for bootstrap-flat expression-if tail preservation."""
+
+extern fn rt_file_read_text(path: text) -> text
+
+use compiler.core.ast.{ast_reset, decl_get_body, module_get_decls, stmt_count, stmt_get_expr}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.hir.hir_definitions.{HirBinOp, HirExprKind, HirStmtKind}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+use std.spec.step
+
+describe "bootstrap-flat if tail lowering":
+    it "preserves if and elif arms as a value-producing HIR expression":
+        step("Read the bootstrap-flat HIR lowering owner")
+        val lowering = source("src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl")
+
+        step("Require EXPR_IF routing and value-bearing branch blocks")
+        expect(lowering).to_contain("if tag == EXPR_IF:")
+        expect(lowering).to_contain("HirExprKind.IfChain(arms")
+        expect(lowering).to_contain("lower_bootstrap_flat_if_branch")
+        expect(lowering).to_contain("HirBlock(stmts: body.stmts, has: true")
+
+    it "keeps the bootstrap output parser as a non-unit if-chain tail":
+        step("Pin the Stage3 reproducer shape")
+        val entry = source("src/app/cli/bootstrap_main.spl")
+
+        expect(entry).to_contain("fn bootstrap_output_from_args(args: [text], i: i64) -> text:")
+        expect(entry).to_contain("elif args[i].starts_with(\"--output=\"):")
+        expect(entry).to_contain("bootstrap_output_from_args(args, i + 1)")
+
+    it "predeclares bootstrap helpers with their callable type":
+        step("Lower the recursive i64 helper through the live bootstrap module path")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val target = "fn native_build_has_source_arg(args: [text], i: i64) -> i64:\n" +
+            "    if i >= args.len():\n        0\n" +
+            "    elif args[i] == \"--source\":\n        1\n" +
+            "    elif args[i].starts_with(\"--source=\"):\n        1\n" +
+            "    else:\n        native_build_has_source_arg(args, i + 1)\n"
+        val module = parse_full_frontend(target, "native_build_has_source_arg.spl", "native_build_has_source_arg", Logger(level: 0))
+        var lowering = HirLowering.with_filename("native_build_has_source_arg.spl")
+        val hir = lowering.lower_module(module)
+        match prior_bootstrap:
+            case Some(prior_value):
+                rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+            case nil:
+                rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require the predeclared recursive symbol to retain its i64 return")
+        match hir.symbols.lookup("native_build_has_source_arg"):
+            case Some(symbol):
+                val info = hir.symbols.get_symbol_raw(symbol.id)
+                if val present = info:
+                    if val callable = present.type_:
+                        match callable.kind:
+                            case HirTypeKind.Function(_, ret, _):
+                                match ret.kind:
+                                    case HirTypeKind.Int(bits, signed):
+                                        expect(bits).to_equal(64)
+                                        expect(signed).to_equal(true)
+                                    case _: fail("bootstrap helper must retain its i64 return type")
+                            case _: fail("bootstrap helper symbol must remain callable")
+                    else:
+                        fail("bootstrap helper symbol must carry its callable type")
+                else:
+                    fail("bootstrap helper symbol id must resolve")
+            case nil:
+                fail("bootstrap helper must be predeclared")
+
+    it "lowers explicit else branch values through the real flat arena":
+        step("Parse an if/elif/else tail into the flat arena")
+        ast_reset()
+        parser_init_with_path("fn choose() -> text:\n    if true:\n        \"first\"\n    elif false:\n        \"second\"\n    else:\n        \"fallback\"\n", "bootstrap_if_tail.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+
+        step("Lower the arena expression directly through the bootstrap owner")
+        val body = decl_get_body(module_get_decls()[0])
+        var lowering = HirLowering.new()
+        val lowered = lowering.lower_bootstrap_flat_stmt(body[0])
+        match lowered.kind:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.IfChain(arms, else_):
+                        expect(arms.len()).to_equal(2)
+                        match arms[0].then_.value.kind:
+                            case HirExprKind.StringLit(value, _): expect(value).to_equal("first")
+                            case _: fail("first arm must retain its text tail")
+                        if val fallback = else_:
+                            match fallback.value.kind:
+                                case HirExprKind.StringLit(value, _): expect(value).to_equal("fallback")
+                                case _: fail("else arm must retain its text tail")
+                        else:
+                            fail("explicit else must remain present")
+                    case _:
+                        fail("flat STMT_IF must lower to HirExprKind.IfChain")
+            case _:
+                fail("flat STMT_IF must remain an expression statement")
+        ast_reset()
+
+    it "does not fabricate an else block for the flat EXPR_UNIT sentinel":
+        step("Parse a no-else expression-if into the flat arena")
+        ast_reset()
+        parser_init_with_path("fn maybe() -> text:\n    if true:\n        \"present\"\n", "bootstrap_if_no_else.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+
+        val body = decl_get_body(module_get_decls()[0])
+        var lowering = HirLowering.new()
+        val lowered = lowering.lower_bootstrap_flat_stmt(body[0])
+        match lowered.kind:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.IfChain(arms, else_):
+                        expect(arms.len()).to_equal(1)
+                        expect(else_ == nil).to_equal(true)
+                    case _:
+                        fail("flat STMT_IF must lower to HirExprKind.IfChain")
+            case _:
+                fail("flat STMT_IF must remain an expression statement")
+        ast_reset()
+
+    it "preserves the target output-parser indexes, method arguments, and conjunctions":
+        step("Parse the Stage3 blocker shape into the flat arena")
+        ast_reset()
+
+        val target = "fn bootstrap_output_from_args(args: [text], i: i64) -> text:\n" +
+            "    if i >= args.len():\n        \"\"\n" +
+            "    elif args[i].starts_with(\"-o\") and args[i].len() == 2 and i + 1 < args.len():\n        args[i + 1]\n" +
+            "    elif args[i].starts_with(\"-o\") and args[i].len() > 2:\n        args[i].substring(2)\n" +
+            "    elif args[i].starts_with(\"--output\") and args[i].len() == 8 and i + 1 < args.len():\n        args[i + 1]\n" +
+            "    elif args[i].starts_with(\"--output=\"):\n        args[i].substring(9)\n" +
+            "    else:\n        bootstrap_output_from_args(args, i + 1)\n"
+        parser_init_with_path(target, "bootstrap_output_from_args.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+
+        var lowering = HirLowering.new()
+        val body = decl_get_body(module_get_decls()[0])
+        val lowered = lowering.lower_bootstrap_flat_stmt(body[0])
+        match lowered.kind:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.IfChain(arms, else_):
+                        expect(arms.len()).to_equal(5)
+                        match arms[1].cond.kind:
+                            case HirExprKind.Binary(HirBinOp.And, left_and, _):
+                                match left_and.kind:
+                                    case HirExprKind.Binary(HirBinOp.And, starts_call, _):
+                                        match starts_call.kind:
+                                            case HirExprKind.MethodCall(receiver, method, args, _):
+                                                expect(method).to_equal("starts_with")
+                                                expect(args.len()).to_equal(1)
+                                                match receiver.kind:
+                                                    case HirExprKind.Index(_, _): pass
+                                                    case _: fail("starts_with receiver must retain args[i]")
+                                                match args[0].value.kind:
+                                                    case HirExprKind.StringLit(value, _): expect(value).to_equal("-o")
+                                                    case _: fail("starts_with argument must retain -o")
+                                            case _: fail("first conjunction must retain starts_with")
+                                    case _: fail("three-part condition must retain nested And")
+                            case _: fail("three-part condition must lower to HirBinOp.And")
+                        match arms[2].then_.value.kind:
+                            case HirExprKind.MethodCall(receiver, method, args, _):
+                                expect(method).to_equal("substring")
+                                expect(args.len()).to_equal(1)
+                                match receiver.kind:
+                                    case HirExprKind.Index(_, _): pass
+                                    case _: fail("substring receiver must retain args[i]")
+                                match args[0].value.kind:
+                                    case HirExprKind.IntLit(value, _): expect(value).to_equal(2)
+                                    case _: fail("substring argument must retain 2")
+                            case _: fail("third arm must retain substring call")
+                        if val fallback = else_:
+                            match fallback.value.kind:
+                                case HirExprKind.Call(_, args, _):
+                                    expect(args.len()).to_equal(2)
+                                    match args[1].value.kind:
+                                        case HirExprKind.Binary(HirBinOp.Add, _, _): pass
+                                        case _: fail("recursive index must retain i + 1")
+                                case _: fail("else must retain recursive call")
+                        else:
+                            fail("target output parser requires its recursive else")
+                    case _: fail("target STMT_IF must lower to IfChain")
+            case _: fail("target STMT_IF must remain an expression statement")
+        ast_reset()
+
+    it "fails closed on an out-of-range flat if-chain owner":
+        step("Lower a malformed root index through the real bootstrap owner")
+        ast_reset()
+        parser_init_with_path("fn valid() -> text:\n    if true:\n        \"ok\"\n", "malformed_bootstrap_if.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+        val malformed_root = stmt_count() + 7
+        var lowering = HirLowering.new()
+        val lowered = lowering.lower_bootstrap_flat_if_stmt(malformed_root, Span.empty())
+
+        step("Require a diagnostic and explicit HIR error marker, never Unit NilLit")
+        expect(lowering.errors.len()).to_equal(1)
+        match lowered.kind:
+            case HirStmtKind.Expr(expr):
+                match expr.kind:
+                    case HirExprKind.Error: pass
+                    case _: fail("malformed flat if chain must lower to HirExprKind.Error")
+            case _: fail("malformed flat if chain must return an error expression statement")
+        ast_reset()

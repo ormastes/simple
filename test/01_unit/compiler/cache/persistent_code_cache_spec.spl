@@ -9,6 +9,7 @@
 # **Category:** Infrastructure
 
 use std.spec.*
+use std.io_runtime.{read_file_text}
 use compiler.driver.cache.persistent_code_cache.{PccKey, PccLoad, pcc_key_new, pcc_key_digest, pcc_store, pcc_load, pcc_entry_path}
 use compiler.driver.cache.action_key.{interface_digest_of_source, dependency_interface_fold}
 
@@ -42,6 +43,31 @@ fn words_equal(a: [i64], b: [i64]) -> bool:
     true
 
 val SRC = "fn a() -> i64:\n    1\nfn b() -> i64:\n    2\n"
+
+describe "persistent code cache — runtime facade ownership":
+    it "routes exact-status writes, existence, and deletes through the canonical owner":
+        val source = read_file_text("src/compiler/80.driver/cache/persistent_code_cache.spl")
+
+        expect(source).to_contain("use std.io_runtime.{dir_create_all}")
+        expect(source).to_contain("use std.nogc_sync_mut.io_runtime.{file_write_exact, file_exists, file_delete, file_read_nullable}")
+        expect(source.split("file_write_exact(").len()).to_be(3)
+        expect(source.split("file_exists(").len()).to_be(2)
+        expect(source.split("file_delete(").len()).to_be(4)
+        expect(source.split("file_read_nullable(").len()).to_be(2)
+        expect(source).to_not_contain("extern fn rt_file_write_text")
+        expect(source).to_not_contain("extern fn rt_file_exists")
+        expect(source).to_not_contain("extern fn rt_file_delete")
+        expect(source).to_not_contain("extern fn rt_file_read_text")
+        expect(source).to_not_contain("rt_file_write_text(")
+        expect(source).to_not_contain("rt_file_exists(")
+        expect(source).to_not_contain("rt_file_delete(")
+        expect(source).to_not_contain("rt_file_read_text(")
+
+    it "preserves publish ordering and normalizes unreadable or empty payloads to a miss":
+        val source = read_file_text("src/compiler/80.driver/cache/persistent_code_cache.spl")
+
+        expect(source).to_contain("if not file_write_exact(tmp, content):\n        return false\n    if not file_write_exact(path, content):\n        file_delete(tmp)\n        return false\n    file_delete(tmp)\n    true")
+        expect(source).to_contain("if not file_exists(path):\n        return pcc_miss(\"absent\")\n    val raw = file_read_nullable(path) ?? \"\"\n    if raw.len() == 0:\n        return pcc_miss(\"empty\")")
 
 describe "persistent code cache — warm start":
     it "cold start misses on an empty cache root":

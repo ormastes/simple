@@ -25,7 +25,38 @@ capability-registry repo — Wave 0 of
 - **`examples/` here is frozen.** New example work goes to ormastes/simply.
   Deleting the 2,613 files here is deferred until a deliberate
   `--expect-files` landing through the tree-size push guards.
-- Registry `status` is hand-audited until three Simple features land (tracked
-  in simply `doc/plan/design.md`): future-impl SSpec tests, `simple test
-  --json` export, and runner-emitted feature grouping/done-%. Once available,
-  the daily job flips statuses from real SSpec results.
+## Producing the dashboard data (native, 2026-08-26)
+
+```bash
+bin/simple test --json test/01_unit | grep '^{' | tail -1 > <simply>/data/test_results.json
+sh <simply>/scripts/update_site.sh    # renders the test panel + registry
+```
+
+The JSON (`spec.total_passed/failed/skipped/pending`, `spec.groups[]` with
+`done_pct`, per-file rows) is emitted by all three `test` lanes: the main
+runner (`test_runner_main.spl`, directory sweeps), the light-daemon client
+(`test_runner_client.spl`, explicit files — rows come from real `SPEC FILE
+VERDICT` lines, matched by basename because spipe rewrites specs to
+`.spipe_matchers_*` temp names), and the Rust repair-only runner. `planned()`
+specs count as pending, never failed.
+
+Completion criteria and per-row test lists live in simply
+(`doc/plan/completion_criteria.md`, `data/tests.sdn`); statuses are earned
+from test evidence, not hand-edited.
+
+**Host hazard seen 2026-08-26:** a deployed seed built inside another worktree
+resolves `src/lib` from that tree (baked `CARGO_MANIFEST_DIR`; the precedence
+fix of 2026-08-21 only helps binaries built after it). Symptom: stdlib edits
+have no effect, `--json` prints the old shape. Check with
+`strace -e openat bin/simple run x.spl | grep worktrees/`, and redeploy a seed
+built from origin/main. See
+`doc/08_tracking/bug/deployed_seed_resolves_stdlib_from_foreign_worktree_2026-08-20.md`.
+
+## Sweep-fix campaign
+
+Failures from the full sweep are sliced by sorted path into ~80-file lists and
+handed to parallel agents, each in its own `git worktree add --detach …
+origin/main` with the seed symlinked into `bin/`. Agents fix only mechanical
+failures (imports, exports, annotations, fixtures, obvious lib bugs) and land
+with `--no-verify`; everything else goes into a dated `doc/08_tracking/bug/`
+record — latest `unit_sweep_language_and_interpreter_gaps_2026-08-26.md`.

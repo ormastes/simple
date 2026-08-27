@@ -33,13 +33,42 @@ use super::{
     TraitImpls, Traits, UnitArithmeticRules, UnitFamilies, UnitFamilyInfo, Units, BASE_UNIT_DIMENSIONS, BDD_AFTER_EACH,
     BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_COUNTS, BDD_INDENT, BDD_LAZY_VALUES, BDD_SHARED_EXAMPLES,
     BLANKET_IMPL_METHODS, CLASS_OVERLOADS, COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, EXTERN_FUNCTIONS, FUNCTION_OVERLOADS,
-    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS,
-    MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
-    SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
+    FUNCTION_MODULE_OWNER, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS,
+    MACRO_DEFINITION_ORDER, MIXINS, TRAIT_IMPLS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 
 type Enums = HashMap<String, Arc<EnumDef>>;
+
+fn should_bind_module_namespace(
+    binding_name: &str,
+    target: &ImportTarget,
+    selected_binding_claims_module_name: bool,
+) -> bool {
+    let path_derived_name = matches!(target, ImportTarget::Glob | ImportTarget::Group(_));
+    if binding_name == "main" && path_derived_name {
+        return false;
+    }
+
+    !selected_binding_claims_module_name
+}
+
+fn bind_module_namespace_after_import(
+    env: &mut Env,
+    binding_name: &str,
+    target: &ImportTarget,
+    module_value: &Value,
+    selected_binding_claims_module_name: bool,
+) -> bool {
+    if !should_bind_module_namespace(binding_name, target, selected_binding_claims_module_name) {
+        return false;
+    }
+
+    env.insert(binding_name.to_string(), module_value.clone());
+    true
+}
 
 fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value) {
     MODULE_GLOBALS.with(|cell| {
@@ -308,6 +337,13 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_event_synchronize",
     "rt_cuda_event_elapsed_ns",
     "rt_cuda_event_destroy",
+    "rt_cuda_event_elapsed_ms",
+    "rt_cuda_stream_create",
+    "rt_cuda_stream_destroy",
+    "rt_cuda_stream_synchronize",
+    "rt_cuda_memcpy_htod_async",
+    "rt_cuda_memcpy_dtoh_async",
+    "rt_cuda_launch_kernel_ex",
     "rt_vulkan_timestamp_supported",
     "rt_vulkan_timestamp_period_fnum",
     "rt_vulkan_query_elapsed_ns",
@@ -442,7 +478,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     // resolves qualified names through the thread-local
                     // registries, not this module-local map.
                     super::interpreter_state::GLOBAL_ENUMS.with(|cell| {
-                        cell.borrow_mut().entry(def.name.clone()).or_insert_with(|| Arc::clone(&def));
+                        cell.borrow_mut()
+                            .entry(def.name.clone())
+                            .or_insert_with(|| Arc::clone(&def));
                     });
                     enums.entry(def.name.clone()).or_insert(def);
                 }
@@ -719,7 +757,22 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 || name == "alloc"
                                 || name == "no_alloc"
                                 || name == "no_mangle"
+                                || name == "inline"
+                                || name == "always_inline"
+                                || name == "force_inline"
                                 || name == "gpu"
+                                // Inlining hints. These are REAL and honoured: the LLVM
+                                // backend reads all three and applies the `alwaysinline`
+                                // attribute (codegen/llvm/backend_core.rs:134). Only this
+                                // interpreter skip-list omitted them, so 84 files' worth of
+                                // legitimate `@always_inline` -- 18 of them in `src/lib`, on
+                                // the compiler's own startup path -- were rejected as
+                                // "unknown decorator" the moment `bin/simple test` loaded
+                                // them, making `main` un-test-runnable.
+                                // doc/08_tracking/bug/origin_main_not_test_runnable_always_inline_decorator_2026-08-26.md
+                                || name == "always_inline"
+                                || name == "inline"
+                                || name == "force_inline"
                             {
                                 continue;
                             }
@@ -1141,9 +1194,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                             let trait_def = match matched_trait {
                                 Some(def) => def,
                                 None => {
-                                    return Err(CompileError::Semantic(
-                                        best_problems.unwrap_or_default().join("; "),
-                                    ));
+                                    return Err(CompileError::Semantic(best_problems.unwrap_or_default().join("; ")));
                                 }
                             };
 
@@ -1637,6 +1688,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     &mut enums,
                 ) {
                     Ok(value) => {
+                        let mut selected_binding_claims_module_name = false;
                         // Unpack module exports into current namespace
                         // For Group imports, only import specified items
                         // For Glob imports, import everything
@@ -1659,6 +1711,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                                     MODULE_GLOBALS.with(|cell| {
                                                         cell.borrow_mut().insert(alias.clone(), export_value.clone());
                                                     });
+                                                    selected_binding_claims_module_name |= alias == &binding_name;
                                                 }
                                                 continue;
                                             }
@@ -1672,6 +1725,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                             MODULE_GLOBALS.with(|cell| {
                                                 cell.borrow_mut().insert(item_name.clone(), export_value.clone());
                                             });
+                                            selected_binding_claims_module_name |= item_name == binding_name;
                                         }
                                     }
                                 }
@@ -1713,8 +1767,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Single/Aliased: bind module dict only, do NOT unpack
                             }
                         }
-                        // Also keep the module dict under its name for qualified access.
-                        // Skip this for Glob/Group imports whose `binding_name` is only
+                        // Also keep the module dict under its name for qualified access,
+                        // unless a Group import explicitly selected that same local name.
+                        // The explicit symbol wins; callers that need both can alias the
+                        // module namespace. Also skip Glob/Group imports whose `binding_name` is only
                         // "main" because the imported module's *file* happens to be named
                         // `main.spl` (binding_name is derived from the last path segment
                         // for those two targets, not chosen by the importer) -- binding a
@@ -1724,13 +1780,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // though the entry file never declared its own main (e.g. any spec
                         // doing `use compiler.tools.lint.main.{Linter, ...}`). A Single or
                         // Aliased import is explicit user intent and is left untouched.
-                        let is_path_derived_main = binding_name == "main"
-                            && matches!(
-                                &use_stmt.target,
-                                ImportTarget::Glob | ImportTarget::Group(_)
-                            );
-                        if !is_path_derived_main {
-                            env.insert(binding_name.clone(), value.clone());
+                        if bind_module_namespace_after_import(
+                            &mut env,
+                            &binding_name,
+                            &use_stmt.target,
+                            &value,
+                            selected_binding_claims_module_name,
+                        ) {
                             // Sync module binding to MODULE_GLOBALS so functions can access it
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut().insert(binding_name.clone(), value);

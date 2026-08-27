@@ -1,0 +1,268 @@
+# @cover src/lib/nogc_sync_mut/mcdc/analyzer.spl 80%
+# @cover src/lib/nogc_sync_mut/mcdc/recorder.spl 80%
+use std.spec
+use std.common.mcdc.model.*
+use std.common.mcdc.masking_context.*
+use std.nogc_sync_mut.mcdc.analyzer.*
+use std.nogc_sync_mut.mcdc.recorder.{McdcRecorder}
+
+fn evaluation(
+    decision_id: i64, sequence: i64, outcome: bool,
+    values: i64, masked: i64
+) -> McdcEvaluation:
+    evaluation_owned(decision_id, 1, sequence, outcome, values, masked)
+
+fn evaluation_owned(
+    decision_id: i64, owner_id: i64, sequence: i64, outcome: bool,
+    values: i64, masked: i64
+) -> McdcEvaluation:
+    McdcEvaluation(
+        decision_id: decision_id, owner_id: owner_id, sequence: sequence,
+        outcome: outcome, evaluated_mask0: 7, evaluated_mask1: 0,
+        evaluated_mask2: 0, evaluated_mask3: 0,
+        true_mask0: values, true_mask1: 0, true_mask2: 0, true_mask3: 0,
+        masked_mask0: masked, masked_mask1: 0,
+        masked_mask2: 0, masked_mask3: 0
+    )
+
+fn masking_policy(decision_id: i64, strong_coupling: bool, reason: text) -> McdcConditionPolicy:
+    McdcConditionPolicy(
+        decision_id: decision_id, condition_ordinal: 0,
+        projection_mask0: 2, projection_mask1: 0,
+        projection_mask2: 0, projection_mask3: 0,
+        strong_coupling: strong_coupling, reason: reason
+    )
+
+fn formal_context(decision_id: i64) -> McdcMaskingContext:
+    McdcMaskingContext(
+        decision_id: decision_id, target_ordinal: 0,
+        proof_id: 700, context_id: 701,
+        requirement_count: 1, strong_coupling: false)
+
+fn formal_evidence(
+    decision_id: i64, sequence: i64, satisfied: i64, masked: i64
+) -> McdcMaskingContextEvidence:
+    McdcMaskingContextEvidence(
+        decision_id: decision_id, owner_id: 1,
+        sequence: sequence, target_ordinal: 0,
+        proof_id: 700, context_id: 701,
+        satisfied0: satisfied, satisfied1: 0,
+        satisfied2: 0, satisfied3: 0,
+        masked0: masked, masked1: 0, masked2: 0, masked3: 0)
+
+describe "MC/DC pair analysis":
+    it "accounts the default formal class table against analysis memory":
+        expect(mcdc_formal_class_storage_bytes(
+            MCDC_DEFAULT_FORMAL_CLASSES_PER_TARGET)).to_equal(10240)
+
+    it "accepts a unique-cause independence pair":
+        val rows = [evaluation(10, 1, false, 0, 0), evaluation(10, 2, true, 1, 0)]
+        val result = analyze_mcdc_unique_cause(rows, 1, 4)
+        expect(result.saturated).to_equal(false)
+        expect(result.covered_count).to_equal(1)
+        expect(result.conditions[0].pair.left_sequence).to_equal(1)
+        expect(result.conditions[0].pair.right_sequence).to_equal(2)
+        expect(result.conditions[0].pair.owner_a).to_equal(1)
+        expect(result.conditions[0].pair.owner_b).to_equal(1)
+        expect(result.conditions[0].pair.kind).to_equal(McdcPairKind.UniqueCause)
+
+    it "retains owner identity when owner-local sequences collide":
+        val rows = [
+            evaluation_owned(12, 2, 1, true, 1, 0),
+            evaluation_owned(12, 1, 1, false, 0, 0)
+        ]
+        val pair = analyze_mcdc_unique_cause(rows, 1, 4).conditions[0].pair
+        expect(pair.owner_a).to_equal(1)
+        expect(pair.left_sequence).to_equal(1)
+        expect(pair.owner_b).to_equal(2)
+        expect(pair.right_sequence).to_equal(1)
+
+    it "never combines evidence from distinct decisions":
+        val rows = [evaluation(10, 1, false, 0, 0), evaluation(11, 2, true, 1, 0)]
+        val result = analyze_mcdc_unique_cause(rows, 1, 4)
+        expect(result.covered_count).to_equal(0)
+        expect(result.decision_count).to_equal(2)
+        expect(result.condition_count).to_equal(2)
+
+    it "reports the same condition ordinal independently for each decision":
+        val rows = [
+            evaluation(30, 1, false, 0, 0),
+            evaluation(30, 2, true, 1, 0),
+            evaluation(31, 3, false, 0, 0)
+        ]
+        val result = analyze_mcdc_unique_cause(rows, 1, 8)
+        expect(result.decision_count).to_equal(2)
+        expect(result.condition_count).to_equal(2)
+        expect(result.covered_count).to_equal(1)
+        expect(result.conditions[0].decision_id).to_equal(30)
+        expect(result.conditions[0].condition_ordinal).to_equal(0)
+        expect(result.conditions[0].covered).to_equal(true)
+        expect(result.conditions[1].decision_id).to_equal(31)
+        expect(result.conditions[1].condition_ordinal).to_equal(0)
+        expect(result.conditions[1].covered).to_equal(false)
+
+    it "fails closed when concrete masks cannot prove the full projection":
+        val masked_rows = [
+            evaluation(20, 1, false, 0, 2),
+            evaluation(20, 2, true, 3, 2)
+        ]
+        val masking_result = analyze_mcdc_with_policy(
+            masked_rows, 1, 4, [masking_policy(20, false, "CFG influence proof")], 0, 0)
+        expect(masking_result.covered_count).to_equal(1)
+        expect(masking_result.conditions[0].pair.kind).to_equal(McdcPairKind.Masking)
+        expect(masking_result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.CoveredMasking)
+
+        # Formal masking can permit one-sided masking, but the current record
+        # has no canonical context key to index it soundly. Reject rather than
+        # award false coverage or fall back to quadratic pair search.
+        val one_sided_rows = [
+            evaluation(20, 1, false, 0, 2),
+            evaluation(20, 2, true, 3, 0)
+        ]
+        val one_sided_result = analyze_mcdc_with_policy(
+            one_sided_rows, 1, 4,
+            [masking_policy(20, false, "CFG influence proof")], 0, 0
+        )
+        expect(one_sided_result.covered_count).to_equal(0)
+        expect(one_sided_result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.InvalidPolicy)
+        expect(one_sided_result.conditions[0].applied_policy).to_equal(
+            "masking-context-key-unavailable")
+
+        val projected_but_unmasked = [
+            evaluation(20, 1, false, 0, 0),
+            evaluation(20, 2, true, 3, 0)
+        ]
+        expect(analyze_mcdc_with_policy(
+            projected_but_unmasked, 1, 4,
+            [masking_policy(20, false, "CFG influence proof")], 0, 0
+        ).covered_count).to_equal(0)
+
+        # Ordinal 2 differs as well, but it is outside projection bit 1 and is
+        # unmasked in both rows, so its concrete value remains in the key.
+        val unmasked_difference = [
+            evaluation(20, 1, false, 0, 2),
+            evaluation(20, 2, true, 5, 2)
+        ]
+        val rejected = analyze_mcdc_with_policy(
+            unmasked_difference, 1, 4,
+            [masking_policy(20, false, "CFG influence proof")], 0, 0
+        )
+        expect(rejected.covered_count).to_equal(0)
+
+    it "classifies compiler-proven strong coupling as uncoverable":
+        val rows = [evaluation(40, 1, false, 0, 0)]
+        val result = analyze_mcdc_with_policy(
+            rows, 1, 4,
+            [masking_policy(40, true, "condition aliases the same source occurrence")],
+            0, 0
+        )
+        expect(result.covered_count).to_equal(0)
+        expect(result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.StrongCoupling)
+        expect(result.conditions[0].applied_policy).to_equal(
+            "condition aliases the same source occurrence")
+
+    it "uses formal context evidence for sound one-sided masking":
+        val rows = [
+            evaluation(60, 1, false, 0, 0),
+            evaluation(60, 2, true, 3, 0)
+        ]
+        val result = analyze_mcdc_with_context(
+            rows, 1, 4, [formal_context(60)],
+            [formal_evidence(60, 1, 1, 0), formal_evidence(60, 2, 0, 1)],
+            0, 0)
+        expect(result.covered_count).to_equal(1)
+        expect(result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.CoveredMasking)
+
+    it "rejects the adversarial both-masked false positive":
+        val rows = [
+            evaluation(61, 1, false, 0, 0),
+            evaluation(61, 2, true, 3, 0)
+        ]
+        val result = analyze_mcdc_with_context(
+            rows, 1, 4, [formal_context(61)],
+            [formal_evidence(61, 1, 0, 1), formal_evidence(61, 2, 0, 1)],
+            0, 0)
+        expect(result.covered_count).to_equal(0)
+        expect(result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.InsufficientEvidence)
+
+    it "retains a later compatible class after an incompatible first witness":
+        val rows = [
+            evaluation(62, 1, false, 0, 0),
+            evaluation(62, 2, false, 0, 0),
+            evaluation(62, 3, true, 3, 0)
+        ]
+        val result = analyze_mcdc_with_context(
+            rows, 1, 8, [formal_context(62)],
+            [
+                formal_evidence(62, 1, 0, 1),
+                formal_evidence(62, 2, 1, 0),
+                formal_evidence(62, 3, 0, 1)
+            ],
+            0, 0)
+        expect(result.covered_count).to_equal(1)
+        expect(result.conditions[0].pair.left_sequence).to_equal(2)
+        expect(result.conditions[0].pair.right_sequence).to_equal(3)
+
+    it "fails explicitly when formal classes exceed the configured bound":
+        val context = McdcMaskingContext(
+            decision_id: 63, target_ordinal: 0,
+            proof_id: 700, context_id: 701,
+            requirement_count: 4, strong_coupling: false)
+        val rows = [
+            evaluation(63, 1, false, 0, 0), evaluation(63, 2, false, 0, 0),
+            evaluation(63, 3, false, 0, 0), evaluation(63, 4, false, 0, 0),
+            evaluation(63, 5, false, 0, 0), evaluation(63, 6, false, 0, 0),
+            evaluation(63, 7, false, 0, 0), evaluation(63, 8, false, 0, 0),
+            evaluation(63, 9, false, 0, 0)
+        ]
+        val evidence = [
+            formal_evidence(63, 1, 0, 15), formal_evidence(63, 2, 1, 14),
+            formal_evidence(63, 3, 2, 13), formal_evidence(63, 4, 3, 12),
+            formal_evidence(63, 5, 4, 11), formal_evidence(63, 6, 5, 10),
+            formal_evidence(63, 7, 6, 9), formal_evidence(63, 8, 7, 8),
+            formal_evidence(63, 9, 8, 7)
+        ]
+        val result = analyze_mcdc_with_context_bounded(
+            rows, 1, 32, 8, [context], evidence, 0, 0)
+        expect(result.covered_count).to_equal(0)
+        expect(result.saturated).to_equal(true)
+        expect(result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.FormalClassCapacityExceeded)
+        expect(result.conditions[0].applied_policy).to_equal(
+            "formal-candidate-class-cap")
+
+    it "retains exact evidence-loss counts and applied diagnosis":
+        val rows = [evaluation(50, 1, false, 0, 0)]
+        val result = analyze_mcdc_with_policy(rows, 1, 4, [], 7, 3)
+        expect(result.dropped_count).to_equal(7)
+        expect(result.overwritten_count).to_equal(3)
+        expect(result.saturated).to_equal(true)
+        expect(result.conditions[0].classification).to_equal(
+            McdcCoverageClassification.EvidenceDropped)
+
+    it "fails closed when the bounded signature table is too small":
+        val rows = [evaluation(10, 1, false, 0, 0), evaluation(10, 2, true, 1, 0)]
+        val result = analyze_mcdc(rows, 1, 3)
+        expect(result.saturated).to_equal(true)
+        expect(result.conditions.len()).to_equal(0)
+
+describe "MC/DC bounded recording":
+    it "retains deterministic chronological order when overwriting":
+        val policy = McdcPolicy(
+            mode: McdcMode.StaticOn, retain_unique_cause: true,
+            max_conditions: 2, max_nesting: 2, owner_bytes: 320,
+            global_bytes: 320, overflow: McdcOverflowPolicy.OverwriteOldest
+        )
+        val recorder = McdcRecorder.create(4, policy)
+        recorder.record(1, false, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        recorder.record(1, true, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0)
+        recorder.record(1, false, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        expect(recorder.count).to_equal(2)
+        expect(recorder.overwritten).to_equal(1)
+        expect(recorder.evaluation_at(0).sequence).to_equal(2)
+        expect(recorder.evaluation_at(1).sequence).to_equal(3)

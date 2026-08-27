@@ -13,6 +13,9 @@ use os.kernel.arch.x86_32.context.{X86_32ContextSwitch}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskId, TaskContext}
 use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.types.x86_32_mapping_handle_v1.{
+    scheduler_x86_32_mapping_handle_present_v1
+}
 
 extern fn rt_x86_32_exec_token_install(task_id: u32, generation: u32, expected_cr3: u32) -> i32
 extern fn rt_x86_32_exec_token_cancel(task_id: u32, generation: u32, expected_cr3: u32) -> i32
@@ -83,10 +86,14 @@ fn dispatch_enter_user_blocking_x86_32(pid_hint: u64, scheduler: Scheduler) -> i
 
     val ctx: TaskContext = uctx.unwrap()
     val cr3 = task.address_space as u32
-    val generation = task.isolation.capability_generation as u32
-    if target_pid == 0u64 or generation == 0u32 or cr3 == 0u32:
+    if (target_pid == 0u64 or target_pid > 0xFFFFFFFFu64 or
+        task.lifecycle_generation == 0u64 or
+        task.lifecycle_generation > 0xFFFFFFFFu64 or cr3 == 0u32 or
+        not scheduler_x86_32_mapping_handle_present_v1(
+            task.x86_32_mapping_handle)):
         log_raw_println("[syscall14-x86_32] invalid scalar handoff")
         return -22
+    val generation = task.lifecycle_generation as u32
     if rt_x86_32_exec_token_install(target_pid as u32, generation, cr3) != 1:
         log_raw_println("[syscall14-x86_32] token install rejected")
         return -16

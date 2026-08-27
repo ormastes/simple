@@ -156,19 +156,48 @@ fn _parse_transition(v: SdnValue, path: text, mut errors: [ManifestError]) -> Tr
                             errors.push(ManifestError.MissingField(path, "transition." + stage + ".target"))
                     return Some(TransitionDecl(stage: stage, state: state, target: target))
 
+fn _manifest_key_sift_down(mut keys: [text], root_index: i64, heap_len: i64):
+    var root = root_index
+    while true:
+        val left = root * 2 + 1
+        if left >= heap_len:
+            return
+
+        var largest = root
+        if keys[largest] < keys[left]:
+            largest = left
+        val right = left + 1
+        if right < heap_len and keys[largest] < keys[right]:
+            largest = right
+        if largest == root:
+            return
+
+        val tmp = keys[root]
+        keys[root] = keys[largest]
+        keys[largest] = tmp
+        root = largest
+
 fn _sorted_keys(keys: [text]) -> [text]:
-    var out: [text] = []
-    for k in keys:
-        var inserted = false
-        var next: [text] = []
-        for existing in out:
-            if not inserted and k < existing:
-                next = next + [k]
-                inserted = true
-            next = next + [existing]
-        if not inserted:
-            next = next + [k]
-        out = next
+    var out = keys
+    if out.len() < 2:
+        return out
+
+    # Keep the deterministic lexical manifest order without rebuilding the
+    # growing prefix for every key.  Bottom-up heapsort is O(n log n), uses the
+    # existing value-semantics result buffer, and works under the seed where
+    # [text].sort() is intentionally not relied upon.
+    var start = out.len() / 2
+    while start > 0:
+        start = start - 1
+        _manifest_key_sift_down(out, start, out.len())
+
+    var end = out.len()
+    while end > 1:
+        end = end - 1
+        val tmp = out[0]
+        out[0] = out[end]
+        out[end] = tmp
+        _manifest_key_sift_down(out, 0, end)
     out
 
 fn _parse_extension(v: SdnValue, path: text, mut errors: [ManifestError]) -> ExtensionManifest:

@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+provider=src/compiler_rust/compiler/src/interpreter_extern/diagram.rs
+registration=src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+decl=src/compiler_rust/lib/std/src/spec/diagram.spl
+calls=src/compiler_rust/compiler/src/codegen/instr/calls.rs
+
+for spec in enable:0 disable:0 clear:0 is_enabled:0 trace_method:2 \
+    trace_method_with_args:3 trace_return:1 mark_architectural:1 \
+    generate_sequence:0 generate_class:0 generate_arch:0 free_string:1; do
+    suffix=${spec%%:*}
+    arity=${spec##*:}
+    name="rt_diagram_${suffix}"
+    body="$(sed -n "/^pub fn ${name}/,/^}/p" "$provider")"
+    if [ "$suffix" = trace_method ] || [ "$suffix" = trace_method_with_args ] || \
+       [ "$suffix" = mark_architectural ]; then
+        printf '%s\n' "$body" | rg -q "args.len\(\) != ${arity}"
+    else
+        printf '%s\n' "$body" | rg -q "require_arity\(args, ${arity}, \"${name}\"\)\?;"
+    fi
+    rg -q "\"${name}\"" "$registration"
+    rg -q "^extern fn ${name}\(" "$decl"
+done
+
+with_args="$(sed -n '/^pub fn rt_diagram_trace_method_with_args/,/^}/p' "$provider")"
+! printf '%s\n' "$with_args" | rg -q 'Value::Array|filter_map|_ => vec!\[\]'
+
+trace_return="$(sed -n '/^pub fn rt_diagram_trace_return/,/^}/p' "$provider")"
+printf '%s\n' "$trace_return" | rg -q 'Value::Str'
+! printf '%s\n' "$trace_return" | rg -q 'Value::Nil|_ => None'
+
+free_string="$(sed -n '/^pub fn rt_diagram_free_string/,/^}/p' "$provider")"
+printf '%s\n' "$free_string" | rg -q 'args\[0\]\.as_int\(\)\?'
+
+test "$(rg -c '^@unsafe\(' "$decl")" -eq 12
+test "$(rg -c 'unsafe\(capabilities: \[ffi\]\):' "$decl")" -eq 10
+rg -q '^extern fn rt_diagram_free_string\(ptr: i64\) -> void$' "$decl"
+! rg -q '^extern fn rt_diagram_free_string\(ptr: i32\)' "$decl"
+
+# Do not mask the known non-NUL Simple text representation by adding diagram
+# functions to the explicitly forbidden C-string lowering table.
+table="$(sed -n '/^pub fn text_cstr_arg_indices/,/^}/p' "$calls")"
+! printf '%s\n' "$table" | rg -q 'rt_diagram_'
+
+echo "diagram SFFI contract audit: PASS (interpreter transport strict; 12 raw declarations unsafe; pointer-width free handle; native C-string lowering unverified)"

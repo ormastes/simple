@@ -31,14 +31,14 @@ extern fn rt_env_set(key: text, value: text) -> bool
 fn xt_local(id: i64, kind: LocalKind) -> MirLocal:
     MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
 
-fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+fn xt_fn_entry(name: text, locals: [MirLocal], blocks: [MirBlock], entry_id: i64) -> MirFunction:
     MirFunction(
         symbol: SymbolId.new(-1),
         name: name,
         signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
         locals: locals,
         blocks: blocks,
-        entry_block: BlockId.new(0),
+        entry_block: BlockId.new(entry_id),
         span: nil,
         generic_params: [],
         is_generic_template: false,
@@ -60,6 +60,9 @@ fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
         memory_banks: 0,
         verification_contract: nil
     )
+
+fn xt_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    xt_fn_entry(name, locals, blocks, 0)
 
 fn xt_inst(kind: MirInstKind) -> MirInst:
     MirInst(kind: kind, span: nil)
@@ -94,6 +97,39 @@ fn xt_const_fn(k: i64) -> MirFunction:
         xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
     ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
     xt_fn("twin", locals, [b0])
+
+# Same name and three-block shape; the unique entry is deliberately in the
+# middle so the key builder must find it and stop before the final block.
+fn xt_middle_entry_fn(k: i64) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val before = xt_blk(0, [], MirTerminator.Ret(Some(mir_operand_const_int(-1))))
+    val entry = xt_blk(1, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(k), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    val after = xt_blk(2, [], MirTerminator.Ret(Some(mir_operand_const_int(-2))))
+    xt_fn_entry("middle_entry", locals, [before, entry, after], 1)
+
+# Same name, shape, constants, and result; only the transfer instruction kind
+# differs, proving the Copy/Move kind marker participates in the memo key.
+fn xt_transfer_kind_fn(use_move: bool) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var), xt_local(1, LocalKind.Var)]
+    val transfer = if use_move:
+        xt_inst(MirInstKind.Move(xt_lid(1), xt_lid(0)))
+    else:
+        xt_inst(MirInstKind.Copy(xt_lid(1), xt_lid(0)))
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Int(8), MirType.i64())),
+        transfer
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(1)))))
+    xt_fn("transfer_kind", locals, [b0])
+
+# Same name and shape; Bool(false) and Bool(true) must not share an encoding.
+fn xt_bool_fn(value: bool) -> MirFunction:
+    val locals = [xt_local(0, LocalKind.Var)]
+    val b0 = xt_blk(0, [
+        xt_inst(MirInstKind.Const(xt_lid(0), MirConstValue.Bool(value), MirType.i64()))
+    ], MirTerminator.Ret(Some(mir_operand_copy(xt_lid(0)))))
+    xt_fn("bool_fingerprint", locals, [b0])
 
 # Unencodable: string const forces nil-encode -> tree-walk fallback.
 fn xt_string_fn() -> MirFunction:
@@ -195,3 +231,27 @@ describe "MirInterpreter ExecIR tier-0.5 dispatch":
         assert_true(roff[1].?)
         expect(ron[1].unwrap().message()).to_equal(roff[1].unwrap().message())
         expect(ron[1].unwrap().message()).to_equal("Division by zero: Integer division")
+
+    it "(e) key fingerprints entry-not-last, instruction kind, Int, and Bool":
+        step("Verify: (e) key fingerprints entry-not-last, instruction kind, Int, and Bool")
+        var on = xt_interp_on()
+
+        val middle_a = on.execute_function(xt_middle_entry_fn(31))
+        val middle_b = on.execute_function(xt_middle_entry_fn(47))
+        expect(middle_a[0] ?? -1).to_equal(31)  # oracle: entry Int(31)
+        expect(middle_b[0] ?? -1).to_equal(47)  # oracle: entry Int(47)
+
+        val copied = on.execute_function(xt_transfer_kind_fn(false))
+        val moved = on.execute_function(xt_transfer_kind_fn(true))
+        expect(copied[0] ?? -1).to_equal(8)  # oracle: Copy preserves 8
+        expect(moved[0] ?? -1).to_equal(8)  # oracle: Move transfers 8
+
+        val bool_false = on.execute_function(xt_bool_fn(false))
+        val bool_true = on.execute_function(xt_bool_fn(true))
+        expect(bool_false[0] ?? -1).to_equal(0)  # oracle: Bool(false)
+        expect(bool_true[0] ?? -1).to_equal(1)  # oracle: Bool(true)
+
+        # Six functions in three same-name/same-shape pairs remain distinct by
+        # entry payload or instruction kind. Each is a cold miss exactly once.
+        expect(on.execir_memo_size()).to_equal(6)  # oracle: six distinct keys
+        expect(on.execir_probe_count_value()).to_equal(6)  # oracle: six cold probes

@@ -1,0 +1,3783 @@
+# Simple compiler performance and memory-efficiency audit
+
+<!-- codex-research -->
+
+Repository scope: static audit of ormastes/simple main at commit 37bd406e219cc35cae049b4130f5167c21801864, dated August 22, 2026 KST.
+
+## Current-HEAD reconciliation — 2026-08-24
+
+The original snapshot remains the historical baseline. The owned hardening
+lineage has now been replayed onto current HEAD. Source review confirms these
+material changes: pass descriptors expose structural status/expectation;
+inactive transforms are excluded from effective pipelines; collection loop
+header “hoisting” is inert; vectorization is analysis-only and its candidate
+recognizer requires an exact integer unit step in the candidate loop region;
+escape `Unknown` remains conservative; shared requested `PerfFacts` provide
+CFG, dominance, def-use, and bounded liveness projections; and lint policy,
+source views, fixes, and diagnostic serialization avoid multiple documented
+quadratic/repeated-allocation paths.
+
+This reconciliation is source evidence, not runtime certification. The deployed
+`bin/release/simple` wrapper currently fails because its admitted self-hosted
+target is absent. Therefore test, optimizer, timing, and RSS claims remain
+blocked by `simple_compiler_perf_audit_missing_stage4_binary.md`. The correct
+first typed HIR collection-fact slice is now implemented with resolved-symbol
+metadata, receiver evidence, loop ancestry, explicit incomplete outcomes, and a
+fail-closed `Array.contains` COLL002 candidate projection. Unknown/unbounded
+`while` and `loop` bodies are recognized as loop contexts but do not claim a
+finite trip bound. The generated standard-library registry,
+driver diagnostic adapter, remaining typed rules, CollectionPlan, MemorySSA-lite,
+bounded summaries, and profile correlation remain incomplete; dormant transforms
+must not be bulk-activated.
+
+The production COLL002 adapter is additionally blocked by
+`typed_collection_perf_builtin_identity_2026-08-24.md`: Array/Slice built-in
+methods have no HIR `SymbolId`, and native Array `contains` is deliberately
+unsupported rather than silently misrouted to text search. The unit registry's
+synthetic IDs are test evidence only, not a deployable standard-library receipt.
+
+I inspected the lint path, collection analysis, MIR optimization registry and dispatch, loop analyses, vectorization, bounds-check elimination, and escape analysis. This was a source-level audit; I did not execute the compiler, test suite, or benchmarks. Findings below therefore distinguish observed code, derived risk, and runtime impact requiring measurement.
+
+Executive conclusions
+
+1. The highest-priority performance defect is not a missing loop lint. It is optimizer activation integrity. The Speed and Aggressive pipelines register many conventional scalar and loop optimizations, but at least eleven canonical function-level pass wrappers return the original MirFunction unchanged. The compiler currently advertises transformations that often do not run.
+
+
+2. Do not activate all those implementations with a mechanical one-line change. Several dormant implementations are incomplete, inefficient, or potentially unsound. Each pass needs an activation contract, positive sentinel test, semantic differential test, and explicit Active / AnalysisOnly / Skeleton / Disabled status.
+
+
+3. Simple already has the correct conceptual direction for collection complexity. Its CollectionPlan design reserves rules for nested dynamic iteration, repeated linear lookup, materialization, sorting, Cartesian products, missing indexes, and complexity regression. The gap is implementation and shared analysis infrastructure, not another disconnected lint framework.
+
+
+4. Multiple loops are not inherently a bug. Fusion is legal only with compatible iteration spaces, dependence proofs, alias proofs, and effect/order preservation. It is profitable only when the saved traversal and eliminated intermediates outweigh increased register pressure, code size, and possible loss of vectorization.
+
+
+5. Use four analysis tiers: cheap local editor lints, intraprocedural MIR analysis and optimization remarks, bounded interprocedural CI analysis, and profile-guided runtime feedback. All tiers should consume one cached PerfFacts service rather than repeatedly parsing or rebuilding CFG, loop, and alias information.
+
+
+
+
+---
+
+1. Important repository findings
+
+1.1 Current optimizer truth table
+
+The canonical Speed and Aggressive pipelines list DCE, constant folding, copy propagation, GVN, CSE, TCO, loop transformations, bounds-check elimination, vectorization, collection optimization, string building, outlining, and other passes. Dispatch resolves these names to typed PassKind values, but many wrappers are identities.
+
+Pass or pass family
+Current audited state
+Consequence
+Recommended status
+
+Dead-code elimination
+Implementation exists; public dispatch wrapper returns func unchanged.
+No normal MIR DCE through this route
+Disabled until liveness is redesigned
+Constant folding
+Wrapper returns input unchanged.
+Constant expressions remain for later backend optimization
+Skeleton pending overflow/FP/trap tests
+Copy propagation
+Wrapper returns input unchanged. The audited file did not expose a complete copy-map construction path.
+Redundant copy chains survive
+Skeleton
+Local CSE
+Wrapper returns input unchanged.
+No Simple-native local CSE through canonical dispatch
+Skeleton
+GVN
+Wrapper returns input unchanged. The implementation approximates dominator order with block order.
+No GVN now; activation would require dominance correctness
+Disabled
+LICM and unrolling
+Wrapper returns input unchanged.
+General loop invariant motion and unrolling do not run
+Disabled
+Bounds-check elimination
+Wrapper returns input unchanged.
+No Simple-native BCE through this pipeline
+Disabled; current proof scope is unsafe
+Strength reduction
+Wrapper returns input unchanged.
+No native strength reduction
+Disabled until signed/range proofs exist
+String-builder transform
+Wrapper returns input unchanged.
+Repeated string concatenation is not transformed here
+Disabled; transform construction is incomplete
+Generator state-machine pass
+Wrapper returns input unchanged.
+No transformation through canonical dispatch
+Skeleton
+Tail-call optimization
+Wrapper returns input unchanged.
+Tail calls are not converted through this route
+Disabled; parallel argument assignment required
+Typed-byte canonicalization
+Both class body and wrapper are explicit skeletons returning the input.
+No widening of byte accesses
+Skeleton
+Body outlining
+Function wrapper is an identity; module wrapper iterates with an empty pass_dn body.
+Effectively no outlining
+Skeleton
+Auto-vectorization
+Canonical dispatch is documented as pattern matching and logging only, with no production MIR rewrite.
+Useful as analysis scaffolding, not an optimizer yet
+AnalysisOnly
+Collection optimization
+Active; wrapper calls the me optimize_function implementation.
+Some collection patterns genuinely transform MIR
+Active, but requires legality audit
+Module inlining
+Module-level wrapper invokes ModuleInliner; function wrapper itself is an identity.
+Cross-function module inlining can run
+Active, with size/semantic gates
+
+
+Recommended compiler self-lint
+
+Add a compiler-internal rule:
+
+COMP-PERF001 registered_transform_is_identity
+
+It should fail CI when all of these are true:
+
+A pass is registered as a transformation.
+
+It appears in a canonical optimization pipeline.
+
+Its dispatch wrapper unconditionally returns the input.
+
+It is not explicitly marked Skeleton, Disabled, AnalysisOnly, or RemarkOnly.
+
+
+The pass descriptor should become structurally honest:
+
+enum PassStatus:
+    Active
+    AnalysisOnly
+    RemarkOnly
+    Skeleton
+    Disabled(reason: text)
+
+enum PassExpectation:
+    MayTransform
+    MustTransformSentinel
+    NeverTransforms
+
+This prevents “implemented-looking but inactive” code from silently accumulating again.
+
+
+---
+
+1.2 Dormant implementations must not be activated blindly
+
+Component
+Source-level blocker
+Risk after naive activation
+
+DCE
+is_instruction_result_used scans later instructions for every definition, giving quadratic block behavior, and ultimately returns true on the no-use path to conservatively assume an inter-block use.
+Almost no useful result DCE, with potentially high compile-time cost
+CSE/GVN
+Expression identities are encoded as interpolated text keys. GVN walks block order instead of a real dominator tree.
+Compiler allocations and hashing on every expression; invalid reuse across non-dominating paths
+LICM
+The general loop pass is inactive, and the active collection optimizer inserts “hoisted” instructions into the loop header, not a true preheader. The loop detector defines the header as part of the loop.
+Work may still execute every iteration; zero-trip execution can change if an operation is not speculatable
+Bounds checks
+Proofs are gathered from local instruction shapes and pre-seeded globally for block processing rather than attached to a dominated loop region.
+A check outside the proof’s scope could be removed
+Vectorization
+“Step is one” detection accepts any constant, and it may find the increment in an unrelated block elsewhere in the function.
+Incorrect vector loop bounds if rewriting is enabled
+String builder
+The implementation describes pre-loop builder initialization and post-loop join, but the shown transformation primarily replaces concatenation with push; the complete lifetime/result construction is not present in the audited path.
+Undefined builder local or missing final string
+TCO
+Parameters are reassigned sequentially from recursive-call arguments.
+Calls such as f(a,b) -> f(b,a) can clobber an argument unless all new values are first stored in temporaries
+Strength reduction
+Signed division and remainder by powers of two are not generally equivalent to arithmetic shifts/masks for negative operands. The provider mentions non-negative or unsigned facts, but activation must enforce them at each rewrite.
+Wrong results for signed negative values
+Body outlining
+The module wrapper does not process functions before adding generated functions.
+Remains a no-op even after being selected
+
+
+The correct process is pass-by-pass rehabilitation, not bulk activation.
+
+
+---
+
+1.3 Current compile-time performance problems
+
+Finding
+Evidence
+Classification
+Corrective direction
+
+Lint parsing dominates execution
+The open lint performance investigation attributes roughly 99% of size-dependent time to parse_module_silent_checked, with checks themselves around 1%.
+Observed measurement in repository report
+Reuse daemon/compiler parse and typed-HIR artifacts; never launch an independent frontend for performance lints
+Full-repository path deduplication was quadratic
+CLI lint changed array membership to dictionary-based sets for tens of thousands of paths.
+Observed fixed bug
+Generalize cost-aware collection primitives and lint compiler code for linear membership in growing loops
+Loop detection repeatedly rebuilds graph data
+For each candidate header, reachability helpers rebuild successor or predecessor maps. Worklist pop uses array slicing.
+Observed structure; allocation cost is derived
+Build CFG, predecessors, RPO, dominators, and loop forest once per function
+Vectorizer def-use construction contains nested definition/use loops
+Dependencies are built with definitions × uses comparisons and repeated array concatenation.
+Observed structure
+Linear def-use lists plus SSA/use chains; append into owned buffers instead of uses = uses + ...
+Several analyses build textual hash keys
+CSE and GVN serialize expression identity to strings.
+Observed
+Interned structural keys such as (opcode, VN, VN, type, flags)
+Passes rebuild overlapping facts
+Loop detection, collection optimization, BCE, and vectorization contain separate loop/bounds/dependence logic.
+Derived architectural issue
+Shared immutable analysis results with explicit invalidation
+
+
+LLVM’s current architecture offers useful precedent: ScalarEvolution provides induction and trip-count reasoning, DependenceAnalysis handles loop dependences, and MemorySSA gives efficient SSA-like memory queries rather than repeated instruction scans. LLVM documents MemorySSA partly as a response to memory-dependence approaches that could easily become quadratic.
+
+
+---
+
+1.4 Escape analysis is not ready to place allocations
+
+Simple’s escape analysis has a useful state model—NoEscape, argument, return, field, global, and unknown escape—but several current behaviors block safe stack promotion:
+
+The design says unknown values should be treated conservatively as escaping, but finalization changes remaining Unknown states to NoEscape.
+
+Return handling is incomplete.
+
+Field points-to keys do not appear consistently formed between store and load paths.
+
+Allocation size is represented but not fully propagated to threshold decisions.
+
+Points-to collections use arrays and repeated membership checks.
+
+Repository planning still describes backend stack-allocation integration as deferred.
+
+
+This is potentially unsound if the result is later used for allocation placement. It is not evidence of a current stack-lifetime miscompile while promotion remains unwired.
+
+Before stack promotion:
+
+1. Unknown must remain escaping.
+
+
+2. Return, aggregate, closure capture, indirect call, field, and global flows must be complete.
+
+
+3. Every NoEscape result must carry a proof reason.
+
+
+4. Allocation size and alignment thresholds must be enforced.
+
+
+5. Differential GC-root and lifetime tests must compare heap and promoted forms.
+
+
+6. An unknown external call must fail closed unless an imported effect/escape summary is verified.
+
+
+
+Go provides a good usability precedent: compiler diagnostics explain why a value escapes, while allocation profiles expose both object counts and allocated bytes.
+
+
+---
+
+2. Recommended analysis architecture
+
+Do not create separate logic for the lint command, optimizer, IDE, and CI. Build one queryable fact layer over cached typed HIR and MIR.
+
+2.1 Shared PerfFacts
+
+struct PerfFacts:
+    cfg: CfgFacts
+    dominators: DominatorTree
+    loops: LoopForest
+    inductions: [InductionFact]
+    def_use: DefUseFacts
+    memory: MemorySsaLite
+    aliases: RegionAliasFacts
+    effects: EffectFacts
+    cardinalities: CardinalityFacts
+    costs: CostFacts
+    allocations: AllocationFacts
+    layouts: LayoutFacts
+
+Simple already carries useful MIR effects such as computation, I/O, wait, allocation, filesystem, network, and unsafe behavior. Extend those effects quantitatively instead of inventing a parallel annotation system.
+
+LoopForest
+
+Build once per function:
+
+LoopFact
+    header
+    preheader?
+    latch set
+    body bitset
+    exits
+    parent?
+    children
+    depth
+    trip_count: Exact | UpperBound | Unknown
+    induction: start, step, bound, signedness, nowrap proof
+
+Important rules:
+
+A bound such as i < 100 is not an exact trip count without proving the initial value and step.
+
+Block IDs or storage order must never substitute for dominance or CFG order.
+
+A transform requiring a preheader must create or verify a real preheader.
+
+Irreducible loops should normally produce remarks, not transformations.
+
+
+MemorySSA-lite
+
+Start with regions rather than full pointer theorem proving:
+
+enum Region:
+    Stack(local)
+    UniqueObject(allocation_site)
+    Argument(index)
+    Global(symbol)
+    Device(resource)
+    Unknown
+
+The ownership model can make this substantially simpler:
+
+An iso/unique value can provide a strong no-alias region.
+
+An immutable shared value permits reads but no writes.
+
+A mutable borrow identifies its exclusive region.
+
+Raw or unsafe pointers collapse to Unknown unless a contract proves more.
+
+
+Each load is connected to a dominating memory definition or phi. Unknown calls clobber Unknown; verified function summaries name their read and write regions. This single service supports DCE, CSE, LICM, fusion, bounds elimination, vectorization, and escape reasoning.
+
+
+---
+
+2.2 Machine-readable operation registry
+
+Simple’s existing CollectionPlan proposal already points toward a shared operation registry and separate cost, effect, cardinality, order, and uniqueness summaries. Implement that as the common source of truth.
+
+OperationSummary
+    effects:
+        reads, writes, allocates, throws, waits, io, atomic, unsafe
+    time:
+        worst: CostExpr
+        expected: CostExpr?
+    allocation_count:
+        CostExpr
+    allocation_bytes:
+        CostExpr
+    peak_live_bytes:
+        CostExpr?
+    output_cardinality:
+        CardinalityExpr
+    access:
+        sequential | random | hash | tree | unknown
+    order:
+        preserved | reordered | unspecified
+    uniqueness:
+        unique | may_duplicate | unknown
+    invalidation:
+        receiver_mutation | global_epoch | immutable
+
+Example entries:
+
+Operation
+Time
+Allocation
+Cardinality
+
+Array.contains(x)
+Size(receiver)
+0
+scalar
+Dict.contains(x)
+expected constant; worst linear
+0
+scalar
+Array.keys/values/materialize
+Size(receiver)
+proportional to receiver
+same size
+sort
+n log n
+implementation-dependent temporary bytes
+n
+filter
+n
+up to n elements when eager
+[0,n]
+flat_map
+sum of inner cardinalities
+proportional to output
+potentially product
+immutable a + b
+len(a)+len(b)
+result size
+sum
+push
+amortized constant
+occasional growth
+n+1
+
+
+Keep expected and worst-case costs separate. Mission-critical analysis should not silently treat expected hash lookup as a hard constant bound.
+
+
+---
+
+2.3 Cost algebra
+
+For editor lints, exact resource polynomials are unnecessary. Use a bounded symbolic algebra:
+
+CostExpr =
+    Const(value)
+    Size(symbol)
+    Add(parts)
+    Mul(parts)
+    Max(parts)
+    Log(expr)
+    Amortized(expr)
+    Expected(expr)
+    Unknown(reason)
+
+Canonicalize and hash-cons expressions. Cap:
+
+expression depth,
+
+polynomial degree,
+
+number of independent size variables,
+
+recursive SCC iterations,
+
+path splits.
+
+
+When the cap is exceeded, produce Unknown, not an unreliable result.
+
+For each loop:
+
+loop_cost = trip_count * body_cost
+loop_allocations = trip_count * body_allocations
+
+For each call, substitute the callee’s size parameters. Recursive SCCs use bounded fixed-point summaries. Infer Cost, SPEED, Loopus, and RaML/AARA demonstrate complementary approaches for symbolic execution cost, loop-bound inference, and amortized time or space analysis.
+
+
+---
+
+3. Analysis tiers: fast enough for compiler and lint
+
+The percentages below are design budgets, not measured Simple results.
+
+Tier
+Default use
+Analysis
+Target marginal overhead
+Failure behavior
+
+Tier 0: Local
+Editor and normal simple lint
+Typed-HIR walk, local type/layout and operation summaries; no call graph
+≤2–3% after frontend reuse
+Suppress uncertain findings
+Tier 1: Function
+Release compile and --perf-fast
+CFG, dominators, loop forest, def-use, MemorySSA-lite, escape facts
+≤5% release compile
+Emit optimization remarks for unknown proofs
+Tier 2: Program
+Robust/Critical CI
+Bounded call graph SCC summaries, symbolic cost/cardinality, baseline comparison
+Explicit node/time budget
+Report analysis incomplete, never silently certify
+Tier 3: Profile-guided
+Offline optimization
+Hotness, allocation lifetime, repetitive memory access, cache/layout evidence
+Outside normal compile path
+Feed evidence into Tier 1 decisions
+
+
+Because parsing currently dominates lint time, Tier 0 must run inside the existing compiler session or daemon and consume the same parse/HIR artifacts. A second parser process would erase most gains from keeping the checks lightweight.
+
+
+---
+
+4. Multiple-loop and algorithmic-complexity detectors
+
+The repository already reserves COLL009 through COLL018 for most of the highest-value cases, while the actual source lint currently implements the earlier local-pattern rules and COLL019.
+
+4.1 Recommended detector table
+
+Rule
+Pattern and analysis
+Typical cost symptom
+Compiler or lint
+Tier
+
+LOOP001 adjacent_same_domain
+Adjacent loops over the same proven iteration domain; compare bounds, directions, early exits, effects, and dependence graph
+Two or more full traversals
+Auto-fuse only with complete legality and profitability proof; otherwise missed-optimization remark
+1
+COLL009 nested_dynamic_iteration
+Dynamic loop nested under another dynamic loop; multiply symbolic trip counts
+O(n*m) or O(n²)
+Warning only when both dimensions may grow; suppress fixed small inner loops
+0/1
+COLL010 functional_linear_lookup
+contains, find, index_of, or linear get inside a loop; operation registry supplies receiver complexity
+O(n*m)
+Suggest temporary index or Dict; normally no auto-fix because order, hashing, and memory change
+0/1
+COLL011 repeated_materialization
+keys, values, collect, to_array, flatten, conversion, or clone inside a loop
+Repeated O(m) time and allocation
+Hoist/elide when receiver and semantics are invariant; otherwise warning
+0/1
+COLL012 sequential_indexing
+Repeated nth(i) or generic indexing on linked, UTF-8, compressed, or iterator-backed data
+Often O(n²)
+Suggest iterator traversal; compiler rewrite only for exact semantics
+0
+COLL013 repeated_sort
+Sort or ordered-index construction occurs inside an outer loop or repeats on unchanged input
+O(n*m log m)
+Hoist if immutable and comparator pure; otherwise warning
+1
+COLL014 unbounded_flat_map
+flat_map/nested production whose inner cardinality is input-dependent
+Output and allocation can become n*m
+Warn with cardinality expression; Robust may require an explicit bound
+1/2
+COLL015 accidental_cartesian_product
+Nested loops over unrelated collections with no recognized key relation or bounded side
+O(n*m) and product output
+Warning; recognize deliberate cartesian_product API or annotation to suppress
+1
+COLL016 missing_index
+Stable collection repeatedly searched by the same key projection
+Repeated linear lookup
+Suggest one-time Dict/index construction with time-memory tradeoff
+1
+COLL017 complexity_regression
+Compare canonical cost summary against main/baseline; detect new size variable or higher polynomial degree
+O(n) → O(n²), allocations 0 → n
+CI policy, not editor warning
+2
+COLL018 unknown_hot_callback_cost
+Dynamic/virtual/function-value callback inside a dynamic loop lacks a verified summary
+Unknown multiplier
+Remark by default; warning only in hot/Robust code
+1/2
+LOOP019 repeated_reductions
+Separate sum, count, min, checksum, or predicate scans over the same producer
+Multiple traversals
+Fuse accumulators if callbacks are pure and each reduction order is preserved
+1
+LOOP020 count_then_consume
+Count/length scan followed by a second traversal, especially on non-sized iterables
+Two passes or forced materialization
+Use exact-size metadata, single-pass builder, or reserve upper bound
+0/1
+LOOP021 invariant_setup
+Regex compilation, parser/serializer construction, format-plan creation, table building inside loop
+Large constant work multiplied by n
+Hoist with purity/lifetime proof; otherwise warning
+0/1
+LOOP022 effect_per_iteration
+I/O, database, RPC, filesystem metadata, or device command in a loop
+N+1 traffic or syscall amplification
+Warning with batching/prefetch candidate; no generic compiler auto-fix
+0/1
+LOOP023 contention_per_iteration
+Lock acquisition, blocking wait, or strong atomic operation inside a loop
+Contention and serialization
+Warning; Critical policy may deny blocking effects in marked paths
+0/1
+LOOP024 recursive_loop_multiplier
+Recursive SCC contains a dynamic loop or calls a looping function per recursion level
+Potential exponential or high polynomial behavior
+Tier-2 cost analysis; editor only shows local hint
+2
+LOOP025 missed_vectorization
+Canonical numeric loop not vectorized; report precise blocker
+Scalar hot loop
+Optimization remark, never a generic warning
+1/3
+LOOP026 repeated_same_source_pipeline
+Eager map().filter().map() or several named temporaries consumed once
+Traversal and intermediate allocation
+CollectionPlan fusion when callbacks/effects permit
+0/1
+
+
+Important suppression rules
+
+A nested or repeated loop should not warn merely because it exists. Suppress when:
+
+The inner bound is a small compile-time constant.
+
+The loop is cold and profiling confirms negligible cost.
+
+Repeated passes are independently vectorized and fusion is predicted to regress throughput.
+
+Fusion would increase live values beyond a register-pressure budget.
+
+Separate passes improve locality through blocking or tiling.
+
+The user explicitly chose a data structure preserving order or worst-case behavior.
+
+The operation is bounded by a declared protocol or hardware maximum.
+
+
+
+---
+
+5. Memory-inefficiency detectors
+
+5.1 Static and profile-guided rules
+
+Rule
+Pattern
+Required facts
+Action
+Tier
+
+MEM001 allocation_in_dynamic_loop
+Heap allocation, collection creation, closure allocation, boxing, formatting buffer inside a dynamic loop
+Allocation effect + loop multiplicity
+Warn; automatically scalar-replace or stack-promote only with complete lifetime proof
+0/1
+MEM002 missing_reserve
+Known exact or upper iteration count followed by repeated push/emplace into an empty/growing collection
+Trip count, existing capacity, growth policy
+Insert exact reserve when semantically invisible; otherwise fix-it
+0/1
+MEM003 repeated_concat_growth
+String/array immutable concatenation into the accumulator in a loop
+Ownership and resulting size
+Builder transformation after correctness completion; warning today
+0
+MEM004 needless_materialization
+Owned temporary collection is immediately iterated, counted, or searched once
+Def-use and escape facts
+Fuse producer/consumer or use view/iterator
+0/1
+MEM005 unnecessary_clone_or_copy
+Large value cloned/copied while source remains available and immutable
+Type size, move/borrow eligibility
+Fix-it to borrow/move; compiler copy elision where exact
+0
+MEM006 copied_loop_item
+Iteration binds a large element by value instead of reference
+Element layout and mutation intent
+Lint/fix-it
+0
+MEM007 large_value_parameter
+Large aggregate passed or returned by value repeatedly
+ABI lowering, size, call frequency
+Suggest borrow/out parameter only when API semantics permit; compiler can optimize internal ABI
+0/1
+MEM008 pointer_rich_small_elements
+Array<Box<small T>>, boxed collection, or one allocation per small node
+Layout, object size, polymorphism
+Suggest contiguous representation; no automatic public semantic change
+0
+MEM009 large_enum_variant
+One sum-type variant dominates total size and most values use smaller variants
+Variant sizes and profile frequencies
+Suggest boxing/splitting the rare variant; compiler layout optimization only behind stable ABI rules
+0/3
+MEM010 large_stack_frame
+Static arrays, inlined temporaries, spills, or generator state exceed target threshold
+Post-layout frame estimate
+Warning; optimizer may undo inlining or move cold storage
+1
+MEM011 zero_fill_then_overwrite
+Allocation is zeroed and all bytes are definitely written before any read
+Definite initialization, aliasing, trap paths
+Eliminate zeroing automatically with full-overwrite proof
+1
+MEM012 temporary_buffer_pipeline
+Temporary buffer is produced and consumed once without escaping
+Def-use, effects, cardinality
+Fuse, stream, or allocate in arena/stack
+1
+MEM013 retained_capacity_spike
+Long-lived collection grows to a high watermark and then remains mostly empty
+Escape/lifetime plus profile
+Profile-guided remark; suggest shrink or bounded pool
+3
+MEM014 heap_escape_reason
+Local allocation cannot be promoted
+Escape path
+Explain the exact store/call/return that caused escape
+1
+MEM015 repeated_format_or_serialize_buffer
+Formatting/serialization repeatedly creates scratch buffers
+Operation registry, loop multiplicity
+Reuse builder or caller-owned scratch region
+0/1
+MEM016 index_rebuilt_in_loop
+Hash table, sorted index, prefix table, or lookup cache recreated each iteration
+Invariance and mutation facts
+Hoist or warn
+1
+MEM017 oversized_closure_capture
+Closure or async state captures a large aggregate by value
+Capture layout and use set
+Capture selected fields or reference where lifetime permits
+0/1
+MEM018 padding_waste
+Struct or array element has large internal/tail padding
+Target layout and ABI exposure
+Layout remark; source fix-it can reorder private fields
+0
+MEM019 possible_false_sharing
+Independently mutated fields used by different workers share a cache line
+Ownership/thread-role evidence and target cache line
+Concurrency/layout warning; padding only with explicit policy
+1/3
+MEM020 AoS_SoA_mismatch
+Hot loop reads one or two fields from a large array-of-struct element
+Access profile, layout, SIMD target
+Profile-guided data-layout remark or generated SoA view
+3
+MEM021 allocation_churn_cluster
+Many short-lived allocations at the same site or repeatedly across a pipeline
+Allocation profile and lifetime histogram
+Arena, folding, pooling, scalar replacement, or stack promotion candidate
+3
+MEM022 unbounded_retained_collection
+Global, actor, service, or cache collection grows without eviction/bound
+Escape and mutation summary
+Existing COLL008-style warning; Robust/Critical can require an explicit bound
+0/2
+
+
+Clang-tidy already demonstrates low-cost source checks for missing reserve and avoidable copies, while Clippy includes checks for needless collection, oversized stack allocations, large stack frames, and related representation problems.
+
+
+---
+
+6. Compiler transformation versus lint or remark
+
+Opportunity
+Automatic compiler transform
+Lint or remark
+Reason
+
+Constant folding and dead pure computation
+Yes, after semantic correctness
+Usually no source warning
+Pure implementation detail
+Copy elision and scalar replacement
+Yes
+Explain missed reason when hot
+No source-level semantic choice
+Exact reserve for an internal collection
+Yes
+Fix-it when public/custom collection behavior is uncertain
+Capacity usually unobservable, but custom allocators may matter
+Dead intermediate collection
+Yes when non-escaping and effects preserved
+needless_materialization warning otherwise
+Strong producer-consumer proof
+Pure map/filter pipeline fusion
+Yes when callback effects and order are safe
+Missed-fusion remark otherwise
+Eager callbacks can have observable ordering
+Adjacent general loop fusion
+Yes only with complete dependence/effect proof and positive cost model
+Missed-fusion remark
+Interleaves iterations and can alter effects
+Stack promotion
+Yes only for proven NoEscape, bounded size, and valid lifetime
+Escape explanation
+Wrong proof is memory unsafety
+Bounds-check elimination
+Yes with dominance-scoped range proof
+Missed proof remark
+Safety-critical transform
+Zero-fill removal
+Yes with definite full initialization
+Missed proof remark
+Reads on exceptional paths must be excluded
+Build a hash index for repeated lookup
+Usually no
+Suggestion with time/memory/order tradeoff
+Hash/equality/order/worst-case behavior may change
+Change array to linked structure or vice versa
+No
+Suggestion
+Public semantics and memory behavior change
+Batch database/RPC operations
+No generic rewrite
+Warning
+Transaction, ordering, and failure semantics are domain-specific
+Change lock granularity
+No
+Warning
+Concurrency semantics
+Box a large enum variant
+Normally no source-independent rewrite
+Layout lint
+ABI, allocation, and identity may change
+Split AoS into SoA
+Profile-guided specialization or generated view only
+Remark
+Major representation/API choice
+Pretenure or pool allocations
+Runtime/PGO decision
+Profile remark
+Lifetime is workload-dependent
+
+
+LLVM’s optimization-remark model is a good interface: distinguish successful transformations, missed transformations, and analysis details, and optionally attach profile hotness. MLIR similarly supports structured, opt-in remarks without imposing the reporting cost when disabled.
+
+
+---
+
+7. Correct design for multiple-loop fusion
+
+7.1 Implement two distinct fusion layers
+
+Layer A: CollectionPlan/pipeline fusion
+
+Start here. It is safer and gives the largest intermediate-allocation wins.
+
+source
+  -> map(pure f)
+  -> filter(pure predicate)
+  -> take(k)
+  -> reduce(...)
+
+Lower to a single plan before materializing arrays. Advantages:
+
+Cardinalities and ordering are explicit.
+
+Intermediate ownership is known.
+
+Callback effects can be checked at HIR level.
+
+Exact reserve bounds can be derived.
+
+Backend can choose scalar, SIMD, GPU, or parallel execution.
+
+
+Futhark demonstrates aggressive fusion of high-level array operations, while stream-fusion research shows how producer and consumer representations can eliminate intermediate structures.
+
+Layer B: General adjacent MIR loop fusion
+
+Only after shared loop, dependence, and memory analyses are available.
+
+Legality requirement
+Simple proof
+
+Real natural loops
+Shared LoopForest, not block-order heuristics
+Adjacent or control-equivalent execution
+Dominance/post-dominance and no intervening effectful region
+Compatible direction and trip count
+SCEV-lite start, step, bound, signedness, no-wrap
+No illegal cross-iteration dependence
+Def-use plus MemorySSA-lite dependence direction/distance
+Alias safety
+Unique ownership, disjoint regions, imported noalias, or optional runtime versioning
+Effect-order safety
+No observable I/O, waits, atomics, volatile/device access, suspension, or exceptions whose ordering changes
+Early exit compatibility
+Equivalent break, continue, return, and exceptional behavior
+Collection semantics
+Order and uniqueness preserved
+Numeric semantics
+Preserve each reduction’s order unless fast-math explicitly allows reassociation
+Profitability
+Saved traversal/allocation versus register pressure, code size, vectorization, and cache behavior
+
+
+LLVM’s LoopFusion pass requires canonical loop shape, compatible trip counts, control equivalence, and dependence legality. Its supporting SCEV, dependence, and memory analyses illustrate why loop fusion cannot be implemented as a short instruction-window rewrite.
+
+7.2 Profitability model
+
+Use a target-independent first model:
+
+benefit =
+    removed_loop_control
+  + removed_loads_of_shared_input
+  + removed_intermediate_bytes
+  + improved_cache_reuse
+
+cost =
+    added_live_ranges
+  + spill_risk
+  + code_growth
+  + lost_independent_vectorization
+  + changed prefetch behavior
+
+Then add target information:
+
+SIMD width and register count,
+
+cache-line and cache-size estimates,
+
+branch cost,
+
+element size,
+
+expected trip count or profile,
+
+GPU occupancy/register pressure.
+
+
+Do not warn merely because the compiler declines fusion. Emit a structured missed remark:
+
+remark[LOOP001/missed]:
+  loops scan the same 8-byte element domain
+  fusion rejected: output write in loop 1 may alias input read in loop 2
+  required proof: disjoint regions or verified noalias contract
+
+
+---
+
+8. Research and production-language lessons
+
+Source
+What it demonstrates
+Direct lesson for Simple
+
+LLVM LoopFusion, SCEV, DependenceAnalysis
+Fusion requires normalized loops, compatible trip counts, and dependence legality
+Build reusable loop and dependence facts before a general fusion transform.
+LLVM MemorySSA
+Efficient representation and querying of memory definitions, uses, and clobbers
+Replace repeated whole-function alias/memory scans with MemorySSA-lite.
+LLVM/MLIR optimization remarks
+Passed, missed, and analysis diagnostics can be structured and profile-aware
+Performance opportunities should often be remarks, not source warnings.
+Clang-tidy
+Low-cost source checks detect reserve opportunities and avoidable copies
+Implement exact local lints in Tier 0 with safe fix-its.
+Rust Clippy
+Detects unnecessary materialization and oversized stack usage
+Type/layout-aware source linting is valuable without requiring optimizer proofs.
+Go compiler and pprof
+Escape decisions are explainable; allocations can be profiled by objects and bytes
+Every failed stack promotion should explain its escape path and connect to profile data.
+Futhark and stream fusion
+High-level producer-consumer representations support systematic elimination of intermediate arrays
+Build CollectionPlan fusion before arbitrary MIR loop fusion.
+Infer Cost
+Compositional symbolic cost summaries can identify algorithmic complexity across calls
+Add cached function-level cost summaries for Robust/CI analysis.
+SPEED and Loopus
+Loop bounds and symbolic complexity can be inferred with bounded static analyses
+Use a deliberately limited SCEV/cost domain rather than attempting unrestricted theorem proving in editor mode.
+RaML/AARA
+Amortized analysis can infer time and space/resource bounds
+Represent amortized collection growth and bounded memory separately from worst-case per-operation cost.
+Real-world performance-bug studies and Toddler
+Repetitive computation and repetitive memory access are major dynamic bug signatures
+Add a Tier-3 detector for repeated address/value patterns that static analysis cannot prove.
+
+
+
+---
+
+9. Implementation plan
+
+Phase 0 — Make optimizer status truthful
+
+1. Add PassStatus and PassExpectation.
+
+
+2. Remove Skeleton and Disabled passes from effective pipelines.
+
+
+3. Add --emit-opt-report=sdn|json|text:
+
+
+
+PassRunRecord
+    pass
+    status
+    functions_seen
+    candidates
+    transformed
+    instructions_before
+    instructions_after
+    elapsed
+    missed_reasons
+
+4. Add one canonical positive sentinel for every MayTransform pass.
+
+
+5. Fail CI when an active transform never changes its sentinel.
+
+
+6. Add compiler self-lints for identity dispatch wrappers and empty module loops.
+
+
+7. Display the effective pipeline, not merely the requested pass names.
+
+
+
+This immediately distinguishes “not profitable on this program” from “the pass was never operational.”
+
+Phase 1 — Shared linear-time analysis foundation
+
+Implement and cache:
+
+CFG successors and predecessors,
+
+reverse-postorder,
+
+dominator and post-dominator trees,
+
+loop forest with real preheaders and latches,
+
+linear def-use lists,
+
+SCEV-lite,
+
+region alias facts,
+
+MemorySSA-lite,
+
+quantitative effect summaries.
+
+
+Replace:
+
+string expression keys with structural keys,
+
+worklist array slicing with an index or deque,
+
+repeated array.contains sets with bitsets/dictionaries,
+
+pass-local loop detection with shared LoopForest.
+
+
+Add pass invalidation declarations:
+
+preserves: [Cfg, Dominators, LoopForest]
+invalidates: [DefUse, MemorySSA, Cost]
+
+Phase 2 — Fast lints with immediate value
+
+Implement first:
+
+1. COLL009 nested dynamic iteration.
+
+
+2. COLL010 linear lookup in loop.
+
+
+3. COLL011 repeated materialization.
+
+
+4. COLL012 sequential indexing.
+
+
+5. COLL013 repeated sort/setup.
+
+
+6. COLL014 unbounded flat-map.
+
+
+7. COLL015 accidental Cartesian product.
+
+
+8. COLL016 missing index.
+
+
+9. MEM001 allocation in loop.
+
+
+10. MEM002 missing reserve.
+
+
+11. MEM004 needless materialization.
+
+
+12. MEM005–007 avoidable large copies.
+
+
+13. LOOP022 I/O/RPC/DB effect in loop.
+
+
+14. LOOP023 wait/lock effect in loop.
+
+
+
+All should consume the existing typed-HIR session and operation registry. No additional parse.
+
+Phase 3 — Rehabilitate safe scalar transformations
+
+Suggested activation order:
+
+Order
+Transform
+Gate
+
+1
+Constant folding
+Exact overflow, checked-op, FP, trap, and target-width semantics
+2
+Copy propagation
+Complete def-use and mutation invalidation
+3
+DCE
+Backward liveness/dataflow, side-effect and trap model
+4
+Local CSE
+Structural keys, memory invalidation, no trapping-expression removal
+5
+True LICM
+Real preheader, speculatability, MemorySSA and dominance
+6
+Exact reserve insertion
+Exact/upper trip count and collection-growth contract
+7
+Bounds-check elimination
+Dominance-scoped range proof and mutation invalidation
+8
+Stack promotion
+Complete escape proof, size threshold, lifetime verification
+9
+TCO
+Parallel parameter assignment and exception/debug semantics
+10
+GVN
+Real dominator traversal and memory versioning
+
+
+Every activation requires:
+
+positive and negative MIR fixtures,
+
+semantic differential execution before and after,
+
+idempotence,
+
+malformed/irreducible CFG tests,
+
+overflow, exception, zero-trip, alias, and unsafe-pointer adversarial cases,
+
+target/backend matrix tests,
+
+optimization statistics proving the pass actually ran.
+
+
+Phase 4 — CollectionPlan and loop fusion
+
+1. Lower high-level collection pipelines to CollectionPlan.
+
+
+2. Add effect, cardinality, ownership, and materialization nodes.
+
+
+3. Eliminate dead intermediates.
+
+
+4. Fuse pure producers and consumers.
+
+
+5. Add multiple-reduction fusion.
+
+
+6. Add adjacent MIR fusion only after dependence infrastructure is stable.
+
+
+7. Add optional runtime alias versioning only under Aggressive/PGO profiles.
+
+
+
+Phase 5 — Interprocedural and profile-guided analysis
+
+1. Function CostSummary cached by semantic fingerprint.
+
+
+2. SCC fixed point for recursive call graphs.
+
+
+3. Baseline cost-diff CI:
+
+new size variable,
+
+increased polynomial degree,
+
+increased allocation multiplicity,
+
+new unbounded cardinality,
+
+new I/O/wait effect under a dynamic loop.
+
+
+
+4. Allocation profiles:
+
+count,
+
+total bytes,
+
+peak live bytes,
+
+survival/lifetime histogram.
+
+
+
+5. Dynamic repetitive-access detector modeled after Toddler-style signatures.
+
+
+6. Feed hotness into optimization remarks and layout recommendations.
+
+
+
+
+---
+
+10. Diagnostic format
+
+Diagnostics should show the model and uncertainty rather than claiming an unsupported speedup.
+
+Repeated lookup
+
+warning[COLL010]: repeated linear lookup inside a dynamic loop
+  outer iterations: orders.len
+  lookup cost: users.len
+  estimated work class: O(orders.len * users.len)
+
+  users is not mutated in the loop.
+  candidate: build Dict<UserId, User> once before the loop
+  candidate work: O(users.len + orders.len)
+  additional memory: O(users.len)
+
+  no automatic rewrite:
+    hashing, equality, iteration order, and memory behavior may change
+
+Allocation multiplicity
+
+warning[MEM001]: allocation occurs once per loop iteration
+  allocation site: FormatBuffer
+  multiplicity: records.len
+  estimated allocations: O(records.len)
+
+  candidate:
+    reuse one buffer and clear it after each output
+
+Missed fusion
+
+remark[LOOP001/missed]: adjacent loops traverse the same domain
+  trip count: data.len
+  saved traversal if fused: one sequential pass
+  fusion rejected:
+    loop 1 writes region R3
+    loop 2 reads region Unknown
+  required proof:
+    R3 is disjoint from loop 2 input, or a verified noalias contract
+
+Escape reason
+
+remark[MEM014]: allocation remains on the heap
+  allocation size: 128 bytes
+  multiplicity: items.len
+  escape path:
+    local tmp
+      -> argument 2 of unknown external call
+      -> may be retained
+
+  stack promotion requires a verified noescape argument contract
+
+Complexity regression
+
+error[COLL017]: algorithmic cost increased against baseline
+  baseline: O(items.len)
+  current:  O(items.len * rules.len)
+
+  introduced operation:
+    rules.find(...) inside loop over items
+
+  profile: Robust
+  policy: reject new multiplicative input dimension
+
+
+---
+
+Final priority order
+
+Priority
+Work
+
+P0
+Make pass status truthful; add optimizer self-lints and effective-pipeline telemetry
+P0
+Keep BCE, vector rewriting, stack promotion, GVN, general LICM, string-builder rewriting, and TCO disabled until their correctness blockers are fixed
+P0
+Audit the active collection “hoisting” path for true preheader placement, zero-trip behavior, trapping operations, and effect safety
+P1
+Build shared CFG, dominators, loop forest, def-use, SCEV-lite, and MemorySSA-lite
+P1
+Run performance lints from cached typed-HIR/MIR artifacts; remove the separate parse bottleneck
+P1
+Implement COLL009–016, allocation-in-loop, reserve, needless materialization, repeated setup, and effect-in-loop rules
+P2
+Rehabilitate scalar transformations one at a time with semantic differential gates
+P2
+Implement CollectionPlan producer-consumer fusion and multiple-reduction fusion
+P3
+Add bounded interprocedural cost summaries and baseline complexity regression CI
+P3
+Add PGO allocation-lifetime, repetitive-access, false-sharing, and layout analysis
+
+
+The central design principle is:
+
+> The compiler should automatically transform only when equivalence, lifetime, aliasing, effects, and profitability are proved. The lint should expose likely algorithmic or representation mistakes when the better choice depends on application semantics. Optimization remarks should explain every important missed opportunity without turning normal source code into warning noise.
+
+---
+
+## Codex validation addendum — 2026-08-22
+
+<!-- codex-research -->
+
+This addendum validates the supplied audit against commit `37bd406e219cc35cae049b4130f5167c21801864`. Six parallel static lanes covered optimizer dispatch, lint diagnostics, shared MIR/escape facts, compiler/tool hot paths, existing tests/docs, and primary-source domain precedents. No compiler, test, or benchmark was executed during research. Detailed evidence is retained under `.spipe/simple_compiler_performance_memory_efficiency/research_lanes/`.
+
+### Confirmed findings
+
+- Thirteen registered pass entries have canonical identity or empty dispatch routes. `MirPassDescriptor` has typed kind/scope/cost metadata but no operational status or transform expectation, while current statistics count invocation names rather than candidates, transformations, instruction deltas, elapsed time, or missed reasons.
+- Active collection “hoisting” inserts at the loop header rather than a verified preheader. This can remain per-iteration work; moving it outside the loop later requires explicit zero-trip, trap, and effect proofs.
+- GVN substitutes block storage order for dominance; BCE pre-seeds loop proofs across all blocks; TCO assigns recursive arguments sequentially; DCE performs repeated local scans and conservatively retains the no-local-use case.
+- Lint reparses source through `parse_module_silent_checked`. Existing repository measurements attribute about 99% of size-dependent lint time to this parse path. The measured scaling is approximately linear with a severe constant, not proven superlinear growth.
+- Collection diagnostics are not present in the central lint-name/config mapping, so individual `COLL*` rules are not structurally configurable or suppressible. Core lint severity has no remark/info kind; SIMD emits ad-hoc `info`. JSON omits category, fixes, confidence, symbolic cost, evidence, and missed reasons.
+- CFG, predecessors, loops, def-use, ranges, and alias approximations are independently rebuilt by multiple MIR passes with incompatible semantics. A revision-bound shared fact owner and explicit invalidation are prerequisites for safe activation.
+- Escape finalization converts unresolved `Unknown` sites to `NoEscape`; production return terminator integration is a stub; size/alignment/frame thresholds and proof provenance are absent. Stack promotion must remain disabled.
+
+### Corrections and refinements
+
+1. Auto-vectorization is not purely `AnalysisOnly`. Canonical module dispatch performs a narrow elementwise MIR rewrite. Its step matcher accepts constants in `0..4` rather than proving exact step one and operand identity, making the issue an active correctness exposure. The unsafe rewrite must fail closed or be disabled before broader optimizer work.
+2. Escape store/load methods use the same tuple-key form, but the production analyzer supplies inconsistent key inputs: a base-local value on store versus `0` on load. The audit conclusion remains valid, but the defect is at the integration boundary rather than the methods' tuple construction.
+3. Single-file lint does not recursively scan the repository. Directory targets perform discovery; dictionary-based deduplication is already a fixed regression guard. Cold audit-script `find` calls should not be labeled hot-path defects without measurement.
+4. CollectionPlan remains a research design rather than a production IR. Existing reserved `COLL009–018` identities align with the proposed rules, but implementing them safely requires typed operation, effect, cardinality, boundedness, and mutation facts rather than more string-pattern matching.
+
+### Primary synthesis
+
+The implementation order should be: immediately contain the active unsafe vector rewrite and active collection header-hoist behavior; make pass activation and effective pipelines truthful; unify structured diagnostic identities and parse/HIR reuse; land cached CFG/dominance/loop/def-use facts; make escape fail closed; add bounded Tier-0/1 diagnostics; then rehabilitate scalar transforms one at a time. MemorySSA-lite, CollectionPlan fusion, general loop fusion, bounded interprocedural cost analysis, and profile-guided layout work follow only after their proof inputs exist.
+## 2026-08-22 implementation addendum: SSA dominance boundary
+
+The checked optimizer boundary now extends its admitted proof surface beyond identity,
+CFG closure, operand membership, and ABI locals. It builds shared CFG, def-use, and
+immediate-dominator facts without liveness matrices and rejects undefined values,
+multiple definitions, same-block use-before-definition, non-dominating cross-block uses,
+and unavailable dominance. Call-terminator results are modeled on the normal edge so an
+unwind path cannot falsely authorize their use. Stable codes `MIRV020` through `MIRV024`
+identify these failures.
+
+The verifier projection costs O(B + I + A + L) indexed storage plus bounded dominator
+construction. It omits O(B*L) liveness matrices and definitions-by-uses Cartesian scans.
+Normal builds construct none of these facts because checked dispatch remains behind the
+cached verify-each gate. Opcode typing, ownership, and loop proof remain open.
+
+## 2026-08-22 implementation addendum: partial opcode typing
+
+The same structural instruction traversal now proves three exact local type contracts:
+`Const` destination versus its explicit MIR type, `Copy`/`Move` source versus destination,
+and `Cast`/`Bitcast` destination versus target. Stable `MIRV025`-`MIRV027` codes report
+violations. Function and module receipts separately count type-checked and type-unchecked
+instructions, preventing this subset from being mistaken for complete MIR typing.
+
+Declared types are indexed once by local ID and compared structurally as `MirTypeKind`;
+the verifier performs no per-check serialization and no second instruction scan. All
+remaining opcodes are counted as unproved. Ownership and loop-boundary proof remain open.
+
+## 2026-08-22 implementation addendum: lint-name membership
+
+Collection diagnostics are already mapped to the stable `collection_performance` policy
+owner and honor configuration/file-attribute suppression on this branch. The adjacent
+configuration hot path still called `all_lint_names().contains(...)` once per SDN entry
+and once per authored `@allow`/`@warn`/`@deny` name. Each call rebuilt the full name array
+and then scanned it linearly.
+
+`lint_name_is_known` now provides exhaustive allocation-free match dispatch. For K
+authored names and N registered names, membership changes from O(K*N) comparisons plus K
+temporary N-element arrays to O(K) dispatch and no membership allocation. Enumeration
+remains available for `--warn-all`; a parity fixture checks every enumerated name against
+the matcher and rejects recurrence of `all_lint_names().contains`.
+
+## 2026-08-22 implementation addendum: effective lint defaults
+
+`LintConfig.get_level` rebuilt `build_default_levels()` for every diagnostic without an
+explicit override. With a selected profile it then built the tier projection as well.
+Collection diagnostics commonly call policy twice—once for suppression and once for
+effective severity—so a file with D diagnostics and N configured rules incurred O(D*N)
+dictionary insertion/copy work and transient allocations unrelated to analysis.
+
+`LintConfig.effective_defaults` now owns the immutable selected default table. It is built
+once for a new configuration, recomputed only when the profile changes, and shared into
+child configurations. `get_level` performs O(1) override/default lookups and allocates
+nothing. Explicit overrides, profile semantics, evidence-tier capping, and suppression
+behavior are unchanged. Project SDN discovery/caching remains a separate open tool lane.
+
+## 2026-08-22 implementation addendum: request-local lint policy reuse
+
+The standalone path loaded target `simple.sdn`, `lint_source` discovered and parsed it
+again, and parsed AST rule append resolved it a third time. This multiplied parent-path
+probes, file reads, source splitting, default/profile construction, and override copying
+for the same file revision.
+
+Parsed `LintConfig` now carries its exact `source_path`. Resolution reuses an already
+loaded base policy when the discovered path matches. `Linter` also retains the exact
+resolved config for only its immediately processed path, and parsed-rule append consumes
+that value rather than resolving again. The retained state is overwritten on the next
+file, so invalidation is request-local and no process-global stale policy cache exists.
+Normal single-file CLI work reads/parses the target policy once instead of up to three
+times. Directory-to-policy discovery caching remains open.
+
+## 2026-08-22 implementation addendum: one-pass diagnostic policy
+
+Central lint filtering and parsed AST append called `should_keep_lint_result` and then
+`apply_config_level(_for_evidence)` for each retained diagnostic. Both independently
+mapped the lint code and fetched its configured level. With D diagnostics, this doubled
+policy dispatch and dictionary lookups after analysis had already completed.
+
+`LintPolicyDecision` now returns `(keep, level)` from one code mapping and one effective
+level lookup. The central source-lint result filter and all parsed append producers use
+it. Unknown codes retain their authored level, explicit `allow` suppresses, warn promotes
+allow-default rules, deny promotes proven findings, and unproved performance findings
+remain warning-capped. The decision allocates no arrays/dictionaries and reads no source.
+Compatibility wrappers remain for external callers pending staged migration.
+
+## 2026-08-22 implementation addendum: shared lint source view
+
+The combined lint path split identical source into a line array in `lint_source` and then
+again in parsed AST append. Besides a second O(source bytes) traversal, both arrays and
+their line headers could overlap while the source-location index was constructed.
+
+`lint_source_for_parsed_append` now explicitly opts into retaining the first line view.
+Parsed append consumes that COW-owned array and calls `release_combined_lint_view` after
+success. Non-Simple input, parse failure, and stale parsed-revision exits also release it.
+Ordinary `lint_source` retains no view or resolved config. The combined path therefore
+performs one split and keeps at most one source line view pending; long-lived linters do
+not retain prior file contents after append. Exact AST spans remain the preferred future
+replacement for fallback source-location indexing.
+
+## 2026-08-22 implementation addendum: line-view consumers
+
+After the combined-path fix, normal `lint_source` still caused independent line arrays in
+file-attribute resolution and several line-oriented rule owners. These were semantic
+readers of the same immutable source, not owners requiring separate storage.
+
+The canonical `lines` view now feeds attribute resolution, parameter tags, raw-runtime
+fix positioning, stale Markdown diagrams, LLVM type-safety guards, accessor/parent-name
+analysis, freestanding patterns, and opt-in WM boundaries. Compatibility wrappers retain
+string entrypoints for external callers, while normal lint uses `*_lines` variants. This
+removes up to eight additional O(source bytes) splits/line-header arrays per applicable
+file without changing iteration order or text matching. EasyFix registry owners still
+contain independent splits and remain the next shared-view migration boundary.
+
+## 2026-08-22 implementation addendum: quality-check line view
+
+Five additional normal-path rule owners independently split the complete source:
+feature-tracking traceability, SPipe quality, and the three raw typed-UI checks. Their
+predicates and locations are exclusively line-based. They now accept the canonical
+request line view directly, removing five O(source bytes) traversals and five transient
+line-header arrays on applicable files. No whole-text predicate or diagnostic order
+changed. EasyFix registry owners remain the next allocation boundary.
+
+## 2026-08-22 implementation addendum: single EasyFix ownership
+
+The normal lint path invoked the compiler EasyFix registry and then separately invoked
+`primitive_api` and `simple_script_required`, although both are already registry members.
+Applicable source was therefore scanned twice for each rule and identical fixes could be
+appended twice. The redundant imports and append loops are removed. The registry is now
+the single owner, cutting those rules from two executions to one and preventing duplicate
+diagnostic/fix storage. Registry-wide shared line/context construction remains open.
+
+## 2026-08-22 implementation addendum: shared SPipe EasyFix facts
+
+The five SPipe EasyFix members are dispatched together, but four independently built a
+full `LineContext` array and the missing-docstring rule built another line array. The
+registry now accepts the lint request's canonical lines, builds one context array only for
+`_spec.spl` files, and shares it across the four context rules; the fifth consumes the
+same lines directly. Compatibility entrypoints keep their early file gate and construct
+private facts only for standalone callers. Normal spec lint therefore removes one line
+split plus three duplicate context arrays and their repeated trim/indent/offset work.
+
+## 2026-08-22 implementation addendum: shared general EasyFix facts
+
+The same `LineContext` derivation was repeated by resource-leak, struct-construction,
+unknown decorator/attribute, export-boundary, and import-boundary rules. The registry now
+builds one general request-owned context view and shares it with those rules and the SPipe
+family. Non-exhaustive match and bypass checks consume canonical lines directly. The
+duplicate-typed-argument rule also reuses both views, eliminating a fresh line array for
+every candidate signature while retaining its existing candidate-by-line matching order.
+Normal lint removes eight additional context/line arrays plus candidate-count-dependent
+line arrays; the remaining repeated candidate traversal is tracked for a future indexed
+call-site fact rather than being misreported as solved.
+
+## 2026-08-22 implementation addendum: remaining compiler EasyFix lines
+
+Six compiler-owned registry members still split the same source: star-import, wide-public,
+bare-bool, primitive-API, short-grammar, and script-language checks. They now consume the
+canonical line or context view. Primitive file-scope suppression also reads those lines,
+avoiding a hidden second split. Compatibility wrappers preserve pre-split path gates for
+facade and non-script files. Normal lint removes six line arrays plus the primitive allow
+array and redundant short-grammar context derivation. Stdlib-owned contextual-keyword,
+deprecated-if-let, and stub scanners remain the next cross-module view boundary.
+
+## 2026-08-22 implementation addendum: canonical EasyFix context owner
+
+The remaining contextual-keyword, deprecated-if-let, and stub rules lived in the stdlib
+EasyFix layer and each built its own stdlib `LineContext` array. Worse, compiler EasyFix
+helpers defined a structurally duplicate context type, preventing direct sharing. The
+stdlib now owns `EasyFixSourceView(lines, contexts)` and view-taking rule entrypoints.
+Compiler helpers re-export that canonical context type/builders instead of redefining
+them, and the registry derives both compiler and stdlib rule facts from one view. Normal
+lint therefore falls from four context arrays (one compiler plus three stdlib) to one,
+with no additional split and no retained source after dispatch.
+
+## 2026-08-22 implementation addendum: indexed duplicate-typed calls
+
+Duplicate-typed-argument analysis still scanned every source line for every eligible
+signature, giving O(signatures × source characters) matching after the array-allocation
+fix. It now counts `(name, arity)` targets once, rejects ambiguous keys, tokenizes source
+lines once, parses arguments only for eligible names, and records replacements by stable
+signature index. Records are ordered by `(signature index, source sequence)` so fix and
+replacement order remains unchanged. Cost becomes O(source characters + signatures +
+replacements log replacements), with O(signatures + replacements) transient memory and
+no per-signature source traversal or replacement-bucket COW growth.
+
+## 2026-08-22 implementation addendum: allocation-free annotation and ID policy
+
+Unknown-annotation checks reconstructed 31-entry decorator and 15-entry attribute arrays
+for every annotation line, then linearly searched them. Exact match dispatch now encodes
+the same sets without registry arrays or per-line allocation.
+
+The lint bridge also parsed every EasyFix ID with `split(":")[1]`. Besides allocating a
+parts array per fix, this misclassified direct IDs such as `W0406:17` as code `17`, so
+suppression and severity policy targeted the wrong key. `lint_rule_code_from_easyfix_id`
+now recognizes `L:`/`E:` namespaced IDs, preserves direct codes before the first colon,
+and returns malformed IDs unchanged. It performs one necessary code slice and no parts
+array, restoring correct W0404/W0406 policy ownership.
+
+## 2026-08-22 implementation addendum: EasyFix policy reachability
+
+Correct ID decoding exposed that many EasyFix codes already declared in
+`all_lint_names()` and `build_default_levels()` still lacked a mapping to those names.
+Rules including export boundaries, SPipe quality, resource leaks, annotation validity,
+and stub detection therefore ignored authored suppression and configured/default deny
+levels. Exact allocation-free mapping now covers every existing configurable EasyFix
+name, while W0406 maps to `visibility_boundary` alongside W0401–W0404. Default-deny
+`export_outside_init` now promotes to deny, and an explicit allow suppresses it through
+the same one-pass `LintPolicyDecision` used by other diagnostics.
+
+## 2026-08-22 implementation addendum: advisory EasyFix policy completeness
+
+Six emitted EasyFix families had no configurable identity: contextual-keyword ordering,
+deprecated `if let`, struct-construction parentheses, four short-grammar variants,
+raw-unit postfix, and SIMD opportunity. They are now registered with warning defaults and
+allocation-free membership. Exact emitted-code mapping routes the four short-grammar IDs
+to one `short_grammar_refactor` policy and maps the other codes directly. Users and CI can
+now allow, warn, or deny every emitted EasyFix family rather than relying on an immutable
+authored warning level.
+
+## 2026-08-22 implementation addendum: honest unknown-annotation fallback
+
+The source scanner ran `unknown_decorator` and `unknown_attribute` over the same `@name`
+syntax using disjoint allowlists. Known decorators such as `@extern` could therefore be
+reported as unknown attributes, known attributes could be reported as decorators, and a
+truly unknown name produced two warnings and two fix objects. Raw source has no fact that
+can distinguish those categories.
+
+Normal registry dispatch now runs one `unknown_annotation` fallback against the union of
+both known sets and emits at most one advisory per line. Legacy standalone functions
+remain for compatibility. `unknown_annotation` is a real configurable name; setting it
+updates both legacy aliases, while setting either legacy name updates the generic owner.
+Typed HIR remains the future owner for decorator-versus-attribute classification. Normal
+cost falls from two full context scans to one and duplicate diagnostic/fix storage is
+removed.
+
+## 2026-08-22 implementation addendum: remove unsafe hoist bodies
+
+Collection hoisting was already fail-closed at both public compatibility entrypoints, but
+each unconditional return was followed by a complete unreachable header-insertion
+implementation and private legality helpers. Those bodies parsed and compiled despite
+never executing, duplicated roughly 190 lines, and made accidental resurrection of the
+known zero-trip/preheader defect a one-line edit.
+
+Both unreachable transforms and their private-only helpers are removed. The inert
+entrypoints remain and return the original blocks. Scalar-invariance predicates retained
+as analysis scaffolding do not move MIR. Re-enabling collection LICM now requires a new
+implementation built on a real preheader, dominance, MemorySSA/alias/effect facts, and
+non-trapping speculatability rather than uncommenting unsafe header insertion. This
+reduces compiler source/IR size and closes a correctness footgun without claiming LICM.
+## 2026-08-22 follow-up: dormant trip-count recognizer removal
+
+The shared loop detector correctly returns an unknown trip count until SCEV-lite can prove initialization, signed step, direction, branch polarity, nowrap behavior, and finiteness. It nevertheless retained an unreachable comparison-bound recognizer after that return. The recognizer confused a loop bound with an exact iteration count and could be activated mechanically without the missing proofs. The unreachable body and its two private-only parsing helpers were removed. This reduces compiler source/parse memory and prevents unsafe strength-reduction, unrolling, vectorization, or reserve decisions from acquiring a plausible-looking but invalid trip count.
+## 2026-08-22 follow-up: dormant TCO rewrite removal
+
+Tail-call optimization remains structurally `Skeleton`, and canonical dispatch returns the original function. The file nevertheless retained a private rewrite that copied recursive-call arguments directly into parameter locals in sequence. For `f(a, b) -> f(b, a)`, the first assignment can destroy the value needed by the second; arity, type, ownership/destruction, effect, unwind, and debug contracts were also absent. The dormant implementation was removed while the factory, class, statistics, and identity entrypoints remain compatible. Rehabilitation requires parallel temporaries plus semantic differential witnesses. Removing the body also lowers compiler parse/compile work and dead IR memory.
+
+The parallel lint audit also identified the next dominant tooling target: repository lint constructs the rule registry, discovers/parses project policy, and reads critical-mode configuration per file. A CLI-scoped `LintSession` should own the immutable registry and bounded config caches, and each source should be read once even when SIMD checks are requested.
+## 2026-08-22 implementation follow-up: command-scoped lint registry reuse
+
+Repository lint now constructs one `Linter` before its file loop and passes it through `run_lint_file_with_linter`. This removes file-count-multiplied construction of the roughly 56 immutable rule descriptors. A bounded last-project cache reuses the parsed `simple.sdn` configuration for adjacent files in the same discovered project and clones it before applying per-file/CLI policy, avoiding shared mutation and process-global stale state. Standalone `run_lint_file` remains a one-file compatibility wrapper. Remaining work is to cache directory-to-manifest discovery, load critical-mode policy once, and share the single source read with optional SIMD and fix application.
+## 2026-08-22 implementation follow-up: one lint/SIMD source payload
+
+The repository CLI now reads each validated source through the error-aware lint reader once, passes that exact payload to the command-scoped linter, and reuses it for optional SIMD opportunity analysis. A valid empty file remains distinct from a read failure. Standalone `run_lint_file` and `run_lint_file_with_linter` retain their file-reading compatibility behavior, while `run_lint_source_with_linter` exposes source ownership for batch tools. Fix application still rereads immediately before writing so it does not apply replacements to an unvalidated stale payload.
+## 2026-08-22 implementation follow-up: critical policy session snapshot
+
+`check_dynamic_capability_acquire_spl` formerly loaded and parsed `config/critical_mode.sdn` once per source file, including the common disabled case that emits no finding. The command-owned `Linter` now lazily resolves only the effective dynamic-acquire mode on first use and reuses that scalar for the batch. This removes file-count-multiplied filesystem probes, source allocation, line splitting, and configuration-object allocation. The cache is scoped to one lint command, so it cannot become stale across long-lived daemon requests.
+## 2026-08-22 implementation follow-up: bounded manifest discovery cache
+
+Per-file lint previously walked up to ten ancestors to discover `simple.sdn`, then `lint_source` repeated discovery while resolving file attributes. The command-owned `Linter` now caches directory-to-manifest outcomes, including misses, checks cached ancestors during traversal, and caps retained directory entries at 4096. A prepared-path marker tells `lint_source` that manifest resolution is already complete, so it only clones base policy and applies file attributes. This removes the second walk entirely and shares common-ancestor results across sibling directories while bounding batch memory.
+## 2026-08-22 implementation follow-up: bounded parsed-policy cache
+
+The first command-session stage cached only the most recently parsed `simple.sdn`; alternating files from multiple projects could still reparse the same manifests repeatedly. The `Linter` now indexes up to 256 unique manifest paths into flat `LintConfig` storage. Hits clone the stored configuration before applying CLI or file-local overrides. The flat index avoids struct-valued dictionary retrieval hazards; after saturation, new manifests are parsed without retention, preserving correctness with bounded memory.
+## 2026-08-22 implementation follow-up: shared manifest-free defaults
+
+Sources without a discovered `simple.sdn` still constructed `LintConfig.new()` per file, rebuilding the complete effective-default dictionary even though defaults are immutable. `Linter.new` now creates one manifest-free base policy for the command. Each file receives `child()`, which allocates only its mutable overrides while sharing the immutable defaults. Direct caller configuration remains separate, and profile changes replace the child's defaults rather than mutating the cached base.
+## 2026-08-22 implementation follow-up: storage-layout advisory indexing
+
+The active storage-layout advisory deduplicated field IDs by scanning a growing array and deterministically ordered textual identity rows with a handwritten selection sort. Both were quadratic in typed access facts, in addition to the separate semantic overlap check. Field membership is now dictionary-indexed with an explicit count, eliminating the ID array and its repeated scans; identity rows use the standard deterministic sort, reducing ordering from `O(F²)` comparisons to the library sort complexity. The semantic overlap pair analysis remains unchanged and fail-closed pending a region-grouped interval-sweep design.
+## 2026-08-22 follow-up: incomplete string-builder rewrite removal
+
+String-builder optimization is structurally `Skeleton` and canonical dispatch is an identity, but its class retained an unreachable transform. The body allocated only a numeric local ID and replaced concatenation with a `push` call; it never declared or initialized the parts collection and never emitted the final join/result assignment promised by its comments. The private candidate/rewrite machinery and unused loop detector state were removed while factory, statistics, class, and identity entrypoints remain. This prevents mechanical activation of malformed MIR and removes dead parse/compile and pass-construction memory.
+## 2026-08-22 follow-up: strength-reduction bypass closure
+
+Strength reduction is structurally `Disabled` and canonical dispatch returns the input, but its exported class and `reduce_block` method still allowed direct execution of dormant rewrites. Those rewrites included signed division/remainder by powers of two and fixed synthetic local IDs without enforcing the provider's non-negative/unsigned and width facts at each operation. The class is now a compatibility skeleton: function and block entrypoints are identities, provider proof metadata and zero statistics remain, and all rewrite helpers/local allocation are removed. Legacy tests now prove fail-closed behavior rather than bypassing dispatch to exercise unsafe transformations.
+## 2026-08-22 follow-up: GVN block-order bypass removal
+
+GVN is structurally `Skeleton` and its canonical wrapper is an identity, but the exported class still executed a dormant implementation directly. It chose expression leaders while iterating MIR storage order—explicitly described as an approximation of dominator order—and reused field loads without memory-version/alias invalidation. The value-number tables, text-signature allocation, block/instruction rewrites, and mask-identity side transform were removed. Class/factory/statistics compatibility remains identity, preventing non-dominating reuse and eliminating dead compiler allocation/hash work.
+## 2026-08-22 follow-up: bounds-check removal bypass closure
+
+Bounds-check elimination is structurally `Disabled`, but its exported class still removed checks when called directly. It globally collected local loop-shape records, converted them to textual keys, and pre-seeded every block’s seen-check set, so a proof was not scoped to a dominated loop region. Same-block deduplication also assumed stable operand versions. All recognition, textual key allocation, proof seeding, and removal bodies are gone. Public proof record types, counters, dependencies, factory, and identity block/function entrypoints remain compatible.
+## 2026-08-22 follow-up: general loop-transform bypass closure
+
+LICM and loop unrolling are structurally `Disabled`, yet their exported class methods still rewrote MIR directly, and `LoopOptimization.run_on_function` chained those methods without consulting canonical status. LICM synthesized a new block and redirected predecessors without complete preheader/dominance/effect/speculatability/zero-trip proof; unrolling duplicated instructions without induction substitution or complete control/effect handling. All rewrite bodies and loop-detector allocation were removed. Compatibility classes, counters, thresholds, factories, dependencies, and identity methods remain.
+## 2026-08-22 follow-up: generator transform quarantine and analysis cost
+
+Generator state-machine optimization is structurally `Skeleton`, but its exported class directly built a new signature, locals, dispatcher, state blocks, loads/stores, and returns. No other pure-Simple lowering path consumed this optimizer class, and the runtime still records pending generator support. The transform and private segment builder were removed; both class transform entrypoints are identities. Exported yield discovery remains analysis-only and now tracks definitions in one forward walk instead of rescanning the entire function for every yield. Conservative per-yield local snapshots remain `O(Y*L)` and cannot authorize frame layout.
+
+### Body-outlining quarantine result
+
+Body outlining is structurally `Skeleton`: canonical function dispatch returned the input and module dispatch iterated functions without processing them. The same file nevertheless retained directly callable cold-region grouping, live-variable collection, CFG extraction, exit remapping, synthetic function construction, and original-function rewriting. Its cold propagation could classify predecessors from successor coldness without dominance, frequency, or control-equivalence proof, while helper lookups repeatedly scanned blocks and locals and the rewrite cloned MIR arrays. The dormant rewrite and private helpers were removed. Exported compatibility classes, counters, factory, and function/module identity entrypoints remain. This closes the mechanical activation bypass and removes roughly 600 lines of dead compiler parsing, compilation, allocation, and instruction-cache footprint. Rehabilitation requires canonical CFG/loop facts, complete live-in/live-out and ownership analysis, verified symbol/ABI construction, unwind/debug equivalence, profitability evidence, and semantic differential witnesses.
+
+### Local-CSE quarantine result
+
+Local CSE is structurally `Skeleton`, and its canonical wrapper returned the input, but `CommonSubexprElimination.run_on_function` still rewrote MIR directly. The dormant implementation treated `Move` and `Copy` operands as interchangeable, treated `GetField` as pure, and invalidated its table only for direct `Store` and `Call`; `SetField`, globals, indirect/intrinsic calls, other effects, local redefinitions, traps, and ownership consumption were not modeled. It also formatted text keys on lookup and again on insertion, recreated dictionaries per block, and rebuilt every instruction/block/function array even without a match. Rewrite construction and leader-table mutation were removed while exported representation/table/class/factory/statistics compatibility remains fail-closed. This prevents direct unsafe reuse and removes dead compile-time hashing, allocation, cloning, and source footprint. Rehabilitation requires structural keys, exact Copy/Move semantics, definition kills, effect/trap facts, and MemorySSA-lite versions.
+
+The parallel scalar-pass review also found that copy propagation never constructs its copy map, omits most MIR operand families, and conflates moves with copies; constant folding can attach the RHS integer type to a folded boolean comparison and lacks explicit overflow/division/shift legality; DCE pays dense liveness plus per-block/local scans and still needs a complete trap/effect contract. These remain Skeleton work. Copy propagation should be the first activation candidate only after exhaustive local Copy-only rewriting and witnesses; constant folding follows after shared evaluator semantics and result typing; DCE follows sparse-liveness and opcode observability review.
+
+### Command-scoped lint policy result
+
+Repository lint already owns one `Linter`, source payload, manifest-discovery cache, and parsed-policy cache per command, but it still passed the complete normalized CLI array—including every positional target—to every file. Each file performed six flag membership scans, another full profile scan plus slice/parse, and a WM-lane scan. For N explicitly listed files the argument-policy component was `O(N^2)` text comparisons; directory lint remained linear but repeated invariant parsing per file. `LintCliPolicy` now parses flags and the optional profile once, before the file loop, and the policy-aware source entrypoint reuses that command snapshot. Standalone args-based wrappers remain compatible by constructing one policy for their single invocation. Manifest policy → CLI profile → file-header precedence, deprecated-alias warn-once behavior, fix modes, and warning/error semantics are preserved. Retained command memory is constant-size policy state rather than per-file argument-derived temporaries.
+
+### Copy-propagation quarantine result
+
+Copy propagation is structurally `Skeleton` and its canonical function wrapper returned the input, but five callable helpers retained a partial rewrite. The pass never populated its copy map, covered only a small subset of operand-bearing MIR, treated consuming `Move` like `Copy`, followed chains up to an arbitrary 1024 steps per use without compression or explicit cycle failure, and rebuilt argument, instruction, block, and terminator arrays. Those helpers were removed while exported `CopyChain`, `CopyPropagation`, factory, fields, zero statistics, and identity wrapper remain compatible. The former tests did not invoke production code: they simulated an unrelated copy-to-move algorithm and falsely documented it as active. They and the generated manual now assert quarantine instead. This removes dead chain traversal and MIR allocation work plus roughly 230 lines of compiler source. Rehabilitation begins with block-local Copy-only propagation, exhaustive opcode coverage, dominance/redefinition kills, cycle-safe near-linear roots, exact receipts, and differential tests; Move remains excluded until ownership/destruction semantics are proved.
+
+### Legacy optimization-engine function-state fix
+
+The separate compatibility `OptimizationEngine` retained `const_map`, `type_map`, `def_map`, `use_count`, and `expr_map` across `optimize_function` calls. MIR builders restart local numbering at zero for every function, so an engine reused across functions could read a stale constant or defining instruction under the same `LocalId` and incorrectly fold or simplify the later function. It also retained `MirInst` graphs and dictionary high-water storage for the engine lifetime; increasing/sparse IDs could grow this monotonically. Every function entry now replaces all five maps before even the `None_` early return, while cumulative optimization statistics and the configured level remain intact. A regression seeds all maps, calls the no-optimization path, proves every entry is gone, and proves statistics persist. This is an active correctness and retained-memory fix, not merely Skeleton cleanup.
+
+The parallel constant-fold review additionally found a semantic-layer `run_const_fold_pass` that allocates an evaluator, walks functions, discards every reconstructed body, and always returns the original module; the driver still invokes it. That no-op traversal is the next tooling/compiler hot-path removal. It is distinct from the canonical MIR constant-folding Skeleton and from semantic constant evaluation used by language features.
+
+### Semantic HIR constant-fold no-op removal
+
+The bootstrap HIR driver invoked `run_const_fold_pass` after method resolution. That pass allocated `ConstEvaluator`, iterated every function and selected statement/value expressions, constructed replacement statement/block arrays, incremented a fold count, but never wrote `updated_func` back to the module and always returned the original module. The driver import/call, semantic barrel export, and dead pass file were removed; resolved modules now enter validation directly. Repository search found no other users of the pass or its literal helpers. Separate `const_eval.spl` functionality remains available for language semantics, and the MIR constant-fold pass remains the canonical optimization owner in `Skeleton` status. Source contracts pin all three boundaries. This removes size-dependent compiler CPU and transient HIR/evaluator allocation without changing output semantics.
+
+### Compact lint source-location retention
+
+The combined text-lint/parsed-AST path retained the entire `content.split("\n")` array across parsing solely so parsed fallback diagnostics could later build function, collection-fix, and star-export line maps. It then held the line array and all three maps together through every AST diagnostic loop. For `.spl` sources, the text phase now builds the compact location maps while its canonical line view is already live, retains only those dictionaries plus resolved config/path, publishes validity after all maps, and releases all combined-view state immediately after the parsed append materializes config and the index. Non-Simple files do not build the handoff; defensive non-combined callers still split and index locally. Parse-failure and stale-revision paths pay the compact indexing scan before rejecting, trading bounded transient CPU for eliminating source-text retention across the parser. This removes source-sized line-text retention, avoids a second successful-path source scan, bounds retained material to diagnostic location keys, and shortens even that lifetime before AST result construction.
+
+### MIR constant-folding quarantine result
+
+Canonical MIR constant folding was correctly marked `Skeleton` and excluded from effective pipelines, but `ConstantFolding.run_on_function`, block/instruction/terminator methods, `ConstantEvaluator`, and `AlgebraicSimplifier` still transformed on direct calls. The evaluator erased integer widths and signedness into `i64`, used host arithmetic without explicit overflow, `MIN/-1`, division/remainder, or shift legality, and represented F32/F64 through `f64` without target rounding/NaN/signed-zero contracts. Comparison folds could attach the RHS integer type to a boolean result. Algebraic identities ignored type/trap differences, while every direct run rebuilt block/instruction/function arrays even unchanged. All callable surfaces now return their inputs or `nil`; compatibility classes, fields, factory, methods, and zero statistics remain. Misleading positive rewrite fixtures/manual were replaced with quarantine and requested-versus-effective pipeline contracts. This removes about 470 lines of dormant arithmetic/rewrite code and its direct-call allocation risk. Rehabilitation requires one shared typed evaluator, exact target/language semantics, no-change storage reuse, receipts, verification, idempotence, and differential execution.
+
+### In-place lint result compaction
+
+Each lint invocation accumulated diagnostics in `self.results`, then allocated and grew a second `filtered_results` array while both held the same file's retained messages, fixes, evidence, and uncertainty records. Filtering now uses stable indexed compaction directly on the request-owned field: `write <= read` guarantees no unread slot is overwritten, kept order is unchanged, severity changes still construct an isolated diagnostic/result, and tail entries are popped only after the original range is scanned. This removes the second result-array capacity and peak reference retention. It deliberately avoids aliasing the value-semantic array into a local mutable copy. Source contracts pin the indexed loop, direct field writes, tail truncation, and absence of the old buffer.
+
+### Dead-code-elimination quarantine result
+
+DCE was registered as a `Skeleton`, but `DeadCodeElimination.run_on_function`
+still provided a direct transformation bypass. That body built dense shared
+liveness, scanned block/local combinations, allocated live and keep tables plus
+rebuilt instruction arrays, and deleted instructions using an incomplete
+observability/trap contract. All transform surfaces are now identity and the
+Skeleton path performs none of that work. The mandatory decision/condition
+probe classifier remains analysis compatibility only; side-effect and intrinsic
+purity queries fail closed. Rehabilitation requires exhaustive opcode effects,
+traps, ownership/destruction, unwind, volatile/atomic/device and debug semantics,
+plus sparse/worklist liveness with explicit CPU and memory budgets.
+
+### Capability-scoped PerfFacts construction
+
+Four active compiler analyses requested full `perf_facts_build` despite never
+querying liveness: natural-loop detection, vectorization dependency analysis,
+storage-access analysis, and typed-storage-view production. Below the existing
+four-million-cell admission cap, each call could initialize DEF/USE and live-in/
+live-out matrices proportional to `blocks * locals` and run repeated whole-local
+liveness propagation. A new `perf_facts_build_without_liveness` projection keeps
+CFG, dominance and def-use behavior while omitting all four matrices and the
+worklist. The verifier name remains a compatibility alias. The next refinement
+is an integrity-checked fact request so loop detection can omit def-use and
+def-use-only consumers can omit dominance.
+
+### Linear diagnostic evidence rendering
+
+Human and JSON warning/error evidence used repeated immutable text append. For
+a rendered payload of `B` bytes, cumulative copied bytes could grow quadratically
+even though peak output is only `O(B)`. Both paths now collect complete logical
+lines/items and join once, preserving exact ordering and escaping. Focused
+contracts pin the human byte sequence and prohibit recurrence of append loops.
+
+### Accessor field-rewrite hot-path indexing
+
+The active `short_grammar_field_access` rule ignored the registry's canonical
+line/context view, split the source again in both its checker and accessor parser,
+allocated a redundant line-start array, called a linear same-suffix search for
+every dummy method, and then compared every class line with every surviving
+dummy. Accessor-heavy classes therefore approached `O(methods^2 + lines*methods)`
+plus two extra source-sized line views. The registry now passes canonical lines
+and byte offsets. Parsing accepts lines directly; each class indexes real fields
+and unambiguous dummy names once; each line extracts only actual accessor-shaped
+call names for dictionary lookup. The public source wrapper remains compatible
+and performs one split for standalone callers. Conflicting mappings fail closed.
+
+### Warning-path quadratic scan removals
+
+The active `primitive_api` rule asked `line_is_allowed` to walk backward through
+comments, blanks and annotations for every source line before checking whether
+the line was a public function. A comment-only file therefore performed
+`1 + ... + lines` suppression work while it could not emit a finding. Candidate
+classification now occurs first; byte offsets advance once on rejected lines,
+and suppression runs only for public-function candidates. Because declarations
+bound their preceding annotation runs, total work is linear in source lines.
+
+The `_spec.spl` minimal-docstring warning separately counted delimiters with
+`source.slice(cursor).find`, repeatedly allocating and searching the remaining
+suffix. It now uses absolute `index_of_from` cursor advancement, reducing worst-
+case `O(N^2)` copied/scanned bytes to `O(N)` time and `O(1)` auxiliary memory.
+Two byte-identical `check_silent_default_spl` method declarations were also
+removed so the warning has one implementation owner.
+
+### Dependency-closed PerfFacts requests
+
+The no-liveness projection still built CFG, reverse postorder, dominators and
+def-use for every consumer. Production needs are narrower: loop detection needs
+CFG plus dominance; storage-access analysis needs def-use only; vector dependency
+and typed-storage rewriting need CFG integrity plus def-use. `PerfFactRequest`
+now exposes those capabilities with
+closure rules (`dominators => cfg`, `liveness => cfg + def_use`) and diagnostics
+for implicit expansion. Loop detection no longer classifies instructions or
+allocates local buckets/def-use sites. Def-use clients no longer build edge maps,
+DFS/RPO state or iterative dominators. Legacy full/no-liveness/verifier builders
+retain compatibility. Unrequested families are empty and report incomplete, so
+missing work cannot accidentally authorize a transformation.
+
+Independent review caught two capability-integrity gaps before further work.
+Dominance now has an explicit `dominators_complete` bit and loop detection exits
+unless it is true. Vectorization and typed-storage rewriting use the CFG+def-use
+preset and reject duplicate/missing block identities before interpreting sites
+keyed by block ID. They still omit RPO/dominator and liveness work.
+
+### Wide-public export deduplication
+
+The canonical `wide_public` text rule retained every unique export name in an
+array and called a private linear `list_has` for each parsed name. A module with
+`E` distinct exports therefore performed `0 + ... + E-1` name comparisons.
+The rule now uses a dictionary-backed membership set and an explicit scalar
+count, avoiding unreliable dictionary-length behavior while reducing expected
+CPU to linear in parsed export names. Exact textual identity, case sensitivity,
+duplicate suppression, exclusions and diagnostic counts are unchanged; no name
+iteration order is observable.
+
+### Default diagnostic policy fast path
+
+The query/LSP emitter previously extracted every diagnostic code from serialized
+JSON before discovering that no severity override existed. Normal builds without
+an explicit lint profile therefore paid a full diagnostic-text scan and allocated
+a code substring per result. The emitter now consults an explicit override-entry
+count first. The config loader owns the dictionary and count together, resets both
+at request boundaries, and increments the count only when it inserts an Allow or
+Deny override. This avoids relying on native dictionary length behavior and makes
+the default path constant-time before its required emit/collect operation.
+
+### Linear PerfFacts predecessor construction
+
+Shared CFG construction previously read each predecessor array from a dictionary,
+appended to the local value, then wrote it back for every edge. Under Simple's COW
+value semantics, a join with indegree `D` could copy lists of sizes `0..D-1`, for
+`O(D²)` CPU and transient copied elements; a graph can reach `O(E²)` in the worst
+case. PerfFacts now assigns each successor ID one owned nested-array bucket,
+appends edges there in MIR storage/terminator order, publishes each completed
+list to the dictionary once, and releases builder-only indexes before later
+analyses. Construction is expected `O(E + T)` time and
+`O(E + T)` storage for `T` distinct targets. Duplicate edges, dangling targets,
+duplicate source identities, and predecessor ordering remain unchanged.
+
+### Linear short-lambda discovery
+
+The short-grammar EasyFix rule recursively searched for each backslash and then
+rescanned the entire preceding line twice to decide whether the candidate followed
+a comment or appeared inside a quoted string. A line of length `N` containing
+`K = O(N)` backslashes therefore took `O(N²)` character work and `O(K)` recursive
+stack depth. The rule now scans the line once, stops at the same first `#`, keeps
+the same simple quote-toggle state, and records only syntactically eligible
+backslash positions. Candidate parsing and replacement ordering are unchanged.
+Discovery is `O(N)` time with `O(K)` compact position storage and no recursive
+stack-growth hazard. Candidate-specific functional-update and short-grammar
+parsers initially retained their existing costs. Follow-up removed the largest
+remaining candidate multiplier: the first non-function-type `->` boundary is now
+classified once per line and compared with each lambda position in constant time,
+rather than rescanning from byte zero for every candidate. Individual candidate
+parsers retain their syntax-dependent costs, so this does not claim an
+end-to-end linear rewrite rule for every adversarial expression shape.
+
+### Fail-fast dense liveness storage
+
+PerfFacts formerly allocated both dense live-in/live-out matrices before checking
+whether CFG and def-use inputs were complete. It also retained dense per-block
+USE/DEF matrices after liveness had failed closed. Invalid MIR could therefore
+retain four `blocks * locals` boolean matrices despite authorizing no liveness
+query. The liveness builder now rejects incomplete inputs before allocating its
+two output matrices. Duplicate-local incompleteness prevents all four matrices;
+later CFG/instruction incompleteness allocates only the USE/DEF working pair and
+releases it before returning facts. Complete-input semantics and the four-million
+cell budget are unchanged.
+
+### Unchanged CLI diagnostic policy projection
+
+The active lint CLI applied policy by reconstructing every `LintRunResult` and
+`LintDiag`, even when the computed severity equaled the authored severity. That
+is the entire normal `deny_all = false` path, every already-Deny/Allow diagnostic,
+and unproven performance warnings that remain advisory under deny-all. The helper
+now computes the effective level once and returns the immutable input result when
+it is unchanged. Only a real Warn-to-Deny transition rebuilds the diagnostic.
+Traversal remains `O(D)`, but unchanged diagnostics avoid constructor dispatch,
+COW/reference traffic for message/fix/evidence/uncertainty payloads, and transient
+result objects. Formatting, ordering, counts, and JSON/text bytes are unchanged.
+
+### Linear natural-loop latch aggregation
+
+`LoopDetector.detect_loops` formerly stored a growing latch array in a dictionary.
+Every dominance-proven edge extracted that value, linearly scanned it for a
+duplicate source, appended, and wrote it back. A header with `L` latch edges paid
+`O(L²)` comparisons and, under COW value semantics, potentially `O(L²)` copied
+elements/transient allocation. Loop detection now assigns each first-seen header
+an owned latch bucket plus an indexed membership dictionary. Each backedge is
+admitted once in expected constant time and appended directly. Total aggregation
+is expected `O(E)`; header order and per-header latch order remain first CFG
+traversal order, and repeated edges from one source/header still coalesce.
+
+### Bounded fast path for applying source fixes
+
+The active `FixToolApplicator` selection-sorted every file's replacements in
+`O(R²)`, then rebuilt the complete source after each edit, copying roughly
+`O(R * S)` bytes for small edits. The compatibility-safe path now uses a typed,
+stable merge sort (`O(R log R)`) by descending start. Left-first equality retains
+discovery order within an equal-start group. It validates
+overlap exactly as before, and assembles untouched chunks plus replacement text
+with one final join (`O(S + output)` copied bytes). Equal-start edits therefore
+retain their historical insertion order without the former quadratic fallback.
+Negative, reversed, or originally out-of-range spans retain incremental legacy
+application because dynamic length checks are also observable. Missing-source and
+overlap errors are unchanged. Follow-up replaced per-file dictionary array
+copyback with stable integer bucket indexes and owned nested replacement arrays,
+making grouping expected `O(R)` while retaining dictionary key iteration and
+per-file discovery order. The ordering/assembly implementation now lives with
+`std.tooling.easy_fix.types.FixApplicator`: compiler `FixToolApplicator`
+delegates to it, and lint `--fix` calls the same exported primitives. This removes
+the remaining selection-sort/repeated-splice copies and prevents behavioral
+or performance drift among the three active entrypoints.
+
+### Diagnostic JSON escaping allocation audit
+
+The lint and compiler-diagnostic query paths each serialized every message with
+five chained whole-text replacements. For a message of length `M`, this remained
+`O(M)` but performed about five scans and could allocate/copy five complete
+intermediates per diagnostic. Both paths now delegate to one Pure Simple helper.
+It returns an unchanged value directly when no JSON escape is present; otherwise
+it performs one character scan, records unchanged spans and exact escape literals,
+then joins once. The accepted escape set remains exactly backslash, quote, LF, CR
+and TAB; other text, including Unicode, is unchanged.
+
+### ANSI-free diagnostic output allocation audit
+
+`query check` normalizes combined compiler stdout/stderr before deciding whether
+lint may run, and JSON/count paths normalize it again. `_strip_ansi` previously
+pushed every retained character into a text array and joined it even when the
+compiler emitted no ANSI escape—the normal machine-consumer case. This created
+`O(M)` tiny fragments plus a full output copy per normalization. A preliminary
+escape scan now returns the original text directly when ESC is absent, eliminating
+that common-case auxiliary allocation. ANSI-bearing input still uses the original
+state machine exactly: ESC begins suppression, lowercase `m` ends it, and an
+unterminated sequence drops the remaining suffix. Sharing the already-normalized
+combined output is now implemented at both active command boundaries. Single-file
+JSON and failing workspace text each combine and normalize stdout/stderr once,
+then pass the immutable cleaned text to lint policy and diagnostic parsing/counting.
+The text workspace count path checks the parser's exact line-admission predicate
+without allocating JSON objects solely to discard them. Raw text replay remains
+the original stdout followed by stderr.
+
+Workspace JSON extraction also formerly scanned the diagnostic array twice,
+allocated a one-byte substring per scanner iteration, copied and trimmed the
+entire array interior, and rebuilt the result array through assignment. The
+active extractor now scans the original wrapper once with byte-indexed string,
+escape, array-depth and object-depth state, appending only completed object
+slices. Its exact-key search also compares bytes directly, avoiding candidate
+substring allocation and mixed offsets when Unicode precedes the key. Missing
+outer closure still discards partial results; object ordering,
+duplicates, nested objects, quoted braces/brackets, exact compact key matching,
+and Unicode bytes remain unchanged. Compatibility finder/split helpers use the
+same byte comparisons and locally owned append behavior.
+
+### Workspace diagnostics repeated-startup audit
+
+The active workspace command loops over discovered files and launches one
+`simple check` child for each text result. JSON launches `simple run ... query
+check` per file, and that child launches `simple check` again: `N` files cost
+`2N` explicit per-file processes plus a redundant query-program/module startup
+and wrapper serialization/parsing. The LSP/MCP tool already documents nested-check
+deadlock risk and disables this path by default.
+
+A reviewed shortcut that moved lint parsing into the workspace parent was rejected.
+It could emit parser trace stdout into the public JSON envelope when
+`SIMPLE_TRACE_AST_RESET=1`, and restoring the four shared diagnostic globals did
+not restore private `_LINT_TIER_ACTIVE`. The safe replacement is therefore not
+naive process removal or parallelism. Introduce a serial in-process
+`WorkspaceDiagnosticSession` with structured, nonprinting results and an owner
+that can snapshot/restore the complete lint policy state. Freeze configuration
+once, create a fresh compile context per file, preserve discovery ordinals and
+standalone isolation, and move parser-owned globals into request/session state
+before bounded workers are enabled.
+
+The existing lint-owned structured collector was independently unsafe for nested
+use: it replaced the caller's collection buffer and forced collection mode off,
+while lint policy loading cleared severity overrides and private tier state. It
+now snapshots and restores collection mode, outer diagnostics, severity map/count,
+and `_LINT_TIER_ACTIVE`, returning inner records separately. On normal return,
+value/COW snapshots avoid explicit element-wise copies of the caller payload. Its
+scalar preserves legacy per-rule counting, whose suppression behavior is not
+uniform; emitted count is authoritatively `records.len()`. This advances the
+lint-state prerequisite, but failure cleanup and the parser trace/global-arena
+blocker remain, so workspace process removal stays disabled.
+The collector's full lint pipeline also now splits source lines once and passes
+that canonical array to file-attribute policy parsing. The former call order made
+`LintConfig.apply_file_attributes(source)` allocate a second source-sized line
+array before the lint pipeline allocated its own. Work remains linear, but one
+full split and its allocation volume/churn are removed. Peak RSS improvement
+requires measurement because the two arrays were not proven simultaneously live.
+
+### Silent frontend trace-output audit
+
+`parse_module_silent_checked` suppressed parser errors but inherited trace/profile
+knobs could still write parser-init, AST-reset, parser-warning, parser-type,
+per-token profile, debug-pass, statement-tag and expression-tag lines to stdout.
+Post-parse AST lint walks could emit some of the same instrumentation, so a
+parser-local flag was insufficient for machine JSON.
+
+A cycle-free frontend trace-policy owner now provides a nested scalar suppression
+scope. Silent parsing establishes it before preprocessing/parser initialization;
+the structured lint collector holds it across parsing and AST lint traversal.
+Affected trace predicates consult the scope before output and restore the caller's
+prior value on normal return. Cached-off token/tag paths avoid a new policy call;
+ordinary parsing retains its trace knobs and channels. The expression-call
+constructor caches its trace decision once, replacing six identical environment
+reads per allocation with one.
+
+This does not authorize in-process workspace compilation. Cleanup-safe unwinding
+and request-owned parser/AST arenas remain required. Always-on stale-index
+containment diagnostics remain active and update their sequence/deduplication
+state. Ordinary calls retain stdout; machine-output scopes route them to stderr
+so they cannot splice text into a JSON envelope.
+Timing and RSS effects remain measurement-required under the no-verify instruction.
+
+### Variable-reassignment analysis map audit
+
+The active SSA/JIT admission analysis represented counts, alias parents, borrowed
+roots and escaped roots as parallel arrays. Each instruction/operand linearly
+searched growing local sets; alias resolution repeated that search up to 64 times,
+and unique insertions copied growing arrays under current value semantics. For `I`
+visits and `L` locals this produced `O(I*L + L²)` work and quadratic cumulative
+copied-element traffic.
+
+The analyzer now uses local `Dict<i64,i64>` count/alias maps and
+`Dict<i64,bool>` sets. Membership is always `contains_key` followed by a typed
+bracket read; local ID 0 never passes through optional truthiness. Alias walking
+retains its exact 64-transition bound and no path compression. Instruction order
+is unchanged: check the destination against its old root, count the definition,
+capture Ref borrows, capture escapes using old aliases, then install/reset the
+new alias. Final count/escape aggregation is commutative, so dictionary key order
+cannot affect public booleans, counts, reasons or fixed JIT fact order. Expected
+runtime is `O(I*64 + L)` with `O(L)` retained state.
+
+### Bare-import file reconstruction audit
+
+The standalone Pure Simple bare-import fixer already scanned each line once, but
+then reconstructed every changed file by appending `"\n" + line` to an immutable
+growing prefix. A file with `S` output bytes across `L` lines could copy
+`O(S*L)` bytes and reaches quadratic behavior for similar-length lines. The fixer
+now joins the completed line array once, giving `O(S)` output assembly. Because
+the same `split(content, "\n")` result is joined with the same delimiter, empty
+interior lines and the trailing empty item that represents a final newline remain
+unchanged. Atomic-write failure and unchanged/written status values are untouched.
+
+### MCP diagnostic wrapper allocation audit
+
+Both query-check implementations independently joined every serialized diagnostic
+into a full array string, concatenated that payload into another full
+`structuredContent` string, then joined a final envelope. Total work remained
+linear in diagnostic bytes `S`, but several overlapping `O(S)` intermediates
+increased copied bytes and peak RSS for large warning/error sets.
+
+The cycle-free `query_rich_common` owner now assembles one fragment list: fixed
+envelope literals, one cached count string, each existing diagnostic record with
+comma separators, and the suffix. One final join creates the only full wrapper
+output. Diagnostics remain embedded verbatim and in input order; empty, single and
+multiple arrays retain the exact prior MCP envelope. The active rich-query path
+and its older query-check predecessor both delegate to this owner, preventing
+serialization drift.
+
+### Short-grammar identifier reconstruction audit
+
+Compiler and stdlib short-grammar implementations contained four equivalent
+identifier rewriters. Each appended one character or replacement to an immutable
+growing result, causing `O(E²)` cumulative copied bytes for an expression of length
+`E`; the two contains probes built and discarded a complete rewritten expression.
+
+The cycle-free `std.tooling.easy_fix.rules_helpers` owner now provides a direct
+whole-token predicate and span-based plain/interpolation rewriters. Unchanged input
+returns directly. Changed input records only maximal unchanged spans and replacement
+fragments, then joins once, reducing reconstruction to linear output assembly with
+fragment count proportional to matches. All four former implementations are thin
+delegates. Semantics remain textual and ASCII-boundary based: strings/comments are
+not parsed, Unicode neighbors remain nonidentifier characters, interpolation uses
+one boolean brace state, doubled braces never change it, and tuple parameters are
+still rewritten sequentially. The legacy `_` probe remains false when replacing
+`_` by `_` would leave the expression unchanged.
+
+### SPIPE005 assertion-helper graph audit
+
+Assertion-helper discovery previously encoded call sets as growing delimiter
+strings, split them repeatedly, and rescanned every helper until a fixed point.
+A reverse-ordered chain could require `F` whole-graph rounds, with additional
+immutable character/name copying and split allocation.
+
+The Pure Simple implementation now extracts each bare-call token as one span,
+deduplicates with dictionaries, builds indexed `callee -> callers` buckets once,
+and propagates direct assertions with an append-only queue. Expected work is
+`O(source bytes + F + E)` and graph storage is `O(F + E)`. The rewrite preserves
+method-call exclusion, forward references, duplicate-definition name union,
+seedless-cycle rejection, and seeded-cycle propagation.
+
+### Query diagnostic error-code classifier audit
+
+The query CLI carried two near-identical 220-line ordered classifiers in
+`query_check` and `query_diagnostics`. Both were compiled into the rich query
+surface even though the active path uses the latter; their sole semantic delta
+was the legacy `FFI error` versus active `SFFI error` phrase. This duplicated
+parser/compiler work, generated code, instruction-cache footprint, and
+maintenance state.
+
+One cycle-free `query_error_codes` owner now retains the ordered classifier and
+accepts the codegen phrase explicitly. Both entry modules keep thin wrappers, so
+their exact phrase behavior, explicit-code handling, first-match precedence, and
+fallback codes remain unchanged. Replacing 473 entry-local lines with one
+242-line owner and four wrapper lines yields a net 227-line reduction. The
+classifier still performed up to 136 substring scans over 117 probes for
+late/no-match diagnostics; the following runtime tranche closes that defect.
+
+### Query diagnostic multi-pattern runtime audit
+
+The remaining classifier performed 136 case-sensitive `contains` probes over
+116 unique fixed ASCII literals for every uncoded diagnostic. A late or unknown
+message therefore rescanned the full payload roughly 136 times.
+
+The classifier now scans message bytes once through a precomputed sparse
+Aho-Corasick automaton. Its 1,160 states and 1,159 edges occupy approximately
+12,567 raw table bytes; root dispatch is direct, non-root degree is bounded, and
+failure traversal is amortized linear. Two local `u64` masks retain all fixed
+hits without a heap bitset. The existing 80 predicates still execute in source
+priority order, so message occurrence order, overlaps, negative guards, and
+legacy shadowing remain unchanged. Only the caller-selected dynamic `FFI`/`SFFI`
+phrase retains one `contains` call. Runtime matching becomes `O(message bytes +
+matches + rules)` with no per-diagnostic registry or message-copy allocation.
+
+The committed numeric table adds about 49.6 KB of source text for 12.6 KB of
+packed runtime data. A deterministic Pure Simple regeneration/freshness command
+remains required before pattern ownership can be considered self-maintaining.
+
+### Query matcher generator foundation
+
+The build path now has one append-only Pure Simple pattern manifest and a
+deterministic sparse Aho-Corasick model builder. It validates contiguous IDs,
+ASCII/nonempty literals, two-mask capacity, and injected state/edge limits
+before producing output. Trie storage is flat: one scalar transition dictionary
+plus parallel state arrays avoids nested collection copyback. CSR materialization
+walks states and all 128 ASCII bytes in numeric order, so dictionary iteration
+cannot affect output. Construction is `O(pattern bytes + 128*S + S*U)` time and
+`O(S+E+U)` storage, where `U` is the bounded number of distinct output masks.
+Deterministic fragment rendering and a Pure Simple CLI now complete table
+ownership. `check` renders in memory and exact-compares without writing;
+`generate` skips byte-identical output and otherwise performs one atomic write.
+Ordered classifier rules remain a separate priority-manifest contract, so table
+freshness must not be presented as proof of predicate-priority freshness.
+
+### Ordered classifier manifest audit
+
+The classifier has exactly 80 first-match predicates across 15 sections. Its
+Boolean grammar includes single hits, conjunction, disjunction, two
+`(A or B) and C` rules, one explicit negative guard, and one caller-selected
+dynamic phrase at zero-based priority 49. Order is observable: generic
+`dimension mismatch` intentionally shadows later specialized dimension rules.
+
+A build-only postfix predicate manifest now owns this order without creating a
+runtime rule registry. Validation requires contiguous priorities, valid pattern
+IDs, a well-formed one-value postfix stack, valid E-codes, and exactly one
+standalone dynamic phrase at priority 49. The renderer reconstructs the explicit
+early-return cascade and fallback mapping with precedence-aware parentheses.
+The runtime classifier therefore keeps its scalar hit record and straight-line
+dispatch; manifest arrays and token lists exist only during generation.
+
+### Direct scalar rule lowering
+
+The first generated rule form still called `query_error_pattern_hit` about 135
+times on a late/no-match diagnostic. Each call repeated ID range selection,
+low/high word selection, a variable shift, and a branch unless the backend
+inlined and folded it. Generated `Hit(id)` leaves now lower directly to a fully
+parenthesized constant-mask test on `pattern_hits.lo` or `.hi`. IDs 0–63 map to
+the low word and 64–115 restart at high-word bit zero; literals are fixed-width
+lowercase `u64` hex. This retains short-circuit evaluation and first-match
+returns while removing helper dispatch and runtime shifts. It adds no locals,
+arrays, registry, callbacks, or allocation. Timing evidence remains unavailable
+under the requested no-verify policy, so only the static operation reduction is
+claimed.
+
+### Parse-scope compiler-trace snapshot
+
+Static hot-path review found a simple expression statement could consult
+`SIMPLE_COMPILER_TRACE` about 18 times: the precedence chain alone issued about
+15 environment reads per `parse_expr`, with additional primary and statement
+checks. The trace-disabled path therefore paid repeated foreign environment
+dispatch and transient text handling even though no trace payload was emitted.
+
+The cycle-free frontend trace-policy owner now samples the flag once at each
+outer parse boundary. Nested parses inherit the immutable outer snapshot and
+restore it LIFO; the next top-level parse resamples, while direct callers outside
+a parse scope retain dynamic environment behavior. Five parser/type predicates
+use the shared cached decision. Work remains O(tokens), but environment reads
+fall from approximately `15E + P + S` to one per top-level parse, with two i64
+state cells and no per-probe allocation.
+
+No timing, RSS, allocation, optimizer, or executable-test evidence is claimed
+because verification was explicitly disabled for this tranche.
+
+The same scoped accessor now covers one complete FlatAstBridge assembly. Seven
+module-assembly gates and seven node-conversion gates previously performed a
+fresh environment/text lookup each time, including probes around declaration
+conversion. `flat_ast_to_module` now enters once, restores on its early-empty and
+normal exits, and both split modules consume the cached flag. The mutable
+`SIMPLE_BOOTSTRAP` build policy deliberately remains dynamic. Thus a bridge
+transaction performs one compiler-trace environment lookup instead of up to 14,
+without adding another cache or changing bootstrap-mode semantics.
+
+The driver-facing `parse_and_build_module_scoped` owns an outer token across
+parsing, interpolation/desugaring, and assembly, so its recursive parser probes
+also reuse that same single snapshot. Cache-hit reconstruction enters at
+`flat_ast_to_module` and receives the equivalent one-lookup bridge scope.
+
+### Shared parser profiling policy
+
+Declaration profiling independently read `SIMPLE_PARSE_PROFILE` once for every
+parsed method even though token profiling already owned a cached decision.
+With `M` methods, the default-off path performed `M` foreign environment/key
+conversions and temporary text work. Parser initialization now invalidates the
+shared tri-state once per parse; the first token/profile query samples it, and
+declaration timing consumes the same suppression-aware result. Environment
+traffic falls from `O(M)` to `O(1)` per parse. Disabled clocks/output remain
+zero; enabled behavior remains four clocks and three `PARSEPROF` interval lines
+per method. Same-process changes are observed at the next parse boundary.
+
+### MIR lowering trace snapshot
+
+General MIR lowering read three environment flags per predicate, while the
+builder union also read `SIMPLE_MIRB_TRACE`. Structural prescans repeated the
+general predicate, `emit_call_value` read MIRB for every non-unit call, and
+three local caches retained their first process value indefinitely.
+
+`mir_data.spl` now owns `[depth, general, MIRB, generation]`. Outermost
+`lower_module` samples four aliases once; nested lowering inherits them; both
+bootstrap and normal exits restore depth. General and MIRB-only semantics remain
+distinct, and local caches refresh once per generation. Repeated environment
+and transient-text work becomes four reads per outer module; storage is
+constant and disabled formatting stays guarded. No runtime measurements are
+claimed under the no-verify constraint.
+
+### LLVM adapter operation-local policy
+
+The direct LLVM adapter queried `SIMPLE_COMPILER_TRACE` eight times on a
+successful compile and twice on the compiled-module path. It also read and
+parsed `SIMPLE_NATIVE_BUILD_TARGET` independently for target configuration and
+translator construction. Each public operation now captures both booleans once
+and feeds private policy-taking helpers. The public IR translation signature
+remains unchanged. Trace text/order and Result behavior are unchanged. Direct
+trace lookups fall 8-to-1, compiled lookups 2-to-1, and target env/parse work
+2-to-1 per operation. Trace-only function count now uses dictionary length
+rather than materializing `keys()`. No runtime measurements are claimed.
+
+### VHDL trace-loop hoisting
+
+VHDL driver tracing read `SIMPLE_COMPILER_TRACE` once per metadata row plus
+three phase sites. Catalog tracing read it for metadata matches, every rebased
+function, and every candidate function. With `N` metadata rows, `F` functions,
+and `M` matches, one compile performed roughly `N + 2F + M + 3` environment and
+temporary-text operations. Each existing operation now snapshots the flag once
+after its initial validation, preserving no-read early-error paths and stderr
+messages. Combined lookup work is two per compile. The catalog empty check also
+uses `modules.len()` rather than materializing `modules.keys()`. Generated VHDL,
+catalog data, public APIs, and error behavior are unchanged; no runtime evidence
+is claimed.
+
+### VHDL call/port-map target index
+
+Each reachable string call or port map previously materialized every function
+key, selection-sorted `F` symbols, scanned them, and rebuilt `module::name` for
+every candidate. For `E` edges this cost `E*F*(F-1)/2` comparisons plus `E*F`
+scans and qualified texts: `O(E*F^2)` time with heavy allocator churn.
+
+Catalog construction now records exact raw qualified and bare keys once for all
+functions and the hardware-only subset. Parallel symbol/count dictionaries
+preserve duplicate qualified identities, global bare ambiguity, hardware
+filtering, qualified-missing errors, and bare-missing `nil`. Stored symbols are
+read only when count is one, so encounter order cannot affect output. Expected
+total work becomes `O(F+E)` with `O(F)` operation-local index memory. No name
+sanitization, aliasing, local preference, API, or diagnostic text changed.
+
+### VHDL metadata sidecar index
+
+Hardware metadata matching scanned all `N` sidecar rows for every one of `F`
+functions and repeatedly normalized `std.`/`lib.` module spellings, giving
+`Theta(F*N)` comparisons and worst-case `Theta(F*N)` substring allocations.
+Despite rank variables, any second eligible exact or alias row was ambiguous;
+exact never overrode alias.
+
+The catalog now builds two collision-framed indexes once: exact raw
+`(module,function)` and normalized alias keys only for row module spellings not
+loaded in the design. Values are row indices, not heavyweight row copies; `-2`
+retains duplicate rows as ambiguity evidence. Each function performs two
+lookups. Exact+alias, duplicate exact, and duplicate alias remain ambiguous
+before validation; a unique row alone is validated/recovered. Expected work is
+`O(N+F)` and memory `O(N)` keys/indices, with alias normalization once per row
+and once per module rather than per function-row pair.
+
+### Leading explicit-code allocation audit
+
+The leading `Edddd` probe previously allocated a one-character prefix, a
+five-character candidate, then another prefix and four digit substrings inside
+validation—up to seven temporary texts on the ordinary rejection path. The
+classifier now rejects non-`E` messages without allocation, then materializes
+one bounded five-byte candidate and validates its bytes in place. This avoids
+repeated `byte_at` calls on a potentially raw long C-string, where each access
+may otherwise repeat `strlen`. It deliberately accepts longer suffixes, keeps
+uppercase ASCII `E` and ASCII digits only, and leaves the higher-priority
+bracketed `[E...]` extraction untouched. Valid prefixes drop from seven slices
+to one; non-`E` prefixes drop from one slice to zero; malformed leading-`E`
+prefixes retain one bounded slice to cap scan cost.
+
+### Shared query function-outline index
+
+Inlay hints previously split the same source three times and maintained two
+parallel-array function indexes. Each call-site lookup then scanned all known
+functions, making the active path `O(source + call_sites * functions)` and
+retaining duplicate line/name/return/parameter arrays. A second 304-line inlay
+implementation also duplicated the scanner and could drift from production.
+
+The canonical path now consumes its existing line array once, builds return and
+parameter dictionaries in one outline pass, and performs expected `O(1)`
+lookups. It preserves the legacy asymmetric overload rules: parameter names
+come from the first declaration even when empty, while return types come from
+the first nonempty annotation. The old module is a compatibility re-export of
+the production owner. Parameter text is still split at each matched call site;
+interning parsed parameter vectors is a later, profile-gated optimization.
+Execution timing/RSS evidence is intentionally absent under the requested
+no-verify policy; the claim is limited to static complexity and allocation
+removal.
+
+### Formatter lexical-fingerprint assembly
+
+The formatter's semantics guard fingerprints both original and rewritten
+source. Both its token loop and skipped-comment helper previously appended each
+record to an immutable accumulated string. For a fingerprint of `F` bytes this
+copies the growing prefix repeatedly: worst-case `O(F^2)` time and cumulative
+allocation traffic, twice per formatting request, while live output remains
+`O(F)`.
+
+Both builders now retain exact framed fragments and join once. Token order,
+kind/text/length fields, literal source slices, comment indentation, raw skipped
+payload, brace-sensitive whitespace, lexer errors, and the token bound are
+unchanged. The runtime still necessarily retains each complete original and
+formatted fingerprint for comparison; streaming equality is a possible later
+design only if mismatch/error behavior can remain identical. No timing/RSS
+claim is made because execution remains excluded by the no-verify instruction.
+
+### CLOS001 shared scope indexing
+
+The production CLOS001 text heuristic rebuilt a declaration-count dictionary by
+walking backward from every nested `fn`/`me`. Many sibling closures in one long
+outer body therefore repeated the same prefix work and transient map allocation.
+The rule now resolves its exact legacy stop boundary with a Fenwick prefix
+maximum over indentation and advances one declaration-count state per identical
+`(boundary, closure-indent)` group. Sibling declaration work becomes linear in
+the shared outer region plus expected constant-time target lookup.
+
+This deliberately retains unusual observable behavior: stale same-indent
+declarations count, duplicate declarations duplicate warnings, dedented comments
+end a body, nested bodies remain visible to containing closures, and only the
+historical assignment spellings match. Persistent group facts trade transient
+map rebuilding for request-local indexed storage. Deeply nested overlapping
+bodies can still multiply body scans; the exact follow-up is an offline
+assignment-interval join with source-order emission. No runtime measurement is
+claimed under the no-verify policy.
+
+### Structural-union canonicalization correctness and cost
+
+Union normalization used a linear duplicate scan plus insertion rebuilding of
+parallel key/member arrays, giving quadratic comparisons and cumulative array
+copying. Synthesis normalized the same members three times; module registration
+made that four, narrowing made it two, and canonical/variant names used growing
+immutable text accumulators.
+
+More seriously, the former key dropped named generic arguments, type-parameter
+bounds, array size, reference/pointer mutability, and every field of function,
+projection, inference, tensor, and layer types; several distinct constructors
+collapsed to `other`. That could silently deduplicate distinct members and
+attach the wrong payload/discriminant. The replacement is exhaustive and
+aligned with `hir_types_equal`: spans, function effects, and inference levels
+remain deliberately non-identity, while every actual structural identity field
+is length-framed and identifier-safe.
+
+`UnionNormalized` now owns members, keys, and name from one flatten/key/dedup/
+stable-merge operation. Expected dictionary deduplication plus deterministic
+bottom-up merge ordering replaces quadratic insertion work; synthesis,
+registration, and narrowing reuse one result. Primitive names remain byte
+compatible. Synthetic SymbolId collision handling and source-level named-type
+narrowing remain separately tracked. Execution evidence is unavailable under
+the no-verify instruction.
+
+### Structural-union symbol ownership and narrowing lookup
+
+The preferred FNV-derived union ID occupies only 100 million values. Synthesis
+and narrowing formerly recomputed it independently, so a collision could alias
+an enum or variant and overwrite `module.enums`. `SymbolTable` now owns paired
+canonical-name-to-ID and ID-to-owner maps for the module lifetime. Both phases
+reserve through that owner, recompute the old preferred ID from canonical
+identity instead of trusting an encounter-dependent hint, probe a bounded 4096
+slots on collision, and fall back to the ordinary unique allocator
+rather than aliasing or scanning the whole reserved range. Registry state is
+reset with the module and encoded in HIR cache transport.
+
+This is collision-safe, not encounter-order independent for a genuine FNV
+collision: whichever identity is registered first retains the shared starting
+slot. Fully reproducible IDs across reversed traversal need a sorted
+preregistration phase before either identity is embedded in HIR.
+
+### Indexed accessor and inherited-name lint facts
+
+The always-on ACC001/NAME001 path previously replaced a class record after
+every parsed method, scanned every class for each inheritance edge twice per
+child, deduplicated inherited names and suffixes through growing arrays, and
+rescanned every method for every accessor suffix. The indexed path finalizes
+each locally owned class once, builds a first-definition class-name dictionary,
+materializes ordered inheritance plus membership once per class, and groups
+accessors with flat head/tail/next arrays. Exact warning grouping, ordering,
+duplicate methods, first duplicate-class resolution, the 20-edge cap, and the
+existing nested textual-class behavior are preserved. Avoidable work falls
+from quadratic class/suffix scans to expected linear indexing; NAME001's
+ordered bounded-edit-distance candidate comparisons remain separately tracked.
+
+The remaining comparison kernel now uses a fixed edit band because NAME001's
+maximum accepted distance is one or two. Three logical rows rotate over one
+flat `3 * (2L + 1)` integer buffer, and byte equality uses `byte_at` rather than
+allocating one-byte substrings. This changes each comparison from quadratic
+matrix work and cumulative row allocation to `O(K * L)` work and `O(L)` matrix
+storage while retaining ordered candidate selection and adjacent transposition.
+
+Narrowing now builds one key-to-variant dictionary instead of rescanning and
+resanitizing all union keys for every arm. Bare named pattern types resolve via
+the already-registered SymbolId, allowing their complete canonical key to match
+named members. Generic and qualified pattern syntax is still spelling-only at
+the parser/HIR boundary and remains tracked. Review also corrected nested union
+keys to preserve ordered `hir_types_equal` identity inside other constructors;
+only top-level union normalization is set-like. No execution evidence is
+claimed.
+
+### VHDL deterministic catalog ordering
+
+The catalog contained 29 static calls to local text/SymbolId ordering helpers.
+Both used selection-style nested scans, requiring `n(n-1)/2` comparisons and
+exposing array value/COW copies while ordering dictionary keys. Catalog assembly
+also sorted the same module-owned function, static, constant, and type keys
+twice.
+
+The replacement is a stable bottom-up merge with raw text ordering and numeric
+`SymbolId.id` ordering unchanged. It uses `O(n log n)` comparisons and writes,
+bounded `O(n)` scratch, selects the left run on equality, copies odd trailing
+runs, and guards width growth. Module names and each module-owned key set are
+sorted once and reused. Existing reverse-insertion catalog coverage remains the
+behavioral witness; execution timing, allocation, and RSS evidence is not
+claimed under the no-verify instruction.
+
+### Storage-layout overlap proof foundation
+
+`storage_layout_access_advisory_v1` retained an all-pairs typed-fact overlap
+scan after field membership and identity ordering had already been linearized.
+The scan compared unrelated regions, non-field facts, and same-field facts,
+giving `Theta(T^2)` predicate work for `T` typed storage facts.
+
+The replacement materializes compact numeric intervals only while an advisory
+is otherwise viable, stable-merge sorts them by region/start/end/field, and uses
+the two greatest endpoints owned by distinct fields. For the
+well-formed half-open ranges emitted by storage analysis, detection is
+`O(T log T)` time and `O(T)` scratch. A region-local exact fallback preserves
+the historical predicate for externally constructed malformed known ranges;
+identity rows retain their byte-for-byte lexical ordering. Direct summary
+fixtures cover adjacency, region separation, repeated fields, nesting,
+equal starts, unknown ranges, incomplete summaries, and input-order identity.
+
+Repository references currently show this advisory is not yet called by a
+production compiler pipeline; the change hardens the planned activation path
+and does not claim present build-time, RSS, or allocation improvement.
+
+### Command-scoped lint manifest discovery
+
+The current command path already resolves each file's target manifest once,
+caches parsed manifests, applies file attributes from the shared line view, and
+reuses the resolved config for AST append. The remaining cold-path duplication
+was smaller: `Linter.new()` independently searched for and could parse a cwd
+manifest before the target-scoped command immediately replaced it.
+
+Command-owned linters now opt out of cwd discovery while the default constructor
+retains direct-library behavior. This removes at most one independent ten-level
+filesystem ascent and, when cwd has a manifest, one redundant read, split, and
+parse per target-scoped command. Manifest precedence, parse errors, CLI profile, file
+attributes, and command-scoped freshness remain unchanged. No executed timing,
+filesystem-call, allocation, or RSS evidence is claimed.
+
+Ancestor path compression was reviewed but rejected from this tranche: without
+cached manifest-distance metadata, two valid cache hops can bypass the original
+ten-directory search limit. A future implementation must retain that distance
+and enforce the remaining budget at every cache hit.
+
+### Shared raw-SFFI lexical snapshot
+
+The production lint path already owns one canonical `content.split("\n")`
+array, but SFFI009 and SFFI010 each called `iter_code_lines(source)`. Raw-SFFI
+analysis therefore added two more full splits, two triple-quote scans, two
+sequential `CodeLine` allocation cycles, and duplicate trim storage.
+
+One request-local reference-backed snapshot now owns the identical
+docstring-filtered view. Call findings are produced and appended before the
+declaration kernel runs, preserving exact category order without retaining both
+finding arrays simultaneously. Compatibility string APIs build the same
+snapshot and run only their requested kernel. Snapshot helpers accept the class
+reference rather than copying `[CodeLine]` values. The pass also reuses stored
+trimmed text for extern-name extraction and computes body indentation once per
+nonblank in-body line.
+
+This removes one of two raw-SFFI source splits, one complete quote walk, one
+`CodeLine` allocation cycle, and duplicate trim/indent work from the normal
+lint path without depending on array-argument elision. Peak snapshot storage
+remains one `CodeLine` view. The remaining dominant kernel is body-lines times raw extern
+names with up to seven textual probes and temporary needle construction; a
+tokenized call-name set is the next bounded design. No timing, allocation, or
+RSS measurement is claimed under the no-verify instruction.
+
+### HWIR shape-validation membership indexes
+
+`HwModuleDef.shape_diagnostic()` used growing text arrays as sets for clock
+domains, case-folded declaration names, source-origin IDs, and driven results.
+The repeated `contains` scans made these validation kernels quadratic in their
+respective node counts and retained four growable arrays. They now use
+`{text: bool}` membership indexes while keeping traversal order, insertion
+points, case folding, and the first returned diagnostic unchanged. The same
+validated declaration pass now builds width/read/write indexes, replacing the
+remaining per-operation port/signal/constant scans. Shape validation is thus
+linear in declarations plus operation references under dictionary lookup,
+rather than multiplying operation references by declaration count.
+No timing, allocation, or RSS measurement is claimed under the no-verify
+instruction.
+
+### Generated HIR child traversal follow-up
+
+The typed `PerfFacts` collector previously was iterative only above its
+generated child API. Each popped base node constructed a fresh `[HirNode]`,
+while transparent wrapper helpers recursively constructed and concatenated
+additional arrays. The generator now emits a `HirChildFrame` work union and
+context-neutral sink in layer 20, covering all four base carriers and all 19
+reachable transparent wrappers. Reverse field/list/pair expansion lets the
+layer-35 collector attach loop depth and retain forward preorder under LIFO
+execution. Wrapper frames are expanded rather than counted. The old allocating
+API remains as a compatibility surface but is no longer used by `PerfFacts`.
+
+Do not hand-specialize the collector or pass its array into generated code:
+Simple value/COW semantics make by-value mutation unsafe, and a base-node-only
+callback leaves recursive wrappers. Keep the allocating API as a compatibility
+adapter during migration. A focused fixture pins parent, receiver, and argument
+fact order. Static comparison found all 23 frame variants and expansion
+functions paired with no ordering omission. Execution evidence is unavailable:
+the deployed nominal release binary identified itself as the Rust bootstrap
+seed, so it was used only once to materialize deterministic generated source
+and was not accepted as verification evidence.
+
+The prerequisite freshness hardening is now implemented. The combined visitor
+gate regenerates both fold visitors and `hir_children.spl` into explicit temp
+destinations, compares all three declared artifacts, and mutates the child file
+in its red fixture. The dedicated HIR visitor gate also passes an explicit
+temporary fold-output root. This closes a side-effect hazard where the
+`visitors` command's omitted second output argument could write fold artifacts
+under the scanned source tree during a nominally read-only check.
+
+Follow-up repaired the schema generator's unconditional `kind` skip. Only the
+four base carriers now bypass structural kind traversal because they match
+their kind enum explicitly. The three reachable non-base wrappers—`DimExpr`,
+`Effect`, and `HirCompClause`—now delegate to their kind nodes in recursive
+visit, immediate-child enumeration, structural hash, and frame expansion.
+Comprehension `For` iterable and `If` condition operations are therefore visible
+to typed performance facts in declared clause order. Structural hashes for
+trees containing these wrappers intentionally change from incomplete hashes.
+Comprehension coverage remains marked incomplete until cardinality and callback
+execution-domain facts exist.
+
+### TYPE001/TYPE002 canonical line snapshot
+
+The main lint driver already owns one `content.split("\n")` view, but the
+nonexistent-type/range wrapper split the same source again for every Simple
+file. The production path now passes the canonical line array into a new
+line-based kernel. The content-based API remains a compatibility adapter, so
+standalone callers retain behavior while normal linting removes one full-file
+line array and its proportional text storage. Diagnostic ordering, physical
+line numbers, predicates, and levels are unchanged.
+
+### LEADOP001 canonical line snapshot
+
+The leading-operator rule also re-split every file even though its algorithm
+uses only line text, indentation, triple-quote state, and physical line number.
+Its production entrypoint now consumes the main lint driver's canonical line
+array. The source-taking public function remains a compatibility adapter and a
+focused parity fixture compares complete finding fields across both APIs while
+pinning docstring and deeper-continuation suppression. This removes another
+full-file line array from every normal lint request without retaining source
+storage beyond the synchronous call.
+
+The const-reference-default rule has the same lifecycle and is migrated in the
+same way. Its canonical-line entrypoint preserves vendored-source exclusion,
+function/body boundary detection, mutation ordering, and complete finding
+fields; the compatibility source API delegates through one split. Together,
+these changes remove two unconditional per-rule full-file arrays from normal
+linting.
+
+Bare-primitive and silent-default checks now use the same request-owned lines
+as well. Silent-default previously split twice—once for its first-30-line
+mission-critical marker scan and again for findings—so the lines API feeds both
+kernels. Compatibility wrappers retain their vendor fast-return before
+splitting. Complete-field parity fixtures preserve diagnostic order, physical
+lines, mission-critical codes, and the two rules' intentionally different
+vendor predicates. Normal linting now avoids four rule-local splits across
+LEADOP001, const-reference-default, bare-primitive, and silent-default; the
+silent-default migration removes a fifth scope-only split.
+
+### Phase-local lexical code snapshots
+
+Four later always-on rules independently rebuilt the same docstring-aware
+`CodeLine` projection: module-init literals, COW alias hot paths, unwrapped
+foreign resources, and raw SFFI. Their lexical state machine is identical, but
+retaining one projection across the intervening raw-RT, capability, and source
+shape checks would unnecessarily extend the lifetime of both raw and trimmed
+line text. The lint driver now creates two short-lived snapshots around the two
+adjacent consumer pairs and explicitly releases each after use. This reduces
+four projections to two without changing diagnostic ordering, physical line
+numbers, rule-specific exclusions, or the public source-taking APIs. The
+design optimizes allocation/copy behavior while bounding peak live storage;
+whole-request snapshot retention remains intentionally rejected.
+
+Coverage pins the legacy asymmetric docstring rule (opening line skipped,
+closing line included), raw/trimmed fields, 1-based physical lines, and explicit
+release. It was added but not executed under the user's no-verification
+instruction.
+
+### Dynamic capability canonical-line scan
+
+The always-on lint driver also passed full source to DCA001 after already
+splitting it. DCA001 then split the source once for the first-30-line
+`@init_phase` scope decision and again for its acquisition scan. Its production
+kernel now accepts the driver's canonical lines and feeds the same array to
+both phases, removing two proportional arrays and their text references from
+critical-mode linting. The source entrypoint and file-scope helper remain
+compatibility adapters. A complete-field/order parity fixture preserves mode,
+group matching, physical lines, messages, and notes; it was not executed under
+the user's no-verification instruction.
+
+### RISC-V RTL canonical source lines
+
+The generated-core debuggability lint needs full source for header substring
+queries and canonical lines for source-map and output-port scans. Previously
+those two scans each split the VHDL independently after the main lint driver
+had already built its line array. A new `source + lines` kernel shares the
+driver's array and preserves the source API as a one-split adapter. This removes
+two proportional VHDL line arrays on the production path while deliberately
+leaving the separate boot-products manifest split untouched—it is different
+input with a different lifetime. Complete warning payload/order parity is
+covered using a generated RV64 bundle, but not executed under the user's
+no-verification instruction.
+
+### Quarantined alias-unsafe bulk-copy elision
+
+The default-off C-backend bulk-copy hook was still activatable through
+`SIMPLE_MIR_BULK_OPS=1` and directly through its public adapters. Its matcher
+proved contiguous indices, temporary dead-out (H1), and eight-byte values (H2),
+but compared only source/destination LocalIds. Distinct locals do not prove
+disjoint storage. With overlapping aliases, a forward element loop can load a
+value written by the previous iteration; `memmove` instead preserves the
+original source bytes. The rewrite could therefore change program results.
+
+The direct function adapter and module hook are now identities, and the legacy
+environment flag always reports disabled. This also removes the enabled pass's
+compile-time hot path: H2 scanned all L locals for every matched unit, while H1
+rescanned all I instructions and terminators for every candidate run, reaching
+worst-case Theta(I*L + I^2) work and repeatedly allocating temporary arrays,
+dictionaries, and rebuilt block arrays. The retained structural helpers are analysis-only and
+authorize no transformation.
+
+Reactivation requires a dominance-scoped region/alias proof for the complete
+source and destination spans, existing H1/H2/shape proofs, positive and negative
+activation witnesses, and semantic differential coverage for overlap, traps,
+and zero/partial execution. No manual tests, optimizer runs, benchmarks, or RSS
+measurement were run under the user's explicit no-verification instruction.
+
+### Single-snapshot WM module-path classification
+
+The WM lane boundary lint classified module roots through `_wml_seg`, which
+called `String.split(".")` for every lookup. The `common.*` path requested the
+second segment inside the 25-entry host-root loop, so a non-host import reached
+26 full splits. The native split implementation scans the input to count
+segments, allocates an array, scans again, and allocates each segment string.
+For a K-segment path, the hot case therefore created 26 arrays and 26*K segment
+strings even though classification consumes only `root` and `sub`.
+
+Classification now takes one segment snapshot after the existing empty,
+intra-scope, and host-door exits, then reuses `root` and `sub` across all small
+constant policy lists. Worst-case path splitting falls from 26 scans/arrays to
+one, with one set of K segment strings. Empty, leading, interior-empty, and
+trailing segments retain `split` semantics; sequential `std.`/`lib.`
+normalization, warning text, severity, and order are unchanged. The remaining
+25/4/12-entry policy scans are deliberately linear and cache-friendly; building
+per-request hash tables would add allocation without changing their fixed
+bounds. These allocation counts are source/runtime-derived because manual
+tests, optimizer runs, benchmarks, and RSS measurement remain excluded by the
+user's no-verification instruction.
+
+### Allocation-bounded assertion-head classification
+
+SPIPE assertion recognition scans each candidate statement for a paren-less
+assertion-family head such as `check value` or `fail "message"`. It previously
+created a one-character slice and appended it to an immutable head on every
+identifier byte, producing O(H^2) prefix copying and O(H) temporary strings for
+an H-byte head. Assertion-family classification also removed leading underscores
+by repeatedly slicing the remaining name, with the same quadratic worst case.
+
+Both paths now scan their existing byte storage with allocation-free `byte_at`
+using the exact prior ASCII alphabet (`A-Z`, `a-z`, `0-9`, underscore), then
+materialize a constant number of result slices. Head/tail separation, required
+literal space, trimmed nonempty operand,
+single-assignment exclusion, `==` acceptance, leading-underscore handling, and
+all assertion-family names remain unchanged. Work is O(H), with constant slice
+count rather than per-character allocation. No manual verification or allocation
+measurement was run under the user's explicit no-verification instruction.
+
+### Linear duplicate-key normalization
+
+The duplicate detector first assembled each sliding-window key by repeatedly
+appending newlines and trimmed lines, then its cosine prefilter normalized the
+key by collapsing ASCII identifier runs to `#`, digit/dot runs to `0`, and
+retaining all other bytes. Both stages appended to growing immutable prefixes.
+For W lines and K window bytes, raw assembly copied O(W*K) bytes (O(K^2) when
+W scales with K), while byte-granular normalization could independently copy
+O(K^2), multiplied across overlapping windows.
+
+Raw windows now record ordered trimmed-line/newline fragments and join once.
+Normalization records one marker per collapsed run and one source slice per
+maximal unchanged span, then also joins once. The scanner still recognizes exactly
+ASCII letters/underscore as identifier starts, ASCII alphanumeric/underscore as
+identifier continuation, and digits plus subsequent dots as number runs.
+Punctuation, operators, newlines, whitespace, and non-ASCII UTF-8 bytes remain
+byte-for-byte and in encounter order. Work and copied output bytes are O(K),
+with O(F) fragment references for F normalized runs/spans. The real cosine
+feature vectors remain unchanged; these changes only construct exact and
+structural candidate keys. Aggregate sliding-window work remains proportional
+to the sum of window-key lengths. No manual verification or allocation
+measurement was run under the user's explicit no-verification instruction.
+
+### Indexed MIR local metadata updates
+
+`MirBuilder.set_local_name` and `set_local_type` previously allocated a new
+array, copied every local, replaced the matching record, and rebound the full
+table. Each single metadata update was O(L) work and O(L) transient array
+storage even though canonical LocalIds already identify their positions.
+
+The builder now owns one `_local_position` resolver shared by reads and writes.
+Canonical dense state resolves in O(1); unique-ID sparse or reordered fixtures
+retain a first-match O(L) fallback, while duplicate IDs remain invalid builder
+state. Name and type updates replace exactly one `MirLocal` record at the
+resolved position, preserving id, name/type counterpart, kind, ghost flag,
+missing-ID no-op behavior, and array order. With uniquely owned builder storage,
+canonical updates require O(1) work and auxiliary storage; Simple COW may still
+copy the backing array when an external live alias exists, but the methods no
+longer force that copy. Setter-specific round-trip aliases were removed from
+parameter naming, Vulkan constant retyping, and merge-result retyping. Parameter
+naming may pay one initial privatization for an earlier function-builder alias,
+then updates the remaining parameters in place; the Vulkan path is alias-free.
+Five merge paths can still retain earlier branch-builder aliases and therefore
+remain conditionally O(L). That residual is tracked separately rather than
+claimed as fixed. No manual verification or allocation measurement was run
+under the user's explicit no-verification instruction.
+
+### Indexed MIR-builder local type queries
+
+`MirBuilder.new_local` assigns the current `next_local_id` and immediately
+appends the local, establishing `LocalId == locals position` for canonical
+builder state. MIR lowering nevertheless scanned every local for each type
+query, including repeated array, dictionary, string, float, boolean, tuple,
+indexing, and result-type probes. With Q queries and L locals this contributed
+O(Q*L) comparisons and could become quadratic as a function grew.
+
+`MirBuilder.local_type` now checks the dense index and stored identity in O(1).
+A scan fallback retains first-match behavior for directly constructed unique-ID
+sparse or reordered builder state; duplicate LocalIds violate the builder
+invariant. The shared lowering lookup and all remaining explicit
+type-predicate scans delegate to this method; hot canonical lowering becomes
+O(Q), with no dictionary, cache, or invalidation lifetime. Local creation,
+retyping, naming, type objects, diagnostics, and public MIR output are unchanged.
+The fallback remains O(L) only for malformed/noncanonical layout. No manual
+verification or timing measurement was run under the user's explicit
+no-verification instruction.
+
+### Linear canonical MIR DAG validation
+
+Canonical termination closure previously resolved every branch target by
+scanning all blocks and found Kahn progress by repeatedly rescanning the full
+processed set. A reverse-storage-order chain therefore required quadratic
+block work, while switch successor deduplication also compared each target with
+every earlier target.
+
+The validator now builds one first-pass `BlockId -> position` dictionary,
+rejecting duplicates before any terminator diagnostics as before. A second pass
+validates and stores successor positions once and computes indegrees. Kahn's
+worklist is an append-only array with a monotonic cursor, and switch successor
+deduplication uses a local membership dictionary while retaining default-first
+encounter order. For B blocks, T raw successor entries, E distinct CFG edges,
+and switch arities k, validation is expected O(B+T), down from
+O(B^2+B*E+sum(k^2)) in adversarial layouts. Live graph storage is O(B+E), plus
+O(max(k)) transient switch membership. Hash input, diagnostic text and
+precedence, unsupported-edge handling, missing-target behavior, and cycle
+classification remain unchanged. Small CFGs may pay additional dictionary,
+nested-array, and pointer-locality overhead; no runtime measurement was made
+under the user's no-verification instruction.
+
+### Linear TYPE001 rejected-prefix scanning
+
+The default nonexistent-type lint searched each physical line for four bad cast
+names. When a textual prefix such as `as integer_thing` failed the trailing
+word-boundary test, it sliced away a source prefix and searched the new suffix.
+With m rejected prefixes on an N-byte generated line, cumulative rescanning and
+copied suffix bytes could reach O(N^2) per bad name.
+
+TYPE001 now builds the four ordered `(name, needle)` records once per lint
+request and retains the original line throughout each scan. An absolute cursor
+advances to one byte after a rejected match and the two-argument `find` resumes
+from that position. Each name therefore performs linear scanning with no suffix
+allocation, while needle construction drops from once per name per line to once
+per request. Exact whole-word behavior, one warning per bad name per line,
+canonical `int`/`long`/`double`/`uint` ordering, comment suppression, TYPE002,
+messages, and hints remain unchanged. Prefix-heavy, repeated-exact, reverse-
+source-order, and topology contracts were added but not executed under the
+user's no-verification instruction.
+
+### Allocation-free STUB003 candidate gating
+
+The default per-line lint path removed ASCII spaces and then tabs from every
+nonempty trimmed line before checking four rare `pass_todo` shapes. Those two
+whole-line replacements allocated and copied roughly two line projections even
+when the source could not contain the token, producing Θ(B) avoidable temporary
+bytes across ordinary B-byte inputs.
+
+A byte scanner now recognizes `pass_todo` in the virtual stream formed by
+deleting exactly ASCII space and tab. It performs no substring, array, or
+normalized-text allocation. Only candidate lines execute the historical two
+replacements and exact four-shape classifier. Common noncandidate inputs retain
+Θ(0) normalization-copy bytes while total scanning stays linear with a fixed
+nine-byte target. Split spellings, tabs, comments, strings, ASCII-only deletion,
+production/test suppression, STUB003 count/message/fix, and its position before
+T001/D001 remain unchanged. Direct virtual-stream, production/test, ordering,
+Unicode-whitespace, and source-dominance contracts were added but not executed
+under the user's no-verification instruction.
+
+### Sparse native-build diagnostic streaming
+
+The oversized native-build failure path already retained the complete worker
+stderr so it could spill authoritative evidence, but diagnostic preservation
+then called `split("\n")`. That simultaneously materialized an array and every
+line of the same N-byte stream merely to retain a sparse subset, adding O(N)
+payload duplication and O(L) line slots at the failure-path memory high-water
+mark.
+
+Diagnostic collection now walks newline boundaries with an absolute cursor,
+matches directly inside each byte range, materializes only matching lines, and
+appends them to the owned result. Work remains linear in stderr bytes times the fixed matcher
+set, while auxiliary peak storage falls to O(D+M): retained diagnostic bytes D
+plus the longest retained line M, instead of another full-stream line
+projection. Empty, consecutive, and trailing newline fragments remain harmless;
+diagnostic order, multiplicity, broad matching, full-stream spill,
+head/tail excerpts, truncation markers, and APIs are unchanged. Exact sparse,
+CRLF, unterminated, empty/no-match, and source-topology contracts were added but not executed under
+the user's no-verification instruction.
+
+The cursor preserves native/Pure-Simple line bytes exactly, including leading
+indentation and a CR before LF. This also avoids the known interpreter
+`split("\n")` whitespace-loss bug, making interpreted diagnostics agree with the
+intended native byte contract rather than preserving that defect.
+
+### Indexed canonical-module call validation
+
+Canonical MIR contract composition validated internal names with linear array
+membership, then allocated a candidate-function array and rescanned every
+module function for every direct owner call. Repeated calls to one pure leaf
+also rebuilt its region-effect manifest, including canonical MIR serialization
+and hashing. For F functions and C direct calls, validation could therefore
+perform O(F^2 + C*F) lookup work plus repeated callee serialization and transient
+arrays.
+
+The existing name-validation traversal now constructs one compact unique
+name-to-SymbolId dictionary while retaining the ordered name array required by state
+semantics. Each direct call resolves by expected constant-time lookup. A second
+request-local set records only callees whose region manifest was successfully
+closed and pure, so repeated calls skip serialization without caching failures.
+Expected structural work becomes O(F+C+sum(size of uniquely referenced pure
+callees)), plus hashing/comparison of function and callee name bytes, with
+O(F+U) compact index/cache entries. Owner resolution still precedes name validation;
+empty/duplicate names, missing callees, first impure or unclosed callees,
+recursive-call skipping, instruction order, diagnostics, and public APIs remain
+unchanged. Repeated-leaf, exact rejection, precedence, and topology contracts
+were added but not executed under the user's no-verification instruction.
+
+### Allocation-free critical-file line counting
+
+CFG002 previously read every protected file and materialized
+`content.split("\n")` only to obtain its length. That is linear time but also
+linear transient storage per guarded file, with no need for the resulting line
+texts. The shrinkage path now counts newline characters in one pass and starts
+at one, exactly matching split semantics for empty content, internal blank
+lines, and trailing newlines. Complexity remains O(bytes), while auxiliary
+storage drops from O(lines) to O(1). Direct boundary coverage was added but not
+executed under the user's no-verification instruction.
+
+### Constant-space tool line counts
+
+The same count-only allocation pattern existed in three Pure Simple tools:
+context pack metadata, LLM Caret message statistics, and SPipe documentation
+validation. Each now scans newline characters directly rather than allocating
+a line array. Context and message statistics preserve their explicit empty-text
+result of zero; SPipe preserves `split` semantics, where an empty documentation
+block contributes one line and a trailing newline contributes a final empty
+segment. This keeps O(bytes) time and reduces auxiliary storage from O(lines)
+to O(1) at every call site. Context and SPipe boundary fixtures were added but
+not executed under the user's no-verification instruction.
+
+### Bidirectional optimizer registry integrity
+
+The pass registry already models status, expectation, effective-pipeline
+filtering, witnesses, and run receipts. Its integrity check validated aliases
+but did not prove that each descriptor's own stable name resolved back to the
+same `PassKind`; a missing or misbound canonical dispatch row could therefore
+survive otherwise consistent metadata. The guard now fails closed on unresolved
+or wrong-kind stable names. Registry-name and positive/negative witness
+uniqueness checks now use dictionaries rather than repeated linear membership,
+keeping those uniqueness phases linear as the pass inventory expands. Negative
+missing/misbound contracts were added but not executed under the user's
+no-verification instruction.
+
+The same audit previously called `mir_pass_descriptor_registry()` three times,
+reconstructing the full descriptor array and its provider metadata separately
+for status/alias, witness, and fact-preservation phases. It now captures one
+immutable registry snapshot and passes it through the private witness kernel and
+fact loop. The standalone public witness check retains its compatibility API
+and constructs one snapshot only when invoked independently. This removes two
+full registry/provider materializations from the combined integrity path with
+no change to error ordering or content.
+
+Pipeline report generation and budget filtering had a parallel duplication:
+each known pass first resolved a descriptor for status/canonical naming and
+then called a backend-decision function that resolved and reconstructed the
+same descriptor/provider again. Backend policy now has a private
+resolved-descriptor kernel. The public name-taking decision API remains the
+compatibility boundary, while callers that already resolved a descriptor reuse
+it. Existing deterministic report and backend-decision contracts cover output
+behavior but were not executed under the user's no-verification instruction.
+
+The deterministic optimizer JSON report also appended every pass record to a
+growing output string. With output size proportional to the requested pass
+count, repeated whole-prefix copying can become quadratic in emitted bytes.
+The renderer now builds independent ordered entry strings and joins them once,
+preserving the exact schema, ordinal order, comma placement, and empty-pipeline
+form while making top-level assembly linear in output size. Existing schema,
+delegation, order, and repeatability contracts were not rerun under the user's
+no-verification instruction.
+
+The SIMD recipe developer report used the same growing-prefix pattern. Its
+table is currently capped at 16 entries, so the absolute exposure is bounded,
+but the implementation still made report cost depend on cumulative prefix
+copies and would regress if the cap grew. It now renders a header plus ordered
+entry fragments with one join. A direct contract pins insertion order, summary
+fields, and trailing newlines; it was not executed under the user's
+no-verification instruction.
+
+### Fixed-size PerfFacts liveness storage
+
+PerfFacts admitted dense liveness matrices only after its existing
+four-million-cell cap, but initialized the admitted matrices one `push(false)`
+at a time. The initial block worklist and queued bitmap were grown the same way.
+Because Simple array growth may copy the whole prefix when uniqueness is not
+proved, the initialization path could accumulate quadratic copying and large
+transient allocation precisely at the largest admitted inputs. The matrices and
+bitmaps now allocate their exact final sizes once; the worklist is filled by
+index and continues to reuse its fixed live prefix through the existing top
+cursor. The change preserves cell caps, fail-closed completeness, traversal
+order, visit budgets, and public facts while making initialization linear in
+the allocated cells with no growth copies. Existing branch propagation,
+budget, dangling-edge, no-liveness-allocation, and duplicate-local contracts
+cover behavior; they were not rerun under the user's no-verification
+instruction.
+
+### Hoisted liveness adjacency and linear diagnostic dedupe
+
+The liveness solver previously resolved `successors[block]` inside its
+per-local loop. For V worklist visits and L locals this caused V*L dictionary
+lookups and array-value extractions even though adjacency is immutable for the
+entire solve. It now binds the successor array once per visit, reducing those
+operations to V while preserving the same successor iteration and liveness
+equations. The now-fixed-size worklist also writes only into its proven free
+prefix; its unreachable growth fallback was removed.
+
+MEXH006 similarly deduplicated suspect variant names by linearly scanning an
+array of previously emitted names. With input-dependent suspect counts this was
+quadratic in the number of distinct candidates. Membership now uses a
+dictionary set while warnings remain appended in first-occurrence source
+order. A non-bogus occurrence still does not suppress a later bogus finding.
+Existing liveness and match-diagnostic contracts were not rerun under the
+user's no-verification instruction.
+
+### OPTME001 canonical-line reuse
+
+The normal lint path already split each file into canonical lines, but its
+OPTME001 append then split the same source four more times: once for each of
+three index collectors and once for the warning scan. Three stages also rebuilt
+the same per-line enclosure array. Line-owned collector/check APIs now accept
+the existing view, and a combined index reuses one enclosure map. The lint
+source phase computes compact warnings while canonical lines are live, retains
+only those warnings across parsing, and appends them at the unchanged
+post-parse position. Thus malformed or stale revisions remain suppressed and
+no file-sized duplicate survives into the parser's peak-memory window.
+
+The repo-wide OPTME tool now performs one split and one combined enclosure
+index in its indexing pass, plus one split in its checking pass, rather than
+three splits/enclosure maps in pass one and another split in pass two. Public
+source APIs remain one-split compatibility adapters. Source/line collector and
+full warning payload parity contracts were added but not executed under the
+user's no-verification instruction.
+
+### Linear signature parsing and scope-gated MIR snapshots
+
+The const-reference lint parsed a function header by appending every character
+to a growing parameter fragment and then to a growing identifier. Under
+immutable/value-semantics strings, a long single-line signature could therefore
+copy a cumulative O(H^2) bytes. The parser now tracks comma boundaries and
+identifier end offsets, materializing each substring once. Nested `()`, `[]`,
+and `<>` comma behavior, `mut` exclusions, parameter identities, and finding
+order are unchanged; nested-type and long-name contracts were added but not
+executed under the user's no-verification instruction.
+
+`run_typed_pass_on_module` also constructed a full function snapshot before it
+knew the selected pass scope. Whole-module passes such as inlining, outlining,
+vectorization, pattern idioms, and target narrowing never consumed that array,
+so every invocation paid O(function_count) setup and retained the function
+payload slots unnecessarily. Snapshot construction now occurs only in
+function-pass match arms. Those arms retain the original one-snapshot,
+fresh-pass-per-function behavior; module arms receive the module exactly once.
+Existing typed module-dispatch contracts were not rerun under the user's
+no-verification instruction.
+
+### Request-local query outline snapshot
+
+Definition, hover, completion, type-at, and signature-help queries separately
+parsed the target outline and then reread/resplit the same file for imports or
+cursor-line text. A local miss caused two reads and two splits; type-at and
+signature help also had their own explicit cursor read. The query engine now
+builds one request-local `OutlineSnapshot` containing lines and symbols. A
+local hit returns without scanning or allocating imports; only an imported
+lookup lazily projects imports from the retained lines. This preserves one read
+and one split while avoiding an eager second scan on the common local-hit path.
+
+Local symbol order, duplicate import traversal, imported symbol order, grep
+fallback precedence and caps, 1-based lines, stdout, and exit behavior are
+unchanged. Imported-module parsing remains independent. Snapshot projection and
+source-topology contracts were added but not executed under the user's
+no-verification instruction.
+
+### Bounded lint-cache reverse dependencies
+
+`lint_cache_store` replaced the live entry but appended its key to every new
+symbol bucket without removing old links or suppressing repeated dependencies.
+After U refreshes with D dependencies, one live scope could therefore retain
+O(U*D) reverse-index slots; symbol invalidation scanned those duplicates, and
+removing through one symbol left stale links in other buckets.
+
+The cache now treats reverse dependencies as live unique edges while retaining
+the public `Dict<text, [text]>` representation and caller-provided dependency
+list. Store computes unique old/new dependency sets, unlinks only old-minus-new
+buckets, and appends only new-minus-old buckets. Identical refreshes perform set
+work but allocate no replacement bucket arrays. Entry removal filters all of
+its named buckets and removes empty buckets; symbol invalidation detaches its
+bucket before walking a unique snapshot and cleans each removed entry's other
+links. Retained reverse-index memory is O(E) for E live unique scope-symbol
+edges rather than cumulative store history. Bucket filtering remains linear in
+the touched fanout and preserves key order. The cache is ephemeral, so arbitrary
+corruption from a pre-patch process is not migrated. No manual verification was
+run under the user's explicit no-verification instruction.
+
+### Indexed no-allocation import closure
+
+The no-allocation dependency gate previously kept discovered paths in arrays.
+Every popped file scanned the processed array and every resolved import scanned
+both processed and queued arrays; because processed queue entries remain live,
+a closure with V files and E imports performed O(V^2+E*V) path comparisons.
+
+The traversal now owns one request-local `path -> discovered` dictionary and
+marks a path immediately before its single FIFO admission. Initial root order,
+first-import discovery order, one-read-per-resolver-path-string behavior,
+diagnostic order and public output remain unchanged. Expected graph-membership
+work becomes O(V+E) hash lookups (more precisely proportional to hashed path
+bytes), with O(V) queue and index storage; source scanning and filesystem probes
+remain additional work. Dictionary hashing and allocation can add constant
+overhead for tiny closures; no runtime measurement was made under the user's
+explicit no-verification instruction.
+
+### Request-local semantic-query call index
+
+The semantic query `calls(...)` predicate previously reread and split the same
+source file, then scanned every line, for every matching outline symbol and
+call predicate. For S symbols, C call predicates, and N source bytes, this made
+the worst-case query path O(S*C*N) scanning with repeated whole-file line-array
+allocation.
+The executor now consumes the existing one-read outline snapshot and builds a
+query-specific call-match dictionary in one line walk. Distinct callees are
+deduplicated before the walk and predicate evaluation becomes an expected-O(1)
+lookup. The index is built lazily at the first `calls(...)` predicate that is
+actually evaluated, so target or earlier-predicate rejection performs no
+call-index scan. Indexed queries use expected O(N*C + S*C) call work and
+O(N+S+M+C) request-local entries, plus the bytes for precomputed needles and
+length-prefixed keys for M matched pairs.
+
+The index deliberately preserves the old textual contract: only indent-zero
+`fn name(` and `fn name (` headers open bodies, the next indent-zero line closes
+them, duplicate function declarations union their matches, and occurrences in
+comments or strings still count. `pub fn`, methods, and wider header spacing
+remain excluded. `implements(...)` reuses the same snapshot lines, eliminating
+its repeated file reads and splits—though not its per-candidate line scan—without
+changing its textual matching.
+Focused positive, negative, duplicate-name, closure-boundary, legacy-exclusion,
+and source-topology contracts were added but not executed under the user's
+no-verification instruction.
+
+### Linear formatter space normalization
+
+The formatter's expression-spacing path previously collapsed repeated ASCII
+spaces with a fixed-point `contains("  ")` plus whole-string `replace` loop.
+For a line of length `n` and a maximum space run `r`, that performs
+`O(n log r)` scans and transient copies. The replacement is now one ordered
+scan which returns the original normalized line unchanged, and otherwise joins
+unchanged span fragments once: `O(n)` work and output-sized storage. It
+preserves tabs, Unicode/non-space spans, operator-rewrite order, context
+cleanup, and final trim behavior. Boundary and idempotence contracts were
+added but not executed under the user's no-verification instruction.
+
+### Linear `check-tier` accumulation
+
+Repository and configuration scans in `check_tier.spl` accumulated keywords,
+module tiers, and classified paths with `array = array + [item]`. Under
+copy-on-write value semantics this can copy every prior prefix, producing
+quadratic element traffic as repository size grows. The owned accumulators now
+use `push`, preserving encounter and diagnostic order. Full-tier paths are no
+longer retained at all because only their count reaches the summary, reducing
+peak path storage from all files to the seed/core subsets. Operator tables are
+constructed once per checked file and shared across its lines instead of being
+rebuilt for every line. Source contracts were added but not executed under the
+user's no-verification instruction.
+
+The same hot line path previously rebuilt the stripped-source prefix for every
+byte while masking string literals and removing comments. That makes a line of
+length `n` susceptible to `O(n^2)` copied bytes. It now scans raw bytes once,
+retains unchanged code spans, emits one repeated-space fragment per quoted
+span, and joins once. Quote, escape, unterminated-string, inline-comment,
+Unicode-byte, and column-width behavior remain unchanged; lines requiring no
+masking return their original value.
+
+Keyword extraction then performed roughly thirty sequential full-line
+`replace(punctuation, " ")` operations followed by a split, multiplying scans
+and transient allocations for every checked line. A single byte-indexed span
+collector now recognizes the exact legacy ASCII-space/punctuation delimiter
+set and emits only non-empty word slices in encounter order. Tabs and UTF-8
+bytes remain non-delimiters, matching the prior split behavior. This changes
+the normalization phase from many `O(n)` materializations to one `O(n)` scan.
+Direct delimiter, duplicate-order, tab, backslash, hash, and UTF-8 contracts
+were added but not executed under the user's no-verification instruction.
+
+Each extracted word then scanned all keyword arrays to decide whether it was
+known and scanned them again to decide whether the active tier allowed it. A
+request-owned dictionary now stores the minimum required tier for every
+spelling and is reused across all checked files, reducing lookup from
+`O(keyword_count)` per probe to expected constant time. Ordered seed, core, and
+full insertion with no overwrite preserves cross-section duplicate precedence;
+unknown words remain ignored. The active tier level is resolved once per file,
+not once per token. Direct precedence contracts were added but not executed
+under the user's no-verification instruction.
+
+### Linear MIR written-region atom deduplication
+
+Region state hashing, projected verification effects, and frame-obligation
+construction previously deduplicated by scanning their growing output arrays.
+For E effects and U unique entries, membership work was O(E*U), worst-case
+O(E^2), before any required canonical sort. Request-local dictionaries now
+index entries while ordered arrays retain first discovery; unchanged final
+sorts continue to define canonical atom order. Deduplication is expected O(E),
+followed where applicable by O(U log U) sorting, with O(U) temporary dictionary
+storage.
+
+Read effects remain excluded from frame writes, distinct region/type pairs
+remain distinct, and projected read/write effects retain first-occurrence
+order. Canonical state/frame text and hashes therefore receive identical unique
+sets. A focused interleaved read/repeated-write contract was added but not
+executed under the user's no-verification instruction.
+
+### Linear MIR region-type validation and lazy provenance
+
+Manifest construction still compared every admitted global effect against all
+earlier effects to reject one region carrying inconsistent MIR value types.
+Repeated same-typed accesses therefore performed E(E-1)/2 comparisons while
+retaining all E effects. A manifest-local region-to-type dictionary now records
+the first exact type and compares each later access directly. Expected
+validation cost is O(E) with O(R) index storage for R regions; effect order,
+multiplicity, the first conflicting access, and the exact fail-closed diagnostic
+remain unchanged.
+
+The same instruction walk also formatted source provenance text for every
+spanned MIR instruction, although only global loads and stores consume it.
+Provenance construction is now gated by the exact two instruction variants,
+reducing transient formatting from up to I validly-spanned instructions to up
+to G validly-spanned global accesses.
+Global span bytes and missing-span rejection are unchanged. Focused multiplicity
+and exact mismatch contracts were updated but not executed under the user's
+no-verification instruction.
+
+### Linear TRK001 tracking-row decoding
+
+The feature-tracking deny gate decoded each CSV field with
+`current = current + ch`. A decoded field of m bytes therefore constructed and
+copied every prefix, for O(m^2) byte traffic, while also allocating a
+one-character substring per input byte. The parser now scans bytes once,
+retains maximal unchanged spans, emits a fragment only at a quote or delimiter,
+and joins once per completed field. Work and auxiliary fragment storage are
+linear in the row, with substring allocation proportional to structural
+boundaries rather than characters.
+
+The parser's existing permissive dialect is preserved: commas split only
+outside quotes, doubled quotes decode only while already quoted, quotes may
+appear mid-field, unmatched quotes remain tolerated, empty fields survive, and
+decoded fields are edge-trimmed. UTF-8 bytes remain inside unchanged spans.
+An exact deny-level diagnostic fixture uses a quoted identifier to prove comma
+and doubled-quote decoding directly, while quoted title and description fields
+exercise column alignment. It was not executed under the user's no-verification
+instruction.
+
+### Linear API-surface snapshot assembly
+
+The repository API snapshot tool carried four related COW/text-growth costs.
+Its ASCII trim repeatedly sliced one edge byte, comma parsing appended one
+character at a time, three entry accumulators rebound the result of `push`, and
+SDN serialization repeatedly appended to the complete output prefix. Long
+export lines and large snapshots could therefore accumulate quadratic copied
+bytes, while a roots-sized array was retained solely to compute `roots.len()`.
+
+Trim and comma parsing now use byte boundaries and bounded span slices per
+retained name. Direct local-owner `push` preserves file, export, and root
+encounter order without keeping the old accumulator binding live. The
+redundant root array is gone; module count remains exactly the number of
+requested roots, including duplicates or empty roots. Serialization records
+ordered fragments and joins once, changing assembly from worst-case O(P^2)
+copied bytes to O(P) output work
+with O(F) fragment references. Directory read order and the final lexical
+module/symbol sort remain unchanged. Duplicate exports intentionally remain
+because the previous implementation never deduplicated despite a stale
+docstring, which is now corrected.
+
+Exact empty and multi-module SDN byte contracts plus an ordered export fixture
+were added but not executed under the user's no-verification instruction.
+
+### Adaptive MIR local-type lookup
+
+Each local-backed global load/store resolved its type by scanning every MIR
+local and recursively serializing the match. With G accesses and L locals this
+was O(G*L) identity comparisons plus repeated serialization for reused locals.
+The manifest now keeps the first lookup on the direct path and avoids the O(L)
+position-index build for G below two. On the second lookup it builds one first-declaration-wins
+LocalId-to-position index; resolved serialized identities are cached only for
+locals actually used. Repeated workloads become O(L+G) expected lookup work
+without adding a second eager serialization of unused recursive types.
+
+Constant operands still serialize their embedded type directly and never build
+the index. Missing locals still yield the exact load/store type diagnostics.
+Duplicate LocalIds retain the old first-declaration behavior even for directly
+constructed malformed MIR, while all admitted effects remain ordered and
+duplicated exactly as before. The existing repeated-access contract exercises
+the adaptive path; duplicate-id, constant-store, exact indexed-missing, and
+source-topology contracts were added but not executed under the user's
+no-verification instruction.
+
+### Quarantined manifest `Remove` rewrite
+
+The manifest rule schema accepted a raw, case-sensitive `kind_tag: "Remove"`
+and the public block, function, module, and backend adapters could delete any
+matched MIR instruction. The free-text `safety` and numeric `cost_delta`
+metadata were not legality proofs; the executor had no use/liveness, effect,
+trap, dominance, or ownership check. A live `Copy`, `Store`, `Call`, or
+`Intrinsic` could therefore be removed.
+
+The v1 schema and public APIs remain load-compatible, but every execution
+surface is now an exact identity. The module entrypoint exits before rule
+flattening, pattern matching, formatted operand-key creation, wildcard binding,
+or MIR rebuilding. This also removes the exposed O(I*R) matcher work and its
+temporary allocation churn while the transform is disabled; it does not claim
+a normal-build speedup because these adapters are not broadly wired into every
+backend pipeline.
+
+Future activation requires a typed rewrite kind, shared per-function def-use
+facts, exact zero-use proof including terminators, explicit pure/non-trapping
+effect receipts, dominance and ownership checks, post-rewrite MIR verification,
+positive and negative witnesses, and a structured
+`OPT-MANIFEST-REMOVE-QUARANTINED` missed/failure diagnostic. No manual runtime
+measurement or verification was run under the user's instruction.
+
+### Duplicate `MEXH004` emission
+
+Both the text-query and semantic match-exhaustiveness paths independently
+reported overlapping reachability causes. A second wildcard produced a
+duplicate-wildcard warning and an after-wildcard warning; an exact duplicate
+after a wildcard produced both after-wildcard and duplicate-pattern warnings.
+One arm could therefore allocate, retain, serialize, and display two records,
+while the semantic path also performed a needless linear seen-pattern scan.
+
+Each path now classifies an arm once with shared precedence: duplicate wildcard,
+then earlier wildcard, then duplicate exact pattern. Mutually exclusive branches
+emit at most one record without a diagnostic-deduplication set. Query spans and
+source order remain unchanged. The semantic suffix after a wildcard uses direct
+control flow rather than duplicate scans, while coverage and `MEXH006`
+collection continue. No runtime measurement or manual verification was run.
+
+### Feature-document block assembly
+
+`src/app/feature_doc/parser.spl` built every triple-quoted documentation block
+with `block_content = block_content + line + "\n"`. With m equal-width L-byte
+lines, eager flat text copies `(L+1)m(m+1)-m` payload bytes across the two
+left-associative concatenations per iteration: quadratic in block length. The
+loop also constructs and discards the full quadratic buffer for an unterminated
+block.
+
+The parser now retains raw line references and calls `join("\n")` once only
+after finding the closing delimiter, followed by the same whole-block `trim()`.
+Empty blocks, internal blank lines, indentation, title/metadata extraction,
+describe/context association, delimiter consumption, and silent unterminated
+EOF behavior remain unchanged. Pure Simple and C-native joins perform a length
+pass and one exact output allocation. The legacy Rust seed exposes both a
+mutable-builder string join and a repeated-concatenation array join, while
+current MIR lowering uses a separate `rt_array_join_any` route not implemented
+there. Without route-specific execution evidence, this audit makes no exact
+seed-runtime allocation or scaling claim. No new runtime measurement or manual
+verification was run.
+
+### MCP JSON and bounded-prefix assembly
+
+`_mcp_json_escape` mixed byte-length iteration with codepoint-indexed lookup,
+appended a newly encoded character to a growing prefix, and could add NULs after
+multibyte Unicode. For emitted prefixes S_i, copied payload is `sum(S_i)`, worst
+case quadratic, plus per-character text construction.
+
+The replacement returns unchanged text when no backslash, quote, or LF exists;
+otherwise it applies three ordered linear replacements. Unicode remains opaque,
+the historical escape alphabet is preserved, and NUL corruption is removed
+without the repository's unsafe text iterator. `_mcp_first_lines` records its
+exact legacy append fragments and joins once, removing prefix copies while
+retaining full-input split and unusual trailing-empty behavior.
+
+The larger `simple_pipe` defect remains open because raw search and workspace
+symbols have incompatible roots, regex rules, limits, ordering, and errors. The
+freshness-safe target and acceptance evidence are recorded in
+`doc/08_tracking/bug/simple_pipe_codebase_duplicate_scan_2026-08-24.md`.
+# 2026-08-24 follow-up: predicate-promotion quarantine
+
+The active `predicate_promote` adapter removed an adjacent `MaskFromCmp`
+definition whenever the following masked operation referenced it. It did not
+compute the documented exact-one-use fact. A later instruction, successor
+block, or terminator could therefore retain an undefined-local use. The pass is
+now fail-closed: its module, function, and block adapters preserve their exact
+inputs and its descriptor is `Disabled` with a concrete missing-proof reason.
+The separate `simple-predicate-promote` backend/JIT recommendation was removed
+from the active registry for the same reason; hotness is not a legality proof.
+
+Reactivation requires a shared function-wide def-use result, dominance, exact
+sole-use identity, type/lane/comparison legality, an explicit `Move` policy, and
+source-span preservation. That analysis must be built once per function; a
+whole-function scan for every adjacent candidate would turn a linear fusion
+walk into quadratic compile-time work. This quarantine removes both the
+miscompile path and all pass-local traversal/allocation overhead while disabled.
+# 2026-08-24 follow-up: watch dependency normalization allocations
+
+`app.watch.deps.find_dependents` scans graph entries, changed files, and imports
+after every debounced watch event. The former inner matcher normalized the same
+changed path with two full `replace` operations for every import comparison.
+For `D` dependency entries, `C` changed files, `I` imports, and path length `P`,
+that produced up to `2*D*C*I` replacement results and worst-case
+`O(D*C*I*P)` normalization scans/copies.
+
+The changed paths are now normalized once, in input order, before the graph
+scan. Normalization alone becomes `O(C*P)` scans/copies with `O(C*P)` retained
+normalized paths and up to two replacement results per changed file; no-match
+allocation behavior differs by runtime. The patch does not change the nested
+`D/C/I` matcher, prefix conversion, substring searches, or linear scan of the
+growing dependent list, so no end-to-end asymptotic improvement is claimed.
+For empty/no-import graphs it eagerly normalizes paths the former lazy route did
+not touch. Graph order, duplicate suppression, prefix stripping, and the
+existing order-sensitive `dominated` behavior are pinned.
+# 2026-08-24 follow-up: linear Any-inventory classification
+
+The repository-wide `any_audit` sanitizer formerly appended one- or two-byte
+texts to an immutable growing output for each source character. A line of
+length `N` therefore copied `Theta(N^2)` cumulative payload. Each accepted
+`Any` occurrence independently rebuilt its entire prefix the same way, adding
+`sum Theta(i_a^2)` copied payload for occurrence offsets `i_a`.
+
+`strip_code` now records exact character/blank fragments and joins once,
+preserving indexed traversal, escape spacing, comment truncation, and columns.
+Classification maintains the last non-space index and performs constant-size
+checks for literal-space-delimited `as`/`is` and `->`, without prefix text,
+slicing, backward whitespace rescans, or trim allocation. Sanitization is
+`Theta(N)` payload assembly with `O(N)` fragment references; classification is
+one forward scan plus bounded token checks per occurrence.
+
+The driver also replaces retained `AnySite` storage and later class scans with
+one counter per `ANY_CLASSES` entry plus a site count updated while printing. Output order
+and totals remain unchanged; retained driver memory falls from `O(S)` sites to
+`O(K)` counters for the fixed class schema, excluding the per-file census
+already owned by `scan_source`.
+# 2026-08-24 follow-up: match-lint arm boundaries and spans
+
+The query MEXH scanner formerly treated every nonblank descendant of a `match`
+as an arm. After a wildcard, multiline body statements could therefore emit
+false unreachable-arm warnings; nested label/case-like text could also pollute
+pattern state. The scanner now records the first real arm indentation and only
+classifies siblings at that exact level. Blank/comments and deeper bodies are
+skipped before wildcard, deduplication, or arm-count state changes.
+
+The JSON emitter also accepted only an end column and hardcoded `col: 1`.
+MEXH001-005 now pass explicit source columns: arm diagnostics use
+`indent+1 .. indent+trimmed_length`, and match-level diagnostics use the same
+formula for the `match` line. The columns travel as one `QueryMexhSpan`, keeping
+the emitter below the ARG001 parameter threshold. This changes diagnostic
+location metadata only; text output, precedence, and semantic-lint warning
+objects are unchanged. The patch adds no traversal: each match retains its one
+descendant scan, while overall fallback complexity—including overlapping nested
+match scans and enum inference—remains unchanged.
+
+# 2026-08-24 follow-up: filesystem hint transforms quarantined
+
+`WriteCoalesce` and `SyscallBatch` were advertised as active transforms and
+inserted `bulk_store_hint` and `call_batch_hint` intrinsics. The C backend could
+only spell these as undeclared runtime calls, while Cranelift and the MIR
+interpreter had no executable lowering. A selected optimization could therefore
+turn valid MIR into a backend failure.
+
+Both passes are now `AnalysisOnly`; their public adapters are constant-time
+identities and their activation witnesses are removed. The existing `count_*`
+functions remain the sole candidate-analysis surface. This also removes the
+transform adapters' per-block dictionaries, instruction-array rebuilding, and
+temporary hint operands from normal or direct-call paths. No runtime result is
+claimed because manual execution was explicitly skipped.
+
+# 2026-08-24 follow-up: semantic duplicate bucket storage
+
+The local semantic duplicate analyzer encoded every signature-token bucket as
+comma-separated decimal text. Appending member `i` rebuilt the complete prior
+bucket string, and consumption then allocated substrings and parsed every index
+back to `i64`. For a hot bucket of size `k`, construction copied
+worst-case `O(k^2 log N)` character payload (and at least quadratic delimiter
+copies) before the existing 400-member comparison cap could reject it.
+
+The analyzer now stores `{token: bucket_index}` plus `[[i64]]` membership
+buckets. Direct nested-array pushes preserve document/signature insertion order
+without dictionary-value copy/writeback, decimal formatting, delimiter growth,
+split substrings, or integer parsing. Membership construction becomes amortized
+linear in total token memberships; pair comparison, the 400-member cap,
+pair-key deduplication, cosine threshold, and final ordering are unchanged.
+Buckets saturate at 401 members, the first value that is unconditionally
+skipped, so common tokens no longer retain the remaining `N-401` indices.
+Runtime timing and RSS were not measured under the no-verification override.
+
+# 2026-08-24 follow-up: UNUSED001 method scope and spans
+
+The query lint unused-variable fallback identified indented method headers but
+ended every function only at the next nonblank module-level line. A method in a
+class therefore absorbed later sibling methods into one identifier-frequency
+table. A same-named reference in a sibling could suppress a real warning, and
+scan/storage cost grew with the remainder of the class instead of the function.
+
+Function bounds now cache header indentation and stop at the first nonblank
+line whose indentation is less than or equal to it. Each sibling is analyzed
+once in its own scope. JSON columns use the original source line rather than a
+trimmed copy, so indented declarations report exact one-based spans. No runtime
+measurement is claimed under the no-verification override.
+
+# 2026-08-24 follow-up: feature usage-index construction
+
+The feature-document usage index appended every header and row to one immutable
+Markdown text, cumulatively recopying the complete rendered prefix. It also
+stored arrays directly in a category dictionary, copied each array out, pushed,
+and wrote it back. For `R` rendered bytes and a category with `k` entries, these
+patterns risked quadratic copied payload and repeated COW bucket copies.
+
+The generator now appends independent Markdown fragments and joins once. A
+`{category: bucket_index}` map points into `[[FeatureFileInfo]]`, so repeated
+members mutate an indexed nested array directly. Category names are retained in
+first-encounter order, preserving section and within-category input order.
+Filename extraction uses one last-slash lookup rather than allocating every path
+segment. Under the native join contract, construction is linear in input
+metadata plus rendered output size, excluding file I/O. No timing/RSS
+measurement was run under the user override.
+
+# 2026-08-24 follow-up: app feature-index construction
+
+The app-document aggregate index retained the same growing immutable Markdown
+pattern as the former usage index: every emitted row recopied the full prefix,
+and basename extraction split every path solely to read its last segment. For
+final rendered size `R`, cumulative prefix copying was quadratic in the number
+and size of emitted rows.
+
+The app index now pushes fixed headers and complete rows into a fragment array
+and joins once under the native join contract. It preserves input order, nested
+behavior counts, status fallback, exact table framing, output path, and final
+newline. A final-slash search plus one basename slice replaces whole-path
+splitting. No runtime measurement was run under the no-verification override.
+
+# 2026-08-24 follow-up: PatternIdiom backend-safety quarantine
+
+The capability-aware PatternIdiom candidate rewrote software AES/SHA/CRC calls
+to MIR intrinsics, but x86-64 instruction selection only implemented rotate,
+popcount, byte-swap, and storage-address projection. Its previous catch-all
+lowered every other intrinsic to a NOP, which could erase a computation and
+leave its destination undefined. This is a correctness blocker, not a missed
+performance opportunity.
+
+PatternIdiom is now explicitly Disabled and absent from effective pipelines.
+All production adapters preserve MIR; the transforming engine has an explicit
+candidate-only name for parity fixtures. x86-64 lowering now accepts a closed
+allowlist and fails loudly for unsupported intrinsics or missing destinations.
+This avoids silent miscompilation and candidate traversal in normal builds. No
+runtime, allocation, or RSS measurement was run under the no-verification
+override.
+
+# 2026-08-24 follow-up: SAFE001/SAFE003 lexical soundness
+
+The fast safety lint scanned trimmed raw lines. Consequently pointer-operation
+spellings inside comments, strings, and multiline docstrings emitted severity-1
+SAFE003 errors. Fake `unsafe:` text in docstring payload could also enter the
+heuristic unsafe state and suppress a later real error. SAFE001 had the same raw
+lexical weakness, and both diagnostics reported line-wide, indentation-shifted
+spans rather than the offending token.
+
+Safety analysis now obtains first-code and bounded-pattern columns from one
+stateful lexical projection per request. `unsafe` state, assembly detection, and
+all six pointer operations consume only executable-code facts, while raw lines
+remain available for unchanged text output. JSON spans identify the first real
+offending token. A stack of unsafe-header indents preserves nested scopes and
+only syntactic `unsafe:`/`unsafe {` headers can enter one. With P fixed safety
+patterns, work is O(N*P)=O(N), storage is O(L*P)=O(L), and no masked source copy
+or parser invocation is added. No timing, allocation, or RSS measurement was
+run under the no-verification override.
+
+# 2026-08-24 follow-up: LLVM-direct minimal C construction
+
+The LLVM-direct fallback discovered each function with `functions.contains`
+inside the source-line loop and appended every emitted C unit to one immutable
+prefix. For L lines, F unique functions, and R output bytes, this caused
+O(L*F) name comparisons in duplicate-heavy/worst-order input and O(R^2)
+cumulative prefix copying under immutable concatenation.
+
+Discovery now retains first-seen non-main order in an array while a text-keyed
+set provides amortized constant membership. The C shell is assembled as complete
+fragments and joined once. Explicit and absent Simple `main` declarations retain
+identical generated bytes because both old loops skipped `main` and always
+emitted the same generated entry point. Source scanning and name-byte work are
+O(N), expected hash membership performs O(L) operations, and construction is
+O(R) on the native join route. Renderer-owned storage is O(F + R); whole-
+function peak also retains source and split-line material, giving O(N + F + R).
+No timing, allocation, or RSS measurement was run under the no-verification
+override.
+
+# 2026-08-24 follow-up: DEPR002 lexical and span hardening
+
+The fast query lint, JSON collector, and two code-action routes matched `.new(`
+on trimmed raw text. They therefore treated comments and string payloads as
+deprecated constructor syntax, while trimming shifted JSON columns left for
+indented code. Separate raw checks could also disagree about whether a quick fix
+was available.
+
+One request-local lexical projection now tracks single-line and triple-quoted
+strings, truncates comment payload, and records the first code occurrence in
+original source coordinates. Diagnostics and code actions consume the same
+one-based column/candidate result. The shared scanner lives in a narrow,
+dependency-neutral module rather than making hot query paths import the full
+tier checker. Each source is scanned once in O(N) time with one integer result
+per physical line and no masked text construction for DEPR002. No timing,
+allocation, or RSS measurement was run under the no-verification override.
+
+# 2026-08-25 follow-up: compiler-output ANSI span cleanup
+
+`_clean_check_output` previously built stdout, the mandatory newline, and
+stderr with chained immutable concatenation. `_strip_ansi` then retained one
+text fragment per visible character before joining those fragments. The new
+path joins the fixed three input fragments once and, only when an ESC byte is
+present, retains complete visible spans while preserving the historical
+discard-through-ASCII-`m` contract. Cleanup still runs after stream
+composition, so an escape begun in stdout may terminate in stderr.
+
+For N combined bytes, E escape runs, and V visible bytes, cleanup is O(N).
+Plain output returns the combined text without a second rewrite. ANSI output
+uses O(V + E) auxiliary output storage beyond the combined input; the complete
+cleaning path has conservative peak owned output O(N + V + E). This is a
+fragment-count and copying improvement, not a zero-copy claim. No compiler,
+test, timing, allocation, or RSS execution was performed under the user's
+no-verification override.
+
+# 2026-08-25 follow-up: severity override rewrite allocation
+
+Active diagnostic policy scanned the severity digit run by constructing a
+one-byte text per digit. A changed severity then used chained immutable text
+concatenation, copying the prefix through an intermediate before constructing
+the final diagnostic. Even an already-equal severity rebuilt the full JSON.
+Malformed severity fields accepted the marker but no digits and were corrupted
+by inserting the override before the existing value.
+
+Severity scanning now uses ASCII byte bounds and fails closed when no digit is
+present. It compares the full existing digit run with the requested severity;
+an exact match returns the original text. Changed output uses three bounded
+fragments and one final join. Zero-policy routing performs no field scan; active
+routing is O(N) with O(1) scan state, while only a real change constructs O(N)
+output. No execution, allocation, timing, or RSS measurement was run.
+
+# 2026-08-25 follow-up: compiler-output line cursor
+
+Both clean compiler-diagnostic owners called `clean_output.split("\n")`. Counting
+retained every line slice/handle merely to increment a scalar; JSON collection
+retained the same line projection beside its growing diagnostic result. Each
+then consumed lines sequentially, so whole-output line retention was unnecessary.
+
+`_check_output_line_end` now finds LF bytes with one monotonic cursor. Count and
+collection slice, consume, and release one physical line before advancing, while
+preserving trim, CRLF, empty/trailing line, duplicate, malformed-prefix, and
+Unicode behavior. For S output bytes traversal is O(S). Beyond the already-owned
+clean output, count peaks at O(M + P) for maximum line M and prefix P; collection
+peaks at O(M + P + D + K) for retained diagnostic bytes D and handles K. Count and
+collection remain separate passes. No execution, timing, allocation, or RSS
+measurement was run.
+
+# 2026-08-25 follow-up: streaming structured-error metadata
+
+`query_check` and `query_diagnostics` independently parsed `|||RELATED:` and
+`|||HELP:` metadata by slicing the entire suffix, splitting every segment, then
+trimming and slicing recognized payloads. This retained the full suffix and
+segment array alongside the final result and allowed semantics to drift.
+
+`query_rich_common.query_split_structured_error` now owns one monotonic segment
+cursor. It preserves exact core bytes, ordered RELATED payloads, ignored unknown
+segments, empty payloads, and last-HELP-wins behavior. `query_check` calls it
+directly; `query_diagnostics` retains only a compatibility wrapper. For N bytes
+and the fixed three-byte delimiter, traversal is O(N); retained result is
+O(C + R + K) for copied core bytes C, retained metadata bytes R, and K RELATED
+handles. Peak parser storage is O(C + R + K + max segment), hence O(N), instead
+of overlapping a full suffix and all-segments array. It is not zero-copy. No
+execution, allocation, timing, or RSS measurement was run.
+
+# 2026-08-25 follow-up: requested-line DEPR002 projection
+
+Both duplicated code-action owners built DEPR002 columns and trimmed every
+physical line even though only the requested line could produce an action. The
+postprocessor paid O(B) line work and O(L) extra column storage for B source
+bytes and L lines on every cursor request.
+
+`deprecated_new_column_at` now scans only through the requested zero-based line
+to reconstruct triple-string state and returns one scalar original-byte column.
+Both owners validate, directly index, and trim only that line while retaining
+identical DEPR002/DEPR003 action behavior. This postprocessing becomes
+O(B<=r + R) work and O(1) auxiliary storage beyond the existing split lines,
+for prefix bytes through line r and target-line bytes R. The broader request
+still performs compiler/fix collection and is not claimed to be prefix-bounded.
+No execution or timing/RSS measurement was run.
+
+# 2026-08-25 follow-up: canonical diagnostic byte scanning
+
+Three warning/error surfaces carried two private location parsers plus the
+shared parser. Their colon loops created a one-byte substring at every scanned
+position. The shared substring search used by structured `|||RELATED` and
+`|||HELP` recognition similarly created a candidate substring at every offset.
+
+`query_commands` and `query_check` now consume the canonical
+`query_rich_common._parse_error_location`; the two private implementations are
+removed. Location delimiter and generic from-offset matching compare bytes with
+monotonic cursors and O(1) scan state. Negative starts normalize to zero, and
+empty needles return a valid bounded start or -1. Location parsing is O(N);
+generic search remains O(N*P), becoming O(N) for fixed diagnostic separators.
+Final field slices and the higher-level structured split still allocate O(N)
+text. No execution, allocation, timing, or RSS measurement was run.
+
+# 2026-08-24 follow-up: flat-bridge string construction
+
+Every ordinary non-raw string entered the interpolation scanner even when it
+contained no brace. On the no-interpolation path it then entered a second brace
+decoder, which appended one character to an immutable prefix per iteration.
+For S literal bytes this added O(S²) cumulative copied/allocated bytes to a
+compiler-wide frontend path. Actual interpolation bodies likewise accumulated
+their inner text one character at a time, giving O(K²) copied bytes for a K-byte
+placeholder before parsing it.
+
+No-brace strings now return the parser-owned text directly. Brace-bearing
+non-interpolated strings also return directly unless they contain `{{` or `}}`.
+The decoder retains ordinary runs as slices, emits one literal brace per escape,
+and joins once; interpolation bodies collect fragments and join once at the
+closing brace. Work and copied output are linear in inspected bytes, with
+fragment storage proportional to escape runs or interpolation payload. Raw
+strings, invalid-fragment fallback, expression ordering, and MIR interpolation
+ownership are unchanged. No execution or runtime/RSS measurement was run.
+
+# 2026-08-24 follow-up: UNREACH001 executable successors
+
+The indexed UNREACH001/RET001 successor pass skipped only blank physical lines.
+Comments and triple-string payload remained on its indentation stack, while the
+UNREACH001 producer recognized `return` from trimmed raw text. A comment could
+therefore become the reported unreachable statement, and docstring examples
+could originate false warnings. JSON always used column 1 point spans even for
+indented code.
+
+The successor owner now consumes one stateful code-only projection that tracks
+ordinary strings, escapes, comments, and triple strings while preserving source
+columns. Only executable lines enter the reverse monotonic stack. Return facts
+require the lexical `return` match to equal the first code column and preserve
+the former end-or-space boundary. Both live lint and collected query-check JSON
+use the same successor index and exact first-token span. Work remains O(N+L)
+with O(L) scalar arrays/stack and no masked source copy or suffix rescans. No
+execution or runtime/RSS measurement was run.
+
+# 2026-08-25 follow-up: DEPR001 lexical facts
+
+The query fallback scanned every trimmed physical line for deprecated
+`Type__method(` names. It created one-byte substrings throughout identifier
+discovery plus a whole-token substring for every identifier, warned on comments
+and ordinary/triple-string payload, and reported indentation-relative JSON
+columns. It also accepted a deprecated-looking suffix embedded in a larger
+digit-prefixed token.
+
+`deprecated_dunder_facts` now performs one stateful byte scan over original
+lines, tracking comments, escaped ordinary strings, and multiline triple
+strings. It recognizes maximal boundary-delimited ASCII identifiers, tracks the
+internal/leading/trailing dunder shape with scalar flags, requires the immediate
+call parenthesis, and slices only accepted names. `_emit_basic_line_lints`
+constructs the ordered fact list once and emits every same-line match in the
+former DEPR001 position. Work is O(B) plus output with O(D) fact objects and
+O(D+M) retained scanner bytes for D findings and M total matched-name bytes,
+instead of O(B+T) tiny substring objects and shifted locations. This is one
+DEPR001 construction scan; other lint rules retain their own linear passes. No
+execution or runtime/RSS measurement was run.
+
+# 2026-08-24 follow-up: doc-coverage repeated traversal removal
+
+The live self-hosted doc-coverage path ran three recursive grep pipelines for
+the requested aggregate and two more for each of four breakdown rows. The
+default aggregate repeated `src/lib`, and the `std/` plus `lib/` rows rescanned
+that same tree again, yielding 11 process pipelines per terminal/JSON/Markdown
+request. Each pipeline captured matching stdout before reducing it to a count.
+
+Normal reporting now walks each distinct exact requested or breakdown root once
+via the Pure Simple filesystem facade. A root-index cache reuses identical-root counts while the
+requested aggregate intentionally re-adds duplicate roots, preserving historical
+multiplicity. Each `.spl` file is read and counted in one line pass before the
+next file. Grep `-B2` semantics are modeled as distinct triple-quote
+lines in overlapping public-function contexts. Ancestor and descendant roots
+remain separate scan domains, matching their independently requested totals.
+The built-in default remains an ordered multi-root list; a user argument is now
+one literal root rather than an implicit shell-word/glob program, intentionally
+closing the normal-report command-injection surface.
+Normal-report time is O(S + E + Q): S is bytes actually read across all root
+scans, E is visited directory entries, and Q is path construction, stat, and
+hash byte work. With the no-GC command runtime, the conservative peak-allocation
+bound is O(S + E + Q + U), including file/split storage, directory listings,
+path prefixes, and root metadata. It launches zero child processes and retains
+no grep match output. No runtime/RSS measurement was run under the
+no-verification override.
+
+# 2026-08-24 follow-up: MIR local binding index
+
+`bind_local` scanned the complete symbol array before every new binding and
+`find_local` scanned it backward for every reference. For L distinct locals and
+R references, function lowering therefore performed O(L^2 + R*L) symbol
+comparisons even though bindings are unique and updated in place.
+
+The authoritative stage-safe symbol and `LocalId` arrays remain unchanged. A
+flat open-address table now stores only integer slots into them, because staged
+native builds have a known failure mode for mutation of dictionary fields that
+carry structured values. The table grows geometrically before 70% load, giving
+expected O(1) bind/find, O(L) worst-case probing, and amortized O(1) insertion.
+It adds O(L) flat i64 storage and a transient O(L) rebuild allocation; this is a
+latency/locality trade rather than a peak-memory reduction. At the grow
+boundary, old and doubled tables briefly coexist; lambda overlay
+mutation can also trigger an O(L) COW copy of a saved table. Per-function reset
+and both temporary lambda scope overlays clear or snapshot/restore the index in
+lockstep with the authoritative arrays. No compiler execution, timing,
+allocation, or RSS measurement was run under the no-verification override.

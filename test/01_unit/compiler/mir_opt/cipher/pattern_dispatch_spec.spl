@@ -9,15 +9,15 @@ Audience: compiler and tooling engineers who maintain this spec.
 #
 # Feature ID: #COMPILER-MIROPT-PATTERN-DISPATCH-WAVE-K4
 # Category:   Compiler | MIR Optimization | Cipher Pattern Dispatch
-# Status:     Wave K4 — real MIR rewriter active
+# Status:     Candidate rewrite coverage; production pass quarantined
 #
 # Tests cover:
 #   - PatternIdiomStats schema (zero builder)
 #   - idiom_for_intrinsic mapping
-#   - run_pattern_idiom_pass_x86: Call→Intrinsic rewrite when caps support idiom
-#   - run_pattern_idiom_pass_x86: no rewrite when caps lack idiom
-#   - run_pattern_idiom_pass_x86: no rewrite for non-cipher callee
-#   - run_pattern_idiom_pass_x86: cipher_hits counter incremented on rewrite
+#   - run_pattern_idiom_candidate_pass_x86: Call→Intrinsic rewrite when caps support idiom
+#   - run_pattern_idiom_candidate_pass_x86: no rewrite when caps lack idiom
+#   - run_pattern_idiom_candidate_pass_x86: no rewrite for non-cipher callee
+#   - run_pattern_idiom_candidate_pass_x86: cipher_hits counter incremented on rewrite
 #
 # Interpreter-mode note (per .claude/rules/testing.md):
 #   The test runner in interpreter mode only verifies file loading and
@@ -27,7 +27,8 @@ Audience: compiler and tooling engineers who maintain this spec.
 use compiler.mir_opt.mir_opt.pattern_dispatch.{
     PatternIdiomStats, pattern_idiom_stats_zero, pattern_idiom_stats_with_remark,
     x86_caps_supports_any_pattern_idiom, caps_kind_supports_any_pattern_idiom,
-    run_pattern_idiom_pass, run_pattern_idiom_pass_x86, idiom_for_intrinsic
+    run_pattern_idiom_pass, run_pattern_idiom_pass_x86,
+    run_pattern_idiom_candidate_pass_x86, idiom_for_intrinsic
 }
 use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
 use compiler.backend.feature_caps.{X86Caps, TargetIdiom, TargetCapsKind}
@@ -201,6 +202,17 @@ describe "pattern idiom capability guards":
             case _: false
         expect(is_call).to_equal(true)
 
+    it "public x86 adapter preserves a cipher call even with AES caps":
+        step("Quarantine direct capability-aware entry points")
+        val m = make_call_module("std.common.aes.cipher.aes_round_software")
+        val out = run_pattern_idiom_pass_x86(m, make_x86_caps_aes_only(), false)
+        val sym = out.functions.keys()[0]
+        val inst = out.functions[sym].blocks[0].instructions[0]
+        val is_call = match inst.kind:
+            case Call(dest, func_op, args): true
+            case _: false
+        expect(is_call).to_equal(true)
+
 # ============================================================================
 # idiom_for_intrinsic mapping
 # ============================================================================
@@ -240,19 +252,19 @@ describe "idiom_for_intrinsic — known cipher intrinsics":
 # Pass: Call → Intrinsic rewrite when caps support idiom
 # ============================================================================
 
-describe "run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true":
+describe "run_pattern_idiom_candidate_pass_x86 — rewrites AES call when has_aes=true":
     it "module function count is preserved after rewrite":
         step("Verify: module function count is preserved after rewrite")
         val m    = make_call_module("std.common.aes.cipher.aes_round_software")
         val caps = make_x86_caps_aes_only()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         expect(out.functions.keys().len()).to_equal(m.functions.keys().len())
 
     it "rewritten block has same instruction count as original":
         step("Verify: rewritten block has same instruction count as original")
         val m    = make_call_module("std.common.aes.cipher.aes_round_software")
         val caps = make_x86_caps_aes_only()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         expect(func.blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -261,7 +273,7 @@ describe "run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true":
         step("Verify: rewritten instruction is Intrinsic not Call")
         val m    = make_call_module("std.common.aes.cipher.aes_round_software")
         val caps = make_x86_caps_aes_only()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -274,7 +286,7 @@ describe "run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true":
         step("Verify: intrinsic name is crypto_aes_round after rewrite")
         val m    = make_call_module("std.common.aes.cipher.aes_round_software")
         val caps = make_x86_caps_aes_only()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -287,12 +299,12 @@ describe "run_pattern_idiom_pass_x86 — rewrites AES call when has_aes=true":
 # Pass: no rewrite when caps lack idiom
 # ============================================================================
 
-describe "run_pattern_idiom_pass_x86 — no rewrite when has_aes=false":
+describe "run_pattern_idiom_candidate_pass_x86 — no rewrite when has_aes=false":
     it "instruction remains Call when has_aes=false":
         step("Verify: instruction remains Call when has_aes=false")
         val m    = make_call_module("std.common.aes.cipher.aes_round_software")
         val caps = make_x86_caps_none()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -305,7 +317,7 @@ describe "run_pattern_idiom_pass_x86 — no rewrite when has_aes=false":
         step("Verify: block instruction count is unchanged when no rewrite")
         val m    = make_call_module("std.common.aes.cipher.aes_round_software")
         val caps = make_x86_caps_none()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         expect(func.blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
@@ -314,12 +326,12 @@ describe "run_pattern_idiom_pass_x86 — no rewrite when has_aes=false":
 # Pass: no rewrite for non-cipher callee
 # ============================================================================
 
-describe "run_pattern_idiom_pass_x86 — no rewrite for non-cipher callee":
+describe "run_pattern_idiom_candidate_pass_x86 — no rewrite for non-cipher callee":
     it "instruction remains Call for std.io.print callee":
         step("Verify: instruction remains Call for std.io.print callee")
         val m    = make_call_module("std.io.print")
         val caps = make_x86_caps_aes_only()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         val inst = func.blocks[0].instructions[0]
@@ -332,7 +344,7 @@ describe "run_pattern_idiom_pass_x86 — no rewrite for non-cipher callee":
         step("Verify: block instruction count is unchanged for non-cipher callee")
         val m    = make_call_module("std.io.print")
         val caps = make_x86_caps_aes_only()
-        val out  = run_pattern_idiom_pass_x86(m, caps, false)
+        val out  = run_pattern_idiom_candidate_pass_x86(m, caps, false)
         val sym  = out.functions.keys()[0]
         val func = out.functions[sym]
         expect(func.blocks[0].instructions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement

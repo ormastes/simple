@@ -1,0 +1,176 @@
+"""Executable MIR/frontend contract for resolved module-static addresses."""
+# @req: REQ-COMPILER-MIR-GLOBAL-ADDR-001
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.bootstrap_globals.{
+    bootstrap_mir_functions_reset, bootstrap_mir_modules_add,
+    bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks}
+use compiler.interp.mir_interpreter.{MirInterpreter}
+
+fn lower_static_ref_source(src: text, name: text) -> MirModule:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/{name}.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+fn global_addr_count(module: MirModule) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case GlobalAddr(_, _, _): count = count + 1
+                    case _: ()
+    count
+
+fn load_global_count(module: MirModule) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case LoadGlobal(_, _): count = count + 1
+                    case _: ()
+    count
+
+fn static_with_visibility(id: i64, visibility: Visibility) -> MirStatic:
+    MirStatic(
+        symbol: SymbolId(id: id), name: "g{id}", type_: MirType.i64(),
+        init: nil, is_mutable: true, alignment: 8, visibility: visibility)
+
+describe "module-static GlobalAddr MIR contract":
+    it "keeps old constructors compatible and serializes the appended opcode":
+        step("Inspect default metadata and the typed serialized payload")
+        val static_ = MirStatic(
+            symbol: SymbolId(id: 41), name: "counter", type_: MirType.i64(),
+            init: nil, is_mutable: true)
+        expect(static_.alignment).to_equal(0)
+        expect(static_.visibility).to_equal(Visibility.Private)
+        val encoded = serialize_mir_inst_kind(MirInstKind.GlobalAddr(
+            LocalId(id: 3), SymbolId(id: 41), true))
+        expect(encoded).to_contain("\"GlobalAddr\"")
+        expect(encoded).to_contain("\"dest\":3")
+        expect(encoded).to_contain("\"symbol\":41")
+        expect(encoded).to_contain("\"mutable\":true")
+
+    it "lowers shared and mutable static references without loading first":
+        step("Run source through parser, HIR, and MIR")
+        val mir = lower_static_ref_source(
+            "val IMM = 7\nvar MUT = 9\nfn refs():\n" +
+            "    unsafe:\n        val a = &IMM\n        val b = &IMM\n" +
+            "        val c = &mut MUT\n", "global_addr_refs")
+        expect(global_addr_count(mir)).to_equal(3)
+        expect(load_global_count(mir)).to_equal(0)
+        expect(mir.statics.values().len()).to_equal(2)
+        var shared_count = 0
+        var mutable_count = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case GlobalAddr(_, _, mutable):
+                            if mutable: mutable_count = mutable_count + 1
+                            else: shared_count = shared_count + 1
+                        case _: ()
+        expect(shared_count).to_equal(2)
+        expect(mutable_count).to_equal(1)
+
+    it "keeps a shadowing local on ordinary Ref lowering":
+        step("Prove resolved local identity wins over the module name")
+        val mir = lower_static_ref_source(
+            "var VALUE = 1\nfn local_ref():\n    var VALUE = 2\n" +
+            "    val p = &mut VALUE\n", "global_addr_shadow")
+        expect(global_addr_count(mir)).to_equal(0)
+        var ref_count = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case Ref(_, _, _): ref_count = ref_count + 1
+                        case _: ()
+        expect(ref_count).to_equal(1)
+
+    it "merges storage first materialized inside a lifted lambda":
+        step("Lower a lambda whose body is the first address of an immutable")
+        val mir = lower_static_ref_source(
+            "val IMM = 7\nfn make():\n    val f = \\x: &IMM\n",
+            "global_addr_lambda")
+        expect(global_addr_count(mir)).to_equal(1)
+        expect(load_global_count(mir)).to_equal(0)
+        var found_storage = false
+        for static_ in mir.statics.values():
+            if static_.name.ends_with("IMM"): found_storage = true
+        expect(found_storage).to_equal(true)
+
+    it "preserves GlobalAddr through SSA rewriting":
+        step("Force one reassigned destination through the SSA owner")
+        val symbol = SymbolId(id: 71)
+        val block = MirBlock(
+            id: BlockId.entry(), label: Some("entry"),
+            instructions: [
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 0), MirConstValue.Int(0), MirType.i64()), span: nil),
+                MirInst(kind: MirInstKind.GlobalAddr(
+                    LocalId(id: 0), symbol, false), span: nil)
+            ], terminator: MirTerminator.Ret(nil))
+        val rewritten = ssa_var_transform_blocks([block])
+        expect(rewritten.applied).to_equal(true)
+        var survived = false
+        for instruction in rewritten.blocks[0].instructions:
+            match instruction.kind:
+                case GlobalAddr(_, found, false):
+                    if found.id == 71: survived = true
+                case _: ()
+        expect(survived).to_equal(true)
+
+    it "round-trips all six visibility tags and natural alignments":
+        step("Populate and read the real bootstrap parallel accumulators")
+        var statics: Dict<SymbolId, MirStatic> = {}
+        val visibilities = [Visibility.Public, Visibility.Peer, Visibility.Up,
+            Visibility.Internal, Visibility.Package, Visibility.Private]
+        var i = 0
+        while i < visibilities.len():
+            val symbol = SymbolId(id: 100 + i)
+            statics[symbol] = static_with_visibility(symbol.id, visibilities[i])
+            i = i + 1
+        val module = MirModule(
+            name: "visibility_wires", functions: {}, statics: statics,
+            constants: {}, types: {})
+        bootstrap_mir_functions_reset()
+        bootstrap_mir_modules_add(module)
+        var seen: Dict<i64, bool> = {}
+        i = 0
+        while i < 6:
+            seen[bootstrap_mir_static_visibility_at(i)] = true
+            expect(bootstrap_mir_static_alignment_at(i)).to_equal(8)
+            i = i + 1
+        i = 0
+        while i < 6:
+            expect(seen.contains(i)).to_equal(true)
+            i = i + 1
+
+    it "emits canonical metadata and rejects unsupported interpretation":
+        step("Inspect LLVM ownership via the approved facade and execute rejection")
+        val llvm = file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl")
+        expect(llvm).to_contain("{g_linkage}global {g_ty} {g_init}, align {g_alignment}")
+        expect(llvm).to_contain("bootstrap_mir_static_visibility_at(index)")
+        expect(llvm).to_contain("bootstrap_mir_static_alignment_at(index)")
+        var interpreter = MirInterpreter.create()
+        val error = interpreter.execute_instruction(MirInst(
+            kind: MirInstKind.GlobalAddr(
+                LocalId(id: 0), SymbolId(id: 1), false), span: nil))
+        expect(error != nil).to_equal(true)
+        expect(error.unwrap().message()).to_contain("GlobalAddr")

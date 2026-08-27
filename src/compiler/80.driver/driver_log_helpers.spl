@@ -40,6 +40,11 @@ var _g_progress_path_set: bool = false
 var _g_progress_prev_ms: i64 = -1
 var _g_phase_profile_fd: i64 = -2
 var _g_phase_profile_seq: i64 = 0
+var _g_execution_metrics_path: text = ""
+var _g_execution_metrics_run_id: text = ""
+var _g_execution_metrics_set: bool = false
+var _g_execution_metrics_header_written: bool = false
+var _g_execution_metrics_seq: i64 = 0
 
 fn _append_phase_profile(msg: text):
     if _g_phase_profile_fd == -2:
@@ -127,6 +132,53 @@ fn _build_progress_number(value: i64) -> text:
 fn _build_progress_token(value: text) -> text:
     value.replace("%", "%25").replace(" ", "%20").replace("=", "%3D").replace("\n", "%0A")
 
+fn _execution_metrics_configure():
+    if not _g_execution_metrics_set:
+        _g_execution_metrics_path = rt_env_get("SIMPLE_EXECUTION_METRICS_FILE") ?? ""
+        _g_execution_metrics_run_id = rt_env_get("SIMPLE_EVIDENCE_RUN_ID") ?? "unassigned"
+        _g_execution_metrics_set = true
+
+fn _stable_build_phase_ids(phase: text) -> [text]:
+    if phase == "source_closure": return ["SourceClosure"]
+    if phase == "load_sources": return ["LoadSources"]
+    if phase == "parse": return ["Parse"]
+    if phase == "hir": return ["HirLower", "TypeCheck"]
+    if phase == "monomorphize": return ["Monomorphize"]
+    if phase == "mir": return ["MirLower", "BorrowCheck", "MirOptimize"]
+    if phase == "native_compile": return ["BackendCodegen", "Assemble"]
+    if phase == "link": return ["Link"]
+    if phase == "native_cache": return ["ArtifactValidation"]
+    if phase == "aop_weave": return ["AopWeave"]
+    if phase == "smf_package": return ["SmfPackage", "ManifestWrite"]
+    if phase == "surface_alias" or phase == "surface_build" or phase == "surface_freeze":
+        return ["HirLower"]
+    if phase == "export_origins": return ["ManifestWrite"]
+    ["Unknown"]
+
+fn _append_execution_metric(
+    phase: text, unit_kind: text, done: i64, total: i64, current: text,
+    failed: i64, cached: i64, terminal: text, now_ms: i64, dt_ms: i64
+):
+    _execution_metrics_configure()
+    if _g_execution_metrics_path == "":
+        return
+    if not _g_execution_metrics_header_written:
+        val header = "# version: execution-metrics-2\nspans |run_id, span_id, parent_span_id, phase_id, unit_id, started_ms, ended_ms, status, work_name, work_done, work_total, cached|\n"
+        if not file_append(_g_execution_metrics_path, header):
+            _g_execution_metrics_path = ""
+            return
+        _g_execution_metrics_header_written = true
+    val started_ms = if now_ms >= dt_ms: now_ms - dt_ms else: 0
+    val status = if failed > 0: "failure" elif terminal == "complete": "complete" else: "running"
+    for phase_id in _stable_build_phase_ids(phase):
+        val span_id = "build-{_g_execution_metrics_seq}"
+        val line = "    {_build_progress_token(_g_execution_metrics_run_id)}, {span_id}, build-root, {phase_id}, {_build_progress_token(current)}, {started_ms}, {now_ms}, {status}, {_build_progress_token(unit_kind)}, {_build_progress_number(done)}, {_build_progress_number(total)}, {_build_progress_number(cached)}\n"
+        if file_append(_g_execution_metrics_path, line):
+            _g_execution_metrics_seq = _g_execution_metrics_seq + 1
+        else:
+            _g_execution_metrics_path = ""
+            return
+
 pub fn log_build_progress(
     phase: text,
     unit_kind: text,
@@ -149,6 +201,7 @@ pub fn log_build_progress(
     val now_ms = _phase_elapsed_ms()
     val dt_ms = if _g_progress_prev_ms >= 0: now_ms - _g_progress_prev_ms else: 0
     _g_progress_prev_ms = now_ms
+    _append_execution_metric(phase, unit_kind, done, total, current, failed, cached, terminal, now_ms, dt_ms)
     print "[build] {phase} {_build_progress_number(done)}/{_build_progress_number(total)} step {_build_progress_number(tasks_done)}/{_build_progress_number(tasks_total)} +{now_ms}ms dt={dt_ms}ms {current}"
     rt_stdout_flush()
     if path == "":

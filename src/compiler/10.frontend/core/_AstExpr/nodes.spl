@@ -8,6 +8,7 @@ use compiler.frontend.core.ast_expr.*
 # See ast.spl for the full AST module documentation.
 
 use std.string_core.{char_code}
+use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
@@ -188,8 +189,11 @@ fn expr_env_mirror_enabled() -> bool:
 
 fn expr_trace_tags_enabled() -> bool:
     if expr_mode_slots_ready:
-        return expr_trace_tags_cached
-    (rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != ""
+        if not expr_trace_tags_cached:
+            return false
+        return not frontend_trace_suppressed()
+    ((rt_env_get("SIMPLE_TRACE_EXPR_TAGS") ?? "") != "" and
+     not frontend_trace_suppressed())
 
 fn expr_env_read(idx: i64, field: text) -> text:
     if not expr_env_mirror_enabled():
@@ -411,7 +415,11 @@ fn ast_gen_check_index(kind: text, idx: i64, minted_gen: i64) -> bool:
         return false
     if ast_gen_last_report_slot[0] != ast_gen_slot[0]:
         ast_gen_last_report_slot[0] = ast_gen_slot[0]
-        print ast_gen_stale_message(kind, idx, minted_gen)
+        val message = ast_gen_stale_message(kind, idx, minted_gen)
+        if frontend_trace_suppressed():
+            eprint(message)
+        else:
+            print message
     true
 
 fn expr_reset():
@@ -602,21 +610,25 @@ fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
     expr_call_named(callee, call_args, [], span_id)
 
 fn expr_call_named(callee: i64, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
-    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
+    # One policy/env decision per call allocation. The former six identical
+    # environment probes sat directly on a common expression hot path.
+    val trace_calls = ((rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1" and
+        not frontend_trace_suppressed())
+    if trace_calls:
         eprint("[ast-expr] call-alloc:start callee={callee} argc={call_args.len()}")
     val idx = expr_alloc(9, span_id)
-    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
+    if trace_calls:
         eprint("[ast-expr] call-alloc:allocated idx={idx}")
     expr_left[idx] = callee
     expr_i64_set(idx, "LEFT", callee)
-    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
+    if trace_calls:
         eprint("[ast-expr] call-alloc:left idx={idx}")
     expr_call_args_set(idx, call_args, arg_names)
-    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
+    if trace_calls:
         eprint("[ast-expr] call-alloc:args-memory idx={idx}")
-    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
+    if trace_calls:
         eprint("[ast-expr] call-alloc:args-env idx={idx}")
-    if (rt_env_get("SIMPLE_TRACE_AST_EXPR_CALLS") ?? "") == "1":
+    if trace_calls:
         eprint("[ast-expr] call-alloc:done idx={idx}")
     idx
 

@@ -70,6 +70,31 @@ Docs updated to make this the documented landing command:
   happens" now lists `land.shs` as the primary enforcement point for the
   non-bootstrap landing path.
 
+## Re-verified 2026-08-26
+
+Re-read this record and the current tree in a fresh clone
+(`/mnt/data/worktrees/lane-guard1`, `origin/main` tip). `scripts/check/land.shs`
+still exists and still implements the gate-then-push flow described above
+(quick-group `check-rules-sdl.shs` + `check-rules-sdl-integrity.shs` against
+committed content, verdict-line discipline, then `sj bookmark set main -r @-
+&& sj git push --bookmark main`). `.claude/rules/vcs.md` still documents
+`land.shs` as the sanctioned push path and still warns against raw `sj`/`jj
+git push`.
+
+No new fix was implemented this session: the previously-identified gap is
+structural, not an oversight — `jj` has no hook mechanism at all (confirmed
+again: `sj` at `src/app/sj/main.spl` is still a generic argument-forwarding
+passthrough with no `push`-specific branch), so nothing short of (a) a
+hypothetical future jj hook, or (b) CI-side enforcement independent of the
+local push path, can force every route to `git`/`jj` transport through
+`land.shs`. Both of those require either upstream jj functionality this repo
+does not control, or infrastructure outside a single-clone session's scope,
+and neither can be verified without performing a real push — which this
+task's safety rules forbid. Making `land.shs` "the only sanctioned path" is
+already the documented policy (`.claude/rules/vcs.md`); it is a process rule,
+not a technical enforcement, and enforcing it technically remains open work
+as originally scoped below.
+
 ## Open residual risk
 
 `land.shs` only protects sessions/users that actually invoke it. Nothing prevents

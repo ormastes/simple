@@ -489,10 +489,14 @@ impl ChannelProvider for StdChannelProvider {
         }
     }
 
-    fn channel_send(&self, handle: Handle, value: Value) -> Result<(), CompileError> {
+    fn channel_send(&self, handle: Handle, value: Value) -> Result<bool, CompileError> {
         use crate::interpreter::interpreter_extern::concurrency::rt_channel_send;
-        rt_channel_send(&[Value::Int(handle), value])?;
-        Ok(())
+        match rt_channel_send(&[Value::Int(handle), value])? {
+            Value::Int(status) => Ok(status == 1),
+            other => Err(CompileError::runtime(format!(
+                "rt_channel_send returned non-status value: {other:?}"
+            ))),
+        }
     }
 
     fn channel_try_recv(&self, handle: Handle) -> Result<Value, CompileError> {

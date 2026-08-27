@@ -443,6 +443,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
+    insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
     insert_simple!("native_is_tty", terminal::native_is_tty);
     insert_simple!("native_stderr", terminal::native_stderr);
     insert_simple!("rt_host_gpu_lane_event", host_gpu_lane::rt_host_gpu_lane_event);
@@ -559,6 +560,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("native_udp_set_read_timeout", network::native_udp_set_read_timeout);
     insert_simple!("native_udp_set_ttl", network::native_udp_set_ttl);
     insert_simple!("native_udp_set_write_timeout", network::native_udp_set_write_timeout);
+    insert_simple!("rt_io_udp_bind", crate::interpreter::interpreter_native_net::rt_io_udp_bind_interp);
+    insert_simple!("rt_io_udp_close", crate::interpreter::interpreter_native_net::rt_io_udp_close_interp);
+    insert_simple!("rt_io_udp_connect", crate::interpreter::interpreter_native_net::rt_io_udp_connect_interp);
+    insert_simple!("rt_io_udp_local_addr", crate::interpreter::interpreter_native_net::rt_io_udp_local_addr_interp);
+    insert_simple!("rt_io_udp_join_multicast", crate::interpreter::interpreter_native_net::rt_io_udp_join_multicast_interp);
+    insert_simple!("rt_io_udp_leave_multicast", crate::interpreter::interpreter_native_net::rt_io_udp_leave_multicast_interp);
+    insert_simple!("rt_io_udp_recv", crate::interpreter::interpreter_native_net::rt_io_udp_recv_interp);
+    insert_simple!("rt_io_udp_recv_from", crate::interpreter::interpreter_native_net::rt_io_udp_recv_from_interp);
+    insert_simple!("rt_io_udp_send", crate::interpreter::interpreter_native_net::rt_io_udp_send_interp);
+    insert_simple!("rt_io_udp_send_to", crate::interpreter::interpreter_native_net::rt_io_udp_send_to_interp);
+    insert_simple!("rt_io_udp_set_broadcast", crate::interpreter::interpreter_native_net::rt_io_udp_set_broadcast_interp);
+    insert_simple!("rt_io_udp_set_multicast_loop", crate::interpreter::interpreter_native_net::rt_io_udp_set_multicast_loop_interp);
+    insert_simple!("rt_io_udp_set_nonblocking", crate::interpreter::interpreter_native_net::rt_io_udp_set_nonblocking_interp);
+    insert_simple!("rt_io_udp_set_read_timeout", crate::interpreter::interpreter_native_net::rt_io_udp_set_read_timeout_interp);
     insert_simple!("panic", process::panic);
     insert_simple!("parse_memory_size", memory::parse_memory_size);
     insert_simple!("pow", math::pow);
@@ -640,6 +655,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_async_ws_read_raw", network::rt_async_ws_read_raw);
     insert_simple!("rt_async_ws_write_raw", network::rt_async_ws_write_raw);
     insert_simple!("rt_atomic_bool_free", atomic::rt_atomic_bool_free);
+    insert_simple!("rt_atomic_bool_compare_exchange", atomic::rt_atomic_bool_compare_exchange);
     insert_simple!("rt_atomic_bool_load", atomic::rt_atomic_bool_load);
     insert_simple!("rt_atomic_bool_new", atomic::rt_atomic_bool_new);
     insert_simple!("rt_atomic_bool_store", atomic::rt_atomic_bool_store);
@@ -652,6 +668,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_atomic_fetch_sub", atomic::rt_atomic_fetch_sub_fn);
     insert_simple!("rt_atomic_flag_clear", atomic::rt_atomic_flag_clear);
     insert_simple!("rt_atomic_flag_free", atomic::rt_atomic_flag_free);
+    insert_simple!("rt_atomic_flag_load", atomic::rt_atomic_flag_load);
     insert_simple!("rt_atomic_flag_new", atomic::rt_atomic_flag_new);
     insert_simple!("rt_atomic_flag_test_and_set", atomic::rt_atomic_flag_test_and_set);
     insert_simple!("rt_atomic_int_compare_exchange", atomic::rt_atomic_int_compare_exchange);
@@ -674,6 +691,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_atomic_store_u64", atomic::rt_atomic_store_u64);
     insert_simple!("rt_atomic_store_u8", atomic::rt_atomic_store_u8);
     insert_simple!("rt_atomic_swap", atomic::rt_atomic_swap_fn);
+    insert_simple!("rt_spin_loop_hint", atomic::rt_spin_loop_hint);
     insert_simple!("rt_base64_decode", crypto::rt_base64_decode);
     insert_simple!("rt_base64_encode", crypto::rt_base64_encode);
     insert_simple!("rt_base64url_decode", crypto::rt_base64url_decode);
@@ -831,7 +849,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cli_run_verify", cli::rt_cli_run_verify);
     insert_simple!("rt_cli_version", cli::rt_cli_version);
     insert_simple!("rt_cli_watch_file", cli::rt_cli_watch_file);
-    insert_simple!("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir);
     insert_simple!("rt_compile_to_native", native_sffi::rt_compile_to_native);
     insert_simple!("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native);
     insert_simple!("rt_constant_time_compare", crypto::rt_constant_time_compare);
@@ -988,6 +1005,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_get_error_string", gpu::rt_cuda_get_error_string_fn);
     insert_simple!("rt_cuda_init", gpu::rt_cuda_init_fn);
     insert_simple!("rt_cuda_launch_kernel", gpu::rt_cuda_launch_kernel_fn);
+    insert_simple!("rt_cuda_launch_kernel_ex", gpu::rt_cuda_launch_kernel_ex_fn);
     insert_simple!("rt_cuda_mem_alloc", gpu::rt_cuda_mem_alloc_fn);
     insert_simple!("rt_cuda_memcpy_dtod", gpu::rt_cuda_memcpy_dtod_fn);
     insert_simple!("rt_cuda_memcpy_dtoh", gpu::rt_cuda_memcpy_dtoh_fn);
@@ -1677,6 +1695,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_progress_get_elapsed_seconds", time::rt_progress_get_elapsed_seconds);
     insert_simple!("rt_progress_init", time::rt_progress_init);
     insert_simple!("rt_progress_reset", time::rt_progress_reset);
+    insert_simple!("rt_progress_clock_now_nanos", time::rt_progress_clock_now_nanos);
+    insert_simple!("rt_progress_tls_clear", time::rt_progress_tls_clear);
+    insert_simple!("rt_progress_tls_is_initialized", time::rt_progress_tls_is_initialized);
+    insert_simple!("rt_progress_tls_start_nanos", time::rt_progress_tls_start_nanos);
+    insert_simple!("rt_progress_tls_store_start_nanos", time::rt_progress_tls_store_start_nanos);
     insert_simple!(
         "rt_ps_torch_tensor_from_bits_1d",
         torch::rt_ps_torch_tensor_from_bits_1d
@@ -1690,6 +1713,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mmap_raw", memory::rt_mmap_raw);
     insert_simple!("rt_munmap_raw", memory::rt_munmap_raw);
     insert_simple!("rt_mprotect", memory::rt_mprotect);
+    insert_simple!("rt_madvise_raw", memory::rt_madvise_raw);
+    insert_simple!("rt_msync_flags", memory::rt_msync_flags);
+    insert_simple!("rt_mlock", memory::rt_mlock);
+    insert_simple!("rt_munlock", memory::rt_munlock);
+    insert_simple!("rt_open_fd", file_io::rt_open_fd);
+    insert_simple!("rt_close_fd", file_io::rt_close_fd);
     insert_simple!("rt_ptr_write_i32", memory::rt_ptr_write_i32);
     insert_simple!("rt_ptr_write_i16", memory::rt_ptr_write_i16);
     insert_simple!("rt_ptr_write_i64", memory::rt_ptr_write_i64);
@@ -1711,6 +1740,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_volatile_write_u16", memory::rt_volatile_write_u16);
     insert_simple!("rt_volatile_write_u32", memory::rt_volatile_write_u32);
     insert_simple!("rt_volatile_write_u64", memory::rt_volatile_write_u64);
+    insert_simple!("rt_memory_barrier", memory::rt_memory_barrier);
+    insert_simple!("rt_load_barrier", memory::rt_load_barrier);
+    insert_simple!("rt_store_barrier", memory::rt_store_barrier);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
     insert_simple!("rt_ptr_write_bytes", memory::rt_ptr_write_bytes);
     insert_simple!("rt_ptr_write_bytes_raw", memory::rt_ptr_write_bytes_raw);
@@ -1826,6 +1858,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // See `interpreter_extern/sha256.rs` and
     // doc/08_tracking/bug/vulkan_font_whole_atlas_sha256_per_upload_2026-08-04.md.
     insert_simple!("rt_sha256_finish", sha256::rt_sha256_finish);
+    insert_simple!("rt_sha256_finish_bytes", sha256::rt_sha256_finish_bytes);
     insert_simple!("rt_sha256_free", sha256::rt_sha256_free);
     insert_simple!("rt_sha256_new", sha256::rt_sha256_new);
     insert_simple!("rt_sha256_reset", sha256::rt_sha256_reset);
@@ -2024,6 +2057,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_timestamp_get_month", time::rt_timestamp_get_month);
     insert_simple!("rt_timestamp_get_second", time::rt_timestamp_get_second);
     insert_simple!("rt_timestamp_get_year", time::rt_timestamp_get_year);
+    insert_simple!("rt_timestamp_oracle_add_days", time::rt_timestamp_oracle_add_days);
+    insert_simple!("rt_timestamp_oracle_diff_days", time::rt_timestamp_oracle_diff_days);
+    insert_simple!("rt_timestamp_oracle_from_components", time::rt_timestamp_oracle_from_components);
+    insert_simple!("rt_timestamp_oracle_get_day", time::rt_timestamp_get_day);
+    insert_simple!("rt_timestamp_oracle_get_hour", time::rt_timestamp_get_hour);
+    insert_simple!("rt_timestamp_oracle_get_microsecond", time::rt_timestamp_get_microsecond);
+    insert_simple!("rt_timestamp_oracle_get_minute", time::rt_timestamp_get_minute);
+    insert_simple!("rt_timestamp_oracle_get_month", time::rt_timestamp_get_month);
+    insert_simple!("rt_timestamp_oracle_get_second", time::rt_timestamp_get_second);
+    insert_simple!("rt_timestamp_oracle_get_year", time::rt_timestamp_get_year);
     insert_simple!("rt_timestamp_iso8601", time::rt_timestamp_iso8601);
     insert_simple!("rt_tls13_aes128_gcm_decrypt", simd::rt_tls13_aes128_gcm_decrypt);
     insert_simple!("rt_tls13_aes128_gcm_encrypt", simd::rt_tls13_aes128_gcm_encrypt);
@@ -2411,14 +2454,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_bits_to_f64", wsffi::spl_bits_to_f64);
     insert_simple!("spl_dlclose", wsffi::spl_dlclose);
     insert_simple!("spl_dlopen", wsffi::spl_dlopen);
+    insert_simple!("spl_dlopen_checked", wsffi::spl_dlopen_checked);
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
+    insert_simple!("spl_dlsym_checked", wsffi::spl_dlsym_checked);
+    insert_simple!("spl_dlsym_process_checked", wsffi::spl_dlsym_process_checked);
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
+    insert_simple!("spl_wffi_call_bool0_checked", wsffi::spl_wffi_call_bool0_checked);
+    insert_simple!("spl_wffi_call_bool1_checked", wsffi::spl_wffi_call_bool1_checked);
     insert_simple!("spl_wffi_call_f64", wsffi::spl_wffi_call_f64);
     insert_simple!("spl_wffi_call_f64_checked", wsffi::spl_wffi_call_f64_checked);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);
     insert_simple!("spl_wffi_call_i64_checked", wsffi::spl_wffi_call_i64_checked);
+    insert_simple!("spl_wffi_try_call_i64_out", wsffi::spl_wffi_try_call_i64_out);
     insert_simple!("spl_wffi_call_i64_with_bytes", dynamic_sffi::spl_wffi_call_i64_with_bytes_fn);
     insert_simple!(
         "spl_wffi_call_i64_with_bytes_checked",
@@ -2546,11 +2595,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_tls_client_write_timeout",
         net_tls_client::rt_tls_client_write_timeout
     );
-    insert_simple!("rt_tls_client_read", net_tls_client::rt_tls_client_read);
-    insert_simple!(
-        "rt_tls_client_read_timeout",
-        net_tls_client::rt_tls_client_read_timeout
-    );
     insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
     insert_simple!(
         "rt_tls_get_protocol_version",
@@ -2583,7 +2627,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_hosted_select_surface", hosted::select_surface);
     insert_simple!("rt_hosted_set_surface_override", hosted::set_surface_override);
     // Native compilation & execution
-    insert_simple!("rt_compile_to_llvm_ir", native_sffi::rt_compile_to_llvm_ir);
     insert_simple!("rt_compile_to_native", native_sffi::rt_compile_to_native);
     insert_simple!("rt_compile_to_native_with_opt", native_sffi::rt_compile_to_native);
     insert_simple!("rt_execute_native", native_sffi::rt_execute_native);
@@ -2880,8 +2923,7 @@ pub(crate) fn call_extern_function_with_values(
         return audio::dispatch(name, &evaluated);
     }
 
-    // rt_fb_*/rt_image_*/rt_simpleos_log_*+rt_log_target_*/
-    // rt_socket_set_nonblocking are 14 of the 20 bucket (a)
+    // rt_fb_*/rt_image_*/rt_simpleos_log_*+rt_log_target_* were bucket (a)
     // "source-list-absent" names left after the rt_audio_* lane above; see
     // doc/08_tracking/bug/interpreter_extern_unreachable_names.md bucket (a).
     // The other 6, rt_mmio_read_u8/u16/u32 + rt_mmio_write_u8/u16/u32,
@@ -2898,8 +2940,13 @@ pub(crate) fn call_extern_function_with_values(
     if name.starts_with("rt_simpleos_log_") || name.starts_with("rt_log_target_") {
         return simpleos_log::dispatch(name, &evaluated);
     }
-    if name == "rt_socket_set_nonblocking" {
-        return socket_nonblock::dispatch(&evaluated);
+    // Pure Simple owns rt_socket_set_nonblocking; only its scalar syscall
+    // shims are interpreter externs.
+    if name == "rt_socket_nonblock_prepare"
+        || name == "rt_socket_nonblock_commit"
+        || name == "rt_socket_nonblock_mask"
+    {
+        return socket_nonblock::dispatch(name, &evaluated);
     }
 
     // The rt_opengl_* / rt_oneapi_* families are implemented once, in C, at

@@ -90,7 +90,6 @@ pub class DbdAuthenticatedRespIngressV1:
     current_frame_length: i64
     number_value: i64
     number_digits: i64
-    negative_length: bool
     array_remaining: i64
     argument_index: i64
     bulk_length: i64
@@ -121,7 +120,6 @@ pub class DbdAuthenticatedRespIngressV1:
             current_frame_length: 0,
             number_value: 0,
             number_digits: 0,
-            negative_length: false,
             array_remaining: 0,
             argument_index: 0,
             bulk_length: 0,
@@ -149,7 +147,6 @@ pub class DbdAuthenticatedRespIngressV1:
     me reset_number():
         self.number_value = 0
         self.number_digits = 0
-        self.negative_length = false
 
     me reset_frame_parser():
         self.phase = DbdRespParsePhaseV1.Start
@@ -187,8 +184,9 @@ pub class DbdAuthenticatedRespIngressV1:
         if not _dbd_command_digit(byte):
             return false
         val digit = byte.to_i64() - 48
-        if self.number_digits >= 6 or
-            self.number_value > (maximum - digit) / 10:
+        val cond_187 = self.number_digits >= 6 or
+            self.number_value > (maximum - digit) / 10
+        if cond_187:
             return false
         self.number_value = self.number_value * 10 + digit
         self.number_digits = self.number_digits + 1
@@ -197,20 +195,34 @@ pub class DbdAuthenticatedRespIngressV1:
     me observe_command_byte(byte: u8):
         if self.command_token_done:
             return
-        if byte == 32u8 or byte == 9u8 or byte == 13u8 or byte == 10u8:
+        # The canonical inline RESP parser drops leading spaces and tabs.
+        # Mirror that normalization while bytes are still mutable so a frame
+        # such as ``  AUTH principal credential`` cannot evade the repeated-
+        # AUTH detector and become immutable command text after admission.
+        # CR/LF still terminates an all-whitespace frame as an empty command.
+        if byte == 32u8 or byte == 9u8:
+            if self.command_token_length == 0:
+                return
             self.command_token_done = true
             self.current_is_auth = self.command_possible_auth and
                 self.command_token_length == 4
             return
-        if self.command_token_length >= 4 or
+        if byte == 13u8 or byte == 10u8:
+            self.command_token_done = true
+            self.current_is_auth = self.command_possible_auth and
+                self.command_token_length == 4
+            return
+        val cond_214 = self.command_token_length >= 4 or
             _dbd_command_ascii_fold(byte) !=
-                _dbd_command_auth_byte(self.command_token_length):
+                _dbd_command_auth_byte(self.command_token_length)
+        if cond_214:
             self.command_possible_auth = false
         self.command_token_length = self.command_token_length + 1
 
     me finish_frame() -> bool:
-        if self.complete_lengths.len().to_i64() - self.complete_cursor >=
-            DBD_MAX_REQUESTS_PER_SESSION:
+        val cond_221 = self.complete_lengths.len().to_i64() - self.complete_cursor >=
+            DBD_MAX_REQUESTS_PER_SESSION
+        if cond_221:
             return self.fail()
         if not self.command_token_done:
             self.current_is_auth = self.command_possible_auth and
@@ -249,8 +261,9 @@ pub class DbdAuthenticatedRespIngressV1:
 
         if self.phase == DbdRespParsePhaseV1.ArrayCount:
             if byte == 13u8:
-                if self.number_digits == 0 or
-                    self.number_value > DBD_MAX_JOURNAL_ARGS:
+                val cond_261 = self.number_digits == 0 or
+                    self.number_value > DBD_MAX_JOURNAL_ARGS
+                if cond_261:
                     return self.fail()
                 self.array_remaining = self.number_value
                 self.phase = DbdRespParsePhaseV1.ArrayCountLf
@@ -278,22 +291,20 @@ pub class DbdAuthenticatedRespIngressV1:
             return true
 
         if self.phase == DbdRespParsePhaseV1.BulkLength:
-            if byte == 45u8 and self.number_digits == 0 and
-                not self.negative_length:
-                self.negative_length = true
-                return true
+            # RESP null bulk strings are reply values, not valid command
+            # arguments.  The canonical text parser historically maps `$-1`
+            # to `""`; admitting it here would therefore collapse two
+            # different authenticated wire representations before dispatch
+            # and durable journal encoding.  Reject the negative marker in
+            # the byte-domain owner instead of normalizing it.
+            if byte == 45u8:
+                return self.fail()
             if byte == 13u8:
                 if self.number_digits == 0:
                     return self.fail()
-                if self.negative_length and self.number_value != 1:
-                    return self.fail()
-                self.bulk_length = if self.negative_length:
-                    0
-                else:
-                    self.number_value
+                self.bulk_length = self.number_value
                 if self.argument_index == 0:
-                    self.command_possible_auth = not self.negative_length and
-                        self.bulk_length == 4
+                    self.command_possible_auth = self.bulk_length == 4
                     self.command_token_length = 0
                     self.command_token_done = false
                 self.phase = DbdRespParsePhaseV1.BulkLengthLf
@@ -305,11 +316,6 @@ pub class DbdAuthenticatedRespIngressV1:
         if self.phase == DbdRespParsePhaseV1.BulkLengthLf:
             if byte != 10u8:
                 return self.fail()
-            if self.negative_length:
-                if self.argument_index == 0:
-                    self.command_possible_auth = false
-                    self.command_token_done = true
-                return self.finish_array_argument()
             self.bulk_index = 0
             if self.bulk_length == 0:
                 if self.argument_index == 0:
@@ -322,9 +328,10 @@ pub class DbdAuthenticatedRespIngressV1:
 
         if self.phase == DbdRespParsePhaseV1.BulkData:
             if self.argument_index == 0:
-                if self.command_token_length >= 4 or
+                val cond_327 = self.command_token_length >= 4 or
                     _dbd_command_ascii_fold(byte) !=
-                        _dbd_command_auth_byte(self.command_token_length):
+                        _dbd_command_auth_byte(self.command_token_length)
+                if cond_327:
                     self.command_possible_auth = false
                 self.command_token_length = self.command_token_length + 1
             self.bulk_index = self.bulk_index + 1
@@ -394,8 +401,9 @@ pub class DbdAuthenticatedRespIngressV1:
         DbdCommandIngressStatusV1.Accepted
 
     pub me fn take_next() -> DbdAuthenticatedCommandFrameV1?:
-        if self.closed or self.malformed or
-            self.complete_cursor >= self.complete_lengths.len().to_i64():
+        val cond_399 = self.closed or self.malformed or
+            self.complete_cursor >= self.complete_lengths.len().to_i64()
+        if cond_399:
             return nil
         val frame_length = self.complete_lengths[self.complete_cursor]
         val is_auth = self.complete_auth_flags[self.complete_cursor]

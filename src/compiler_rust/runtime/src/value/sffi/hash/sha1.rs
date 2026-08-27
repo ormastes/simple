@@ -27,6 +27,18 @@ fn runtime_sha_unavailable(name: &str) {
     eprintln!("Runtime error: {name} is unavailable in this runtime build (enable Cargo feature `runtime-sha`)");
 }
 
+#[cfg(feature = "runtime-sha")]
+fn digest_to_runtime_byte_array(bytes: &[u8]) -> RuntimeValue {
+    let array = crate::value::collections::rt_byte_array_new_len(bytes.len() as u64);
+    if array.is_nil() {
+        return RuntimeValue::NIL;
+    }
+    if !crate::value::byte_array_write(array, bytes) {
+        return RuntimeValue::NIL;
+    }
+    array
+}
+
 /// Create new SHA1 hasher
 #[no_mangle]
 pub extern "C" fn rt_sha1_new() -> i64 {
@@ -64,9 +76,12 @@ pub unsafe extern "C" fn rt_sha1_write(handle: i64, data_ptr: *const u8, data_le
         if data_ptr.is_null() {
             return;
         }
+        let Ok(data_len) = usize::try_from(data_len) else {
+            return;
+        };
         let mut map = SHA1_MAP.lock().unwrap();
         if let Some(hasher) = map.get_mut(&handle) {
-            let data = std::slice::from_raw_parts(data_ptr, data_len as usize);
+            let data = std::slice::from_raw_parts(data_ptr, data_len);
             hasher.update(data);
         }
     }
@@ -111,8 +126,7 @@ pub extern "C" fn rt_sha1_finish_bytes(handle: i64) -> RuntimeValue {
         let mut map = SHA1_MAP.lock().unwrap();
         if let Some(hasher) = map.remove(&handle) {
             let result = hasher.finalize();
-            let bytes = result.as_slice();
-            unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+            digest_to_runtime_byte_array(result.as_slice())
         } else {
             RuntimeValue::NIL
         }
@@ -275,8 +289,13 @@ mod tests {
 
         let result = rt_sha1_finish_bytes(handle);
         assert!(!result.is_nil());
-        let len = crate::value::collections::rt_string_len(result);
-        assert_eq!(len, 20);
+        assert_eq!(
+            crate::value::byte_array_bytes(result).unwrap(),
+            [
+                0xaa, 0xf4, 0xc6, 0x1d, 0xdc, 0xc5, 0xe8, 0xa2, 0xda, 0xbe,
+                0xd0, 0xf3, 0xb4, 0x82, 0xcd, 0x9a, 0xea, 0x94, 0x34, 0x0d,
+            ]
+        );
     }
 
     #[cfg(feature = "runtime-sha")]

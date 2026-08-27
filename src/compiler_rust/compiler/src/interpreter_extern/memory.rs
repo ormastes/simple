@@ -146,7 +146,12 @@ fn harden_quarantine_free(ptr: usize, size: usize) {
 /// = clean). Always 0 when harden is off.
 ///
 /// Callable from Simple as: `rt_mem_harden_check() -> i64`
-pub fn rt_mem_harden_check(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_harden_check(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_harden_check requires 0 arguments",
+        ));
+    }
     if !harden_enabled() {
         return Ok(Value::Int(0));
     }
@@ -173,7 +178,12 @@ pub fn rt_mem_harden_check(_args: &[Value]) -> Result<Value, CompileError> {
 /// `SIMPLE_MEM_GUARD_RATE` is unset — the zero-overhead-off default.
 ///
 /// Callable from Simple as: `rt_mem_guard_stats() -> i64`
-pub fn rt_mem_guard_stats(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_guard_stats(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_guard_stats requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(mem_guard::guard_sampled_count()))
 }
 
@@ -195,7 +205,12 @@ pub const MEM_PROFILE_FEATURE_OWNER_ATTRIBUTION: i64 = 1 << 3;
 /// Memory-profiling ABI version.
 ///
 /// Callable from Simple as: `rt_mem_profile_abi_version() -> i64`
-pub fn rt_mem_profile_abi_version(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_profile_abi_version(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_profile_abi_version requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(MEM_PROFILE_ABI_VERSION))
 }
 
@@ -203,7 +218,12 @@ pub fn rt_mem_profile_abi_version(_args: &[Value]) -> Result<Value, CompileError
 ///
 /// Callable from Simple as: `rt_mem_profile_features() -> i64`
 /// bit0 = header-bytes, bit1 = hosted-alloc-metadata, bit2 = real-memory-usage.
-pub fn rt_mem_profile_features(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_profile_features(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_profile_features requires 0 arguments",
+        ));
+    }
     let mut features = MEM_PROFILE_FEATURE_HEADER_BYTES | MEM_PROFILE_FEATURE_HOSTED_ALLOC_METADATA;
     if process_rss_bytes().is_some() {
         features |= MEM_PROFILE_FEATURE_REAL_MEMORY_USAGE;
@@ -217,7 +237,12 @@ pub fn rt_mem_profile_features(_args: &[Value]) -> Result<Value, CompileError> {
 /// Whether per-owner allocation attribution is on (SIMPLE_MEM_ATTR=1).
 ///
 /// Callable from Simple as: `rt_mem_attr_enabled() -> i64`
-pub fn rt_mem_attr_enabled(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_mem_attr_enabled(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_enabled requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_mem_attr_enabled()))
 }
 
@@ -226,9 +251,17 @@ pub fn rt_mem_attr_enabled(_args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_mem_attr_set_owner(name: text)`
 pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
-    if let Some(Value::Str(name)) = args.first() {
-        simple_runtime::value::heap::set_current_owner(name.as_ref());
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_set_owner requires 1 argument (name)",
+        ));
     }
+    let Value::Str(name) = &args[0] else {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_set_owner requires a text name",
+        ));
+    };
+    simple_runtime::value::heap::set_current_owner(name.as_ref());
     Ok(Value::Nil)
 }
 
@@ -236,10 +269,12 @@ pub fn rt_mem_attr_set_owner(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_mem_attr_report(n: i64) -> text`
 pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
-    let n = match args.first() {
-        Some(Value::Int(n)) => (*n).max(0) as usize,
-        _ => 16,
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_report requires 1 argument (n)",
+        ));
+    }
+    let n = args[0].as_int()?.max(0) as usize;
     Ok(Value::Str(simple_runtime::value::heap::owner_report(n).into()))
 }
 
@@ -250,10 +285,12 @@ pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_mem_attr_report_print(n: i64)`
 pub fn rt_mem_attr_report_print(args: &[Value]) -> Result<Value, CompileError> {
-    let n = match args.first() {
-        Some(Value::Int(n)) => (*n).max(0) as usize,
-        _ => 16,
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_mem_attr_report_print requires 1 argument (n)",
+        ));
+    }
+    let n = args[0].as_int()?.max(0) as usize;
     println!("{}", simple_runtime::value::heap::owner_report(n));
     Ok(Value::Nil)
 }
@@ -272,28 +309,48 @@ pub fn memory_usage(_args: &[Value]) -> Result<Value, CompileError> {
 }
 
 /// Return the hosted runtime's live heap-registry entry count.
-pub fn rt_heap_registry_count(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_registry_count(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_registry_count requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_registry_count()))
 }
 
 /// Return live heap-object header bytes.
 ///
 /// Callable from Simple as: `rt_heap_live_bytes() -> i64`
-pub fn rt_heap_live_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_live_bytes requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes()))
 }
 
 /// Return live container backing-buffer bytes.
 ///
 /// Callable from Simple as: `rt_heap_aux_live_bytes() -> i64`
-pub fn rt_heap_aux_live_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_aux_live_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_aux_live_bytes requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_aux_live_bytes()))
 }
 
 /// Return live array element-buffer capacity bytes.
 ///
 /// Callable from Simple as: `rt_heap_array_capacity_bytes() -> i64`
-pub fn rt_heap_array_capacity_bytes(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_heap_array_capacity_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_heap_array_capacity_bytes requires 0 arguments",
+        ));
+    }
     Ok(Value::Int(simple_runtime::value::heap::rt_heap_array_capacity_bytes()))
 }
 
@@ -301,37 +358,58 @@ pub fn rt_heap_array_capacity_bytes(_args: &[Value]) -> Result<Value, CompileErr
 ///
 /// Callable from Simple as: `rt_heap_live_bytes_by_kind(kind: i64) -> i64`
 pub fn rt_heap_live_bytes_by_kind(args: &[Value]) -> Result<Value, CompileError> {
-    let kind = match args.first() {
-        Some(Value::Int(k)) => *k,
-        _ => return Ok(Value::Int(0)),
-    };
-    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(kind)))
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_heap_live_bytes_by_kind requires 1 argument (kind)",
+        ));
+    }
+    let kind = args[0].as_int()?;
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_bytes_by_kind(
+        kind,
+    )))
 }
 
 /// Live object count for one `HeapObjectType` tag (0 for out-of-range kinds).
 ///
 /// Callable from Simple as: `rt_heap_live_count_by_kind(kind: i64) -> i64`
 pub fn rt_heap_live_count_by_kind(args: &[Value]) -> Result<Value, CompileError> {
-    let kind = match args.first() {
-        Some(Value::Int(k)) => *k,
-        _ => return Ok(Value::Int(0)),
-    };
-    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(kind)))
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_heap_live_count_by_kind requires 1 argument (kind)",
+        ));
+    }
+    let kind = args[0].as_int()?;
+    Ok(Value::Int(simple_runtime::value::heap::rt_heap_live_count_by_kind(
+        kind,
+    )))
 }
 
 /// Dispatch a hosted-runtime transient parser-array scope operation.
-pub fn rt_transient_array_scope_begin(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_transient_array_scope_begin(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_begin requires 0 arguments",
+        ));
+    }
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_begin()))
 }
 
-pub fn rt_transient_array_scope_pause(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_transient_array_scope_pause(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_pause requires 0 arguments",
+        ));
+    }
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_pause()))
 }
 
 pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> {
-    let Some(value) = args.first() else {
-        return Ok(Value::Bool(false));
-    };
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_transient_heap_promote requires 1 argument (value)",
+        ));
+    }
+    let value = &args[0];
     let promoted = match value {
         // Raw runtime handles cross the interpreter boundary as integer carriers.
         Value::Int(raw) => {
@@ -348,7 +426,12 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(promoted))
 }
 
-pub fn rt_transient_array_scope_end(_args: &[Value]) -> Result<Value, CompileError> {
+pub fn rt_transient_array_scope_end(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(
+            "rt_transient_array_scope_end requires 0 arguments",
+        ));
+    }
     Ok(Value::Bool(simple_runtime::value::rt_transient_array_scope_end()))
 }
 
@@ -748,22 +831,25 @@ pub fn rt_ptr_read_u8(args: &[Value]) -> Result<Value, CompileError> {
 /// Hosted interpreter bridge for the loader's raw mmap contract.
 #[cfg(unix)]
 pub fn rt_mmap_raw(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 6 {
+    if args.len() != 6 {
         return Err(CompileError::runtime("rt_mmap_raw requires 6 arguments"));
     }
     let addr = args[0].as_int()? as usize as *mut libc::c_void;
     let length = args[1].as_int()?;
-    if length <= 0 {
+    let prot = args[2].as_int()?;
+    let offset = args[5].as_int()?;
+    let write_exec = i64::from(libc::PROT_WRITE | libc::PROT_EXEC);
+    if length <= 0 || offset < 0 || (prot & write_exec) == write_exec {
         return Ok(Value::Int(-1));
     }
     let mapped = unsafe {
         libc::mmap(
             addr,
             length as usize,
-            args[2].as_int()? as i32,
+            prot as i32,
             args[3].as_int()? as i32,
             args[4].as_int()? as i32,
-            args[5].as_int()? as libc::off_t,
+            offset as libc::off_t,
         )
     };
     if mapped == libc::MAP_FAILED {
@@ -780,13 +866,18 @@ pub fn rt_mmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 pub fn rt_munmap_raw(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 2 {
+    if args.len() != 2 {
         return Err(CompileError::runtime("rt_munmap_raw requires 2 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
     }
     let result = unsafe {
         libc::munmap(
-            args[0].as_int()? as usize as *mut libc::c_void,
-            args[1].as_int()? as usize,
+            addr as usize as *mut libc::c_void,
+            length as usize,
         )
     };
     Ok(Value::Int(i64::from(result)))
@@ -799,13 +890,81 @@ pub fn rt_munmap_raw(_args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(unix)]
 pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() < 3 {
+    if args.len() != 3 {
         return Err(CompileError::runtime("rt_mprotect requires 3 arguments"));
     }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    let prot = args[2].as_int()?;
+    let write_exec = i64::from(libc::PROT_WRITE | libc::PROT_EXEC);
+    if addr <= 0 || length <= 0 || (prot & write_exec) == write_exec {
+        return Ok(Value::Int(-1));
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    if (prot & i64::from(libc::PROT_EXEC)) != 0 {
+        // No verified cross-platform cache-sync primitive exists in this lane.
+        // Fail before granting execute permission on non-coherent targets.
+        return Ok(Value::Int(-1));
+    }
+    let result = unsafe { libc::mprotect(addr as usize as *mut libc::c_void, length as usize, prot as i32) };
+    Ok(Value::Int(i64::from(result)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
+}
+
+macro_rules! unix_address_length_status {
+    ($name:literal, $args:expr, $call:path) => {{
+        let args = $args;
+        if args.len() != 2 {
+            return Err(CompileError::runtime(concat!($name, " requires 2 arguments")));
+        }
+        let addr = args[0].as_int()?;
+        let length = args[1].as_int()?;
+        if addr <= 0 || length <= 0 {
+            return Ok(Value::Int(-1));
+        }
+        let result = unsafe { $call(addr as usize as *mut libc::c_void, length as usize) };
+        Ok(Value::Int(i64::from(result)))
+    }};
+}
+
+#[cfg(unix)]
+pub fn rt_mlock(args: &[Value]) -> Result<Value, CompileError> {
+    unix_address_length_status!("rt_mlock", args, libc::mlock)
+}
+
+#[cfg(not(unix))]
+pub fn rt_mlock(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_mlock is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_munlock(args: &[Value]) -> Result<Value, CompileError> {
+    unix_address_length_status!("rt_munlock", args, libc::munlock)
+}
+
+#[cfg(not(unix))]
+pub fn rt_munlock(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_munlock is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_madvise_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_madvise_raw requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
     let result = unsafe {
-        libc::mprotect(
-            args[0].as_int()? as usize as *mut libc::c_void,
-            args[1].as_int()? as usize,
+        libc::madvise(
+            addr as usize as *mut libc::c_void,
+            length as usize,
             args[2].as_int()? as i32,
         )
     };
@@ -813,8 +972,33 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 #[cfg(not(unix))]
-pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
-    Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
+pub fn rt_madvise_raw(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_madvise_raw is unavailable on this host"))
+}
+
+#[cfg(unix)]
+pub fn rt_msync_flags(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_msync_flags requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let result = unsafe {
+        libc::msync(
+            addr as usize as *mut libc::c_void,
+            length as usize,
+            args[2].as_int()? as i32,
+        )
+    };
+    Ok(Value::Int(i64::from(result)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_msync_flags(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_msync_flags is unavailable on this host"))
 }
 
 #[cfg(test)]
@@ -828,11 +1012,7 @@ mod ptr_read_u8_tests {
         let bytes = [0x00_u8, 0x7f, 0x80, 0xff, 0x5a];
         let addr = bytes.as_ptr() as usize as i64;
         for (offset, expected) in bytes.iter().enumerate() {
-            let value = rt_ptr_read_u8(&[
-                Value::Int(addr),
-                Value::Int(offset as i64),
-            ])
-            .expect("byte read");
+            let value = rt_ptr_read_u8(&[Value::Int(addr), Value::Int(offset as i64)]).expect("byte read");
             assert_eq!(value.as_int().expect("integer byte"), i64::from(*expected));
         }
     }
@@ -858,18 +1038,59 @@ mod ptr_read_u8_tests {
         .unwrap();
         assert_ne!(mapped, -1);
         assert_eq!(
-            rt_mprotect(&[
-                Value::Int(mapped),
-                Value::Int(4096),
-                Value::Int(libc::PROT_READ as i64),
-            ])
-            .unwrap()
-            .as_int()
-            .unwrap(),
+            rt_mprotect(&[Value::Int(mapped), Value::Int(4096), Value::Int(libc::PROT_READ as i64),])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             0
         );
         assert_eq!(
             rt_munmap_raw(&[Value::Int(mapped), Value::Int(4096)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_write_execute_mappings_and_transitions() {
+        let write_exec = libc::PROT_WRITE as i64 | libc::PROT_EXEC as i64;
+        let mapped = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(write_exec),
+            Value::Int(libc::MAP_PRIVATE as i64 | libc::MAP_ANONYMOUS as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_eq!(mapped, -1);
+
+        let rw = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(libc::PROT_READ as i64 | libc::PROT_WRITE as i64),
+            Value::Int(libc::MAP_PRIVATE as i64 | libc::MAP_ANONYMOUS as i64),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(rw, -1);
+        assert_eq!(
+            rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(write_exec)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)])
                 .unwrap()
                 .as_int()
                 .unwrap(),
@@ -958,11 +1179,29 @@ pub fn rt_ptr_write_i16(args: &[Value]) -> Result<Value, CompileError> {
 /// doc/08_tracking/bug/render_spl_specs_cannot_execute_mmio_externs_2026-08-06.md.
 ///
 /// Callable from Simple as: `rt_mmio_read_u32(addr: u64) -> u32`
+#[inline]
+fn checked_mmio_addr(args: &[Value], alignment: usize, name: &str) -> Result<usize, CompileError> {
+    let raw = args[0].as_int()?;
+    if raw <= 0 {
+        return Err(CompileError::runtime(format!(
+            "{name} requires a positive non-null host address"
+        )));
+    }
+    let addr = usize::try_from(raw)
+        .map_err(|_| CompileError::runtime(format!("{name} address does not fit the host pointer width")))?;
+    if addr & (alignment - 1) != 0 {
+        return Err(CompileError::runtime(format!(
+            "{name} requires {alignment}-byte aligned address"
+        )));
+    }
+    Ok(addr)
+}
+
 pub fn rt_mmio_read_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_mmio_read_u32 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u32>(), "rt_mmio_read_u32")?;
     unsafe { Ok(Value::Int((addr as *const u32).read_volatile() as i64)) }
 }
 
@@ -973,7 +1212,7 @@ pub fn rt_mmio_write_u32(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mmio_write_u32 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u32>(), "rt_mmio_write_u32")?;
     let value = args[1].as_int()? as u32;
     unsafe { (addr as *mut u32).write_volatile(value) };
     Ok(Value::Nil)
@@ -984,7 +1223,7 @@ pub fn rt_mmio_read_u16(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_mmio_read_u16 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u16>(), "rt_mmio_read_u16")?;
     unsafe { Ok(Value::Int((addr as *const u16).read_volatile() as i64)) }
 }
 
@@ -995,7 +1234,7 @@ pub fn rt_mmio_write_u16(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mmio_write_u16 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u16>(), "rt_mmio_write_u16")?;
     let value = args[1].as_int()? as u16;
     unsafe { (addr as *mut u16).write_volatile(value) };
     Ok(Value::Nil)
@@ -1006,7 +1245,7 @@ pub fn rt_mmio_read_u8(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_mmio_read_u8 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u8>(), "rt_mmio_read_u8")?;
     unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
 }
 
@@ -1017,31 +1256,45 @@ pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
             "rt_mmio_write_u8 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u8>(), "rt_mmio_write_u8")?;
     let value = args[1].as_int()? as u8;
     unsafe { (addr as *mut u8).write_volatile(value) };
     Ok(Value::Nil)
 }
 
+/// Interpreter parity for the native acquire/release/full memory barriers.
+fn memory_barrier(args: &[Value], ordering: std::sync::atomic::Ordering, name: &str) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::runtime(format!("{name} requires 0 arguments")));
+    }
+    std::sync::atomic::fence(ordering);
+    Ok(Value::Nil)
+}
+
+pub fn rt_memory_barrier(args: &[Value]) -> Result<Value, CompileError> {
+    memory_barrier(args, std::sync::atomic::Ordering::SeqCst, "rt_memory_barrier")
+}
+
+pub fn rt_load_barrier(args: &[Value]) -> Result<Value, CompileError> {
+    memory_barrier(args, std::sync::atomic::Ordering::Acquire, "rt_load_barrier")
+}
+
+pub fn rt_store_barrier(args: &[Value]) -> Result<Value, CompileError> {
+    memory_barrier(args, std::sync::atomic::Ordering::Release, "rt_store_barrier")
+}
 
 /// Volatile read/write family mirroring the native runtime's
-/// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`
-/// (src/compiler_rust/runtime/src/lib.rs:379-417, all `(addr: i64 [, value:
-/// i64])` C-ABI). Under the tree-walk interpreter these serve spec harnesses
-/// whose "mmio" region is a plain `rt_alloc`ed process-memory buffer (mock
-/// ivshmem), so a plain load/store through the pointer is faithful — no real
-/// volatile ordering semantics are needed here; `read_volatile`/
-/// `write_volatile` are used anyway to match the JIT lane byte-for-byte.
-/// Addresses are treated strictly as process-memory addresses, same as the
-/// sibling `rt_ptr_*`/`rt_mmio_*` accessors above. See
-/// doc/08_tracking/bug/interpreter_missing_rt_volatile_externs_blocks_ivshmem_specs_2026-08-15.md.
+/// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`.
+/// Addresses are process-memory addresses, as with the sibling raw pointer
+/// accessors. The volatile operations preserve the native lane's access
+/// semantics while the registered barriers above preserve ordering.
 ///
 /// Callable from Simple as: `rt_volatile_read_u8(addr: i64) -> i64`
 pub fn rt_volatile_read_u8(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u8 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u8>(), "rt_volatile_read_u8")?;
     unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
 }
 
@@ -1050,7 +1303,7 @@ pub fn rt_volatile_read_u16(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u16 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u16>(), "rt_volatile_read_u16")?;
     unsafe { Ok(Value::Int((addr as *const u16).read_volatile() as i64)) }
 }
 
@@ -1059,7 +1312,7 @@ pub fn rt_volatile_read_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u32 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u32>(), "rt_volatile_read_u32")?;
     unsafe { Ok(Value::Int((addr as *const u32).read_volatile() as i64)) }
 }
 
@@ -1068,7 +1321,7 @@ pub fn rt_volatile_read_u64(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u64 requires 1 argument (addr)"));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u64>(), "rt_volatile_read_u64")?;
     unsafe { Ok(Value::Int((addr as *const u64).read_volatile() as i64)) }
 }
 
@@ -1079,7 +1332,7 @@ pub fn rt_volatile_write_u8(args: &[Value]) -> Result<Value, CompileError> {
             "rt_volatile_write_u8 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u8>(), "rt_volatile_write_u8")?;
     let value = args[1].as_int()? as u8;
     unsafe { (addr as *mut u8).write_volatile(value) };
     Ok(Value::Nil)
@@ -1092,7 +1345,7 @@ pub fn rt_volatile_write_u16(args: &[Value]) -> Result<Value, CompileError> {
             "rt_volatile_write_u16 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u16>(), "rt_volatile_write_u16")?;
     let value = args[1].as_int()? as u16;
     unsafe { (addr as *mut u16).write_volatile(value) };
     Ok(Value::Nil)
@@ -1105,7 +1358,7 @@ pub fn rt_volatile_write_u32(args: &[Value]) -> Result<Value, CompileError> {
             "rt_volatile_write_u32 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u32>(), "rt_volatile_write_u32")?;
     let value = args[1].as_int()? as u32;
     unsafe { (addr as *mut u32).write_volatile(value) };
     Ok(Value::Nil)
@@ -1118,7 +1371,7 @@ pub fn rt_volatile_write_u64(args: &[Value]) -> Result<Value, CompileError> {
             "rt_volatile_write_u64 requires 2 arguments (addr, value)",
         ));
     }
-    let addr = args[0].as_int()? as usize;
+    let addr = checked_mmio_addr(args, core::mem::align_of::<u64>(), "rt_volatile_write_u64")?;
     let value = args[1].as_int()? as u64;
     unsafe { (addr as *mut u64).write_volatile(value) };
     Ok(Value::Nil)
@@ -1143,7 +1396,9 @@ pub fn rt_volatile_write_u64(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_copy_user_byte(ptr_addr: u64) -> u8`
 pub fn rt_copy_user_byte(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
-        return Err(CompileError::runtime("rt_copy_user_byte requires 1 argument (ptr_addr)"));
+        return Err(CompileError::runtime(
+            "rt_copy_user_byte requires 1 argument (ptr_addr)",
+        ));
     }
     let addr = args[0].as_int()? as usize;
     unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
@@ -1286,7 +1541,9 @@ pub fn rt_call_ptr_0(args: &[Value]) -> Result<Value, CompileError> {
     }
     let addr = args[0].as_int()?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_0 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_0 received a null or invalid function address",
+        ));
     }
     let f: extern "C" fn() -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f()))
@@ -1308,7 +1565,9 @@ fn call_ptr_args<const N: usize>(name: &str, args: &[Value]) -> Result<(i64, [i6
 pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
     let (addr, a) = call_ptr_args::<1>("rt_call_ptr_1", args)?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_1 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_1 received a null or invalid function address",
+        ));
     }
     let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0])))
@@ -1318,10 +1577,11 @@ pub fn rt_call_ptr_1(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
     let (addr, a) = call_ptr_args::<2>("rt_call_ptr_2", args)?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_2 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_2 received a null or invalid function address",
+        ));
     }
-    let f: extern "C" fn(i64, i64) -> i64 =
-        unsafe { std::mem::transmute(addr as usize as *const ()) };
+    let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0], a[1])))
 }
 
@@ -1329,10 +1589,11 @@ pub fn rt_call_ptr_2(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_call_ptr_3(args: &[Value]) -> Result<Value, CompileError> {
     let (addr, a) = call_ptr_args::<3>("rt_call_ptr_3", args)?;
     if addr <= 0 {
-        return Err(CompileError::runtime("rt_call_ptr_3 received a null or invalid function address"));
+        return Err(CompileError::runtime(
+            "rt_call_ptr_3 received a null or invalid function address",
+        ));
     }
-    let f: extern "C" fn(i64, i64, i64) -> i64 =
-        unsafe { std::mem::transmute(addr as usize as *const ()) };
+    let f: extern "C" fn(i64, i64, i64) -> i64 = unsafe { std::mem::transmute(addr as usize as *const ()) };
     Ok(Value::Int(f(a[0], a[1], a[2])))
 }
 
@@ -1509,7 +1770,49 @@ mod tests {
             rt_transient_heap_promote(&[Value::UInt { value: 0, width: 64 }]),
             Ok(Value::Bool(false))
         ));
-        assert!(matches!(rt_transient_heap_promote(&[]), Ok(Value::Bool(false))));
+        assert!(rt_transient_heap_promote(&[]).is_err());
+    }
+
+    #[test]
+    fn transient_scope_operations_reject_extra_arguments() {
+        let extra = [Value::Int(1)];
+        assert!(rt_transient_array_scope_begin(&extra).is_err());
+        assert!(rt_transient_array_scope_pause(&extra).is_err());
+        assert!(rt_transient_array_scope_end(&extra).is_err());
+    }
+
+    #[test]
+    fn heap_metrics_reject_abi_misuse_without_hiding_genuine_zero() {
+        let extra = [Value::Int(1)];
+        assert!(rt_heap_registry_count(&extra).is_err());
+        assert!(rt_heap_live_bytes(&extra).is_err());
+        assert!(rt_heap_aux_live_bytes(&extra).is_err());
+        assert!(rt_heap_array_capacity_bytes(&extra).is_err());
+        assert!(rt_heap_live_bytes_by_kind(&[]).is_err());
+        assert!(rt_heap_live_count_by_kind(&[Value::Bool(false)]).is_err());
+        assert!(matches!(
+            rt_heap_live_count_by_kind(&[Value::Int(i64::MAX)]),
+            Ok(Value::Int(0))
+        ));
+    }
+
+    #[test]
+    fn memory_attribution_handlers_reject_fabricated_defaults() {
+        assert!(rt_mem_attr_enabled(&[Value::Int(1)]).is_err());
+        assert!(rt_mem_attr_set_owner(&[]).is_err());
+        assert!(rt_mem_attr_set_owner(&[Value::Bool(false)]).is_err());
+        assert!(rt_mem_attr_report(&[]).is_err());
+        assert!(rt_mem_attr_report(&[Value::Bool(false)]).is_err());
+        assert!(rt_mem_attr_report_print(&[]).is_err());
+    }
+
+    #[test]
+    fn memory_profile_handlers_reject_extra_arguments() {
+        let extra = [Value::Int(1)];
+        assert!(rt_mem_harden_check(&extra).is_err());
+        assert!(rt_mem_guard_stats(&extra).is_err());
+        assert!(rt_mem_profile_abi_version(&extra).is_err());
+        assert!(rt_mem_profile_features(&extra).is_err());
     }
 
     // ========================================================================
@@ -1528,19 +1831,32 @@ mod tests {
         // contract as the non-harden path) but the block itself is NOT
         // really deallocated yet — it sits in the quarantine ring.
         assert!(!map_contains(ptr), "freed pointer must leave the live metadata map");
-        assert!(quarantine_contains(ptr as usize), "freed block must enter the quarantine ring");
+        assert!(
+            quarantine_contains(ptr as usize),
+            "freed block must enter the quarantine ring"
+        );
 
         // Read-after-free: the block is poisoned (0xDE), not garbage/reused.
         let byte = unsafe { std::ptr::read(ptr as *const u8) };
-        assert_eq!(byte, HARDEN_POISON_BYTE, "quarantined block must read as poison before tampering");
-        assert_eq!(rt_mem_harden_check(&[]).unwrap().as_int().unwrap(), 0, "untouched quarantine must report clean");
+        assert_eq!(
+            byte, HARDEN_POISON_BYTE,
+            "quarantined block must read as poison before tampering"
+        );
+        assert_eq!(
+            rt_mem_harden_check(&[]).unwrap().as_int().unwrap(),
+            0,
+            "untouched quarantine must report clean"
+        );
 
         // Write-after-free: tamper one byte through the stale pointer.
         unsafe {
             std::ptr::write(ptr as *mut u8, 0x41);
         }
         let tampered = rt_mem_harden_check(&[]).unwrap().as_int().unwrap();
-        assert!(tampered >= 1, "rt_mem_harden_check must report >=1 tampered block, got {tampered}");
+        assert!(
+            tampered >= 1,
+            "rt_mem_harden_check must report >=1 tampered block, got {tampered}"
+        );
 
         // Double free of a quarantined (not really-freed) block must still
         // be refused, not touch the allocator.
@@ -1558,7 +1874,10 @@ mod tests {
         let ptr2 = alloc(32);
         assert_ne!(ptr, 0);
         assert_ne!(ptr2, 0);
-        assert_ne!(ptr, ptr2, "quarantined block's address must not be reused before ring eviction");
+        assert_ne!(
+            ptr, ptr2,
+            "quarantined block's address must not be reused before ring eviction"
+        );
         rt_free(&[Value::Int(ptr2)]).unwrap();
     }
 
@@ -1581,13 +1900,15 @@ mod tests {
         assert!(rt_call_ptr_0(&[Value::Int(0)]).is_err());
         assert!(rt_call_ptr_1(&[Value::Int(0), Value::Int(1)]).is_err());
         assert!(rt_call_ptr_2(&[Value::Int(0), Value::Int(1), Value::Int(2)]).is_err());
-        assert!(rt_call_ptr_3(&[
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-        ])
-        .is_err());
+        assert!(rt_call_ptr_3(&[Value::Int(0), Value::Int(1), Value::Int(2), Value::Int(3),]).is_err());
+    }
+
+    #[test]
+    fn memory_barriers_match_native_arity_and_unit_result() {
+        for barrier in [rt_memory_barrier, rt_load_barrier, rt_store_barrier] {
+            assert_eq!(barrier(&[]).unwrap(), Value::Nil);
+            assert!(barrier(&[Value::Int(0)]).is_err());
+        }
     }
 
     #[test]
@@ -1626,14 +1947,10 @@ mod tests {
             9
         );
         assert_eq!(
-            rt_call_ptr_2(&[
-                Value::Int(add_two as usize as i64),
-                Value::Int(8),
-                Value::Int(13),
-            ])
-            .unwrap()
-            .as_int()
-            .unwrap(),
+            rt_call_ptr_2(&[Value::Int(add_two as usize as i64), Value::Int(8), Value::Int(13),])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             21
         );
         assert_eq!(
@@ -1652,12 +1969,7 @@ mod tests {
 
     #[test]
     fn raw_pointer_writes_reject_invalid_descriptors_and_write_exact_widths() {
-        for write in [
-            rt_ptr_write_u8,
-            rt_ptr_write_i16,
-            rt_ptr_write_i32,
-            rt_ptr_write_i64,
-        ] {
+        for write in [rt_ptr_write_u8, rt_ptr_write_i16, rt_ptr_write_i32, rt_ptr_write_i64] {
             assert!(write(&[Value::Int(0), Value::Int(0), Value::Int(1)]).is_err());
             assert!(write(&[Value::Int(1), Value::Int(-1), Value::Int(1)]).is_err());
         }
@@ -1665,24 +1977,9 @@ mod tests {
         let mut bytes = [0u8; 16];
         let address = bytes.as_mut_ptr() as usize as i64;
         rt_ptr_write_u8(&[Value::Int(address), Value::Int(0), Value::Int(0xab)]).unwrap();
-        rt_ptr_write_i16(&[
-            Value::Int(address),
-            Value::Int(2),
-            Value::Int(0x1234),
-        ])
-        .unwrap();
-        rt_ptr_write_i32(&[
-            Value::Int(address),
-            Value::Int(4),
-            Value::Int(0x1234_5678),
-        ])
-        .unwrap();
-        rt_ptr_write_i64(&[
-            Value::Int(address),
-            Value::Int(8),
-            Value::Int(0x0102_0304_0506_0708),
-        ])
-        .unwrap();
+        rt_ptr_write_i16(&[Value::Int(address), Value::Int(2), Value::Int(0x1234)]).unwrap();
+        rt_ptr_write_i32(&[Value::Int(address), Value::Int(4), Value::Int(0x1234_5678)]).unwrap();
+        rt_ptr_write_i64(&[Value::Int(address), Value::Int(8), Value::Int(0x0102_0304_0506_0708)]).unwrap();
         assert_eq!(bytes[0], 0xab);
         assert_eq!(i16::from_ne_bytes(bytes[2..4].try_into().unwrap()), 0x1234);
         assert_eq!(i32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 0x1234_5678);
@@ -1700,8 +1997,7 @@ mod tests {
         }
 
         let bytes: [u8; 13] = [
-            0xff, 0x78, 0x56, 0x34, 0x12, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02,
-            0x01,
+            0xff, 0x78, 0x56, 0x34, 0x12, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
         ];
         let address = bytes.as_ptr() as usize as i64;
         assert_eq!(
@@ -1730,24 +2026,13 @@ mod tests {
     #[test]
     fn raw_pointer_bulk_copy_distinguishes_empty_success_from_invalid_descriptors() {
         assert_eq!(
-            rt_ptr_write_bytes_raw(&[
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(0),
-                Value::Int(0),
-            ])
-            .unwrap()
-            .as_int()
-            .unwrap(),
+            rt_ptr_write_bytes_raw(&[Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(0),])
+                .unwrap()
+                .as_int()
+                .unwrap(),
             0
         );
-        assert!(rt_ptr_write_bytes_raw(&[
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(1),
-            Value::Int(1),
-        ])
-        .is_err());
+        assert!(rt_ptr_write_bytes_raw(&[Value::Int(0), Value::Int(0), Value::Int(1), Value::Int(1),]).is_err());
 
         let source = [1u8, 2, 3, 4];
         let mut destination = [0u8; 4];
@@ -1762,5 +2047,39 @@ mod tests {
         .unwrap();
         assert_eq!(written, 4);
         assert_eq!(destination, source);
+    }
+
+    #[test]
+    fn mmio_rejects_null_and_misaligned_addresses_before_volatile_access() {
+        assert!(rt_mmio_read_u8(&[Value::Int(0)]).is_err());
+        assert!(rt_mmio_write_u32(&[Value::Int(-1), Value::Int(1)]).is_err());
+        assert!(rt_mmio_read_u16(&[Value::Int(3)]).is_err());
+        assert!(rt_mmio_write_u32(&[Value::Int(6), Value::Int(1)]).is_err());
+
+        let mut value = 0x1234_5678u32;
+        let address = (&mut value as *mut u32) as usize as i64;
+        assert_eq!(
+            rt_mmio_read_u32(&[Value::Int(address)]).unwrap().as_int().unwrap(),
+            0x1234_5678
+        );
+        rt_mmio_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
+        assert_eq!(value, 0x7654_3210);
+    }
+
+    #[test]
+    fn volatile_rejects_null_and_misaligned_addresses_before_access() {
+        assert!(rt_volatile_read_u8(&[Value::Int(0)]).is_err());
+        assert!(rt_volatile_write_u64(&[Value::Int(-1), Value::Int(1)]).is_err());
+        assert!(rt_volatile_read_u16(&[Value::Int(3)]).is_err());
+        assert!(rt_volatile_write_u32(&[Value::Int(6), Value::Int(1)]).is_err());
+
+        let mut value = 0x1234_5678u32;
+        let address = (&mut value as *mut u32) as usize as i64;
+        assert_eq!(
+            rt_volatile_read_u32(&[Value::Int(address)]).unwrap().as_int().unwrap(),
+            0x1234_5678
+        );
+        rt_volatile_write_u32(&[Value::Int(address), Value::Int(0x7654_3210)]).unwrap();
+        assert_eq!(value, 0x7654_3210);
     }
 }

@@ -498,11 +498,36 @@ fn test_lower_danger_block_retains_boundary_and_tail_type() {
         panic!("Expected unsafe block expression");
     };
     assert_eq!(expr.ty, TypeId::I64);
-    let HirExprKind::UnsafeBlock(statements) = &expr.kind else {
+    let HirExprKind::UnsafeBlock {
+        statements,
+        capabilities,
+    } = &expr.kind else {
         panic!("Expected retained unsafe boundary, got {:?}", expr.kind);
     };
     assert_eq!(statements.len(), 2);
+    assert!(capabilities.is_empty());
     assert!(!format!("{statements:?}").contains("danger"));
+}
+
+#[test]
+fn test_lower_value_bound_unsafe_block_retains_boundary_and_tail_type() {
+    let module = parse_and_lower(
+        "extern fn raw_digest() -> i64\nfn test() -> i64:\n    val result = unsafe(capabilities: [ffi]):\n        raw_digest()\n    result\n",
+    )
+    .unwrap();
+    let func = module
+        .functions
+        .iter()
+        .find(|function| function.name == "test")
+        .unwrap();
+    let HirStmt::Let { value: Some(value), .. } = &func.body[0] else {
+        panic!("Expected value-bound unsafe expression");
+    };
+    assert_eq!(value.ty, TypeId::I64);
+    let HirExprKind::UnsafeBlock { capabilities, .. } = &value.kind else {
+        panic!("Expected retained unsafe boundary");
+    };
+    assert_eq!(capabilities, &["ffi"]);
 }
 
 #[test]

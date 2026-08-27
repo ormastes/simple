@@ -112,17 +112,24 @@ fn _simple_lower_hardware_local_call(line: text, call_ordinal: i64, param_names:
     val eq_opt = line.find("=")
     if not eq_opt.?:
         return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
-    val eq_index = match eq_opt:
-        case Some(value): value
-        case nil: return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
+    # Stage-3 native lowering cannot reliably carry `Some(binding)` through a
+    # nested enum match payload. The equivalent if-val form is the canonical
+    # nullable extraction path and preserves the explicit None diagnostic.
+    var eq_index = -1
+    if val value = eq_opt:
+        eq_index = value
+    else:
+        return Err("VHDL subset fallback hardware local binding must use `val name = callee(...)`")
     val local_name = line.substring(4, eq_index).trim()
     val call_text = line.substring(eq_index + 1, line.len()).trim()
     val open_opt = call_text.find("(")
     if local_name == "" or not open_opt.? or not call_text.ends_with(")"):
         return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
-    val open_index = match open_opt:
-        case Some(value): value
-        case nil: return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
+    var open_index = -1
+    if val value = open_opt:
+        open_index = value
+    else:
+        return Err("VHDL subset fallback hardware local binding must call a direct hardware function")
     val callee_name = call_text.substring(0, open_index).trim()
     val callee_index = _text_list_index(all_names, callee_name)
     if callee_index < 0 or hardware_flags[callee_index] != "hardware":
@@ -219,11 +226,8 @@ fn _simple_labeled_tuple_labels(type_text: text) -> [text]:
     for part in parts:
         val trimmed = part.trim()
         val sep = _simple_find_top_level(trimmed, ":")
-        match sep:
-            case Some(sep_index):
-                labels = labels.push(trimmed.substring(0, sep_index).trim())
-            case nil:
-                pass
+        if val sep_index = sep:
+            labels = labels.push(trimmed.substring(0, sep_index).trim())
     labels
 
 fn _simple_labeled_tuple_types(type_text: text) -> [text]:
@@ -234,11 +238,8 @@ fn _simple_labeled_tuple_types(type_text: text) -> [text]:
     for part in parts:
         val trimmed = part.trim()
         val sep = _simple_find_top_level(trimmed, ":")
-        match sep:
-            case Some(sep_index):
-                types = types.push(trimmed.substring(sep_index + 1, trimmed.len()).trim())
-            case nil:
-                pass
+        if val sep_index = sep:
+            types = types.push(trimmed.substring(sep_index + 1, trimmed.len()).trim())
     types
 
 fn _simple_labeled_body_assignments(body_lines: [text], labels: [text], port_names: [text], return_types: [text], param_names: [text], param_types: [text]) -> Result<text, text>:
@@ -264,9 +265,11 @@ fn _simple_labeled_body_assignments(body_lines: [text], labels: [text], port_nam
         val sep = part.find(":")
         if not sep.?:
             return Err("VHDL subset fallback labeled tuple return field is missing ':'")
-        val sep_index = match sep:
-            case Some(value): value
-            case nil: return Err("VHDL subset fallback labeled tuple return field is missing ':'")
+        var sep_index = -1
+        if val value = sep:
+            sep_index = value
+        else:
+            return Err("VHDL subset fallback labeled tuple return field is missing ':'")
         val label = part.substring(0, sep_index).trim()
         if label != labels[i]:
             return Err("VHDL subset fallback labeled tuple return expected `{labels[i]}`, found `{label}`")
@@ -297,14 +300,11 @@ fn _simple_anonymous_body_assignments(body_lines: [text], labels: [text], port_n
     while i < labels.len():
         var expr_text = parts[i].trim()
         val sep = _simple_find_top_level(expr_text, ":")
-        match sep:
-            case Some(sep_index):
-                val label = expr_text.substring(0, sep_index).trim()
-                if label != labels[i]:
-                    return Err("VHDL subset fallback anonymous tuple return expected `{labels[i]}`, found `{label}`")
-                expr_text = expr_text.substring(sep_index + 1, expr_text.len()).trim()
-            case nil:
-                pass
+        if val sep_index = sep:
+            val label = expr_text.substring(0, sep_index).trim()
+            if label != labels[i]:
+                return Err("VHDL subset fallback anonymous tuple return expected `{labels[i]}`, found `{label}`")
+            expr_text = expr_text.substring(sep_index + 1, expr_text.len()).trim()
         val expr_vhdl = _simple_expr_to_vhdl(expr_text, return_types[i], param_names, param_types)?
         out = out + "    {port_names[i]} <= {expr_vhdl};\n"
         i = i + 1

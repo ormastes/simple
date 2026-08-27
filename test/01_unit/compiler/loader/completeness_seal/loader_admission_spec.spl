@@ -32,6 +32,7 @@ use compiler.loader.completeness_seal.manifest.{
     parse_manifest_text
 }
 use compiler.common.dynamic_identity.dense_tag_map.{DenseTagMap}
+use compiler.common.dynamic_identity.persistent_id.{PersistentExtensionId}
 use compiler.loader.completeness_seal.seal.{
     SealConfig,
     CompletenessSeal,
@@ -191,6 +192,123 @@ describe "loader admission — E-COMPLETE-020 id collision":
                         assert_true(admission_reason_text(r).contains("hir_async"))
                         seen = true
                 assert_true(seen)
+
+    it "retains the first sealed holder when malformed seal input repeats a key":
+        val s = frozen_universe("hir_async.sdn")
+        assert_true(s.tags.entries.len() > 0)
+        val first = s.tags.entries[0]
+        val second = PersistentExtensionId(
+            owner_enum: first.owner_enum,
+            provider_module: "later_shadow_holder",
+            constructor_name: first.constructor_name,
+            local_ordinal: first.local_ordinal + 1,
+            schema_abi_version: first.schema_abi_version
+        )
+        val duplicate_seal = CompletenessSeal(
+            tags: DenseTagMap(
+                entries: [first, second],
+                static_count: 0,
+                sealed_count: 2,
+                seal_hash: s.seal_hash
+            ),
+            module_ids: s.module_ids,
+            canonical_lines: s.canonical_lines,
+            seal_hash: s.seal_hash
+        )
+        match admit_module(duplicate_seal,
+                candidate("hir_async_shadow_collision.sdn", s.seal_hash),
+                AdmissionProfile(critical: true)):
+            case Ok(_):
+                assert_true(false)
+            case Err(reasons):
+                var collision_text = ""
+                for reason in reasons:
+                    if admission_reason_code(reason) == "E-COMPLETE-020":
+                        collision_text = admission_reason_text(reason)
+                assert_true(collision_text.contains("held by:\n  " + first.provider_module))
+                assert_false(collision_text.contains("held by:\n  later_shadow_holder"))
+
+    it "reports repeated candidate identities in encounter order after the first":
+        val s = frozen_universe("hir_async.sdn")
+        val base = candidate("hir_gpu_candidate.sdn", s.seal_hash)
+        assert_equal(base.extensions.len(), 1)
+        val repeated = AdmissionCandidate(
+            module_id: base.module_id,
+            expects_seal_hash: base.expects_seal_hash,
+            extensions: [base.extensions[0], base.extensions[0], base.extensions[0]],
+            modules: base.modules
+        )
+        match admit_module(s, repeated, AdmissionProfile(critical: true)):
+            case Ok(_):
+                assert_true(false)
+            case Err(reasons):
+                var collisions: [text] = []
+                for reason in reasons:
+                    if admission_reason_code(reason) == "E-COMPLETE-020":
+                        collisions.push(admission_reason_text(reason))
+                assert_equal(collisions.len(), 2)
+                assert_true(collisions[0].contains("candidate provider:\n  hir_gpu"))
+                assert_true(collisions[0].contains("held by:\n  hir_gpu"))
+                assert_equal(collisions[0], collisions[1])
+
+    it "indexes sealed and candidate collision membership without nested scans":
+        val source = read_file("src/compiler/99.loader/completeness_seal/admission.spl")
+        val key_begin = source.index_of("fn _collision_key(")
+        val key_finish = source.index_of("fn _check_seal_hash(", key_begin)
+        val begin = source.index_of("fn _check_collisions(")
+        val finish = source.index_of("fn _check_closure(", begin)
+        assert_true(key_begin >= 0)
+        assert_true(key_finish > key_begin)
+        assert_true(begin >= 0)
+        assert_true(finish > begin)
+        val key_body = source.substring(key_begin, key_finish)
+        val body = source.substring(begin, finish)
+        val empty_guard = body.index_of("if cand.extensions.len() == 0:")
+        val empty_return = body.index_of("return", empty_guard)
+        val sealed_index = body.index_of("var sealed_holders: Dict<text, text> = {}")
+        val sealed_loop = body.index_of("for entry in seal.tags.entries:")
+        val candidate_index = body.index_of("var seen: Dict<text, bool> = {}")
+        val candidate_loop = body.index_of("for ext in cand.extensions:")
+        val sealed_body = body.substring(sealed_loop, candidate_index)
+        val body_len = body.length()
+        val candidate_body = body.substring(candidate_loop, body_len)
+        val key_loops = key_body.split("for ")
+        val sealed_loops = sealed_body.split("for ")
+        val candidate_loops = candidate_body.split("for ")
+        val candidate_index_checks = candidate_body.split("contains_key(")
+        assert_equal(key_loops.len(), 1)
+        assert_false(key_body.contains("while "))
+        assert_false(key_body.contains(".map("))
+        assert_false(key_body.contains(".filter("))
+        assert_false(key_body.contains(".enumerate("))
+        assert_false(key_body.contains(".keys("))
+        assert_false(key_body.contains(".values("))
+        assert_false(key_body.contains(".each("))
+        assert_false(key_body.contains(".fold("))
+        assert_false(key_body.contains(".reduce("))
+        assert_true(empty_guard >= 0)
+        assert_true(empty_return > empty_guard)
+        assert_true(sealed_index > empty_return)
+        assert_true(sealed_loop > sealed_index)
+        assert_true(candidate_index > sealed_loop)
+        assert_true(candidate_loop > candidate_index)
+        assert_equal(sealed_loops.len(), 2)
+        assert_false(sealed_body.contains("while "))
+        assert_true(sealed_body.contains("_collision_key(entry.owner_enum, entry.constructor_name)"))
+        assert_true(sealed_body.contains("sealed_holders.contains_key(key)"))
+        assert_true(sealed_body.contains("sealed_holders[key] = entry.provider_module"))
+        assert_false(sealed_body.contains("cand.extensions"))
+        assert_false(sealed_body.contains("identity_of(ext)"))
+        assert_equal(candidate_loops.len(), 2)
+        assert_false(candidate_body.contains("while "))
+        assert_equal(candidate_index_checks.len(), 3)
+        assert_true(candidate_body.contains("sealed_holders.contains_key(collision_key)"))
+        assert_true(candidate_body.contains("sealed_holders[collision_key]"))
+        assert_true(candidate_body.contains("seen.contains_key(identity_key)"))
+        assert_true(candidate_body.contains("seen[identity_key] = true"))
+        assert_false(candidate_body.contains("seal.tags"))
+        assert_false(candidate_body.contains("seal."))
+        assert_false(candidate_body.contains("for entry"))
 
 describe "loader admission — E-MC-DYN-001 open dyn under a critical profile":
     it "rejects an open dyn provider when the profile is critical":

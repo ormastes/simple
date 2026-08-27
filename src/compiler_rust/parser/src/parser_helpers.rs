@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::ast::{BinOp, UnaryOp, Visibility};
-use crate::error_recovery::{detect_common_mistake, CommonMistake, ErrorHint, ErrorHintLevel};
+use crate::error_recovery::{detect_common_mistake_lookahead, CommonMistake, ErrorHint, ErrorHintLevel};
 use crate::macro_registry::ConstValue;
 
 impl<'a> Parser<'a> {
@@ -58,10 +58,30 @@ impl<'a> Parser<'a> {
         if self.pending_tokens.is_empty() {
             self.pending_tokens.push_back(self.lexer.next_token());
         }
+
+        // The `identifier[Type` rule needs a SECOND token to tell `List[T]` from
+        // an index like `dict[Key(...)]`. Reading it eagerly on every advance is
+        // NOT safe: the lexer is context-sensitive, and pulling a token early
+        // broke inline-`match` parsing (5 control_flow tests). So fetch it only
+        // in the narrow shape that could possibly report WrongBrackets.
+        if !skip_check
+            && self.pending_tokens.len() < 2
+            && matches!(self.current.kind, TokenKind::LBracket)
+            && matches!(self.previous.kind, TokenKind::Identifier { .. })
+            && self
+                .pending_tokens
+                .front()
+                .is_some_and(|t| matches!(&t.kind, TokenKind::Identifier { name, .. }
+                    if name.chars().next().is_some_and(|c: char| c.is_uppercase())))
+        {
+            self.pending_tokens.push_back(self.lexer.next_token());
+        }
         let next_token = self.pending_tokens.front();
+        let after_next_token = self.pending_tokens.get(1);
 
         if !skip_check {
-            if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token)
+            if let Some(mistake) =
+                detect_common_mistake_lookahead(&self.current, &self.previous, next_token, after_next_token)
                 .filter(|m| !self.is_spurious_match_arm_fat_arrow(m))
             {
                 // Determine error hint level based on mistake type.
@@ -228,10 +248,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn soft_keyword_prefixes_operand(&mut self) -> bool {
         matches!(
             self.peek_next().kind,
-            TokenKind::Backslash
-                | TokenKind::Pipe
-                | TokenKind::Identifier { .. }
-                | TokenKind::Me
+            TokenKind::Backslash | TokenKind::Pipe | TokenKind::Identifier { .. } | TokenKind::Me
         )
     }
 

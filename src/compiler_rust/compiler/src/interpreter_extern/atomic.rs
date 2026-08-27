@@ -125,6 +125,53 @@ pub fn rt_atomic_bool_swap(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+fn atomic_bool_handle_and_value(args: &[Value], operation: &str) -> Result<(i64, bool), CompileError> {
+    let handle = args.first().ok_or_else(|| {
+        CompileError::semantic(format!("{operation} expects a handle and boolean value"))
+    })?.as_int()?;
+    let value = match args.get(1) {
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(CompileError::semantic(format!("{operation} expects a bool value"))),
+    };
+    Ok((handle, value))
+}
+
+pub fn rt_atomic_bool_compare_exchange(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::semantic("rt_atomic_bool_compare_exchange expects 3 arguments"));
+    }
+    let (handle, current) = atomic_bool_handle_and_value(args, "rt_atomic_bool_compare_exchange")?;
+    let new_value = match &args[2] {
+        Value::Bool(value) => *value,
+        _ => return Err(CompileError::semantic("rt_atomic_bool_compare_exchange expects bool argument")),
+    };
+    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_compare_exchange(handle, current, new_value))) }
+}
+
+pub fn rt_atomic_bool_fetch_and(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic("rt_atomic_bool_fetch_and expects 2 arguments"));
+    }
+    let (handle, value) = atomic_bool_handle_and_value(args, "rt_atomic_bool_fetch_and")?;
+    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_and(handle, value))) }
+}
+
+pub fn rt_atomic_bool_fetch_or(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic("rt_atomic_bool_fetch_or expects 2 arguments"));
+    }
+    let (handle, value) = atomic_bool_handle_and_value(args, "rt_atomic_bool_fetch_or")?;
+    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_or(handle, value))) }
+}
+
+pub fn rt_atomic_bool_fetch_not(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic("rt_atomic_bool_fetch_not expects 1 argument"));
+    }
+    let handle = args[0].as_int()?;
+    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_bool_fetch_not(handle))) }
+}
+
 /// Free atomic boolean
 pub fn rt_atomic_bool_free(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
@@ -443,6 +490,15 @@ pub fn rt_atomic_flag_test_and_set(args: &[Value]) -> Result<Value, CompileError
     }
 }
 
+/// Read an atomic flag without changing it.
+pub fn rt_atomic_flag_load(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args
+        .first()
+        .ok_or_else(|| CompileError::semantic("rt_atomic_flag_load expects 1 argument"))?
+        .as_int()?;
+    unsafe { Ok(Value::Bool(simple_runtime::value::rt_atomic_flag_load(handle))) }
+}
+
 /// Clear atomic flag
 pub fn rt_atomic_flag_clear(args: &[Value]) -> Result<Value, CompileError> {
     let handle = args
@@ -475,6 +531,15 @@ pub fn rt_atomic_flag_free(args: &[Value]) -> Result<Value, CompileError> {
         simple_runtime::value::rt_atomic_flag_free(handle);
         Ok(Value::Nil)
     }
+}
+
+/// Yield an architecture-specific hint while retaining the current thread.
+pub fn rt_spin_loop_hint(args: &[Value]) -> Result<Value, CompileError> {
+    if !args.is_empty() {
+        return Err(CompileError::semantic("rt_spin_loop_hint expects 0 arguments"));
+    }
+    simple_runtime::value::rt_spin_loop_hint();
+    Ok(Value::Nil)
 }
 
 // ============================================================================
@@ -1119,10 +1184,7 @@ mod lock_value_roundtrip_tests {
                 "array",
                 Value::array(vec![Value::Int(1), Value::text("two".to_string())]),
             ),
-            (
-                "tuple",
-                Value::Tuple(vec![Value::Int(7), Value::Bool(false)]),
-            ),
+            ("tuple", Value::Tuple(vec![Value::Int(7), Value::Bool(false)])),
         ];
         for (label, original) in cases {
             let rv = value_to_runtime(&original);

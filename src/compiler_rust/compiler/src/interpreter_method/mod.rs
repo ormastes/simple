@@ -377,8 +377,7 @@ pub(crate) fn evaluate_method_call(
         // destroyed a genuine bare `expect <cond>` failure raised by a
         // different expect in the same example — see
         // doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md.
-        let owns_provisional = BDD_PROVISIONAL_SEQ
-            .with(|cell: &std::cell::RefCell<usize>| *cell.borrow())
+        let owns_provisional = BDD_PROVISIONAL_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow())
             == BDD_EXPECT_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow());
         if owns_provisional {
             BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
@@ -1149,7 +1148,10 @@ pub(crate) fn evaluate_method_call(
                         // WRITE side of the enum-payload provenance diagnostic
                         // (default off, SIMPLE_DEBUG_ENUM_PAYLOAD=1).
                         crate::interpreter::note_enum_payload_function_opt(
-                            "variant-construction", &(enum_name.clone()), &(method.to_string()), &payload,
+                            "variant-construction",
+                            &(enum_name.clone()),
+                            &(method.to_string()),
+                            &payload,
                         );
                         return Ok(Value::Enum {
                             enum_name: enum_name.clone(),
@@ -1708,10 +1710,20 @@ pub(crate) fn evaluate_method_call(
     // (e.g. a struct field decoding as raw i64): the Rust backtrace pins the
     // interp dispatch path when the .spl-level location is unknown.
     if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
+        // The Rust backtrace names interpreter dispatch frames; the question
+        // that actually matters is WHICH interpreted (.spl) function was
+        // running. `debug_call_stack_snapshot()` answers that directly, and is
+        // populated when SIMPLE_DEBUG_FIELD_ACCESS=1. Pinning a
+        // "method not found" raised inside self-hosted compiler code took three
+        // lanes without it and one 21s run with it -- see
+        // doc/08_tracking/bug/interp_local_shadows_cross_module_global_arm_body_2026-08-24.md
+        let spl_stack = crate::interpreter::debug_call_stack_snapshot();
         eprintln!(
-            "[mnf-debug] method={} recv_type={}\n[mnf-debug-bt] {}",
+            "[mnf-debug] method={} recv_type={} recv={}\n[mnf-debug-spl] {}\n[mnf-debug-bt] {}",
             method,
             recv_val.type_name(),
+            recv_val.to_display_string().chars().take(80).collect::<String>(),
+            spl_stack.join(" -> "),
             std::backtrace::Backtrace::force_capture()
         );
     }

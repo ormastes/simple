@@ -1,3 +1,6 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /*
  * Simple Native Runtime Bridge
  *
@@ -54,6 +57,7 @@
 #if defined(__linux__)
 #include <sys/random.h>
 #include <sys/syscall.h>
+#include <linux/memfd.h>
 #include <linux/fs.h>
 #include <linux/openat2.h>
 #endif
@@ -4091,7 +4095,7 @@ int64_t rt_unwrap_or_self(int64_t value) {
 }
 
 /* `.unwrap_or(default)` -- real method-call semantics: return the Ok/Some
- * payload, or `default`, for ANY enum receiver (Result, Option, ...), never
+ * payload, or `default`, for Result/Option receivers, never
  * trapping. Distinct from `rt_unwrap_or_self` above, which the `??`
  * nil-coalesce operator alone must keep using (only special-cases the
  * reserved Option enum_id 1, returns every other enum -- including Result --
@@ -4099,10 +4103,9 @@ int64_t rt_unwrap_or_self(int64_t value) {
  * silently returned the boxed `Result` enum for BOTH Ok and Err instead of
  * the payload / the default -- see
  * doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md.
- * Result has no reserved enum_id, so Ok/Err are identified by
- * discriminant-hash comparison against the canonical variant names, the same
- * technique the Cranelift codegen already uses for is_ok/is_err and the
- * sibling Rust-runtime `rt_unwrap_or_trap`/`rt_unwrap_or_value`. These are
+ * Result and Option have reserved compiler runtime IDs 0 and 1. The ID check
+ * is required because arbitrary user enums may also name variants Ok/Err and
+ * must remain opaque present values, matching the interpreter. Discriminants are
  * `std::collections::hash_map::DefaultHasher` values over the variant name,
  * masked to 32 bits -- fixed/deterministic, precomputed here to avoid
  * reimplementing SipHash in C. */
@@ -4110,19 +4113,23 @@ int64_t rt_unwrap_or_self(int64_t value) {
 #define RT_DISC_ERR  4200179024u
 #define RT_DISC_SOME 4053299545u
 #define RT_DISC_NONE 2371748697u
+#define RT_RESULT_ENUM_ID 0u
+#define RT_OPTION_ENUM_ID 1u
 
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e) return value; /* bare/flat-nullable payload convention */
 
-    if (e->enum_id == 1) { /* canonical Option */
-        if (e->discriminant == RT_DISC_SOME) return e->payload;
-        if (e->discriminant == RT_DISC_NONE) return default_val;
+    if (e->enum_id == RT_OPTION_ENUM_ID) {
+        if (e->discriminant == 0 || e->discriminant == RT_DISC_SOME) return e->payload;
+        if (e->discriminant == 1 || e->discriminant == RT_DISC_NONE) return default_val;
         return value;
     }
 
-    if (e->discriminant == RT_DISC_OK) return e->payload;
-    if (e->discriminant == RT_DISC_ERR) return default_val;
+    if (e->enum_id == RT_RESULT_ENUM_ID) {
+        if (e->discriminant == RT_DISC_OK) return e->payload;
+        if (e->discriminant == RT_DISC_ERR) return default_val;
+    }
 
     /* Arbitrary user enum: preserve the pre-existing "return self" fallback. */
     return value;
@@ -4133,7 +4140,9 @@ int8_t rt_is_none(int64_t value) {
      * Options use enum id 1 with ordinal Some=0 / None=1, so raw zero remains
      * a valid present payload and other enum types are never classified nil. */
     if (value == rt_core_nil()) return 1;
-    return rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1;
+    if (rt_enum_id(value) != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = rt_enum_discriminant(value);
+    return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
 int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
@@ -6933,24 +6942,139 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * missing library. Because the bundle links runtime_native.o BEFORE
  * runtime_dynload.o under -z muldefs, THIS weaker copy was the one that won.
  * rt_interp_cstr accepts both encodings and is a strict superset. */
-int64_t spl_dlopen(int64_t path_value) {
-    const char* path = rt_interp_cstr(path_value);
-    if (!path) return 0;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)LoadLibraryA(path);
+static HMODULE runtime_dynload_open_utf8(const char *path) {
+    int wide_len;
+    wchar_t *wide_path;
+    HMODULE handle;
+    if (!path || !path[0]) return NULL;
+    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        path, -1, NULL, 0);
+    if (wide_len <= 0) return NULL;
+    wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            path, -1, wide_path, wide_len) != wide_len) {
+        free(wide_path);
+        return NULL;
+    }
+    handle = LoadLibraryW(wide_path);
+    free(wide_path);
+    return handle;
+}
+#endif
+
+int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
+#if defined(__linux__)
+    const char* path = rt_interp_cstr(path_value);
+    if (!path) return -1;
+    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (source < 0) return -1;
+    struct stat source_stat;
+    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
+        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
+        close(source);
+        return -1;
+    }
+    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
+                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    if (snapshot < 0) { close(source); return -1; }
+    uint8_t buffer[65536];
+    uint64_t total = 0;
+    for (;;) {
+        ssize_t got = read(source, buffer, sizeof(buffer));
+        if (got == 0) break;
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            close(source); close(snapshot); return -1;
+        }
+        if ((uint64_t)got > UINT64_C(1073741824) - total) {
+            close(source); close(snapshot); return -1;
+        }
+        total += (uint64_t)got;
+        ssize_t offset = 0;
+        while (offset < got) {
+            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
+            if (put < 0 && errno == EINTR) continue;
+            if (put <= 0) { close(source); close(snapshot); return -1; }
+            offset += put;
+        }
+    }
+    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
+        lseek(snapshot, 0, SEEK_SET) < 0 ||
+        fcntl(snapshot, F_ADD_SEALS,
+              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
+        close(snapshot);
+        return -1;
+    }
+    return (int64_t)snapshot;
 #else
-    return (int64_t)(intptr_t)dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    (void)path_value;
+    return -1;
 #endif
 }
 
-int64_t spl_dlsym(int64_t handle, int64_t name_value) {
-    const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name) return 0;
+int64_t spl_dlopen(int64_t path_value) {
+    int64_t handle = 0;
+    return spl_dlopen_checked(path_value, &handle) == 0 ? handle : 0;
+}
+
+int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
+    if (!out_handle) return 1;
+    *out_handle = 0;
+    const char* path = rt_interp_cstr(path_value);
+    if (!path || !path[0]) return 1;
 #ifdef _WIN32
-    return (int64_t)(intptr_t)GetProcAddress((HMODULE)(intptr_t)handle, name);
+    HMODULE handle = runtime_dynload_open_utf8(path);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #else
-    return (int64_t)(intptr_t)dlsym((void*)(intptr_t)handle, name);
+    void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (!handle) return 2;
+    *out_handle = (int64_t)(intptr_t)handle;
 #endif
+    return 0;
+}
+
+int64_t spl_dlsym(int64_t handle, int64_t name_value) {
+    int64_t symbol = 0;
+    return spl_dlsym_checked(handle, name_value, &symbol) == 0 ? symbol : 0;
+}
+
+int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!handle || !name || !name[0]) return 1;
+#ifdef _WIN32
+    FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym((void*)(intptr_t)handle, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
+}
+
+int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
+    if (!out_symbol) return 1;
+    *out_symbol = 0;
+    const char* name = rt_interp_cstr(name_value);
+    if (!name || !name[0]) return 1;
+#ifdef _WIN32
+    HMODULE process = GetModuleHandleA(NULL);
+    if (!process) return 3;
+    FARPROC symbol = GetProcAddress(process, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#else
+    void* symbol = dlsym(NULL, name);
+    if (!symbol) return 3;
+    *out_symbol = (int64_t)(intptr_t)symbol;
+#endif
+    return 0;
 }
 
 int64_t spl_dlclose(int64_t handle) {
@@ -6990,6 +7114,83 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
         case 8: return ((Fn8)(uintptr_t)fptr)(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
         default: return 0;
     }
+}
+
+/* Checked integer-only WFFI transport: [status, value]. */
+#define SPL_WFFI_OK 0
+#define SPL_WFFI_INVALID_ARGUMENT 1
+#define SPL_WFFI_NULL_FUNCTION 2
+#define SPL_WFFI_UNSUPPORTED_SIGNATURE 3
+
+int64_t spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value) {
+    typedef bool (*Fn)(void);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)() ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+int64_t spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0, int8_t* out_value) {
+    typedef bool (*Fn)(int64_t);
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (!fptr) return SPL_WFFI_NULL_FUNCTION;
+    *out_value = ((Fn)(uintptr_t)fptr)(arg0) ? 1 : 0;
+    return SPL_WFFI_OK;
+}
+
+static int64_t spl_wffi_i64_checked_result(int64_t status, int64_t value) {
+    SplArray* result = rt_array_new(2);
+    if (!result) return rt_core_nil();
+    if (!rt_array_push(result, rt_value_int(status)) ||
+        !rt_array_push(result, rt_value_int(value))) {
+        rt_array_free(result);
+        return rt_core_nil();
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int64_t spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value, int64_t nargs) {
+    if (fptr == 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    }
+    if (nargs < 0) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (nargs > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data || nargs > args->len) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, spl_wffi_call_i64(fptr, args_value, nargs));
+}
+
+int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
+                                  int64_t nargs, int64_t* out_value) {
+    if (!out_value) return SPL_WFFI_INVALID_ARGUMENT;
+    *out_value = 0;
+    if (fptr == 0) return SPL_WFFI_NULL_FUNCTION;
+    if (nargs < 0) return SPL_WFFI_INVALID_ARGUMENT;
+    if (nargs > 8) return SPL_WFFI_UNSUPPORTED_SIGNATURE;
+    RtCoreArray* args = rt_core_as_array(args_value);
+    if (!args || (args->flags & RT_CORE_ARRAY_FLAG_BYTES) || !args->data || nargs > args->len) {
+        return SPL_WFFI_INVALID_ARGUMENT;
+    }
+    for (int64_t i = 0; i < nargs; i++) {
+        if (!rt_core_is_int(((int64_t*)args->data)[i])) {
+            return SPL_WFFI_INVALID_ARGUMENT;
+        }
+    }
+    *out_value = spl_wffi_call_i64(fptr, args_value, nargs);
+    return SPL_WFFI_OK;
 }
 
 int64_t rt_array_header_ptr(SplArray* a) {
@@ -8677,20 +8878,14 @@ int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
-int rt_file_delete(const char* path) {
-    if (!path) return 0;
+int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return remove(path) == 0 ? 1 : 0;
 }
 
 int rt_file_remove(const uint8_t* path_ptr, uint64_t path_len) {
-    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
-    char* path = (char*)malloc((size_t)path_len + 1);
-    if (!path) return 0;
-    memcpy(path, path_ptr, (size_t)path_len);
-    path[(size_t)path_len] = '\0';
-    int ok = remove(path) == 0 ? 1 : 0;
-    free(path);
-    return ok;
+    return rt_file_delete(path_ptr, path_len);
 }
 
 /* Non-accelerator native bridges. Text parameters use the ABI selected by
@@ -8797,6 +8992,31 @@ static int64_t rt_http_tuple(int64_t status, const uint8_t* body, uint64_t body_
     rt_tuple_set(tuple, 1, rt_string_new(body, body_len));
     rt_tuple_set(tuple, 2, rt_string_new((const uint8_t*)(error ? error : ""),
                                          error ? (uint64_t)strlen(error) : 0));
+    return tuple;
+}
+
+static int64_t rt_http_v2_tuple(int64_t status,
+                                const uint8_t* reason, uint64_t reason_len,
+                                const uint8_t* headers, uint64_t headers_len,
+                                const uint8_t* body, uint64_t body_len,
+                                const char* error) {
+    int64_t tuple = rt_tuple_new(5);
+    if (tuple == rt_core_nil()) abort();
+    SplArray* body_array = rt_byte_array_new_len(body_len);
+    RtCoreArray* body_storage = rt_core_array_ptr(body_array);
+    if (!body_storage || (body_len > 0 && !body_storage->data)) abort();
+    if (body_len > 0) memcpy(body_storage->data, body, (size_t)body_len);
+    int64_t reason_value = rt_string_new(reason, reason_len);
+    int64_t headers_value = rt_string_new(headers, headers_len);
+    int64_t error_value = rt_string_new((const uint8_t*)(error ? error : ""),
+                                         error ? (uint64_t)strlen(error) : 0);
+    if (reason_value == rt_core_nil() || headers_value == rt_core_nil() ||
+        error_value == rt_core_nil()) abort();
+    rt_tuple_set(tuple, 0, rt_value_int(status));
+    rt_tuple_set(tuple, 1, reason_value);
+    rt_tuple_set(tuple, 2, headers_value);
+    rt_tuple_set(tuple, 3, (int64_t)(uintptr_t)body_array);
+    rt_tuple_set(tuple, 4, error_value);
     return tuple;
 }
 
@@ -9080,6 +9300,32 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
     return 0;
 }
 
+static int rt_http_header_has_token(const char* headers, size_t len,
+                                    const char* name, const char* token) {
+    size_t name_len = strlen(name);
+    size_t token_len = strlen(token);
+    const char* line = headers;
+    const char* end = headers + len;
+    while (line < end) {
+        const char* next = strstr(line, "\r\n");
+        if (!next || next > end) next = end;
+        if ((size_t)(next - line) > name_len &&
+            strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+            const char* value = line + name_len + 1;
+            while (value < next) {
+                while (value < next && (*value == ' ' || *value == '\t' || *value == ',')) value++;
+                const char* token_end = value;
+                while (token_end < next && *token_end != ',' && *token_end != ' ' && *token_end != '\t') token_end++;
+                if ((size_t)(token_end - value) == token_len &&
+                    strncasecmp(value, token, token_len) == 0) return 1;
+                value = token_end < next ? token_end + 1 : next;
+            }
+        }
+        line = next < end ? next + 2 : end;
+    }
+    return 0;
+}
+
 static int64_t rt_http_content_length(const char* headers, size_t len) {
     const char* line = headers;
     const char* end = headers + len;
@@ -9089,9 +9335,13 @@ static int64_t rt_http_content_length(const char* headers, size_t len) {
         if ((size_t)(next - line) >= 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
             const char* value = line + 15;
             while (value < next && (*value == ' ' || *value == '\t')) value++;
+            if (value == next || *value < '0' || *value > '9') return -2;
             char* parse_end = NULL;
             unsigned long long parsed = strtoull(value, &parse_end, 10);
-            if (parse_end == value || parsed > (unsigned long long)INT64_MAX) return -1;
+            if (parse_end == value || parse_end > next ||
+                parsed > (unsigned long long)INT64_MAX) return -2;
+            while (parse_end < next && (*parse_end == ' ' || *parse_end == '\t')) parse_end++;
+            if (parse_end != next) return -2;
             return (int64_t)parsed;
         }
         line = next < end ? next + 2 : end;
@@ -9136,11 +9386,36 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
     *out = result; *out_len = used; return 1;
 }
 
+static int rt_http_token_char(unsigned char value) {
+    return ('0' <= value && value <= '9') || ('A' <= value && value <= 'Z') ||
+           ('a' <= value && value <= 'z') || strchr("!#$%&'*+-.^_`|~", value);
+}
+
 static int rt_http_method_is_token(const char* method) {
     if (!method || !*method) return 0;
     for (const unsigned char* p = (const unsigned char*)method; *p; p++) {
-        if (!(('0' <= *p && *p <= '9') || ('A' <= *p && *p <= 'Z') ||
-              ('a' <= *p && *p <= 'z') || strchr("!#$%&'*+-.^_`|~", *p))) return 0;
+        if (!rt_http_token_char(*p)) return 0;
+    }
+    return 1;
+}
+
+static int rt_http_headers_valid(RtCoreArray* headers) {
+    if (!headers || headers->len < 0 ||
+        (headers->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) ||
+        (headers->len > 0 && !headers->data) || headers->len > 1024) return 0;
+    uint64_t total_bytes = 0;
+    for (int64_t i = 0; i < headers->len; i++) {
+        RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+        const char* separator = header ? memchr(header->data, ':', header->len) : NULL;
+        if (!header || !separator || separator == header->data ||
+            memchr(header->data, '\r', header->len) ||
+            memchr(header->data, '\n', header->len)) return 0;
+        if (header->len > 1024 * 1024 - total_bytes) return 0;
+        total_bytes += header->len;
+        for (const unsigned char* p = (const unsigned char*)header->data;
+             p < (const unsigned char*)separator; p++) {
+            if (!rt_http_token_char(*p)) return 0;
+        }
     }
     return 1;
 }
@@ -9148,8 +9423,15 @@ static int rt_http_method_is_token(const char* method) {
 static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
                            const uint8_t* body, size_t body_len, int64_t timeout_ms,
                            int64_t* status_out,
-                           uint8_t** body_out, size_t* body_len_out, char* error, size_t error_cap) {
+                           uint8_t** body_out, size_t* body_len_out,
+                           uint8_t** reason_out, size_t* reason_len_out,
+                           uint8_t** headers_out, size_t* headers_len_out,
+                           char* error, size_t error_cap) {
     *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    if (reason_out) *reason_out = NULL;
+    if (reason_len_out) *reason_len_out = 0;
+    if (headers_out) *headers_out = NULL;
+    if (headers_len_out) *headers_len_out = 0;
     int64_t deadline_ms = 0;
     if (timeout_ms > 0) {
         int64_t now = rt_time_now_monotonic_ms();
@@ -9283,26 +9565,83 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     const char* header_end = rt_http_header_end(response, received);
     if (!header_end) { free(response); snprintf(error, error_cap, "invalid HTTP response"); return 0; }
     int status = 0;
-    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1) {
+    if (sscanf((const char*)response, "HTTP/%*s %d", &status) != 1 ||
+        status < 100 || status > 999) {
         free(response); snprintf(error, error_cap, "invalid HTTP status"); return 0;
     }
     const char* header_start = strchr((const char*)response, '\n');
     if (!header_start || header_start >= header_end) { free(response); snprintf(error, error_cap, "invalid HTTP headers"); return 0; }
     header_start++; size_t header_len = (size_t)(header_end - header_start);
+    const char* status_line_end = header_start - 1;
+    if ((reason_out && status_line_end - (const char*)response > 8192) ||
+        (headers_out && header_len > 1024 * 1024)) {
+        free(response); snprintf(error, error_cap, "HTTP response metadata too large"); return 0;
+    }
+    if (headers_out) {
+        size_t response_header_count = header_len > 0 ? 1 : 0;
+        for (size_t i = 0; i < header_len; i++) {
+            if (header_start[i] == '\n' && ++response_header_count > 1024) {
+                free(response); snprintf(error, error_cap, "too many HTTP response headers"); return 0;
+            }
+        }
+    }
+    size_t status_reason_len = 0;
+    const char* status_reason = NULL;
+    uint8_t* reason_copy = NULL;
+    uint8_t* headers_copy = NULL;
+    if (reason_out) {
+        const char* status_first_space = memchr(
+            response, ' ', (size_t)(status_line_end - (const char*)response));
+        status_reason = status_first_space
+            ? memchr(status_first_space + 1, ' ',
+                     (size_t)(status_line_end - status_first_space - 1))
+            : NULL;
+        if (status_reason) {
+            status_reason++;
+            const char* reason_end = status_line_end;
+            if (reason_end > status_reason && reason_end[-1] == '\r') reason_end--;
+            status_reason_len = (size_t)(reason_end - status_reason);
+            if (status_reason_len > 0) {
+                reason_copy = (uint8_t*)malloc(status_reason_len);
+                if (!reason_copy) { free(response); snprintf(error, error_cap, "out of memory"); return 0; }
+                memcpy(reason_copy, status_reason, status_reason_len);
+            }
+        }
+    }
+    if (headers_out && header_len > 0) {
+        headers_copy = (uint8_t*)malloc(header_len);
+        if (!headers_copy) { free(reason_copy); free(response); snprintf(error, error_cap, "out of memory"); return 0; }
+        memcpy(headers_copy, header_start, header_len);
+    }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    if (rt_http_has_header(header_start, header_len, "Transfer-Encoding") && strcasestr(header_start, "chunked")) {
+    if (rt_http_header_has_token(header_start, header_len,
+                                 "Transfer-Encoding", "chunked")) {
         uint8_t* decoded = NULL; size_t decoded_len = 0;
         if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
-            free(response); snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "invalid chunked HTTP response"); return 0;
         }
         free(response); response = decoded; payload = response; payload_len = decoded_len;
     } else {
         int64_t declared = rt_http_content_length(header_start, header_len);
+        if (declared == -2) {
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "invalid HTTP Content-Length"); return 0;
+        }
+        if (declared >= 0 && (uint64_t)declared > payload_len) {
+            free(headers_copy); free(reason_copy); free(response);
+            snprintf(error, error_cap, "truncated HTTP response body"); return 0;
+        }
         if (declared >= 0 && (uint64_t)declared < payload_len) payload_len = (size_t)declared;
         memmove(response, payload, payload_len); payload = response;
     }
-    *status_out = status; *body_out = response; *body_len_out = payload_len; return 1;
+    *status_out = status; *body_out = response; *body_len_out = payload_len;
+    if (reason_out) *reason_out = reason_copy; else free(reason_copy);
+    if (reason_len_out) *reason_len_out = status_reason_len;
+    if (headers_out) *headers_out = headers_copy; else free(headers_copy);
+    if (headers_len_out) *headers_len_out = header_len;
+    return 1;
 }
 #endif
 
@@ -9314,7 +9653,8 @@ int64_t rt_http_get(int64_t url_value) {
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
-                             &status, &body, &body_len, error, sizeof(error));
+                             &status, &body, &body_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(body); return result;
@@ -9335,7 +9675,8 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
                              body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
                              timeout_ms,
-                             &status, &response, &response_len, error, sizeof(error));
+                             &status, &response, &response_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(response); return result;
@@ -9345,6 +9686,46 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
 int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
                         int64_t body_value) {
     return rt_http_request_with_timeout(method_value, url_value, headers_value, body_value, 0);
+}
+
+int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
+                           int64_t headers_value, int64_t body_value,
+                           int64_t timeout_ms) {
+    RtCoreString* method = rt_core_as_string(method_value);
+    RtCoreString* url = rt_core_as_string(url_value);
+    RtCoreArray* headers = rt_core_as_array(headers_value);
+    RtCoreArray* body = rt_core_as_array(body_value);
+    if (!method || !url || timeout_ms < 0 || !body ||
+        !(body->flags & RT_CORE_ARRAY_FLAG_BYTES) ||
+        body->len < 0 || (body->len > 0 && !body->data)) {
+        return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                                "invalid HTTP v2 argument");
+    }
+#if defined(_WIN32)
+    (void)headers; (void)headers_value; (void)timeout_ms;
+    return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                            "native HTTP is unavailable on Windows core runtime");
+#else
+    if (!rt_http_headers_valid(headers)) {
+        return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
+                                "invalid HTTP v2 headers");
+    }
+    int64_t status = -1;
+    uint8_t *reason = NULL, *response_headers = NULL, *response = NULL;
+    size_t reason_len = 0, response_headers_len = 0, response_len = 0;
+    char error[160] = {0};
+    int ok = rt_http_perform(method->data, url->data, headers,
+                             (const uint8_t*)body->data, (size_t)body->len,
+                             timeout_ms, &status, &response, &response_len,
+                             &reason, &reason_len, &response_headers,
+                             &response_headers_len, error, sizeof(error));
+    int64_t result = ok
+        ? rt_http_v2_tuple(status, reason, reason_len, response_headers,
+                           response_headers_len, response, response_len, "")
+        : rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0, error);
+    free(reason); free(response_headers); free(response);
+    return result;
+#endif
 }
 
 int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
@@ -9365,7 +9746,8 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
 #else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
-                             &status, &body, &body_len, error, sizeof(error));
+                             &status, &body, &body_len, NULL, NULL, NULL, NULL,
+                             error, sizeof(error));
     if (ok) {
         FILE* file = fopen(output_path->data, "wb");
         if (!file) {
@@ -11109,7 +11491,8 @@ static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
 }
 
 int64_t rt_io_tcp_socket_create(int64_t family) {
-    int af = (family == 6) ? AF_INET6 : AF_INET;
+    if (family != 0 && family != 1) return -1;
+    int af = family == 1 ? AF_INET6 : AF_INET;
     return (int64_t)socket(af, SOCK_STREAM, 0);
 }
 
@@ -11126,7 +11509,7 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
     return (int64_t)fd;
 }
 
-int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
+bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -11134,8 +11517,8 @@ int64_t rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
     return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_listen(int64_t fd, int64_t backlog) {
-    return listen((int)fd, (int)backlog) == 0 ? 1 : 0;
+bool rt_io_tcp_listen(int64_t fd, int64_t backlog) {
+    return listen((int)fd, (int)backlog) == 0;
 }
 
 int64_t rt_io_tcp_accept(int64_t fd) {
@@ -11145,6 +11528,7 @@ int64_t rt_io_tcp_accept(int64_t fd) {
 }
 
 int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
+    if (ms <= 0) return -1;
     struct pollfd pfd;
     memset(&pfd, 0, sizeof(pfd));
     pfd.fd = (int)fd; pfd.events = POLLIN;
@@ -11164,16 +11548,62 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 }
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
-    (void)ms;
-    return rt_io_tcp_connect(addr_val);
+    if (ms <= 0) return -1;
+    const char* address = rt_extract_cstr(addr_val);
+    if (!address) return -1;
+    struct sockaddr_in socket_address;
+    if (rt_parse_addr_port(address, &socket_address) < 0) return -1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int original_flags = fcntl(fd, F_GETFL, 0);
+    if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
+        close(fd);
+        return -1;
+    }
+    int connected = connect(fd, (struct sockaddr*)&socket_address,
+                            sizeof(socket_address));
+    if (connected != 0 && errno != EINPROGRESS) {
+        close(fd);
+        return -1;
+    }
+    if (connected != 0) {
+        struct pollfd pfd;
+        memset(&pfd, 0, sizeof(pfd));
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        if (poll(&pfd, 1, (int)ms) <= 0) {
+            close(fd);
+            return -1;
+        }
+        int socket_error = 0;
+        socklen_t error_length = sizeof(socket_error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) != 0 ||
+            socket_error != 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    if (fcntl(fd, F_SETFL, original_flags) != 0) {
+        close(fd);
+        return -1;
+    }
+    return (int64_t)fd;
 }
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
+    if (size < 0) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return rt_core_nil();
+    }
     ssize_t n = read((int)fd, ca->data, (size_t)size);
-    ca->len = n > 0 ? n : 0;
+    if (n < 0) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    ca->len = n;
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -11206,16 +11636,15 @@ int64_t rt_io_tcp_write_bytes(int64_t fd, int64_t data_val) {
     return rt_io_tcp_write(fd, data_val);
 }
 
-int64_t rt_io_tcp_flush(int64_t fd) {
+bool rt_io_tcp_flush(int64_t fd) {
     int flag = 1;
-    setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    if (setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) != 0) return false;
     flag = 0;
-    setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    return 1;
+    return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0;
 }
 
-int64_t rt_io_tcp_close(int64_t fd) {
-    return close((int)fd) == 0 ? 1 : 0;
+bool rt_io_tcp_close(int64_t fd) {
+    return close((int)fd) == 0;
 }
 
 int64_t rt_io_tcp_local_addr(int64_t fd) {
@@ -11232,19 +11661,19 @@ int64_t rt_io_tcp_peer_addr(int64_t fd) {
     return rt_make_addr_string(&sa);
 }
 
-int64_t rt_io_tcp_set_nonblocking(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nonblocking(int64_t fd, bool enabled) {
     int flags = fcntl((int)fd, F_GETFL, 0);
     if (flags < 0) return 0;
     if (enabled) flags |= O_NONBLOCK; else flags &= ~O_NONBLOCK;
     return fcntl((int)fd, F_SETFL, flags) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_nodelay(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_nodelay(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseport(int64_t fd, bool enabled) {
 #ifdef SO_REUSEPORT
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEPORT, &flag, sizeof(flag)) == 0 ? 1 : 0;
@@ -11253,25 +11682,25 @@ int64_t rt_io_tcp_set_reuseport(int64_t fd, int64_t enabled) {
 #endif
 }
 
-int64_t rt_io_tcp_set_reuseaddr(int64_t fd, int64_t enabled) {
+bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
     int flag = enabled ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
+bool rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
     tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
+bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
     tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
-int64_t rt_io_tcp_shutdown(int64_t fd, int64_t how) {
-    return shutdown((int)fd, (int)how) == 0 ? 1 : 0;
+bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
+    return shutdown((int)fd, (int)how) == 0;
 }
 
 /* ================================================================
@@ -11295,7 +11724,8 @@ int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return -1;
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
-    if (!ca || !ca->data || ca->len <= 0) return 0;
+    if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
+        ca->len > 65535 || (ca->len > 0 && !ca->data)) return -1;
     struct sockaddr_in sa;
     if (rt_parse_addr_port(a, &sa) < 0) return -1;
     return (int64_t)sendto((int)fd, ca->data, (size_t)ca->len, 0, (struct sockaddr*)&sa, sizeof(sa));
@@ -11303,20 +11733,29 @@ int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
 
 int64_t rt_io_udp_send(int64_t fd, int64_t data_val) {
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
-    if (!ca || !ca->data || ca->len <= 0) return 0;
+    if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
+        ca->len > 65535 || (ca->len > 0 && !ca->data)) return -1;
     return (int64_t)send((int)fd, ca->data, (size_t)ca->len, 0);
 }
 
 int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
+    if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return rt_core_nil();
+    }
     ssize_t n = recv((int)fd, ca->data, (size_t)size, 0);
-    ca->len = n > 0 ? n : 0;
+    if (n < 0) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    ca->len = n;
     return (int64_t)(uintptr_t)arr;
 }
 
-int64_t rt_io_udp_connect(int64_t fd, int64_t addr_val) {
+bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
     const char* a = rt_extract_cstr(addr_val);
     if (!a) return 0;
     struct sockaddr_in sa;
@@ -11325,61 +11764,135 @@ int64_t rt_io_udp_connect(int64_t fd, int64_t addr_val) {
 }
 
 int64_t rt_io_udp_local_addr(int64_t fd) { return rt_io_tcp_local_addr(fd); }
-int64_t rt_io_udp_set_broadcast(int64_t fd, int64_t e) {
+bool rt_io_udp_set_broadcast(int64_t fd, bool e) {
     int flag = e ? 1 : 0;
     return setsockopt((int)fd, SOL_SOCKET, SO_BROADCAST, &flag, sizeof(flag)) == 0 ? 1 : 0;
 }
-int64_t rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) { return rt_io_tcp_set_read_timeout(fd, ms); }
-int64_t rt_io_udp_close(int64_t fd) { return close((int)fd) == 0 ? 1 : 0; }
-int64_t rt_io_udp_set_nonblocking(int64_t fd, int64_t e) { return rt_io_tcp_set_nonblocking(fd, e); }
+bool rt_io_udp_set_read_timeout(int64_t fd, int64_t ms) {
+    struct timeval timeout = {0, 0};
+    if (ms > 0) {
+        timeout.tv_sec = ms / 1000;
+        timeout.tv_usec = (ms % 1000) * 1000;
+    }
+    return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0;
+}
+bool rt_io_udp_close(int64_t fd) { return close((int)fd) == 0; }
+bool rt_io_udp_set_nonblocking(int64_t fd, bool e) { return rt_io_tcp_set_nonblocking(fd, e); }
+
+bool rt_io_udp_set_multicast_loop(int64_t fd, bool enabled) {
+    struct sockaddr_storage local;
+    socklen_t local_len = sizeof(local);
+    if (getsockname((int)fd, (struct sockaddr*)&local, &local_len) != 0) return 0;
+    int flag = enabled ? 1 : 0;
+    if (local.ss_family == AF_INET6) {
+        return setsockopt((int)fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
+                          &flag, sizeof(flag)) == 0;
+    }
+    return setsockopt((int)fd, IPPROTO_IP, IP_MULTICAST_LOOP,
+                      &flag, sizeof(flag)) == 0;
+}
+
+static bool rt_io_udp_multicast_membership(int64_t fd, int64_t addr_val,
+                                           bool join) {
+    const char* address = rt_extract_cstr(addr_val);
+    if (!address) return 0;
+    if (strchr(address, ':')) {
+        struct ipv6_mreq request;
+        memset(&request, 0, sizeof(request));
+        if (inet_pton(AF_INET6, address, &request.ipv6mr_multiaddr) != 1) return 0;
+        request.ipv6mr_interface = 0;
+        return setsockopt((int)fd, IPPROTO_IPV6,
+                          join ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP,
+                          &request, sizeof(request)) == 0;
+    }
+    struct ip_mreq request;
+    memset(&request, 0, sizeof(request));
+    if (inet_pton(AF_INET, address, &request.imr_multiaddr) != 1) return 0;
+    request.imr_interface.s_addr = htonl(INADDR_ANY);
+    return setsockopt((int)fd, IPPROTO_IP,
+                      join ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP,
+                      &request, sizeof(request)) == 0;
+}
+
+bool rt_io_udp_join_multicast(int64_t fd, int64_t addr_val) {
+    return rt_io_udp_multicast_membership(fd, addr_val, true);
+}
+
+bool rt_io_udp_leave_multicast(int64_t fd, int64_t addr_val) {
+    return rt_io_udp_multicast_membership(fd, addr_val, false);
+}
 
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
+    if (size < 0 || size > 65535) return rt_core_nil();
     SplArray* arr = rt_byte_array_new((uint64_t)size);
     RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || !ca->data) return (int64_t)(uintptr_t)arr;
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return rt_core_nil();
+    }
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom((int)fd, ca->data, (size_t)size, 0, (struct sockaddr*)&from, &fromlen);
-    ca->len = n > 0 ? n : 0;
-    return (int64_t)(uintptr_t)arr;
+    if (n < 0) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    ca->len = n;
+    int64_t address = rt_make_addr_string(&from);
+    if (address == rt_core_nil()) {
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    int64_t tuple = rt_tuple_new(2);
+    if (tuple == rt_core_nil()) {
+        rt_string_free(address);
+        rt_array_free(arr);
+        return rt_core_nil();
+    }
+    rt_tuple_set(tuple, 0, (int64_t)(uintptr_t)arr);
+    rt_tuple_set(tuple, 1, address);
+    return tuple;
 }
 
 #else /* _WIN32 stubs */
 int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
-int64_t rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return 0; }
+bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
 int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
 int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
 int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
 int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_tcp_flush(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_close(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_tcp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_nodelay(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_reuseport(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_reuseaddr(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return 0; }
+int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
+int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
+bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
+int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
+int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
+bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
 int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return 0; }
-int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return 0; }
-int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
-int64_t rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return 0; }
-int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return 0; }
-int64_t rt_io_udp_set_broadcast(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return 0; }
-int64_t rt_io_udp_close(int64_t f) { (void)f; return 0; }
-int64_t rt_io_udp_set_nonblocking(int64_t f, int64_t e) { (void)f; (void)e; return 0; }
-int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return 0; }
+int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return -1; }
+int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
+int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
+bool rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
+bool rt_io_udp_set_broadcast(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
+bool rt_io_udp_close(int64_t f) { (void)f; return false; }
+bool rt_io_udp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_udp_set_multicast_loop(int64_t f, bool e) { (void)f; (void)e; return false; }
+bool rt_io_udp_join_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+bool rt_io_udp_leave_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
+int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
 #endif /* !_WIN32 */
 
 /* ================================================================

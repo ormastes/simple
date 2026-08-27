@@ -7,32 +7,33 @@
 use os.apps.sshd.ssh_packet.{SshTextResult, SshStringResult, ssh_put_u32, ssh_put_string, ssh_put_text, ssh_put_byte, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text, ssh_ascii_text_to_bytes}
 use os.apps.sshd.ssh_hex.{format_hex}
 use os.apps.sshd.ssh_transport.{SshKexInit, SSH_MSG_NEWKEYS, SSH_MSG_IGNORE, SSH_MSG_DEBUG}
-use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_INIT, ssh_build_ed25519_host_key_blob}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_INIT, ssh_build_ed25519_host_key_blob, _append_byte}
 use os.kernel.net.rt_net_socket_facade.{rt_net_send_bytes, rt_net_recv_bytes, rt_net_recv_ssh_plain_packet_payload, rt_net_recv_version_text, rt_net_close}
 use os.crypto.ed25519.{ed25519_keypair_from_seed}
-extern fn rt_ed25519_keypair_pk(seed: [u8]) -> [u8]
-extern fn rt_rsa_sha256_verify(pubkey: [u8], message: [u8], signature: [u8]) -> i64
-extern fn rt_ed25519_verify(message: [u8], pubkey: [u8], signature: [u8]) -> i64
+@unsafe(reason: "raw runtime byte-array to text lift; non-empty input must not become empty text", capabilities: [ffi])
 extern fn rt_string_from_byte_array(arr: [u8]) -> text
-extern fn rt_thread_sleep(ms: i64) -> i64
-extern fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]
-extern fn rt_bytes_concat(a: [u8], b: [u8]) -> [u8]
-extern fn rt_bytes_slice(arr: [u8], start: i64, length: i64) -> [u8]
-extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-extern fn rt_tls13_x25519_public_key(scalar: [u8]) -> [u8]
-extern fn rt_tls13_x25519_shared_secret(scalar: [u8], point: [u8]) -> [u8]
-extern fn rt_ssh_aes128_gcm_encrypt_packet(key: [u8], iv: [u8], seq: i64, payload: [u8]) -> [u8]
-extern fn rt_ssh_aes128_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
-extern fn serial_println(msg: text)
 
-fn log_raw_println(msg: text):
-    serial_println(msg)
+# Transitional local spelling retained by packet builders.  This is a direct
+# Pure Simple append, not a foreign dispatch.
+@inline
+fn rt_push_byte(arr: [u8], byte_val: i64) -> [u8]:
+    _append_byte(arr, byte_val.to_u8())
 
 # ============================================================================
 # Constants
 # ============================================================================
 
 val RECV_BUF_SIZE: u64 = 8192
+# Authentication attempts are bounded separately in ssh_auth.  These limits
+# bound transport work which does not consume an authentication attempt: a
+# legitimate client may send advisory packets or rekey while authenticating,
+# but neither path may pin a fixed sshd session indefinitely.
+val SSH_PREAUTH_CONTROL_PACKET_BUDGET: u32 = 64u32
+val SSH_PREAUTH_REKEY_BUDGET: u32 = 4u32
+
+fn ssh_pre_auth_control_budget_allows(control_packets: u32, rekeys: u32) -> bool:
+    control_packets <= SSH_PREAUTH_CONTROL_PACKET_BUDGET and
+        rekeys <= SSH_PREAUTH_REKEY_BUDGET
 
 struct PlainPacketHeader:
     header: [u8]
@@ -48,15 +49,17 @@ struct _SshFieldRange:
     next_offset: u64
 
 pub fn ssh_session_u8_at(data: [u8], idx: u64) -> u8:
-    rt_bytes_u8_at(data, idx.to_i64()).to_u8()
+    if idx >= data.len():
+        return 0u8
+    data[idx]
 
 fn _slice_range(data: [u8], start: u64, end: u64) -> [u8]:
     if start >= data.len() or start >= end:
-        return rt_bytes_slice(data, 0, 0)
+        return []
     var capped_end = end
     if capped_end > data.len():
         capped_end = data.len()
-    rt_bytes_slice(data, start.to_i64(), (capped_end - start).to_i64())
+    data.slice(start, capped_end)
 
 fn _zeroed_32_bytes() -> [u8]:
     var out: [u8] = []
@@ -67,11 +70,10 @@ fn _zeroed_32_bytes() -> [u8]:
     out
 
 fn _copy_bytes_stable(data: [u8]) -> [u8]:
-    # Build with the intrinsic `.push` (inline packed-[u8] codegen) rather than
-    # the extern `rt_push_byte(out, ..) -> [u8]` reassignment form: on the
+    # Build with the intrinsic `.push` (inline packed-[u8] codegen). On the
     # x86_64 freestanding native-build, assigning an extern [u8] return back
     # into a [u8] local drops the BYTE_PACKED representation and corrupts the
-    # copy (see report: rt_push_byte-return-assignment hazard). `.push`
+    # copy (see the extern-return-assignment hazard report). `.push`
     # mutates in place and preserves the packed contract.
     var out: [u8] = []
     var i: u64 = 0
@@ -84,13 +86,12 @@ fn _copy_prefix_stable(data: [u8], limit: u64) -> [u8]:
     var out: [u8] = []
     var i: u64 = 0
     while i < data.len() and i < limit:
-        out = rt_push_byte(out, ssh_session_u8_at(data, i).to_i64())
+        out.push((ssh_session_u8_at(data, i).to_i64()) as u8)
         i = i + 1
     out
 
 fn _publickey_only_auth_failure_payload() -> [u8]:
     val payload = _copy_bytes_stable([0x33, 0x00, 0x00, 0x00, 0x09, 0x70, 0x75, 0x62, 0x6c, 0x69, 0x63, 0x6b, 0x65, 0x79, 0x00])
-    serial_println("[sshd-session] auth fail payload len={payload.len()} hex={_bytes_to_hex(payload)}")
     payload
 
 fn _build_plain_packet_header(payload_len: u64, block_size: u64) -> PlainPacketHeader:
@@ -100,11 +101,11 @@ fn _build_plain_packet_header(payload_len: u64, block_size: u64) -> PlainPacketH
 
     var packet_length_u64: u64 = 1 + payload_len + padding_len
     var header: [u8] = []
-    header = rt_push_byte(header, ((packet_length_u64 >> 24) & 0xFF).to_i64())
-    header = rt_push_byte(header, ((packet_length_u64 >> 16) & 0xFF).to_i64())
-    header = rt_push_byte(header, ((packet_length_u64 >> 8) & 0xFF).to_i64())
-    header = rt_push_byte(header, (packet_length_u64 & 0xFF).to_i64())
-    header = rt_push_byte(header, padding_len.to_i64())
+    header.push((((packet_length_u64 >> 24) & 0xFF).to_i64()) as u8)
+    header.push((((packet_length_u64 >> 16) & 0xFF).to_i64()) as u8)
+    header.push((((packet_length_u64 >> 8) & 0xFF).to_i64()) as u8)
+    header.push(((packet_length_u64 & 0xFF).to_i64()) as u8)
+    header.push((padding_len.to_i64()) as u8)
     PlainPacketHeader(header: header, padding_len: padding_len)
 
 fn _zero_padding_bytes(count: u64) -> [u8]:
@@ -125,15 +126,15 @@ fn _copy_range_stable(data: [u8], start: u64, count: u64) -> [u8]:
 
 fn _push_u32_be_stable(buf: [u8], val_: u32) -> [u8]:
     var out = buf
-    out = rt_push_byte(out, ((val_ >> 24) & 0xFF).to_i64())
-    out = rt_push_byte(out, ((val_ >> 16) & 0xFF).to_i64())
-    out = rt_push_byte(out, ((val_ >> 8) & 0xFF).to_i64())
-    out = rt_push_byte(out, (val_ & 0xFF).to_i64())
+    out.push((((val_ >> 24) & 0xFF).to_i64()) as u8)
+    out.push((((val_ >> 16) & 0xFF).to_i64()) as u8)
+    out.push((((val_ >> 8) & 0xFF).to_i64()) as u8)
+    out.push(((val_ & 0xFF).to_i64()) as u8)
     out
 
 fn _build_channel_open_confirmation_stable(recipient: u32, sender: u32, window: u32, max_packet: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 91)
+    payload.push((91) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, sender)
     payload = _push_u32_be_stable(payload, window)
@@ -142,45 +143,45 @@ fn _build_channel_open_confirmation_stable(recipient: u32, sender: u32, window: 
 
 fn _build_channel_success_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 99)
+    payload.push((99) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_failure_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 100)
+    payload.push((100) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_eof_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 96)
+    payload.push((96) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_close_stable(recipient: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 97)
+    payload.push((97) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload
 
 fn _build_channel_exit_status_stable(recipient: u32, exit_status: u32) -> [u8]:
     var payload: [u8] = []
-    payload = rt_push_byte(payload, 98)
+    payload.push((98) as u8)
     payload = _push_u32_be_stable(payload, recipient)
     payload = _push_u32_be_stable(payload, 11)
-    payload = rt_push_byte(payload, 0x65)
-    payload = rt_push_byte(payload, 0x78)
-    payload = rt_push_byte(payload, 0x69)
-    payload = rt_push_byte(payload, 0x74)
-    payload = rt_push_byte(payload, 0x2D)
-    payload = rt_push_byte(payload, 0x73)
-    payload = rt_push_byte(payload, 0x74)
-    payload = rt_push_byte(payload, 0x61)
-    payload = rt_push_byte(payload, 0x74)
-    payload = rt_push_byte(payload, 0x75)
-    payload = rt_push_byte(payload, 0x73)
-    payload = rt_push_byte(payload, 0)
+    payload.push((0x65) as u8)
+    payload.push((0x78) as u8)
+    payload.push((0x69) as u8)
+    payload.push((0x74) as u8)
+    payload.push((0x2D) as u8)
+    payload.push((0x73) as u8)
+    payload.push((0x74) as u8)
+    payload.push((0x61) as u8)
+    payload.push((0x74) as u8)
+    payload.push((0x75) as u8)
+    payload.push((0x73) as u8)
+    payload.push((0) as u8)
     payload = _push_u32_be_stable(payload, exit_status)
     payload
 
@@ -192,30 +193,32 @@ fn _read_u32_stable(data: [u8], offset: u64) -> u32:
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 fn _read_text_field_fast(data: [u8], offset: u64) -> Result<_SshTextField, text>:
-    if offset + 4 > data.len():
-        log_raw_println("[sshd-session] fast text err=truncated_length off={offset} len={data.len()}")
+    if offset > data.len() or data.len() - offset < 4u64:
         return Err("truncated length")
-    var field_len_u32: u32 = _read_u32_stable(data, offset)
-    var field_len: u64 = field_len_u32.to_u64()
-    var start: u64 = offset + 4
-    var end: u64 = start + field_len
-    if end > data.len():
-        log_raw_println("[sshd-session] fast text err=truncated_data off={offset} field_len={field_len} end={end} len={data.len()}")
+    val field_len = _read_u32_stable(data, offset).to_u64()
+    val start = offset + 4u64
+    if field_len > data.len() - start:
         return Err("truncated data")
+    val end = start + field_len
     val field_bytes = _copy_range_stable(data, start, field_len)
+    var field_text = ""
+    unsafe(capabilities: [ffi]):
+        field_text = rt_string_from_byte_array(field_bytes)
+    if field_len > 0u64 and field_text.len() == 0:
+        return Err("invalid text")
     Ok(_SshTextField(
-        value: rt_string_from_byte_array(field_bytes),
+        value: field_text,
         next_offset: end
     ))
 
 fn _read_field_range_fast(data: [u8], offset: u64) -> Result<_SshFieldRange, text>:
-    if offset + 4 > data.len():
+    if offset > data.len() or data.len() - offset < 4u64:
         return Err("truncated length")
     val field_len = _read_u32_stable(data, offset).to_u64()
-    val start = offset + 4
-    val end = start + field_len
-    if end > data.len():
+    val start = offset + 4u64
+    if field_len > data.len() - start:
         return Err("truncated data")
+    val end = start + field_len
     Ok(_SshFieldRange(start: start, end: end, next_offset: end))
 
 fn _append_algo_name(list: text, name: text) -> text:
@@ -344,9 +347,7 @@ fn _known_compress_list(data: [u8], start: u64, end: u64) -> text:
     ""
 
 fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
-    log_raw_println("[sshd-session] fast kex begin len={data.len()}")
     if data.len() < 17:
-        log_raw_println("[sshd-session] fast kex err=too_short")
         return Err("KEXINIT too short")
     if ssh_session_u8_at(data, 0) != 20:
         return Err("not a KEXINIT message")
@@ -357,102 +358,80 @@ fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_kex off={off}")
             return Err("bad kex")
     off = kex.next_offset
-    log_raw_println("[sshd-session] fast kex stage=kex off={off}")
     val r_host = _read_field_range_fast(data, off)
     val host = match r_host:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_host off={off}")
             return Err("bad host")
     off = host.next_offset
-    log_raw_println("[sshd-session] fast kex stage=host off={off}")
     val r_enc_c2s = _read_field_range_fast(data, off)
     val enc_c2s = match r_enc_c2s:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_enc_c2s off={off}")
             return Err("bad enc c2s")
     off = enc_c2s.next_offset
-    log_raw_println("[sshd-session] fast kex stage=enc_c2s off={off}")
     val r_enc_s2c = _read_field_range_fast(data, off)
     val enc_s2c = match r_enc_s2c:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_enc_s2c off={off}")
             return Err("bad enc s2c")
     off = enc_s2c.next_offset
-    log_raw_println("[sshd-session] fast kex stage=enc_s2c off={off}")
     val r_mac_c2s = _read_field_range_fast(data, off)
     val mac_c2s = match r_mac_c2s:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_mac_c2s off={off}")
             return Err("bad mac c2s")
     off = mac_c2s.next_offset
-    log_raw_println("[sshd-session] fast kex stage=mac_c2s off={off}")
     val r_mac_s2c = _read_field_range_fast(data, off)
     val mac_s2c = match r_mac_s2c:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_mac_s2c off={off}")
             return Err("bad mac s2c")
     off = mac_s2c.next_offset
-    log_raw_println("[sshd-session] fast kex stage=mac_s2c off={off}")
     val r_comp_c2s = _read_field_range_fast(data, off)
     val comp_c2s = match r_comp_c2s:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_comp_c2s off={off}")
             return Err("bad comp c2s")
     off = comp_c2s.next_offset
-    log_raw_println("[sshd-session] fast kex stage=comp_c2s off={off}")
     val r_comp_s2c = _read_field_range_fast(data, off)
     val comp_s2c = match r_comp_s2c:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_comp_s2c off={off}")
             return Err("bad comp s2c")
     off = comp_s2c.next_offset
-    log_raw_println("[sshd-session] fast kex stage=comp_s2c off={off}")
     val r_lang1 = _read_field_range_fast(data, off)
     val lang1 = match r_lang1:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_lang1 off={off}")
             return Err("bad lang1")
     off = lang1.next_offset
-    log_raw_println("[sshd-session] fast kex stage=lang1 off={off}")
     val r_lang2 = _read_field_range_fast(data, off)
     val lang2 = match r_lang2:
         Ok(parsed):
             parsed
         Err(_):
-            log_raw_println("[sshd-session] fast kex err=bad_lang2 off={off}")
             return Err("bad lang2")
     off = lang2.next_offset
-    log_raw_println("[sshd-session] fast kex stage=lang2 off={off}")
-    if off + 5 > data.len():
-        log_raw_println("[sshd-session] fast kex err=truncated_tail off={off} len={data.len()}")
+    if off > data.len() or data.len() - off < 5u64:
         return Err("truncated tail")
     val first_follows = ssh_session_u8_at(data, off) != 0
     off = off + 1
     if _read_u32_stable(data, off) != 0:
-        log_raw_println("[sshd-session] fast kex err=nonzero_reserved off={off}")
         return Err("non-zero reserved")
     off = off + 4
     if off != data.len():
-        log_raw_println("[sshd-session] fast kex trailing_bytes off={off} len={data.len()}")
+        return Err("trailing data")
 
     val kex_list = _known_kex_list(data, kex.start, kex.end)
     val host_list = _known_host_key_list(data, host.start, host.end)
@@ -463,7 +442,6 @@ fn _parse_kexinit_fast(data: [u8]) -> Result<SshKexInit, text>:
     val comp_c2s_list = _known_compress_list(data, comp_c2s.start, comp_c2s.end)
     val comp_s2c_list = _known_compress_list(data, comp_s2c.start, comp_s2c.end)
     if kex_list.len() == 0 or host_list.len() == 0 or enc_c2s_list.len() == 0 or enc_s2c_list.len() == 0 or comp_c2s_list.len() == 0 or comp_s2c_list.len() == 0:
-        log_raw_println("[sshd-session] fast kex err=no_supported_algorithms")
         return Err("no supported algorithms")
 
     Ok(SshKexInit(
@@ -603,28 +581,22 @@ fn _ed25519_public_key_from_seed(seed: [u8]?) -> [u8]:
 fn ssh_validate_kex_payload(expected_type: u32, payload: [u8], strict_kex: bool) -> Result<(), text>:
     """Validate an inbound packet while the session is in pre-NEWKEYS KEX."""
     if payload.len() == 0:
-        log_raw_println("[sshd-session] kex payload invalid: empty")
         return Err("empty kex payload")
     val msg_type = ssh_session_u8_at(payload, 0)
     if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
-        log_raw_println("[sshd-session] kex payload invalid: strict type={msg_type} expected={expected_type}")
         return Err("strict-kex unexpected pre-newkeys message")
     if msg_type.to_u32() != expected_type:
-        log_raw_println("[sshd-session] kex payload invalid: type={msg_type} expected={expected_type}")
         return Err("unexpected kex packet type")
     Ok(())
 
 fn ssh_validate_kex_ecdh_init_payload(payload: [u8], strict_kex: bool) -> Result<(), text>:
     """Baremetal-safe validator for SSH_MSG_KEX_ECDH_INIT."""
     if payload.len() == 0:
-        log_raw_println("[sshd-session] kex ecdh init invalid: empty")
         return Err("empty kex payload")
     val msg_type = ssh_session_u8_at(payload, 0)
     if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
-        log_raw_println("[sshd-session] kex ecdh init invalid: strict type={msg_type}")
         return Err("strict-kex unexpected pre-newkeys message")
     if msg_type != SSH_MSG_KEX_ECDH_INIT:
-        log_raw_println("[sshd-session] kex ecdh init invalid: type={msg_type}")
         if msg_type == 0:
             return Err("type0")
         if msg_type == 20:
@@ -639,14 +611,11 @@ fn ssh_validate_kex_ecdh_init_payload(payload: [u8], strict_kex: bool) -> Result
 fn ssh_validate_newkeys_payload(payload: [u8], strict_kex: bool) -> Result<(), text>:
     """Baremetal-safe validator for SSH_MSG_NEWKEYS."""
     if payload.len() == 0:
-        log_raw_println("[sshd-session] newkeys invalid: empty")
         return Err("empty kex payload")
     val msg_type = ssh_session_u8_at(payload, 0)
     if strict_kex and (msg_type == SSH_MSG_IGNORE or msg_type == SSH_MSG_DEBUG):
-        log_raw_println("[sshd-session] newkeys invalid: strict type={msg_type}")
         return Err("strict-kex unexpected pre-newkeys message")
     if msg_type != SSH_MSG_NEWKEYS:
-        log_raw_println("[sshd-session] newkeys invalid: type={msg_type}")
         return Err("unexpected kex packet type")
     Ok(())
 
@@ -732,3 +701,4 @@ fn _extract_ed25519_pubkey(key_blob: [u8]) -> [u8]:
     []
 
 export RECV_BUF_SIZE
+export ssh_pre_auth_control_budget_allows

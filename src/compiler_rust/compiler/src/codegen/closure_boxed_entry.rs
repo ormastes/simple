@@ -104,6 +104,12 @@ impl<M: Module> CodegenBackend<M> {
     }
 
     fn emit_one_boxed_entry(&mut self, lambda: &MirFunction) -> BackendResult<()> {
+        self.emit_boxed_entry_for(lambda, true)
+    }
+
+    /// A named function has no closure-context parameter; its boxed thunk
+    /// drops the closure handle and forwards every declared parameter.
+    fn emit_boxed_entry_for(&mut self, lambda: &MirFunction, has_ctx: bool) -> BackendResult<()> {
         let raw_name = boxed_entry_name(&lambda.name);
         if self.func_ids.contains_key(&raw_name) {
             return Ok(());
@@ -117,7 +123,8 @@ impl<M: Module> CodegenBackend<M> {
         // The outlined lambda's params are [ctx, p1..pn]; the boxed entry has
         // the same arity but every slot is a tagged RuntimeValue (i64).
         let target_sig = build_mir_signature(lambda);
-        let user_params: Vec<TypeId> = lambda.params.iter().skip(1).map(|p| p.ty).collect();
+        let skip = usize::from(has_ctx);
+        let user_params: Vec<TypeId> = lambda.params.iter().skip(skip).map(|p| p.ty).collect();
         let ret_ty = lambda.return_type;
 
         let mut sig = Signature::new(platform_call_conv());
@@ -159,12 +166,12 @@ impl<M: Module> CodegenBackend<M> {
             let params: Vec<_> = b.block_params(entry).to_vec();
             let closure = params[0];
 
-            let mut call_args = vec![closure];
+            let mut call_args = if has_ctx { vec![closure] } else { Vec::new() };
             for (i, ty) in user_params.iter().enumerate() {
                 let tagged = params[i + 1];
                 // Cranelift type the target actually declares for this slot
                 // (index i + 1 — slot 0 is the ctx pointer).
-                let want = target_sig.params[i + 1].value_type;
+                let want = target_sig.params[i + skip].value_type;
                 call_args.push(unbox_arg(&mut b, &helpers, tagged, *ty, want));
             }
 
@@ -184,6 +191,22 @@ impl<M: Module> CodegenBackend<M> {
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| BackendError::ModuleError(format!("define {symbol}: {e}")))?;
         self.module.clear_context(&mut self.ctx);
+        Ok(())
+    }
+
+    /// Emit one boxed closure entry for every defined function that is loaded
+    /// as a first-class value in this module.
+    pub fn emit_boxed_fn_value_entries(
+        &mut self,
+        mir: &crate::mir::MirModule,
+        functions: &[MirFunction],
+    ) -> BackendResult<()> {
+        for name in named_fn_value_targets(mir) {
+            let Some(func) = functions.iter().find(|f| f.name == name) else {
+                continue;
+            };
+            self.emit_boxed_entry_for(func, false)?;
+        }
         Ok(())
     }
 }
@@ -207,11 +230,7 @@ struct BoxHelperRefs {
 }
 
 impl BoxHelperIds {
-    fn resolve<M: Module>(
-        backend: &CodegenBackend<M>,
-        params: &[TypeId],
-        ret: TypeId,
-    ) -> BackendResult<Self> {
+    fn resolve<M: Module>(backend: &CodegenBackend<M>, params: &[TypeId], ret: TypeId) -> BackendResult<Self> {
         let need = |pred: &dyn Fn(TypeId) -> bool| params.iter().copied().any(pred) || pred(ret);
         let get = |name: &'static str| backend.runtime_funcs.get(name).copied();
         let _ = need;
@@ -234,11 +253,7 @@ impl BoxHelperIds {
         Ok(ids)
     }
 
-    fn in_func<M: Module>(
-        &self,
-        module: &mut M,
-        func: &mut cranelift_codegen::ir::Function,
-    ) -> BoxHelperRefs {
+    fn in_func<M: Module>(&self, module: &mut M, func: &mut cranelift_codegen::ir::Function) -> BoxHelperRefs {
         BoxHelperRefs {
             unbox_int: self.unbox_int.map(|id| module.declare_func_in_func(id, func)),
             as_float: self.as_float.map(|id| module.declare_func_in_func(id, func)),
@@ -361,4 +376,33 @@ fn coerce(
         (types::F64, types::I64) => b.ins().bitcast(types::I64, MemFlags::new(), val),
         _ => val,
     }
+}
+
+fn named_fn_value_targets(mir: &crate::mir::MirModule) -> Vec<String> {
+    let global_names: std::collections::HashSet<&str> = mir
+        .globals
+        .iter()
+        .map(|(name, _, _)| name.as_str())
+        .filter(|name| !mir.extern_fn_names.contains(*name))
+        .collect();
+    let defined: std::collections::HashSet<&str> = mir
+        .functions
+        .iter()
+        .filter(|f| !f.blocks.is_empty() && !mir.extern_fn_names.contains(&f.name))
+        .map(|f| f.name.as_str())
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for func in &mir.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                if let crate::mir::MirInst::GlobalLoad { global_name, .. } = inst {
+                    let name = global_name.as_str();
+                    if !global_names.contains(name) && defined.contains(name) && !out.iter().any(|n| n == name) {
+                        out.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out
 }

@@ -17,11 +17,15 @@ use compiler.hir.hir_lowering.items.{
 use compiler.hir.hir_lowering.types.{LoweringError, LoweringErrorKind}
 use compiler.frontend.aspect_registry.{aspect_registry_reset}
 use compiler.frontend.effect_registry.{effect_registry_reset}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset}
 use compiler.frontend.layer_eq_registry.{layer_eq_registry_reset}
 use compiler.driver.driver_source_pipeline_impl.{driver_end_transient_parse_scope, driver_promote_frontend_registry_owners}
 use compiler.semantics.value_struct_layout.{validate_value_struct_layouts}
 use compiler.semantics.layer_eq_validation.{validate_layer_eq_types}
 use compiler.semantics.effect_validation.{validate_effect_contracts}
+use compiler.semantics.rt_criticality_validation.{validate_rt_criticality}
+use compiler.semantics.forbidden_io_validation.{validate_forbidden_io_contexts}
+use compiler.semantics.rt_hal_tag.{validate_rt_hal_tags}
 use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -42,6 +46,7 @@ pub fn driver_rollback_flat_hir_row_or_abort(expected_count: i64):
 fn reset_frontend_registries_after_scope():
     aspect_registry_reset()
     effect_registry_reset()
+    rt_criticality_reset()
     layer_eq_registry_reset()
 
 pub fn driver_finish_failed_parse_scope(source_path: text) -> text:
@@ -165,7 +170,7 @@ pub fn driver_dict_entry_count(entries: Dict<SymbolId, HirFunction>) -> i64:
 pub fn driver_validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule],
-    hir_modules: Dict<text, HirModule>
+    hir_modules: Dict<text, HirModule>, rt_hal_plan: text = ""
 ) -> [text]:
     var errors: [text] = []
     for error in validate_value_struct_layouts(module_keys, module_values):
@@ -174,6 +179,14 @@ pub fn driver_validate_value_struct_layouts(
         errors = errors.push(layer_eq_error)
     for effect_error in validate_effect_contracts(hir_modules):
         errors = errors.push(effect_error)
+    # Run beside RT validation while the same parse-to-semantics claims are in
+    # scope, before later validators can mutate their own transient registries.
+    for forbidden_io_error in validate_forbidden_io_contexts(hir_modules):
+        errors = errors.push(forbidden_io_error)
+    for rt_error in validate_rt_criticality(hir_modules):
+        errors = errors.push(rt_error)
+    for rt_hal_error in validate_rt_hal_tags(hir_modules, rt_hal_plan):
+        errors = errors.push(rt_hal_error)
     val aspect_errors = validate_aspect_contracts(hir_modules)
     for aspect_error in aspect_errors:
         errors = errors.push(aspect_error)

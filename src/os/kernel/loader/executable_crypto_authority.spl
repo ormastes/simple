@@ -2,12 +2,20 @@
 # Trust roots are installed once by platform configuration. Callers may submit
 # signatures, but cannot submit or select the key that authorizes them.
 
-use std.common.crypto.ed25519.{pure_ed25519_verify}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
 use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
 use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use std.common.contracts.execution.simpleos_executable_v1.{SimpleArtifactManifest}
 use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableAdmissionV1}
 use os.kernel.loader.executable_signing_body.{executable_manifest_signing_body_v1}
+use os.kernel.loader.installed_artifact_catalog_v1.{
+    InstalledArtifactCatalogSealLeaseV1,
+    installed_artifact_catalog_seal_lease_consume_for_root_v1}
+use os.kernel.boot.boot_measurement_entropy_capability_v1.{
+    BootMeasurementEntropyLeaseV1,
+    boot_measurement_entropy_lease_consume_v1}
 
 pub struct ExecutableTrustedSignerV1:
     key_id: text
@@ -17,12 +25,18 @@ val _loader_crypto_mutex: i64 = mutex_raw_create()
 var _loader_crypto_roots: [ExecutableTrustedSignerV1] = []
 var _loader_crypto_initialized: bool = false
 var _loader_crypto_quarantined: bool = false
+var _loader_crypto_ephemeral_transitioned_v1: bool = false
+var _loader_crypto_ephemeral_transition_reserved_v1: bool = false
 
 fn _copy_bytes(source: [u8]) -> [u8]:
     var out: [u8] = []
     for byte in source:
         out.push(byte)
     out
+
+fn _wipe_secret_bytes_v1(bytes: [u8]):
+    if not secure_zero_u8_slots(bytes).verified():
+        _loader_crypto_quarantined = true
 
 fn _bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -66,6 +80,9 @@ pub fn executable_loader_trust_roots_initialize(
         return false
     if not mutex_raw_lock(_loader_crypto_mutex):
         return false
+    if _loader_crypto_ephemeral_transition_reserved_v1 or
+        _loader_crypto_ephemeral_transitioned_v1:
+        return _unlock(false)
     if _loader_crypto_initialized:
         var same = roots.len() == _loader_crypto_roots.len()
         var i = 0
@@ -80,6 +97,87 @@ pub fn executable_loader_trust_roots_initialize(
             key_id: root.key_id, public_key: _copy_bytes(root.public_key)))
     _loader_crypto_roots = installed
     _loader_crypto_initialized = true
+    _unlock(true)
+
+fn _cancel_ephemeral_transition_reservation_v1() -> bool:
+    if not mutex_raw_lock(_loader_crypto_mutex):
+        _loader_crypto_quarantined = true
+        return false
+    if not _loader_crypto_ephemeral_transition_reserved_v1 or
+        _loader_crypto_ephemeral_transitioned_v1:
+        return _unlock(false)
+    _loader_crypto_ephemeral_transition_reserved_v1 = false
+    _unlock(true)
+
+pub(package) fn executable_loader_admission_root_transition_v1(
+    catalog_seal: InstalledArtifactCatalogSealLeaseV1,
+    boot_evidence: BootMeasurementEntropyLeaseV1,
+    key_id: text,
+    public_key: [u8]
+) -> bool:
+    """Authorize one boot-ephemeral admission root without self-authorization.
+
+    The candidate public key must derive from the production seed carried by a
+    real measured-boot entropy lease. Both that lease and the catalog owner's
+    offline-root seal lease are consumed exactly once before mutation. Neither
+    a public key nor catalog status alone can authorize this transition.
+
+    Current platforms cannot succeed because the boot capability honestly
+    issues no lease while entropy/measurement owners are unavailable.
+    """
+    if _loader_crypto_quarantined or
+        not _root_valid(ExecutableTrustedSignerV1(
+            key_id: key_id, public_key: public_key)):
+        return false
+    # Reserve the destination before consuming either external one-shot lease.
+    # This prevents an existing/public root initializer from burning evidence
+    # for a transition that can no longer commit.
+    if not mutex_raw_lock(_loader_crypto_mutex): return false
+    if _loader_crypto_initialized or _loader_crypto_roots.len() != 0 or
+        _loader_crypto_ephemeral_transition_reserved_v1 or
+        _loader_crypto_ephemeral_transitioned_v1:
+        return _unlock(false)
+    _loader_crypto_ephemeral_transition_reserved_v1 = true
+    if not _unlock(true): return false
+
+    # Current unavailable providers always return nil, preserving the catalog
+    # lease for diagnosis. A future owner authenticates generation+nonce and
+    # returns secret bytes only after consuming its private registry row.
+    val boot_receipt = boot_measurement_entropy_lease_consume_v1(boot_evidence)
+    if not boot_receipt.?:
+        _ = _cancel_ephemeral_transition_reservation_v1()
+        return false
+    val evidence = boot_receipt.unwrap()
+    defer _wipe_secret_bytes_v1(evidence.production_seed)
+    val cond_152 = evidence.production_seed.len() != 32 or
+        not hash256_hex_valid(evidence.kernel_sha256) or
+        hash256_is_zero(evidence.kernel_sha256)
+    if cond_152:
+        _ = _cancel_ephemeral_transition_reservation_v1()
+        return false
+    val derived = pure_ed25519_keypair_from_seed(evidence.production_seed).1
+    if not _bytes_equal(derived, public_key):
+        _ = _cancel_ephemeral_transition_reservation_v1()
+        return false
+    val cond_161 = not installed_artifact_catalog_seal_lease_consume_for_root_v1(
+        catalog_seal, key_id, sha256_u8_hex(public_key))
+    if cond_161:
+        _ = _cancel_ephemeral_transition_reservation_v1()
+        return false
+    if not mutex_raw_lock(_loader_crypto_mutex):
+        _loader_crypto_quarantined = true
+        return false
+    # Do not append to caller-installed roots or replace an existing owner.
+    # The ephemeral transition owns the admission verifier exactly once.
+    if _loader_crypto_initialized or _loader_crypto_roots.len() != 0 or
+        not _loader_crypto_ephemeral_transition_reserved_v1:
+        _loader_crypto_quarantined = true
+        return _unlock(false)
+    _loader_crypto_roots = [ExecutableTrustedSignerV1(
+        key_id: key_id, public_key: _copy_bytes(public_key))]
+    _loader_crypto_initialized = true
+    _loader_crypto_ephemeral_transitioned_v1 = true
+    _loader_crypto_ephemeral_transition_reserved_v1 = false
     _unlock(true)
 
 

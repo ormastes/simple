@@ -1,6 +1,10 @@
 use std.spec
 use os.compositor.rv64_wm_present_receipt.{rv64_wm_engine2d_present_receipt}
-use os.services.wm.rv64_production_wm_adapter.{Rv64WmProcessLiveness, Rv64ProductionWmAdapter}
+use os.services.wm.rv64_production_wm_adapter.{
+    Rv64WmProcessLiveness,
+    Rv64ProductionWmAdapter,
+    rv64_wm_task_state_alive
+}
 
 fn live_process(process_id: u64) -> Rv64WmProcessLiveness:
     Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: true, reason: "live")
@@ -54,3 +58,23 @@ describe "RV64 production WM ownership adapter":
         expect(verdict.ready).to_equal(false)
         expect(verdict.failed).to_equal(true)
         expect(verdict.reason).to_equal("duplicate-present-receipt")
+
+    it "continues observing owner liveness after first presentation":
+        var adapter = Rv64ProductionWmAdapter.create(41u64)
+        adapter.observe_process(live_process(41u64))
+        adapter.observe_first_present(rv64_wm_engine2d_present_receipt(41u64, 41u64, 7, 7))
+        adapter.observe_process(Rv64WmProcessLiveness(
+            process_id: 41u64, queried: true, alive: false, reason: "process-preparing-exit"
+        ))
+        val verdict = adapter.verdict()
+        expect(verdict.ready).to_equal(false)
+        expect(verdict.failed).to_equal(true)
+        expect(verdict.reason).to_equal("process-preparing-exit")
+
+    it "rejects zombie and PreparingExit task states as live owners":
+        expect(rv64_wm_task_state_alive(0u8)).to_equal(true)
+        expect(rv64_wm_task_state_alive(1u8)).to_equal(true)
+        expect(rv64_wm_task_state_alive(2u8)).to_equal(true)
+        expect(rv64_wm_task_state_alive(3u8)).to_equal(false)
+        expect(rv64_wm_task_state_alive(4u8)).to_equal(false)
+        expect(rv64_wm_task_state_alive(255u8)).to_equal(false)

@@ -66,10 +66,19 @@ int main(void) {
     RtOwnedProcessResultV2 async_result;
     assert(rt_process_owned_result_v2(async_token, &async_result));
     assert(async_result.exit_code == 0 && async_result.reaped);
+    RtOwnedProcessObservationV1 async_observation;
+    assert(rt_process_owned_observation_v1(async_token, &async_observation));
+    assert(async_observation.version == RT_OWNED_PROCESS_OBSERVATION_VERSION);
+    assert(async_observation.evidence_flags & RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE);
+    assert(async_observation.peak_direct_child_rss_bytes > 0);
+    assert(async_observation.user_cpu_ms >= 0 && async_observation.system_cpu_ms >= 0);
+    assert(async_observation.peak_tree_charge_bytes == 0);
     RtOwnedProcessTokenV2 stale_token = async_token;
     assert(rt_process_owned_collect_v2(async_token, &async_result));
     assert(!rt_process_owned_result_v2(stale_token, &async_result));
     assert(async_result.runtime_error == ESTALE);
+    assert(!rt_process_owned_observation_v1(stale_token, &async_observation));
+    assert(async_observation.runtime_error == ESTALE);
 
     /* Capture is globally bounded across both streams and a zero-buffer poll
      * drains only into lease-owned storage.  A terminal result remains valid
@@ -103,6 +112,8 @@ int main(void) {
            cancel_v2_receipt.runtime_error == 0);
     assert(rt_process_owned_result_v2(cancel_v2_token, &async_result));
     assert(async_result.reaped && async_result.stdout_bytes_kept == 1);
+    assert(rt_process_owned_observation_v1(cancel_v2_token, &async_observation));
+    assert(async_observation.termination_signal == SIGKILL);
     assert(!rt_process_owned_collect_v2(cancel_v2_token, &async_result));
     assert(async_result.runtime_error == EBUSY);
     assert(rt_process_owned_poll_v2(cancel_v2_token, 0, async_out, sizeof(async_out),

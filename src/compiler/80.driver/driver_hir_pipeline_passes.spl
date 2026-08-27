@@ -60,6 +60,15 @@ impl CompilerDriver:
         (ctx, not ctx.has_errors())
 
     me monomorphize_impl(hir_phase_admitted: bool) -> bool:
+        self.monomorphize_with_policy(hir_phase_admitted, true)
+
+    me monomorphize_for_explicit_compilation(hir_phase_admitted: bool) -> bool:
+        self.monomorphize_with_policy(hir_phase_admitted, false)
+
+    me monomorphize_with_policy(
+        hir_phase_admitted: bool,
+        allow_ambient_bootstrap_policy: bool
+    ) -> bool:
         """Run monomorphization pass on all HIR modules.
 
         This creates specialized versions of generic functions, structs, and
@@ -75,7 +84,10 @@ impl CompilerDriver:
         # zero errors.
         if not hir_phase_admitted:
             return false
-        val skip_mono = rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") ?? ""
+        val skip_mono = if allow_ambient_bootstrap_policy:
+            rt_env_get("SIMPLE_BOOTSTRAP_SKIP_MONO") ?? ""
+        else:
+            ""
         # SIMPLE_BOOTSTRAP=1 used to skip the pass too. That was only safe while
         # HIR lowering refused every generic fn; with that gate open (#158
         # Phase B, 2026-08-22) a skipped pass would hand generic templates to
@@ -251,6 +263,26 @@ pub fn run_safety_warn_pass(
                             ctx.add_error(msg)
                 case RawPointerOutsideUnsafe(span):
                     val msg = "[safety raw-pointer-outside-unsafe] {name}: raw pointer operation used outside an `unsafe:` block at {span.line}:{span.col}"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case StaticReferenceOutsideUnsafe(span):
+                    val msg = "[safety static-reference-outside-unsafe] {name}: reference to module static taken outside an `unsafe:` block at {span.line}:{span.col}; fix: wrap the reference-taking expression in the smallest valid `unsafe:` block"
+                    out = out.push(msg)
+                    match severity:
+                        case SafetyPassSeverity.Advisory:
+                            val _ = 0
+                        case SafetyPassSeverity.Warn:
+                            ctx.add_warning(msg)
+                        case SafetyPassSeverity.Deny:
+                            ctx.add_error(msg)
+                case MutableReferenceToImmutableStatic(span):
+                    val msg = "[safety mutable-reference-to-immutable-static] {name}: mutable reference requested for an immutable module static at {span.line}:{span.col}; fix: use `&STATIC`, or declare the static mutable when shared mutation is intended"
                     out = out.push(msg)
                     match severity:
                         case SafetyPassSeverity.Advisory:

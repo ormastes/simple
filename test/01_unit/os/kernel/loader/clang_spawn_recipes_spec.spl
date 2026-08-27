@@ -1,0 +1,61 @@
+use std.spec.*
+use os.kernel.loader.spawn_recipes.*
+use os.kernel.types.capability_types.{CapabilityKind}
+use std.common.contracts.execution.simpleos_target_v1.{
+    SIMPLEOS_TARGET_V1_X86_64_TRIPLE
+}
+
+fn _compile_argv(root: text) -> [text]:
+    ["/usr/bin/clang", "-cc1", "-triple",
+     SIMPLEOS_TARGET_V1_X86_64_TRIPLE, "-emit-obj", "-o",
+     root + "/hello.o", "-x", "c", root + "/hello.c"]
+
+fn _link_argv(root: text) -> [text]:
+    ["/usr/bin/ld.lld", "-m", "elf_x86_64", "-static", "-no-pie",
+     "--gc-sections", "--export-dynamic", "--defsym=__bss_end=_end",
+     "-T", "/usr/share/simpleos/simpleos.ld", "-e", "_start",
+     "/usr/lib/crt0.o", root + "/hello.o", "-L", "/usr/lib",
+     "--start-group", "-lsimpleos_c", "-lsimple_runtime", "-lm",
+     "--end-group", "-o", root + "/hello.elf"]
+
+fn _has_process_spawn(recipe: i64) -> bool:
+    for grant in spawn_recipe_grants(recipe):
+        if grant.requested == CapabilityKind.ProcessSpawn: return true
+    false
+
+describe "Clang filesystem spawn recipes":
+    it "binds DBFS stages to exact paths argv and an empty environment":
+        expect(spawn_recipe_launch_contract_valid(
+            SPAWN_RECIPE_CLANG_COMPILE_DBFS, "/usr/bin/clang",
+            _compile_argv("/dbfs/work"), [])).to_be(true)
+        expect(spawn_recipe_launch_contract_valid(
+            SPAWN_RECIPE_LLD_LINK_DBFS, "/usr/bin/ld.lld",
+            _link_argv("/dbfs/work"), [])).to_be(true)
+        expect(spawn_recipe_launch_contract_valid(
+            SPAWN_RECIPE_CLANG_HELLO_DBFS, "/dbfs/work/hello.elf",
+            ["/dbfs/work/hello.elf"], [])).to_be(true)
+
+    it "rejects cross-filesystem suffix argv and environment substitution":
+        expect(spawn_recipe_launch_contract_valid(
+            SPAWN_RECIPE_CLANG_COMPILE_DBFS, "/usr/bin/clang-evil",
+            _compile_argv("/dbfs/work"), [])).to_be(false)
+        expect(spawn_recipe_launch_contract_valid(
+            SPAWN_RECIPE_LLD_LINK_DBFS, "/usr/bin/ld.lld",
+            _link_argv("/nvfs/work"), [])).to_be(false)
+        expect(spawn_recipe_launch_contract_valid(
+            SPAWN_RECIPE_CLANG_HELLO_NVFS, "/nvfs/work/hello.elf",
+            ["/nvfs/work/hello.elf"], ["LD_PRELOAD=/nvfs/work/x"])).to_be(false)
+
+    it "keeps every pipeline stage free of ambient subprocess authority":
+        val recipes = [
+            SPAWN_RECIPE_CLANG_COMPILE_DBFS,
+            SPAWN_RECIPE_LLD_LINK_DBFS,
+            SPAWN_RECIPE_CLANG_HELLO_DBFS,
+            SPAWN_RECIPE_CLANG_COMPILE_NVFS,
+            SPAWN_RECIPE_LLD_LINK_NVFS,
+            SPAWN_RECIPE_CLANG_HELLO_NVFS,
+        ]
+        for recipe in recipes:
+            expect(_has_process_spawn(recipe)).to_be(false)
+            expect(spawn_recipe_seed_parent_caps(recipe, 77u64).caps.len()).to_equal(
+                spawn_recipe_grant_count(recipe))

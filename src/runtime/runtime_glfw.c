@@ -37,6 +37,8 @@ typedef void (*rt_glfw_close_fn)(GLFWwindow*);
 
 #define RT_GLFW_MAX_WINDOWS 16
 #define RT_GLFW_MAX_EVENTS 256
+#define RT_GLFW_MAX_DIMENSION 8192
+#define RT_GLFW_MAX_PIXEL_BYTES UINT64_C(268435456)
 #define RT_GLFW_HANDLE_BASE UINT64_C(4294967296)
 
 #define GLFW_CONTEXT_VERSION_MAJOR 0x00022002
@@ -409,7 +411,10 @@ void rt_glfw_terminate(void) {
 }
 
 int64_t rt_glfw_create_window(const char* title, int64_t width, int64_t height) {
-    if (!g_glfw_initialized || width <= 0 || height <= 0) return 0;
+    if (!g_glfw_initialized || width <= 0 || height <= 0 ||
+        width > RT_GLFW_MAX_DIMENSION || height > RT_GLFW_MAX_DIMENSION) {
+        return 0;
+    }
     p_glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     p_glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
     GLFWwindow* window = p_glfwCreateWindow(
@@ -582,10 +587,13 @@ static int64_t glfw_present_staged(
 static int64_t glfw_validate_frame(
     int64_t width, int64_t height, int64_t pixel_count
 ) {
-    if (width <= 0 || height <= 0 || width > INT_MAX ||
+    if (width <= 0 || height <= 0 ||
+        width > RT_GLFW_MAX_DIMENSION || height > RT_GLFW_MAX_DIMENSION ||
+        width > INT_MAX ||
         height > INT_MAX || width > INT64_MAX / height) return 5;
     int64_t expected = width * height;
     if (pixel_count != expected ||
+        (uint64_t)expected > RT_GLFW_MAX_PIXEL_BYTES / sizeof(uint32_t) ||
         (uint64_t)expected > SIZE_MAX / sizeof(uint32_t)) return 5;
     return 0;
 }
@@ -678,7 +686,7 @@ int64_t rt_glfw_live_window_count(void) {
 
 int64_t rt_glfw_should_close(int64_t handle) {
     rt_glfw_window_slot* slot = glfw_slot(handle);
-    return slot ? p_glfwWindowShouldClose(slot->window) : 1;
+    return slot ? p_glfwWindowShouldClose(slot->window) : -1;
 }
 
 int64_t rt_glfw_set_visible(int64_t handle, int64_t visible) {
@@ -770,9 +778,9 @@ int64_t rt_glfw_buffer_growth_count(int64_t handle) {
 
 const char* rt_glfw_clipboard_get(int64_t handle) {
     rt_glfw_window_slot* slot = glfw_slot(handle);
-    if (!slot || !p_glfwGetClipboardString) return "";
+    if (!slot || !p_glfwGetClipboardString) return NULL;
     const char* text = p_glfwGetClipboardString(slot->window);
-    return text ? text : "";
+    return text;
 }
 
 int64_t rt_glfw_clipboard_set(int64_t handle, const char* text) {

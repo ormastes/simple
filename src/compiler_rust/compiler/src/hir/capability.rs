@@ -22,6 +22,11 @@ impl CapabilityEnv {
         Self { active: HashMap::new() }
     }
 
+    /// Start a new function-local aliasing domain while retaining table capacity.
+    pub fn clear(&mut self) {
+        self.active.clear();
+    }
+
     /// Check if a capability can be acquired without aliasing violations
     pub fn can_acquire(&self, id: usize, cap: ReferenceCapability) -> Result<(), CapabilityError> {
         // Check if this ID already has an active capability

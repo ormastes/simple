@@ -19,6 +19,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 use compiler.semantics.forbidden_io_checker.{
     ForbiddenIoContextManifest, ForbiddenIoViolationKind,
+    FORBIDDEN_IO_MAX_CALL_DEPTH,
     check_forbidden_io_violations, check_all_forbidden_io_fns,
     format_forbidden_io_violation, format_forbidden_io_violations,
     is_forbidden_io_acquire_fn
@@ -34,10 +35,15 @@ describe "forbidden-I/O acquisition entry point set":
         expect(is_forbidden_io_acquire_fn("apk_load_aspect_manual")).to_equal(true)
         expect(is_forbidden_io_acquire_fn("apk_activate_startup")).to_equal(true)
         expect(is_forbidden_io_acquire_fn("_apk_acquire_facet")).to_equal(true)
+        expect(is_forbidden_io_acquire_fn("src/lib/common/aspect_pack.spl::apk_load_facet")).to_equal(true)
 
     it "does NOT flag apk_try_facet — its own contract states it never performs I/O":
         step("Verify: does NOT flag apk_try_facet — its own contract states it never performs I/O")
         expect(is_forbidden_io_acquire_fn("apk_try_facet")).to_equal(false)
+        expect(is_forbidden_io_acquire_fn("src/lib/common/aspect_pack.spl::apk_try_facet")).to_equal(false)
+        expect(is_forbidden_io_acquire_fn("not_apk_load_facet")).to_equal(false)
+        expect(is_forbidden_io_acquire_fn("unrelated/path.spl::apk_load_facet")).to_equal(false)
+        expect(is_forbidden_io_acquire_fn("unrelated.module.apk_load_facet")).to_equal(false)
 
 describe "check_forbidden_io_violations — direct call":
     it "REJECTS: an interrupt-context function directly calling apk_load_facet":
@@ -98,6 +104,16 @@ describe "check_forbidden_io_violations — transitive call":
         m.set_callees("helper_b", ["apk_try_facet"])
         expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(0)
 
+    it "REJECTS: real-time and noalloc roots through the shared indexed transitive graph":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("rt_loop", true, false, false)
+        m.set_callees("rt_loop", ["shared_helper"])
+        m.register("noalloc_loop", false, false, true)
+        m.set_callees("noalloc_loop", ["shared_helper"])
+        m.set_callees("shared_helper", ["src/lib/common/aspect_pack.spl::apk_load_facet"])
+        expect(check_forbidden_io_violations("rt_loop", m).len()).to_equal(1)
+        expect(check_forbidden_io_violations("noalloc_loop", m).len()).to_equal(1)
+
     it "does not hang on a call-graph cycle that never reaches an acquisition fn":
         step("Verify: does not hang on a call-graph cycle that never reaches an acquisition fn")
         val m = ForbiddenIoContextManifest.new()
@@ -105,6 +121,36 @@ describe "check_forbidden_io_violations — transitive call":
         m.set_callees("isr_tick", ["helper_a"])
         m.set_callees("helper_a", ["helper_b"])
         m.set_callees("helper_b", ["helper_a"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(0)
+
+    it "terminates a reachable cycle and still finds the acquisition branch":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["helper_a"])
+        m.set_callees("helper_a", ["helper_b"])
+        m.set_callees("helper_b", ["helper_a", "apk_load_facet"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(1)
+
+    it "accepts a forbidden acquisition at the exact 256-edge traversal bound":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["depth_0"])
+        var i = 0
+        while i < FORBIDDEN_IO_MAX_CALL_DEPTH - 1:
+            m.set_callees("depth_{i}", ["depth_{i + 1}"])
+            i = i + 1
+        m.set_callees("depth_{i}", ["apk_load_facet"])
+        expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(1)
+
+    it "terminates cleanly beyond the 256-edge traversal bound":
+        val m = ForbiddenIoContextManifest.new()
+        m.register("isr_tick", false, true, false)
+        m.set_callees("isr_tick", ["depth_0"])
+        var i = 0
+        while i < FORBIDDEN_IO_MAX_CALL_DEPTH:
+            m.set_callees("depth_{i}", ["depth_{i + 1}"])
+            i = i + 1
+        m.set_callees("depth_{i}", ["apk_load_facet"])
         expect(check_forbidden_io_violations("isr_tick", m).len()).to_equal(0)
 
 describe "check_all_forbidden_io_fns — bulk":

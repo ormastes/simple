@@ -82,14 +82,21 @@ watch maintenance publish a new snapshot outside request handling.
 
 ## 3. Workspace Resolution
 
-Workspace identity is explicit and stable. Resolution precedence is:
+Workspace identity is explicit and stable. Resolution precedence applies only
+before a request has selected a URI family or presented an admission receipt:
 
 1. tool/resource workspace identifier;
 2. server configuration supplied at launch;
 3. `SPIPE_HOST_ROOT` compatibility environment value;
 4. one configured default workspace.
 
-There is no per-request current-working-directory inference. Startup resolves
+There is no per-request current-working-directory inference. Once a URI names a
+workspace, or a receipt/cursor binds one, the resolver uses that exact
+workspace; it never falls through to server configuration, environment, or a
+default workspace. Workspace-less project and legacy aliases are first resolved
+by the registry to one canonical workspace; a legacy alias then yields only a
+candidate that must pass sealed target proof before reauthorization in that
+exact workspace. Ambiguity is a closed admission failure. Startup resolves
 and realpaths the module root, host root, canonical content roots, cache root,
 and materialization root. The registry binds workspace ID to project IDs,
 revision, worktree ID, visibility policy, and current snapshot ID.
@@ -106,6 +113,14 @@ spipe://workspace/{workspace}/diagnostics
 spipe://project/{project}/artifact/{artifact_uid}
 spipe://project/{project}/section/{section_uid}
 ```
+
+The workspace-root resource has exactly the trailing-slash form shown above;
+`spipe://workspace/{workspace}` is not a synonym and is rejected as malformed.
+No URI family permits an implicit selector remap: a request selects the named
+workspace, project, snapshot/revision, view, and scope, and all later checks
+must bind those exact values. In particular, a legacy alias, cursor, or receipt
+for one workspace may not resolve a same-named project or view in a foreign
+workspace.
 
 `view` is one of `lifecycle`, `feature`, `component`, `layer`, `matrix`,
 `trace`, `project`, `status`, or `diagnostics`. The legacy `spipe://skill`
@@ -163,10 +178,27 @@ lifecycle grouping, and trace gaps. Limits are:
 - no more than 200 Markdown lines or approximately 6,000 model tokens;
 - cursor pagination before either bound would be exceeded.
 
-A cursor is an opaque signed or integrity-checked encoding of snapshot ID,
-view identity, filters, effective authorization-scope digest, last sort key,
-and limit. Reuse against a different snapshot or effective scope returns
-`stale_cursor`; it never silently skips, duplicates, or discloses results.
+A cursor is an opaque, versioned `CursorReceiptV1`, signed by the same admitted
+receipt authority as reads. Its canonical signed payload binds **authority
+key/epoch**, workspace UID, project UID or null, snapshot ID, revision ID, view
+kind, normalized logical path, normalized filters, effective authorization
+scope digest, ordering version, last sort key, and the issued page limit. The
+next request independently resolves and authorizes the URI, then compares every
+binding before consulting the cursor position. A valid receipt with a different
+authority, workspace, snapshot, view, scope, selector, or limit is
+`stale_cursor`; it never silently skips, duplicates, remaps, or discloses
+results. Cursor verification never substitutes a current default workspace or
+current snapshot.
+
+`AuthorizationPort` is a branded, real signed-verifier boundary, not a
+structural JavaScript object or duck-typed callback. `createAuthorizationPort`
+returns an unforgeable branded instance after it loads an issuer/algorithm/key
+allowlist and verified key epoch. `verifyCanonicalReadReceiptV1(receipt,
+expectedBinding, clockNowMs)` verifies the brand, protocol version, canonical
+payload bytes, signature, issuer/key/epoch allowlist, revocation epoch,
+`issuedAtMs <= clockNowMs < expiresAtMs`, and exact expected binding. It returns
+only an opaque verified-read grant; parser, projection, and cursor modules
+cannot construct a grant or accept `{ verify() {} }` substitutes.
 
 MIME types are `inode/directory` for directory resources, `text/markdown` for
 rendered documents, and `application/vnd.spipe.sdn` for structured graph data.
@@ -194,12 +226,22 @@ inconsistently:
 The existing six tools and `spipe://skill` remain callable. New structured
 results include a human-readable text representation for legacy hosts.
 
-JSON-RPC failures preserve the request ID and distinguish parse error, invalid
-request, method not found, invalid parameters, stale cursor, unauthorized,
-not found, resource limit, and internal error. Notifications never receive a
-response. Partial stdio chunks and multiple messages per chunk are supported.
+JSON-RPC failures preserve the request ID and distinguish protocol-envelope
+errors (parse error, invalid request, method not found, invalid parameters,
+resource limit, and internal error). Every **read-admission** denial is instead
+the privacy-safe `not_found_or_unauthorized` class defined below. Notifications
+never receive a response. Partial stdio chunks and multiple messages per chunk
+are supported.
 Initialize negotiates a mutually supported version, processes `initialized`,
 and rejects requests that require initialization before lifecycle completion.
+
+All public read-family admission failures (`malformed_uri`, unknown workspace,
+foreign selector, receipt/signature failure, expired/revoked receipt, stale
+cursor, unauthorized, and hidden/not-found) map to one privacy-safe external
+`not_found_or_unauthorized` response class with the same bounded-work path.
+Server telemetry retains a closed internal reason code. This rule applies to
+both resources and tools and prevents an oracle for workspace/project/view
+existence.
 
 The protocol-neutral core supports legacy stdio and the target stateless MCP
 2026 transport. Transport-specific sessions, headers, or authorization never
@@ -510,3 +552,106 @@ Optional HTTP, editor, semantic, and OS-mount adapters may be unavailable
 without disabling legacy stdio, core resource tools, or materialized views.
 Provider failure returns a bounded diagnostic and retains exact/lexical core
 behavior; it never causes a hidden full rebuild on a hot request.
+
+## 12. Wave 5a SnapshotAuthority and ProjectionPort admission prerequisite
+
+URI parsing and receipt validation do not themselves prove that a claimed
+`targetKind`/`targetUid` exists in the selected immutable snapshot. The current
+`ImmutableSnapshotStore` exposes project/revision snapshot records but neither
+a target inventory nor a workspace/worktree-bound read. Therefore URI,
+resources, tools, and materialization are **non-admitted** until this contract
+is implemented; adapters must not use a raw store lookup as a substitute.
+
+The composition root creates two non-forgeable ports. `SnapshotAuthorityPortV1`
+owns authoritative snapshot membership and its opaque
+`SnapshotAuthorityViewV1`; `ProjectionPortV1` owns only deterministic
+read-only projection. Their exact operations are:
+
+```text
+SnapshotAuthorityPortV1.openBoundSnapshot(
+  {workspaceUid, projectUidOrNull, worktreeUid, snapshotUid, revisionId}
+) -> Result<SnapshotAuthorityViewV1, SnapshotAuthorityError>
+SnapshotAuthorityPortV1.resolveCanonicalTarget(
+  view, {targetKind, targetUid}
+) -> Result<CanonicalTargetV1, SnapshotAuthorityError>
+SnapshotAuthorityPortV1.resolveCanonicalAlias(
+  view, {normalizedAliasUri}
+) -> Result<CanonicalTargetCandidateV1, SnapshotAuthorityError>
+SnapshotAuthorityPortV1.listDirectoryTarget(
+  view, {viewKind, normalizedLogicalPath, selectorDigest}
+) -> Result<CanonicalDirectoryTargetV1, SnapshotAuthorityError>
+ProjectionPortV1.list(view, directoryTarget, pageRequest) -> Result<ProjectionPageV1, ProjectionError>
+ProjectionPortV1.render(view, canonicalTarget) -> Result<ProjectionDocumentV1, ProjectionError>
+```
+
+`CanonicalTargetCandidateV1` contains only normalized canonical kind/UID and
+an alias-index digest; it is deliberately not a `CanonicalTargetV1` and cannot
+be passed to ProjectionPort. `openBoundSnapshot` validates registry workspace/project/worktree ownership,
+immutable snapshot UID/revision equality, and a manifest digest before it
+returns an opaque view. The manifest inventory has canonical entries for
+artifacts, sections, trace/diagnostic aggregates, and virtual directory
+mappings. The target and directory operations must prove membership against
+that inventory and return the bound manifest digest. `ProjectionPortV1` repeats
+the binding/digest equality check and refuses a target or view from another
+authority instance. It never scans repository paths, creates identities, or
+refreshes indexes.
+
+`ResourceResolver` performs this sequence: (1) parse and normalize once; (2)
+resolve the named workspace and worktree exactly; (3) open the receipt-named
+authority snapshot only as an untrusted candidate; (4) a legacy alias resolves
+through that view's sealed alias index only to a canonical candidate, which is
+then passed to `resolveCanonicalTarget`, while a canonical URI proves its
+target/directory directly; (5) derive expected receipt binding from that
+proved target and verify the receipt through `AuthorizationPortV1`; (6) ask
+ProjectionPort to list/render. Every error before step 6 has the bounded public
+denial class and cannot disclose a canonical path. An alias never contributes
+authority or bypasses target proof; authorization never precedes that proof.
+
+Wave 5a acceptance uses this matrix before any URI implementation is admitted:
+
+| Case | Required observation |
+|---|---|
+| Correct workspace/worktree/snapshot/revision and artifact/section | Target renders from one matching manifest inventory entry |
+| Correct receipt but absent or kind-mismatched UID | Denial before ProjectionPort call |
+| Same snapshot UID in foreign workspace/worktree | Denial before inventory access |
+| Current project with stale revision or manifest digest | Denial before inventory access |
+| Duck-typed authority/projection substitute | Construction or invocation rejects |
+| Legacy alias | Alias yields a canonical candidate, sealed membership proof succeeds, then the canonical target is freshly authorized |
+| Clean rebuild versus incremental update | Equal inventory manifest and projection bytes |
+| Directory view | Only manifest-proved children, deterministic page/cursor bindings |
+
+This explicit Wave 5a slice precedes Wave 5 URI/MCP/materializer work. It is a
+read-only authority addition; it does not grant write capability or enable
+HTTP, notifications, editor VFS, or FUSE/ProjFS.
+
+### 12.1 Binding correction: sealed target inventory before receipt verification
+
+`TargetInventoryManifestV1` has canonical bytes for `{version, scopeKind,
+workspaceUid, projectUidOrNull, worktreeUid, baseSnapshotUid, revisionId,
+entries, aliasIndex, projectionRoot, contributingProjectRoots, rootDigest}`.
+`rootDigest` is recomputed
+over canonical bytes excluding itself. A separate content-addressed
+`AuthorityManifestV1.snapshotUid` commits the base snapshot UID, inventory
+root, scope tuple, and `contributingProjectRoots`; receipts bind that authority
+snapshot UID. This avoids a
+snapshot/inventory hash cycle. Authority validates both canonical roots before
+a view is returned; missing, swapped, or tampered root rejects.
+
+`scopeKind=project` requires a non-null project UID and forbids aggregate
+contributors. Workspace root/view/trace/diagnostics use
+`scopeKind=workspace_aggregate`, with null project UID and the required,
+canonical `contributingProjectRoots` list of `{projectUid, baseSnapshotUid,
+authoritySnapshotUid, targetInventoryRoot}`. Both inventory and authority
+manifest bytes commit that full ordered list; missing, extra, substituted, or
+reordered roots fail admission. The registry selects that aggregate only for
+the exact workspace/worktree/revision.
+
+The resolver does: parse; exact workspace/worktree lookup; open the receipt's
+snapshot/revision as an untrusted candidate and validate its sealed inventory;
+for an alias, resolve only a canonical candidate then prove it with
+`resolveCanonicalTarget`; for a canonical URI, prove its target directly;
+derive the expected receipt binding from the proved view/target/request; verify
+the receipt; then call ProjectionPort. `CanonicalReadReceiptV1` deliberately has no worktree
+field: the port proves it transitively through the verified manifest tuple, so
+the frozen receipt ABI does not change. All pre-render failures coalesce to the
+bounded public denial class.

@@ -560,6 +560,20 @@ perf script. Do not rewrite Simple features in C/Rust to claim C-level speed; if
 parity is blocked by runtime/compiler behavior, record a measured blocker under
 `doc/08_tracking/bug/`.
 
+Performance and memory lanes use the four-tier contract in
+`doc/07_guide/compiler/performance_diagnostics.md`: fast typed lints, MIR
+transforms plus remarks, bounded deep analysis, and profile-guided diagnosis.
+Start with algorithmic complexity, then allocations/copies, layout/locality,
+loop-invariant work, and dispatch overhead. A source-level bound is static
+evidence, not a timing or RSS result; record `unverified` or
+`AnalysisIncomplete(reason)` when execution or proof is unavailable. Risky
+optimizer changes need paired semantic and structural SSpec evidence, while a
+missed optimization normally belongs in a remark rather than a default warning.
+Keep the local audit, architecture, detail design, agent plan, relevant
+`doc/07_guide` page, executable SSpec, and mirrored `doc/06_spec` manual current
+in the same lane. The canonical research baseline is
+`doc/01_research/local/simple_compiler_performance_memory_efficiency_audit.md`.
+
 Minimize runtime coupling first in SPipe lanes. App, GUI, web, 2D, MCP/LSP, and
 benchmark code should use Simple facades instead of new raw runtime calls,
 env/CLI shortcuts, direct backend field poking, or tool-local runtime aliases.
@@ -922,6 +936,23 @@ When a workflow or tool contract changes, update the matching `doc/07_guide`,
 `.claude/agents/spipe/`, and `.gemini/commands/` instructions before handoff. Treat stale process docs
 as unfinished work, not release cleanup.
 
+For a protected GitHub publication, keep the handoff state explicit:
+`unverified`, `REVIEW_REQUIRED`, `awaiting-self-review-admission`,
+`awaiting-independent-approval`, `awaiting-required-checks`, `merge-blocked`,
+or `merged`. A high-capability, high-effort exact-head review that reports zero
+P0/P1 findings may dispatch the trusted default-branch `SPipe Self Review
+Admission` workflow with `PASS:0:0`. That short-lived required check is
+self-attested admission, not a GitHub provider `APPROVED` review or independent
+authentication. Never have the PR author's credential call
+`gh pr review --approve`; use the scoped admission when policy permits, or an
+eligible independent provider reviewer when provider approval is required.
+After a push, base/PR edit, policy/ruleset change, or expiry, treat the old
+admission as invalid and perform a new exact-state review before redispatch.
+`--no-verify` skips local Git hooks only and never bypasses repository
+protection or required checks. See `doc/07_guide/app/devhub.md`,
+`doc/07_guide/infra/self_review_policy_db.md`, and
+`tools/claude-plugin/repo-and-pull-req/skills/git/gh_pull_req_review.md`.
+
 For broad SPipe planning lanes, split independent research or implementation
 checks across lower-model parallel agents when available (for example Codex
 Spark, Claude Haiku, or Claude Sonnet). The best available
@@ -1013,6 +1044,30 @@ expensive gates through `scripts/check/check-bootstrap-must-pass.shs`. Ledger v3
 rows must name a non-empty owner; TODO/blocked rows require an actionable
 non-`none` unblock condition, while PASS rows require
 `unblock_condition=none`. The push consumer must fail closed on violations.
+External host, device, installed-provider, and benchmark rows use registry mode
+`external-receipt` and the registry-owned semantic validator. A generic
+hash-bound receipt or prose artifact is not promotion authority: require the
+exact gate acceptance-ID matrix and separate committed command, target,
+toolchain, and observation blobs whose hashes are recomputed. Require the
+evidence summary to carry a valid signature from a repository-pinned independent
+reviewer key, plus a final validator PASS.
+Keep that validator bootstrap-owned; the bounded push consumer only validates
+the committed ledger and evidence hashes.
+For source-decidable external gates, add a narrow registry-owned semantic
+oracle after common signature/hash validation; RISC-V sharing requires an
+exhaustive disjoint HEAD inventory with bilateral and specialization evidence.
+Performance external gates require narrow numeric validators over retained raw
+artifacts; binary-size parity hashes and sizes the committed stripped binaries
+and derives `Simple <= Go` itself. Interpreter-startup parity requires ordered
+trial-interleaved raw process-launch samples for Simple/Python/Bun/Go, exact
+Simple interpreter-mode receipts, recomputed p50/p95, strict cold+warm
+comparisons, and the live canonical Stage 4 chain.
+Rust/Go benchmark parity requires a runtime-fed equal-work fixture, rotated
+trial-interleaved raw samples, recomputed p50/p95, equality-or-better Simple
+latency against both references, and the same canonical Stage 4 authority.
+When a push guard's default command also runs mutation fixtures, register its
+scan-only mode in the push tier and retain the self-test as a distinct required
+bootstrap row.
 
 ## Log-retention convention (debug/perf instrumentation)
 

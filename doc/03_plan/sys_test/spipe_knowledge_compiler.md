@@ -123,6 +123,25 @@ scenarios include:
 - bind resource URIs, cursors, query hashes, cache entries, and mutation tokens
   to immutable snapshot identity, principal/policy version, filters, and
   analyzer version so pagination cannot drift across authorization or updates;
+- accept the one canonical workspace-root URI
+  `spipe://workspace/{workspace}/` and reject its un-slashed near miss;
+- use a branded signed `AuthorizationPortV1`, rejecting duck-typed verifiers,
+  invalid algorithm/issuer/key/epoch, malformed signature, expired/revoked
+  receipt, and receipt payloads whose authority/workspace/project/snapshot/
+  revision/view/normalized-path/selector/scope/ordering/page-limit binding
+  differs from the request;
+- accept one fully authorized canonical read and one next-page cursor in the
+  same complete authority/workspace/project/snapshot/revision/view/path/
+  selector/scope/ordering/page-limit tuple, then reject cursor reuse across
+  every bound field, a foreign workspace selector, legacy-alias remap, changed
+  ordering/version, and changed page limit. Cover cursor issuer/signature,
+  expiry, and revocation failure independently;
+- exercise raw/once-encoded/double-encoded traversal and separators, NUL,
+  controls, malformed percent escapes, Windows device/ADS forms, empty IDs,
+  duplicate query parameters, hostile receipt/cursor bytes, and every public
+  admission error. Assert identical public `not_found_or_unauthorized` class
+  and bounded content-free work for malformed, foreign-selector, receipt- or
+  cursor-failure, stale-cursor, hidden, unknown, and unauthorized targets;
 - materialize only changed read-only files under `.spipe/view/`;
 - complete legacy stdio initialization and a stateless MCP 2026 request;
 - start/connect, send `initialize`, send `notifications/initialized`, request
@@ -288,8 +307,9 @@ limit and limit-plus-one for: frame 1 MiB, headers 32 KiB, JSON depth 16,
 method 128 bytes, URI 8 KiB, query 4 KiB, decoded string 256 KiB, aggregate
 arguments 512 KiB, list 100, candidates 1,000, trace depth 8/nodes 2,000,
 response 1 MiB, generated manual 200 lines/about 6,000 tokens, and 16 in-flight
-requests. Expected typed failures are `frame_too_large`, `limit_exceeded`,
-`invalid_request`, `unauthorized`, or `stale_cursor`, before protected effects.
+requests. Expected typed protocol-envelope failures are `frame_too_large`,
+`limit_exceeded`, or `invalid_request`; any attempted read admission is the
+single public `not_found_or_unauthorized` class before protected effects.
 
 Provider cases additionally test: 128 query tokens, 64 Boolean clauses, depth
 8, 32 terms/phrase and 64 total phrase terms, 256 expansions, 32 filters, 64
@@ -1489,3 +1509,67 @@ Unicode analyzer parity, canonical JSON, and the native identity candidate are
 `FAIL`, `BLOCKED`, or `NOT-EVIDENCE`. Later wave tests must not use those
 candidates as prerequisites until an accepted commit and focused receipt are
 recorded in the execution ledger.
+
+## 21. Wave 5a snapshot-authority admission matrix (2026-08-26)
+
+Wave 5 URI/resource/materializer scenarios are **not executable acceptance
+evidence** until the following Wave 5a prerequisite has a production oracle.
+The tested surface is `SnapshotAuthorityPortV1` plus `ProjectionPortV1`; a
+raw `ImmutableSnapshotStore` or a duck-typed substitute cannot satisfy it.
+
+| ID | Setup/action | Required oracle |
+|---|---|---|
+| W5A-01 | Open one exact workspace/project/worktree/snapshot/revision tuple | Opaque authority view has the matching binding and verified manifest digest |
+| W5A-02 | Resolve artifact and section IDs in that view | Each exists in exactly one matching manifest inventory entry before rendering |
+| W5A-03 | Use absent UID or a valid UID with the wrong kind | Bounded denial and zero ProjectionPort render/list calls |
+| W5A-04 | Reuse snapshot UID across a foreign workspace/worktree | Bounded denial before inventory access |
+| W5A-05 | Use stale revision, changed manifest digest, or unavailable snapshot | Bounded denial before inventory access |
+| W5A-06 | Pass structural/duck-typed authority or projection objects | Constructor/invocation rejects; no fallback is accepted |
+| W5A-07 | Resolve `spipe://skill` or another legacy alias | Alias yields only a canonical candidate; the sealed authority proves that target, then fresh authorization is verified, before any ProjectionPort call |
+| W5A-08 | Generate inventory by clean rebuild and equivalent incremental update | Manifest inventory and rendered projection bytes are identical |
+| W5A-09 | List a bounded virtual directory | Every child is inventory-proved; deterministic order, cursor, and receipt bindings hold |
+| W5A-10 | Exercise malformed/hidden/foreign/mismatch paths | Same bounded public class, no canonical path or inventory disclosure |
+| W5A-11 | Build aggregate from clean rebuild and equivalent incremental update | Byte-identical ordered `contributingProjectRoots`, inventory root, authority tuple, and projection bytes |
+| W5A-12 | Remove one otherwise valid aggregate contributor | Denial before target lookup or ProjectionPort call |
+| W5A-13 | Add an otherwise valid extra contributor or substitute one contributor root | Denial before target lookup or ProjectionPort call |
+| W5A-14 | Present the same contributor records in non-canonical order | Denial before target lookup or ProjectionPort call |
+
+The eventual MCP system spec uses `step("Browse virtual knowledge views")` and
+`check_spipe_virtual_view_safety`; its fail-fast helper remains fail-fast until
+these fourteen cases observe real ports. A Wave 5 URI candidate that proves only
+syntax, receipt signatures, or mocked membership is `NOT-EVIDENCE`.
+
+### 21.1 Seal and alias additions (repair cycle 2)
+
+W5A additionally injects swapped/tampered inventory bytes, authority-manifest
+root mismatch, and a deliberately cyclic base-snapshot/inventory construction;
+each rejects before target lookup. It proves alias absence, ambiguity,
+foreign-authority alias reuse, and alias-index root tampering. A positive alias
+must use `SnapshotAuthorityPortV1.resolveCanonicalAlias` in the sealed view;
+external registry/path alias lookup is `NOT-EVIDENCE`.
+
+### 21.2 Required additions to W5A evidence
+
+W5A-01 through W5A-14 additionally require: (a) swapped/tampered inventory
+bytes and sealed-manifest/root mismatch reject before target lookup; (b)
+project UID mismatch is independently rejected; (c) positive manifest-proved
+workspace-root, trace, diagnostics, and directory aggregate cases use the
+defined null-project `workspace_aggregate` scope; (d) project scope rejects
+null project while aggregate scope rejects a supplied project; (e) two genuine
+branded authority instances/views/targets cannot be cross-mixed; and (f) each
+receipt binding field is mutated independently. The worktree negative uses a
+valid receipt whose snapshot tuple belongs to another worktree, proving the
+receipt's intentionally absent worktree field is enforced transitively rather
+than silently ignored.
+
+### 21.3 Aggregate-manifest exactness
+
+For each positive workspace-aggregate root/view/trace/diagnostics case, W5A
+builds a `contributingProjectRoots` manifest with canonical records
+`{projectUid, baseSnapshotUid, authoritySnapshotUid, targetInventoryRoot}` and
+requires exact canonical ordering. It then independently attempts a missing
+contributor, an extra contributor, a substituted root for an existing project,
+and a reordered equivalent list. Every variation must deny before target
+lookup or ProjectionPort calls; only byte-identical canonical manifest and
+authority tuple can be admitted. The same fixture verifies that a project
+scope containing this field, and an aggregate scope omitting it, reject.

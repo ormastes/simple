@@ -1,5 +1,10 @@
 # fs_optimization_spec
 
+> **Safety update (2026-08-24):** `write_coalesce` and `syscall_batch` are
+> analysis-only. Candidate counters remain available, but their adapters
+> preserve MIR and emit no `bulk_store_hint` or `call_batch_hint`. The
+> quarantine scenarios below are active safety contracts.
+
 > FS Optimization Pass Specification
 
 <!-- sdn-diagram:id=fs_optimization_spec.arch -->
@@ -49,10 +54,10 @@ FS Optimization Pass Specification
 
 FS Optimization Pass Specification
 
-Validates the 3 new MIR optimization passes for FS-aware transforms:
-  - io_write_coalesce: merges adjacent writes
-  - io_readahead_hoist: lifts reads before loops
-  - io_batch_open_close: batches syscalls
+Validates FS-aware candidate analyses and quarantined adapters:
+  - io_write_coalesce: counts adjacent-write candidates; adapter preserves MIR
+  - io_readahead_hoist: counts invariant-read candidates; adapter preserves MIR
+  - io_batch_open_close: counts batching candidates; adapter preserves MIR
   - PassScope.FsDriver recognized in manifest (D-5)
 
 ## Scenarios
@@ -454,9 +459,9 @@ expect(cnt).to_equal(0)
 
 </details>
 
-### WriteCoalesce Transform
+### WriteCoalesce AnalysisOnly
 
-#### inserts bulk_store_hint intrinsic for 2+ stores to same base
+#### preserves MIR for 2+ stores to the same base
 
 <details>
 <summary>Executable SSpec</summary>
@@ -477,7 +482,8 @@ val rblocks = result.blocks
 val rb0 = rblocks[0]
 val rinsts = rb0.instructions
 val new_len = rinsts.len()
-expect(new_len).to_equal(5)
+expect(new_len).to_equal(4)
+expect(stats.write_coalesce_count).to_equal(0)
 ```
 
 </details>
@@ -502,13 +508,14 @@ val rb0 = rblocks[0]
 val rinsts = rb0.instructions
 val new_len = rinsts.len()
 expect(new_len).to_equal(2)
+expect(stats.write_coalesce_count).to_equal(0)
 ```
 
 </details>
 
-### SyscallBatch Transform
+### SyscallBatch AnalysisOnly
 
-#### transforms 2+ consecutive same-function calls without error
+#### counts 2+ consecutive same-function calls without transforming MIR
 
 <details>
 <summary>Executable SSpec</summary>
@@ -529,7 +536,8 @@ val rblocks = result.blocks
 val rb0 = rblocks[0]
 val rinsts = rb0.instructions
 val new_len = rinsts.len()
-expect(new_len).to_equal(3)
+expect(new_len).to_equal(2)
+expect(stats.syscall_batch_count).to_equal(0)
 ```
 
 </details>
@@ -554,6 +562,7 @@ val rb0 = rblocks[0]
 val rinsts = rb0.instructions
 val new_len = rinsts.len()
 expect(new_len).to_equal(2)
+expect(stats.syscall_batch_count).to_equal(0)
 ```
 
 </details>

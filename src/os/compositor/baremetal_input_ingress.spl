@@ -1,0 +1,43 @@
+# Bounded opaque-handle registry for architecture-owned WM input producers.
+#
+# Concrete decoder state stays in the architecture module behind a module-level
+# callback. DesktopShell transports only a positive scalar handle, avoiding
+# trait/class identity differences across interpreter, JIT, and native engines.
+
+use common.ui.host_input_event.{HostInputEvent}
+
+val BAREMETAL_INPUT_INGRESS_CAPACITY: i64 = 16
+
+var _pollers: [fn() -> HostInputEvent?] = []
+var _legacy_readiness: [fn() -> bool] = []
+
+fn _no_event() -> HostInputEvent?:
+    nil
+
+fn _never_ready() -> bool:
+    false
+
+fn _register(poll: fn() -> HostInputEvent?, ready: fn() -> bool) -> i64:
+    if _pollers.len() >= BAREMETAL_INPUT_INGRESS_CAPACITY:
+        return 0
+    _pollers.push(poll)
+    _legacy_readiness.push(ready)
+    _pollers.len()
+
+fn baremetal_input_ingress_register_poller(poll: fn() -> HostInputEvent?) -> i64:
+    _register(poll, _never_ready)
+
+fn baremetal_input_ingress_register_legacy_ready(ready: fn() -> bool) -> i64:
+    _register(_no_event, ready)
+
+fn baremetal_input_ingress_poll(handle: i64) -> HostInputEvent?:
+    val idx = handle - 1
+    if idx < 0 or idx >= _pollers.len():
+        return nil
+    _pollers[idx]()
+
+fn baremetal_input_ingress_legacy_ready(handle: i64) -> bool:
+    val idx = handle - 1
+    if idx < 0 or idx >= _legacy_readiness.len():
+        return false
+    _legacy_readiness[idx]()

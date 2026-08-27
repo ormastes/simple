@@ -194,7 +194,9 @@ impl Lowerer {
             Expr::Match { subject, arms } => self.lower_match(subject, arms, ctx),
             // Do block: do: statements... (block as expression)
             Expr::DoBlock(statements) => self.lower_do_block(statements, ctx),
-            Expr::UnsafeBlock(statements) => self.lower_unsafe_block(statements, ctx),
+            Expr::UnsafeBlock(statements, capabilities) => {
+                self.lower_unsafe_block(statements, capabilities, ctx)
+            }
             // Null coalescing: expr ?? default
             Expr::Coalesce { expr, default } => self.lower_coalesce(expr, default, ctx),
             // Existence check: expr.? (is present/non-empty)
@@ -215,6 +217,8 @@ impl Lowerer {
             Expr::Try(inner) => self.lower_try(inner, ctx),
             // Force unwrap: expr! - unwrap or panic (lowered same as try for codegen)
             Expr::ForceUnwrap(inner) => self.lower_try(inner, ctx),
+            // Diverging coalesce fallback: expr ?? return default
+            Expr::UnwrapOrReturn { expr, default } => self.lower_unwrap_or_return(expr, default, ctx),
             // Range expression: start..end or start..=end
             Expr::Range { start, end, bound } => self.lower_range(start.as_deref(), end.as_deref(), *bound, ctx),
             _ => {
@@ -789,6 +793,29 @@ impl Lowerer {
         // Lower arguments for generic method call
         let hir_args = self.lower_call_args(args, ctx)?;
 
+        // A statically typed tuple `.get(constant_index)` has a precise
+        // per-position result type. Leaving it as the generic ANY return type
+        // makes MIR either retain a tagged RuntimeValue for an integer sink or
+        // unbox it while an ANY consumer (notably print) still expects the
+        // tagged representation. Keep this gate identical to MIR lowering:
+        // only one non-negative, in-range integer literal on a direct
+        // Tuple/LabeledTuple receiver is refined. Every dynamic/error shape
+        // retains generic method typing and dispatch.
+        let tuple_get_return_ty = if method == "get" && hir_args.len() == 1 {
+            match &hir_args[0].kind {
+                HirExprKind::Integer(index) => usize::try_from(*index).ok().and_then(|index| {
+                    match self.module.types.get(receiver_hir.ty) {
+                        Some(HirType::Tuple(elements)) => elements.get(index).copied(),
+                        Some(HirType::LabeledTuple(fields)) => fields.get(index).map(|(_, ty)| *ty),
+                        _ => None,
+                    }
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         if (method == "append" || method == "push") && hir_args.len() == 1 {
             if let HirExprKind::Local(local_idx) = receiver_hir.kind {
                 if let Some(HirType::Array { element, size }) = self.module.types.get(receiver_hir.ty).cloned() {
@@ -807,7 +834,7 @@ impl Lowerer {
 
         // Look up return type from module functions
         let recv_ty = receiver_hir.ty;
-        let return_ty = self.lookup_method_return_type(recv_ty, method);
+        let return_ty = tuple_get_return_ty.unwrap_or_else(|| self.lookup_method_return_type(recv_ty, method));
 
         // Generate generic method call for user-defined methods
         // Uses dynamic dispatch since we don't know the concrete type at compile time

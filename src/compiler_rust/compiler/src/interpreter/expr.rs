@@ -16,7 +16,7 @@ use super::{
 };
 
 /// Helper to unwrap Option or Result values, returning Some(inner_value) or None
-fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
+pub(super) fn try_unwrap_option_or_result(val: &Value) -> Option<Value> {
     match val {
         Value::Enum {
             ref enum_name,
@@ -238,7 +238,7 @@ fn route_expr(
             ops::eval_op_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- control flow ---
-        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) | Expr::UnsafeBlock(_) => {
+        Expr::Lambda { .. } | Expr::If { .. } | Expr::Match { .. } | Expr::DoBlock(_) | Expr::UnsafeBlock(_, _) => {
             control::eval_control_expr(expr, env, functions, classes, enums, impl_methods).transpose()
         }
         // --- calls & field access ---

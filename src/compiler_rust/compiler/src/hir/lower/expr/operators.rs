@@ -22,14 +22,7 @@ impl Lowerer {
     fn is_int_scalar(ty: TypeId) -> bool {
         matches!(
             ty,
-            TypeId::I8
-                | TypeId::I16
-                | TypeId::I32
-                | TypeId::I64
-                | TypeId::U8
-                | TypeId::U16
-                | TypeId::U32
-                | TypeId::U64
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
         )
     }
 

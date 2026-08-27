@@ -220,4 +220,134 @@ describe("HIR import registration resolution facts", fn():
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
         expect(lowering.registered_import_skip_count).to_equal(0)
     )
+
+    it("runs a resolved explicit dependency tail once per importer, not once per call", fn():
+        step("Verify: a repeated explicit dependency tail is skipped")
+        val registry = declaring_registry()
+        val decl_index = registry.index_by_name["pkg.decl"]
+        val decl = registry.surfaces[decl_index]
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        # The binding the first tail published is what the repeats would redo.
+        expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(2)
+        # A different materialize_enum flag is a DIFFERENT tail and must run.
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, true)
+        expect(lowering.dep_tail_skip_count).to_equal(2)
+    )
+
+    it("never carries a completed dependency tail across importers", fn():
+        step("Verify: begin_module drops the dependency-tail memo")
+        # The safety argument, identical to RISDONE's: the tail calls
+        # `bind_qualified_type` into ONE importer's symbol table, which
+        # `begin_module` wipes. Carrying it over would leave the next importer
+        # with no qualified binding at all.
+        val registry = declaring_registry()
+        val decl_index = registry.index_by_name["pkg.decl"]
+        val decl = registry.surfaces[decl_index]
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        lowering.begin_module("pkg/imp2.spl")
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        # ... and importer 2 really does get its own binding.
+        expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
+    )
+
+    it("never memoizes an UNRESOLVED tail -- it stays retryable", fn():
+        step("Verify: an unresolved dependency is not recorded")
+        # A tail that binds nothing must stay retryable within the importer:
+        # a later registration can still make the lookup succeed. Only a tail
+        # that ran to completion AND found a valid symbol is recorded, so the
+        # `-2` ambiguity and `< 0` unresolved diagnostics keep their exact
+        # per-call multiplicity.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
+    )
+)
+
+    it("never carries a completed dependency tail across importers", fn():
+        step("Verify: begin_module drops the dependency-tail memo")
+        # The safety argument, identical to RISDONE's: the tail calls
+        # `bind_qualified_type` into ONE importer's symbol table, which
+        # `begin_module` wipes. Carrying it over would leave the next importer
+        # with no qualified binding at all.
+        val registry = declaring_registry()
+        val decl_index = registry.index_by_name["pkg.decl"]
+        val decl = registry.surfaces[decl_index]
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        lowering.begin_module("pkg/imp2.spl")
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
+        lowering.materialize_imported_callable_explicit_dependency(
+            decl, "Widget", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        # ... and importer 2 really does get its own binding.
+        expect(lowering.symbols.lookup_or_invalid("pkg.other::Widget").is_valid()).to_equal(true)
+    )
+
+    it("never memoizes an UNRESOLVED tail -- it stays retryable", fn():
+        step("Verify: an unresolved dependency is not recorded")
+        # A tail that binds nothing must stay retryable within the importer:
+        # a later registration can still make the lookup succeed. Only a tail
+        # that ran to completion AND found a valid symbol is recorded, so the
+        # `-2` ambiguity and `< 0` unresolved diagnostics keep their exact
+        # per-call multiplicity.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
+    )
+)
+
+    it("never memoizes an UNRESOLVED tail -- it stays retryable", fn():
+        step("Verify: an unresolved dependency is not recorded")
+        # A tail that binds nothing must stay retryable within the importer:
+        # a later registration can still make the lookup succeed. Only a tail
+        # that ran to completion AND found a valid symbol is recorded, so the
+        # `-2` ambiguity and `< 0` unresolved diagnostics keep their exact
+        # per-call multiplicity.
+        val registry = import_registry()
+        var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
+        val span = Span.empty()
+        lowering.begin_module("pkg/imp1.spl")
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[0], "NeverDeclared", span, false)
+        expect(lowering.dep_tail_skip_count).to_equal(0)
+        expect(lowering.dep_tail_memo.len()).to_equal(0)
+    )
+)
 )

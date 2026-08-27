@@ -22,14 +22,13 @@
 
 use std.crypto.sha256.{sha256_text}
 use compiler.driver.cache.action_key.{canon_str, canon_nat, canon_field, canon_seq}
-use std.io_runtime.{dir_create_all}
+use std.io_runtime.{dir_create_all, env_get_opt}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 
-extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_move(old_path: text, new_path: text) -> bool
-extern fn rt_env_get(key: text) -> text
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 
@@ -63,7 +62,10 @@ val RESULT_MANIFEST_HEADER: text = "simple-result-manifest-v2"
 # ============================================================================
 
 fn cas_root() -> text:
-    val env = rt_env_get("SIMPLE_CACHE") ?? ""
+    # Keep the cache root's unset-to-default policy at the runtime facade.
+    # `env_get_opt` preserves the old nullable runtime result before this
+    # module deliberately normalizes it for the total `cas_root` API.
+    val env = env_get_opt("SIMPLE_CACHE") ?? ""
     if env != "":
         return env
     "build/cache_cas"
@@ -95,7 +97,7 @@ fn cas_open(root: text) -> bool:
     val vpath = "{root}/VERSION"
     val current = cas_version_text()
     if rt_file_exists(vpath):
-        val stored = rt_file_read_text(vpath) ?? ""
+        val stored = file_read_nullable(vpath) ?? ""
         if stored.trim() != current:
             val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
             rt_file_move("{root}/cas", "{root}/stale-cas-{stamp}")
@@ -138,7 +140,7 @@ fn cas_get(root: text, digest: text) -> text?:
     val path = cas_blob_path(root, digest)
     if not rt_file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     if sha256_text(content) != digest:
         cas_quarantine(root, path)
         return nil
@@ -204,7 +206,7 @@ fn action_get(root: text, action_digest: text) -> ActionManifest?:
     val path = cas_action_path(root, action_digest)
     if not rt_file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     val parsed = action_manifest_parse(content)
     match parsed:
         case Some(manifest):
@@ -297,7 +299,7 @@ fn result_manifest_get(root: text, action_digest: text) -> ResultManifest?:
     val path = cas_action_path(root, action_digest)
     if not rt_file_exists(path):
         return nil
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     val parsed = result_manifest_parse(content)
     match parsed:
         case Some(manifest):

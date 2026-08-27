@@ -29,6 +29,68 @@ if allowed.0 != 0 or allowed.1.len() != 0:
     print "FAIL: suppressed AST lint changed the diagnostic count"
     rt_exit(1)
 
+val collection_source = "# decoy: fn collect_values<T>():\nasync fn collect_values<T>():\n    var values = []\n    var i = 0\n    while i < 2:\n        values = values + [i]\n        i = i + 1\n\nasync fn collect_more<T>():\n    var values = []\n    var i = 0\n    while i < 2:\n        values = values + [i]\n        i = i + 1\n"
+val collection = _collect_lint_diagnostics_json(
+    "/tmp/query_lint_ast_dispatch_collection.spl", collection_source)
+val collection_diagnostics = collection.1.join("\n")
+if (not collection_diagnostics.contains("\"code\":\"COLL001\"") or
+    not collection_diagnostics.contains("\"severity\":2") or
+    not collection_diagnostics.contains("\"confidence\":\"source-pattern\"") or
+    not collection_diagnostics.contains("\"evidence\":[") or
+    not collection_diagnostics.contains("\"uncertainty\":") or
+    not collection_diagnostics.contains("\"line\":2") or
+    not collection_diagnostics.contains("\"line\":9")):
+    print "FAIL: query collection diagnostics lost advisory structured evidence"
+    rt_exit(1)
+
+val allowed_collection = _collect_lint_diagnostics_json(
+    "/tmp/query_lint_ast_dispatch_collection_allow.spl",
+    "@allow(collection_performance)\n" + collection_source)
+if allowed_collection.1.join("\n").contains("\"code\":\"COLL001\""):
+    print "FAIL: query collection suppression was ignored"
+    rt_exit(1)
+
+val robust_collection = _collect_lint_diagnostics_json(
+    "/tmp/query_lint_ast_dispatch_collection_robust.spl",
+    "@lint_profile(robust)\n" + collection_source)
+val robust_collection_diagnostics = robust_collection.1.join("\n")
+if (not robust_collection_diagnostics.contains("\"code\":\"COLL001\"") or
+    not robust_collection_diagnostics.contains("\"severity\":2")):
+    print "FAIL: robust profile promoted untyped query collection evidence"
+    rt_exit(1)
+
+var gc_lines: [text] = ["# decoy: use gc_async_mut.task"]
+var gc_i = 0
+while gc_i < 64:
+    gc_lines.push("use common.fixture_{gc_i}")
+    gc_i = gc_i + 1
+gc_lines.push("use gc_async_mut.task")
+val gc_result = _collect_lint_diagnostics_json(
+    "src/lib/nogc_sync_mut/query_lint_location_probe.spl",
+    gc_lines.join("\n"))
+val gc_diagnostics = gc_result.1.join("\n")
+if (gc_result.0 < 1 or
+    not gc_diagnostics.contains("\"code\":\"gc_boundary_crossing\"") or
+    not gc_diagnostics.contains("\"line\":66")):
+    print "FAIL: GC-boundary diagnostic lost indexed import location"
+    rt_exit(1)
+
+var unused_lines: [text] = ["fn unused_many():"]
+var unused_i = 0
+while unused_i < 32:
+    unused_lines.push("    val unused_{unused_i} = {unused_i}")
+    unused_i = unused_i + 1
+val unused_result = _collect_lint_diagnostics_json(
+    "/tmp/query_lint_unused_cardinality.spl", unused_lines.join("\n"))
+val unused_diagnostics = unused_result.1.join("\n")
+if (unused_result.0 < 32 or
+    not unused_diagnostics.contains("variable 'unused_0' is declared but never used") or
+    not unused_diagnostics.contains("variable 'unused_31' is declared but never used") or
+    not unused_diagnostics.contains("\"line\":2") or
+    not unused_diagnostics.contains("\"line\":33")):
+    print "FAIL: UNUSED001 linear index lost high-cardinality diagnostics"
+    rt_exit(1)
+
 val malformed = _collect_lint_diagnostics_json(
     "/tmp/query_lint_ast_dispatch_malformed.spl",
     "fn broken(\n")

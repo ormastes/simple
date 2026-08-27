@@ -8,6 +8,7 @@ modes, compared against bun, python, go, erlang, java, and C.
 - **Execution modes:** [Execution Modes](#execution-modes)
 - **Correctness gates:** [Correctness Checks](#correctness-checks)
 - **Cross-language evidence:** [Cross-Language Benchmark](#cross-language-benchmark)
+- **SimpleRing/task/profile V1 evidence:** [SimpleRing/task/profile V1 foundation](#simpleringtaskprofile-v1-foundation)
 - **Result interpretation:** [Reading the Results](#reading-the-results)
 - **Simple optimization:** [Optimizing Simple Code](#optimizing-simple-code)
 - **Loader and packed bytes:** [Compiler-loader packed-byte lane](#compiler-loader-packed-byte-lane)
@@ -139,6 +140,47 @@ done
 - `--mode=native` specs can no-op or segfault before test bodies when generated BDD calls (`rt_bdd_*` / `std.spec`) are unresolved — verify semantic ground truth in interpreter mode, and use a direct native entrypoint with hard `rt_exit` oracles when validating native runtime ABI paths
 - `--mode=smf` can swallow runtime errors and report PASSED — cross-check against interpreter
 - See memory: `feedback_compile_mode_false_greens.md`
+
+## SimpleRing/task/profile V1 foundation
+
+The V1 lane currently has contract and lifecycle evidence, not a new
+performance baseline. The authoritative source paths are:
+
+| Surface | Path | Evidence available |
+|---------|------|--------------------|
+| Ring/task contract | `src/lib/common/contracts/execution/simple_ring_async_v1.spl` | Tokens, operation metadata/payload ownership, typed completion, callable poll contract, and trace-event validation |
+| Profile contract | `src/lib/common/contracts/execution/async_profile_v1.spl` | Five presets, fail-closed policy validation, canonical serialization, and SHA-256 fingerprints |
+| Bounded ring | `src/lib/nogc_async_mut/async_ring/simple_ring.spl` | Fixed-capacity lifecycle, batches, explicit cancellation, stale/duplicate rejection, and occupancy/caller-clock latency telemetry |
+| Performance fixture | `test/05_perf/runtime/simple_ring_async_base_perf_spec.spl` | Single and depth-eight batch workloads with p50/p99/p99.9, throughput, high-water/full/batch/kick/latency counters; no admitted baseline receipt yet |
+
+Run the focused unit specs when the admitted pure-Simple CLI is available:
+
+```text
+test/01_unit/lib/common/contracts/execution/simple_ring_async_v1_spec.spl
+test/01_unit/lib/common/contracts/execution/async_profile_v1_spec.spl
+test/01_unit/lib/nogc_async_mut/async_ring/simple_ring_spec.spl
+test/01_unit/lib/nogc_async_mut/async_ring/mission_adapter_spec.spl
+test/01_unit/lib/nogc_async_mut_noalloc/async/async_trace_ring_spec.spl
+test/05_perf/runtime/simple_ring_async_base_perf_spec.spl
+```
+
+The focused tests provide diagnostic data-contract, bounded-lifecycle, hosted
+mission-admission, and fixed-capacity trace evidence. They do not prove
+scheduler fairness, native I/O latency, compiler lowering, link-time-static
+mission storage, RSS/allocation bounds, or cross-language throughput. A
+profile's `implicit` surface field is
+configuration vocabulary only. It must not be reported as implemented
+implicit-await insertion. Likewise, `mission_alloc`/`mission_pool` records are
+validation presets, not evidence that static pools or migrated mission
+executors exist.
+
+Keep V1 evidence separate from the existing profile rows below. OS-thread
+(`thread_spawn`), cooperative-green, multicore-green (`multicore_green_spawn`),
+pool-task (`task_spawn`), and Future/host-executor measurements use their own
+handles, schedulers, and acceptance gates. No native `io_uring` provider or
+executor migration is admitted by this foundation; `src/runtime/platform/async_linux_uring.c`
+remains a platform implementation outside the V1 common contract until an
+adapter/conformance gate is added.
 
 ## Cross-Language Benchmark
 

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT/bin/simple}"
+OUT_DIR="${MCDC_RT_HAL_PERF_OUT:-$ROOT/build/perf/mcdc_rt_hal}/optimizer"
+INPUTS="$ROOT/test/05_perf/mcdc_rt_hal/optimizer_inputs.txt"
+mkdir -p "$OUT_DIR"
+
+[ -x "$SIMPLE_BIN" ] || { echo "BLOCKED: executable Pure Simple compiler not found: $SIMPLE_BIN" >&2; exit 2; }
+[ -r "$INPUTS" ] || { echo "BLOCKED: optimizer input manifest missing" >&2; exit 2; }
+
+revision="$(git -C "$ROOT" rev-parse HEAD)"
+status=0
+while IFS= read -r relative || [ -n "$relative" ]; do
+    case "$relative" in ''|'#'*) continue ;; esac
+    source_path="$ROOT/$relative"
+    [ -f "$source_path" ] || { echo "BLOCKED: optimizer input missing: $relative" >&2; exit 2; }
+    safe_name="$(printf '%s' "$relative" | tr '/.' '__')"
+    receipt="$OUT_DIR/$safe_name.receipt"
+    output="$OUT_DIR/$safe_name.out"
+    source_sha256="$(sha256sum "$source_path" | awk '{print $1}')"
+    started_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    set +e
+    "$SIMPLE_BIN" run "$ROOT/src/app/optimize/main.spl" "$source_path" \
+        --full --level=O3 >"$output" 2>&1
+    rc=$?
+    set -e
+    {
+        echo "schema=simple.optimizer-receipt.v1"
+        echo "revision=$revision"
+        echo "started_utc=$started_utc"
+        echo "source=$relative"
+        echo "source_sha256=$source_sha256"
+        echo "command=bin/simple run src/app/optimize/main.spl $relative --full --level=O3"
+        echo "output=${output#$ROOT/}"
+        echo "exit_code=$rc"
+        echo "status=$([ "$rc" -eq 0 ] && echo PASS || echo FAIL)"
+    } >"$receipt"
+    if [ "$rc" -ne 0 ]; then status=1; fi
+done < "$INPUTS"
+
+[ "$status" -eq 0 ] || { echo "FAIL: one or more optimizer invocations failed" >&2; exit 1; }
+echo "PASS: optimizer receipts written to ${OUT_DIR#$ROOT/}"
+

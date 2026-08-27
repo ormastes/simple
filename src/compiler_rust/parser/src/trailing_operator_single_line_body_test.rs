@@ -77,7 +77,10 @@ mod trailing_operator_single_line_body {
                    \x20   if a or\n\
                    \x20     c == \"\": return 1\n\
                    \x20   2\n";
-        assert!(parses(src), "shallow continuation column with single-line body must parse");
+        assert!(
+            parses(src),
+            "shallow continuation column with single-line body must parse"
+        );
     }
 
     /// `while` shares `parse_condition_block` with `if`, so it must not be a

@@ -1,7 +1,11 @@
 /**
 Atomic Types
 
-Lock-free atomic primitives for concurrent programming.
+Atomic primitives for concurrent programming.
+
+The C provider uses direct C11 atomics. The Rust compatibility provider uses a
+mutex-protected handle map, so this module does not claim universal lock-free
+progress. All providers currently execute operations as SeqCst.
 
 Features:
 - AtomicInt: Atomic integer operations
@@ -108,52 +112,62 @@ enum Ordering:
         val sync_label = if self.is_synchronizing(): "synchronizing" else: "no sync"
         return "Ordering: {name} ({desc}, {sync_label})"
 
-# SFFI declarations for atomic operations
+# The provider currently uses SeqCst internally. Ordering stays a source-level
+# compatibility parameter and is not transported across the raw ABI.
+@unsafe(reason: "raw owned atomic-int handle allocation; non-positive means allocation failure", capabilities: [ffi])
 extern fn rt_atomic_int_new(value: i64) -> i64
-extern fn rt_atomic_int_load(ptr: i64, ordering: i64) -> i64
-extern fn rt_atomic_int_store(ptr: i64, value: i64, ordering: i64)
-extern fn rt_atomic_int_swap(ptr: i64, value: i64, ordering: i64) -> i64
-extern fn rt_atomic_int_compare_exchange(ptr: i64, expected: i64, desired: i64, success: i64, failure: i64) -> i64
-extern fn rt_atomic_int_fetch_add(ptr: i64, value: i64, ordering: i64) -> i64
-extern fn rt_atomic_int_fetch_sub(ptr: i64, value: i64, ordering: i64) -> i64
-extern fn rt_atomic_int_fetch_and(ptr: i64, value: i64, ordering: i64) -> i64
-extern fn rt_atomic_int_fetch_or(ptr: i64, value: i64, ordering: i64) -> i64
-extern fn rt_atomic_int_fetch_xor(ptr: i64, value: i64, ordering: i64) -> i64
+@unsafe(reason: "raw atomic-int handle load; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_load(ptr: i64) -> i64
+@unsafe(reason: "raw atomic-int handle store; invalid or stale handles discard the write", capabilities: [ffi])
+extern fn rt_atomic_int_store(ptr: i64, value: i64)
+@unsafe(reason: "raw atomic-int handle swap; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_swap(ptr: i64, value: i64) -> i64
+@unsafe(reason: "raw atomic-int compare-exchange; false includes mismatch or invalid handle", capabilities: [ffi])
+extern fn rt_atomic_int_compare_exchange(ptr: i64, expected: i64, desired: i64) -> bool
+@unsafe(reason: "raw atomic-int fetch-add; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_fetch_add(ptr: i64, value: i64) -> i64
+@unsafe(reason: "raw atomic-int fetch-sub; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_fetch_sub(ptr: i64, value: i64) -> i64
+@unsafe(reason: "raw atomic-int fetch-and; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_fetch_and(ptr: i64, value: i64) -> i64
+@unsafe(reason: "raw atomic-int fetch-or; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_fetch_or(ptr: i64, value: i64) -> i64
+@unsafe(reason: "raw atomic-int fetch-xor; invalid or stale handles fabricate zero", capabilities: [ffi])
+extern fn rt_atomic_int_fetch_xor(ptr: i64, value: i64) -> i64
+@unsafe(reason: "raw atomic-int handle release; caller must prevent stale or duplicate release", capabilities: [ffi])
 extern fn rt_atomic_int_free(ptr: i64)
 
-extern fn rt_atomic_bool_new(value: i64) -> i64
-extern fn rt_atomic_bool_load(ptr: i64, ordering: i64) -> i64
-extern fn rt_atomic_bool_store(ptr: i64, value: i64, ordering: i64)
-extern fn rt_atomic_bool_swap(ptr: i64, value: i64, ordering: i64) -> i64
+@unsafe(reason: "raw owned atomic-bool handle allocation; non-positive means allocation failure", capabilities: [ffi])
+extern fn rt_atomic_bool_new(value: bool) -> i64
+@unsafe(reason: "raw atomic-bool handle load; invalid or stale handles fabricate false", capabilities: [ffi])
+extern fn rt_atomic_bool_load(ptr: i64) -> bool
+@unsafe(reason: "raw atomic-bool handle store; invalid or stale handles discard the write", capabilities: [ffi])
+extern fn rt_atomic_bool_store(ptr: i64, value: bool)
+@unsafe(reason: "raw atomic-bool handle swap; invalid or stale handles fabricate false", capabilities: [ffi])
+extern fn rt_atomic_bool_swap(ptr: i64, value: bool) -> bool
+@unsafe(reason: "raw atomic-bool compare-exchange; false includes mismatch or invalid handle", capabilities: [ffi])
+extern fn rt_atomic_bool_compare_exchange(ptr: i64, expected: bool, desired: bool) -> bool
+@unsafe(reason: "raw atomic-bool handle release; caller must prevent stale or duplicate release", capabilities: [ffi])
 extern fn rt_atomic_bool_free(ptr: i64)
 
+@unsafe(reason: "raw owned atomic-flag handle allocation; non-positive means allocation failure", capabilities: [ffi])
 extern fn rt_atomic_flag_new() -> i64
-extern fn rt_atomic_flag_test_and_set(ptr: i64, ordering: i64) -> i64
-extern fn rt_atomic_flag_clear(ptr: i64, ordering: i64)
+@unsafe(reason: "raw atomic-flag test-and-set; invalid or stale handles fabricate false", capabilities: [ffi])
+extern fn rt_atomic_flag_test_and_set(ptr: i64) -> bool
+@unsafe(reason: "raw atomic-flag load; invalid or stale handles fabricate false", capabilities: [ffi])
+extern fn rt_atomic_flag_load(ptr: i64) -> bool
+@unsafe(reason: "raw atomic-flag clear; invalid or stale handles discard the write", capabilities: [ffi])
+extern fn rt_atomic_flag_clear(ptr: i64)
+@unsafe(reason: "raw atomic-flag handle release; caller must prevent stale or duplicate release", capabilities: [ffi])
 extern fn rt_atomic_flag_free(ptr: i64)
 
+@unsafe(reason: "raw architecture spin hint provider; exact provider artifact is not admitted", capabilities: [ffi])
 extern fn rt_spin_loop_hint()
-
-/**
-Convert ordering enum to SFFI value.
-*/
-fn ordering_to_int(o: Ordering) -> i64:
-    match o:
-        case Relaxed:
-            return 0
-        case Acquire:
-            return 1
-        case Release:
-            return 2
-        case AcqRel:
-            return 3
-        case SeqCst:
-            return 4
 
 /**
 Atomic 64-bit integer.
 
-Provides lock-free atomic operations on integers.
+Provides atomic integer operations through the selected runtime provider.
 All operations are thread-safe.
 
 ```sdoctest
@@ -163,7 +177,7 @@ All operations are thread-safe.
 >>> counter.load()
 5
 >>> counter.compare_exchange(5, 10)
-(true, 5)
+true
 >>> counter.load()
 10
 ```
@@ -173,61 +187,63 @@ struct AtomicInt:
 
     fn new(value: i64) -> AtomicInt:
         """Create a new atomic integer with initial value."""
-        val ptr = rt_atomic_int_new(value)
+        val ptr = unsafe(capabilities: [ffi]):
+            rt_atomic_int_new(value)
+        if ptr <= 0:
+            panic("E-SFFI-ATOMIC-001: atomic integer allocation failed")
         return AtomicInt(_ptr: ptr)
 
     fn load(self, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Load the current value."""
-        return rt_atomic_int_load(self._ptr, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_load(self._ptr)
 
     fn store(self, value: i64, ordering: Ordering = Ordering.SeqCst):
         """Store a new value."""
-        rt_atomic_int_store(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_store(self._ptr, value)
 
     fn swap(self, value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Swap the value, returning the old value."""
-        return rt_atomic_int_swap(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_swap(self._ptr, value)
 
     fn compare_exchange(self, expected: i64,
         desired: i64,
         success_order: Ordering = Ordering.SeqCst,
         failure_order: Ordering = Ordering.SeqCst
-    ) -> (bool, i64):
+    ) -> bool:
         """Compare and exchange.
-        If current == expected, sets to desired and returns (true, current).
-        Otherwise returns (false, current).
+        If current == expected, sets to desired and returns true.
+        Otherwise returns false.
         """
-        val result = rt_atomic_int_compare_exchange(
-            self._ptr,
-            expected,
-            desired,
-            ordering_to_int(success_order),
-            ordering_to_int(failure_order)
-        )
-        # Result encoding: success in high bit, value in low bits
-        val success = (result >> 63) == 0
-        val current = result & 0x7FFFFFFFFFFFFFFF
-        return (success, current)
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_compare_exchange(self._ptr, expected, desired)
 
     fn fetch_add(self, value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Atomically add and return the previous value."""
-        return rt_atomic_int_fetch_add(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_fetch_add(self._ptr, value)
 
     fn fetch_sub(self, value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Atomically subtract and return the previous value."""
-        return rt_atomic_int_fetch_sub(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_fetch_sub(self._ptr, value)
 
     fn fetch_and(self, value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Atomically AND and return the previous value."""
-        return rt_atomic_int_fetch_and(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_fetch_and(self._ptr, value)
 
     fn fetch_or(self, value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Atomically OR and return the previous value."""
-        return rt_atomic_int_fetch_or(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_fetch_or(self._ptr, value)
 
     fn fetch_xor(self, value: i64, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Atomically XOR and return the previous value."""
-        return rt_atomic_int_fetch_xor(self._ptr, value, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_fetch_xor(self._ptr, value)
 
     fn increment(self, ordering: Ordering = Ordering.SeqCst) -> i64:
         """Increment and return the new value."""
@@ -237,9 +253,11 @@ struct AtomicInt:
         """Decrement and return the new value."""
         return self.fetch_sub(1, ordering) - 1
 
+    @unsafe(reason: "manual release invalidates copied aliases and permits stale-handle use", capabilities: [ffi])
     fn free(self):
         """Free the atomic."""
-        rt_atomic_int_free(self._ptr)
+        unsafe(capabilities: [ffi]):
+            rt_atomic_int_free(self._ptr)
 
     # =========================================================================
     # Helper Methods
@@ -273,7 +291,7 @@ struct AtomicInt:
 /**
 Atomic boolean.
 
-Provides lock-free atomic operations on booleans.
+Provides atomic boolean operations through the selected runtime provider.
 
 ```sdoctest
 >>> val flag = AtomicBool.new(false)
@@ -288,28 +306,33 @@ struct AtomicBool:
     _ptr: i64
 
     fn new(value: bool) -> AtomicBool:
-        val int_val = if value: 1 else: 0
-        val ptr = rt_atomic_bool_new(int_val)
+        val ptr = unsafe(capabilities: [ffi]):
+            rt_atomic_bool_new(value)
+        if ptr <= 0:
+            panic("E-SFFI-ATOMIC-001: atomic boolean allocation failed")
         return AtomicBool(_ptr: ptr)
 
     fn load(self, ordering: Ordering = Ordering.SeqCst) -> bool:
-        return rt_atomic_bool_load(self._ptr, ordering_to_int(ordering)) == 1
+        unsafe(capabilities: [ffi]):
+            rt_atomic_bool_load(self._ptr)
 
     fn store(self, value: bool, ordering: Ordering = Ordering.SeqCst):
-        val int_val = if value: 1 else: 0
-        rt_atomic_bool_store(self._ptr, int_val, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_bool_store(self._ptr, value)
 
     fn swap(self, value: bool, ordering: Ordering = Ordering.SeqCst) -> bool:
-        val int_val = if value: 1 else: 0
-        return rt_atomic_bool_swap(self._ptr, int_val, ordering_to_int(ordering)) == 1
+        unsafe(capabilities: [ffi]):
+            rt_atomic_bool_swap(self._ptr, value)
 
     fn compare_and_swap(self, expected: bool, desired: bool, ordering: Ordering = Ordering.SeqCst) -> bool:
         """Compare and swap."""
-        val old = self.swap(desired, ordering)
-        return old == expected
+        unsafe(capabilities: [ffi]):
+            rt_atomic_bool_compare_exchange(self._ptr, expected, desired)
 
+    @unsafe(reason: "manual release invalidates copied aliases and permits stale-handle use", capabilities: [ffi])
     fn free(self):
-        rt_atomic_bool_free(self._ptr)
+        unsafe(capabilities: [ffi]):
+            rt_atomic_bool_free(self._ptr)
 
     # =========================================================================
     # Helper Methods
@@ -357,21 +380,28 @@ struct AtomicFlag:
     _ptr: i64
 
     static fn new() -> AtomicFlag:
-        val ptr = rt_atomic_flag_new()
+        val ptr = unsafe(capabilities: [ffi]):
+            rt_atomic_flag_new()
+        if ptr <= 0:
+            panic("E-SFFI-ATOMIC-001: atomic flag allocation failed")
         return AtomicFlag(_ptr: ptr)
 
     fn test_and_set(self, ordering: Ordering = Ordering.Acquire) -> bool:
         """Atomically set the flag and return the previous state.
         Returns true if the flag was already set.
         """
-        return rt_atomic_flag_test_and_set(self._ptr, ordering_to_int(ordering)) == 1
+        unsafe(capabilities: [ffi]):
+            rt_atomic_flag_test_and_set(self._ptr)
 
     fn clear(self, ordering: Ordering = Ordering.Release):
         """Clear the flag."""
-        rt_atomic_flag_clear(self._ptr, ordering_to_int(ordering))
+        unsafe(capabilities: [ffi]):
+            rt_atomic_flag_clear(self._ptr)
 
+    @unsafe(reason: "manual release invalidates copied aliases and permits stale-handle use", capabilities: [ffi])
     fn free(self):
-        rt_atomic_flag_free(self._ptr)
+        unsafe(capabilities: [ffi]):
+            rt_atomic_flag_free(self._ptr)
 
     # =========================================================================
     # Helper Methods
@@ -386,7 +416,8 @@ struct AtomicFlag:
         Example:
             flag.is_set()  # → false
         """
-        return self.test_and_set(ordering)
+        unsafe(capabilities: [ffi]):
+            rt_atomic_flag_load(self._ptr)
 
     fn is_clear(self, ordering: Ordering = Ordering.Acquire) -> bool:
         """Check if flag is clear.
@@ -397,7 +428,8 @@ struct AtomicFlag:
         Example:
             flag.is_clear()  # → true
         """
-        return not self.test_and_set(ordering)
+        unsafe(capabilities: [ffi]):
+            not rt_atomic_flag_load(self._ptr)
 
     fn summary(self) -> text:
         """Get summary of atomic flag.
@@ -409,7 +441,9 @@ struct AtomicFlag:
             flag.summary()
             # → "AtomicFlag: set" or "AtomicFlag: clear"
         """
-        val status = if self.test_and_set(): "set" else: "clear"
+        val set = unsafe(capabilities: [ffi]):
+            rt_atomic_flag_load(self._ptr)
+        val status = if set: "set" else: "clear"
         return "AtomicFlag: {status}"
 
 /**
@@ -426,30 +460,37 @@ Provides atomic load/store of object references.
 struct AtomicRef<T>:
     _atomic: AtomicInt
 
+    @unsafe(reason: "casts an unverified object representation to a raw integer handle", capabilities: [ffi, raw_ptr])
     fn new(value: T) -> AtomicRef<T>:
         val ptr = value as i64
         return AtomicRef(_atomic: AtomicInt.new(ptr))
 
+    @unsafe(reason: "casts a raw integer back to an object without provenance or lifetime proof", capabilities: [ffi, raw_ptr])
     fn load(self, ordering: Ordering = Ordering.Acquire) -> T:
         val ptr = self._atomic.load(ordering)
         return ptr as T
 
+    @unsafe(reason: "stores an unverified object representation as a raw integer", capabilities: [ffi, raw_ptr])
     fn store(self, value: T, ordering: Ordering = Ordering.Release):
         val ptr = value as i64
         self._atomic.store(ptr, ordering)
 
+    @unsafe(reason: "swaps and reconstructs raw object representations without provenance proof", capabilities: [ffi, raw_ptr])
     fn swap(self, value: T, ordering: Ordering = Ordering.AcqRel) -> T:
         val ptr = value as i64
         val old = self._atomic.swap(ptr, ordering)
         return old as T
 
+    @unsafe(reason: "manual release invalidates copied aliases and permits stale-handle use", capabilities: [ffi])
     fn free(self):
-        self._atomic.free()
+        unsafe(capabilities: [ffi]):
+            self._atomic.free()
 
     # =========================================================================
     # Helper Methods
     # =========================================================================
 
+    @unsafe(reason: "inspects an unverified raw object representation", capabilities: [ffi, raw_ptr])
     fn is_null(self, ordering: Ordering = Ordering.Acquire) -> bool:
         """Check if reference is null (zero).
 
@@ -461,6 +502,7 @@ struct AtomicRef<T>:
         """
         return self._atomic.load(ordering) == 0
 
+    @unsafe(reason: "inspects an unverified raw object representation", capabilities: [ffi, raw_ptr])
     fn is_not_null(self, ordering: Ordering = Ordering.Acquire) -> bool:
         """Check if reference is not null.
 
@@ -472,7 +514,8 @@ struct AtomicRef<T>:
         """
         return self._atomic.load(ordering) != 0
 
-    fn compare_and_swap(self, expected: T, desired: T, ordering: Ordering = Ordering.AcqRel) -> (bool, T):
+    @unsafe(reason: "compares raw object representations without provenance or lifetime proof", capabilities: [ffi, raw_ptr])
+    fn compare_and_swap(self, expected: T, desired: T, ordering: Ordering = Ordering.AcqRel) -> bool:
         """Compare and exchange reference.
 
         Args:
@@ -481,21 +524,21 @@ struct AtomicRef<T>:
             ordering: Memory ordering
 
         Returns:
-            Tuple of (success, current_value)
+            True when the expected reference was replaced
 
         Example:
-            val (ok, old) = ref.compare_and_swap(old_obj, new_obj)
+            val ok = ref.compare_and_swap(old_obj, new_obj)
         """
         val expected_ptr = expected as i64
         val desired_ptr = desired as i64
-        val (success, current_ptr) = self._atomic.compare_exchange(
+        self._atomic.compare_exchange(
             expected_ptr,
             desired_ptr,
             ordering,
             ordering
         )
-        return (success, current_ptr as T)
 
+    @unsafe(reason: "formats an unverified raw object representation", capabilities: [ffi, raw_ptr])
     fn summary(self) -> text:
         """Get summary of atomic reference.
 
@@ -516,7 +559,8 @@ Signals to the CPU that we're in a spin loop.
 May reduce power consumption and improve performance.
 */
 fn spin_loop_hint():
-    rt_spin_loop_hint()
+    unsafe(capabilities: [ffi]):
+        rt_spin_loop_hint()
 
 /**
 Simple spinlock implementation using AtomicFlag.
@@ -549,8 +593,10 @@ struct Spinlock:
         """Release the lock."""
         self._flag.clear(Ordering.Release)
 
+    @unsafe(reason: "manual release invalidates copied aliases and permits stale-handle use", capabilities: [ffi])
     fn free(self):
-        self._flag.free()
+        unsafe(capabilities: [ffi]):
+            self._flag.free()
 
     # =========================================================================
     # Helper Methods
@@ -620,8 +666,10 @@ struct Counter:
     fn reset(self):
         self._atomic.store(0)
 
+    @unsafe(reason: "manual release invalidates copied aliases and permits stale-handle use", capabilities: [ffi])
     fn free(self):
-        self._atomic.free()
+        unsafe(capabilities: [ffi]):
+            self._atomic.free()
 
     # =========================================================================
     # Helper Methods

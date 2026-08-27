@@ -7,13 +7,13 @@ use super::super::interpreter_helpers::{
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
-    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name,
-    pattern_matches, record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME,
-    EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS,
-    MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
+    evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
+    record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS,
+    GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, WhileStmt};
 use simple_runtime::value::diagram_sffi;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -207,6 +207,119 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
             ))
         }
     }
+}
+
+enum WhileConditionDecision {
+    Stop,
+    Run,
+    RunWithBindings(HashMap<String, Value>),
+}
+
+/// Evaluate one block-closure `while` condition exactly once and preserve the
+/// pattern-binding semantics of the canonical statement executor.
+fn evaluate_block_while_condition(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<WhileConditionDecision, CompileError> {
+    let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
+    let Some(pattern) = &while_stmt.let_pattern else {
+        return Ok(if is_condition_present(&while_stmt.condition, &value) {
+            WhileConditionDecision::Run
+        } else {
+            WhileConditionDecision::Stop
+        });
+    };
+
+    match optional_let_binding(pattern, &value) {
+        LetBind::Skip => Ok(WhileConditionDecision::Stop),
+        LetBind::Bind(name, inner) => {
+            let mut bindings = HashMap::with_capacity(1);
+            bindings.insert(name, inner);
+            Ok(WhileConditionDecision::RunWithBindings(bindings))
+        }
+        LetBind::NotApplicable => {
+            let mut bindings = HashMap::new();
+            if pattern_matches(pattern, &value, &mut bindings, enums, classes)? {
+                Ok(WhileConditionDecision::RunWithBindings(bindings))
+            } else {
+                Ok(WhileConditionDecision::Stop)
+            }
+        }
+    }
+}
+
+/// Execute a `while` in a BDD/lambda block. Pattern names are block-local for
+/// the lifetime of the loop and are restored on every exit, including errors.
+fn exec_block_while(
+    while_stmt: &WhileStmt,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let mut last_value = None;
+    loop {
+        if crate::interpreter::is_timeout_exceeded() {
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
+        }
+
+        // Ordinary boolean loops take the `None` arm and allocate nothing.
+        // Pattern loops snapshot only the source-sized set of names actually
+        // bound by this successful match.
+        let iteration_scope = match evaluate_block_while_condition(
+            while_stmt,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )? {
+            WhileConditionDecision::Stop => break,
+            WhileConditionDecision::Run => None,
+            WhileConditionDecision::RunWithBindings(bindings) => {
+                let mut saved = Vec::with_capacity(bindings.len());
+                for (name, value) in bindings {
+                    saved.push((name.clone(), env.get(&name).cloned()));
+                    env.enter_block_local(name.clone());
+                    env.insert(name, value);
+                }
+                Some(saved)
+            }
+        };
+
+        let body_result = exec_block_closure_mut(
+            &while_stmt.body.statements,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        );
+        if let Some(saved) = iteration_scope {
+            // The pattern is scoped to this iteration's body. Restore before
+            // deciding continue/break/error so the next condition and every
+            // outward exit observe the pre-binding environment.
+            crate::interpreter::restore_block_scope_shadows(saved, env);
+        }
+
+        match body_result {
+            Ok(value) => last_value = Some(value),
+            Err(CompileError::LoopBreak(value)) => {
+                last_value = Some(value.unwrap_or(Value::Nil));
+                break;
+            }
+            Err(CompileError::LoopContinue) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(last_value)
 }
 
 /// Execute a block closure (BDD DSL colon-block) against a fresh scope.
@@ -516,10 +629,7 @@ pub(super) fn exec_block_closure_into(
                     // `exec_if` — so branch decisions inside a function body
                     // previously recorded NOTHING. See
                     // doc/08_tracking/bug/coverage_tooling_does_not_instrument_spl_2026-08-07.md.
-                    record_decision_coverage_here(if_stmt.span.line,
-                        if_stmt.span.column,
-                        decision_result,
-                    );
+                    record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
                     decision_result
                 } {
                     last_value = exec_block_closure_mut(
@@ -585,7 +695,8 @@ pub(super) fn exec_block_closure_into(
                             // COVERAGE: mirror `interpreter_control::exec_if`'s elif
                             // handling (offset the line by `elif_idx` so each elif
                             // gets a distinct decision id, same scheme as there).
-                            record_decision_coverage_here(if_stmt.span.line + elif_idx,
+                            record_decision_coverage_here(
+                                if_stmt.span.line + elif_idx,
                                 if_stmt.span.column,
                                 elif_decision,
                             );
@@ -1100,45 +1211,31 @@ pub(super) fn exec_block_closure_into(
                 }
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => loop {
-                if crate::interpreter::is_timeout_exceeded() {
-                    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
-                    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
-                }
-                let cond = evaluate_expr(
-                    &while_stmt.condition,
-                    &mut local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )?;
-                if !is_condition_present(&while_stmt.condition, &cond) {
-                    break;
-                }
-                match exec_block_closure_mut(
-                    &while_stmt.body.statements,
+            Node::While(while_stmt) => {
+                match exec_block_while(
+                    while_stmt,
                     &mut local_env,
                     functions,
                     classes,
                     enums,
                     impl_methods,
                 ) {
-                    Ok(val) => last_value = val,
-                    Err(CompileError::LoopBreak(val)) => {
-                        last_value = val.unwrap_or(Value::Nil);
-                        break;
+                    Ok(Some(value)) => last_value = value,
+                    Ok(None) => {}
+                    Err(error) => {
+                        CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
+                        IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
+                        return Err(error);
                     }
-                    Err(CompileError::LoopContinue) => continue,
-                    Err(e) => return Err(e),
                 }
-            },
+            }
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
                     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
                     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+                    return Err(CompileError::TimeoutExceeded {
+                        timeout_secs: crate::interpreter::timeout_limit_secs(),
+                    });
                 }
                 match exec_block_closure_mut(
                     &loop_stmt.body.statements,
@@ -1388,10 +1485,7 @@ fn exec_block_closure_mut_inner(
                     // COVERAGE: mirror `interpreter_control::exec_if`. This is the
                     // `exec_block_closure_into` twin of the `exec_block_closure_mut`
                     // `Node::If` handling above — same previously-missing wiring.
-                    record_decision_coverage_here(if_stmt.span.line,
-                        if_stmt.span.column,
-                        decision_result,
-                    );
+                    record_decision_coverage_here(if_stmt.span.line, if_stmt.span.column, decision_result);
                     decision_result
                 } {
                     last_value = exec_block_closure_mut(
@@ -1453,7 +1547,8 @@ fn exec_block_closure_mut_inner(
                         } else if {
                             let elif_val = evaluate_expr(cond, local_env, functions, classes, enums, impl_methods)?;
                             let elif_decision = is_condition_present(cond, &elif_val);
-                            record_decision_coverage_here(if_stmt.span.line + elif_idx,
+                            record_decision_coverage_here(
+                                if_stmt.span.line + elif_idx,
                                 if_stmt.span.column,
                                 elif_decision,
                             );
@@ -1816,41 +1911,23 @@ fn exec_block_closure_mut_inner(
                 );
                 last_value = Value::Nil;
             }
-            Node::While(while_stmt) => loop {
-                if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
-                }
-                let cond = evaluate_expr(
-                    &while_stmt.condition,
+            Node::While(while_stmt) => {
+                if let Some(value) = exec_block_while(
+                    while_stmt,
                     local_env,
                     functions,
                     classes,
                     enums,
                     impl_methods,
-                )?;
-                if !is_condition_present(&while_stmt.condition, &cond) {
-                    break;
+                )? {
+                    last_value = value;
                 }
-                match exec_block_closure_mut(
-                    &while_stmt.body.statements,
-                    local_env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                ) {
-                    Ok(val) => last_value = val,
-                    Err(CompileError::LoopBreak(val)) => {
-                        last_value = val.unwrap_or(Value::Nil);
-                        break;
-                    }
-                    Err(CompileError::LoopContinue) => continue,
-                    Err(e) => return Err(e),
-                }
-            },
+            }
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+                    return Err(CompileError::TimeoutExceeded {
+                        timeout_secs: crate::interpreter::timeout_limit_secs(),
+                    });
                 }
                 match exec_block_closure_mut(
                     &loop_stmt.body.statements,
@@ -1897,8 +1974,14 @@ fn exec_block_closure_mut_inner(
                 // Same fix as the `Node::Assert` arm in `exec_block_closure_mut`
                 // above: without this arm a bare `assert <cond>` nested inside an
                 // if/match/loop body was silently inert.
-                let condition_value =
-                    evaluate_expr(&assert_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                let condition_value = evaluate_expr(
+                    &assert_stmt.condition,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
                 if !is_condition_present(&assert_stmt.condition, &condition_value) {
                     return Err(assert_stmt_failure(assert_stmt, &condition_value));
                 }
@@ -2104,8 +2187,8 @@ mod tests {
     /// The message form must fail too, and must carry the custom message.
     #[test]
     fn false_bare_assert_with_message_fails_block_closure() {
-        let err = run_probe("fn probe():\n    assert 1 == 2, \"one is not two\"\n")
-            .expect_err("false assert must fail");
+        let err =
+            run_probe("fn probe():\n    assert 1 == 2, \"one is not two\"\n").expect_err("false assert must fail");
         let text = err.to_string();
         assert!(text.contains("assertion failed"), "unexpected error text: {text}");
         assert!(text.contains("one is not two"), "custom message dropped: {text}");
@@ -2115,8 +2198,8 @@ mod tests {
     /// `exec_block_closure_into`; that executor needs the same arm.
     #[test]
     fn false_bare_assert_nested_in_if_fails_block_closure() {
-        let err = run_probe("fn probe():\n    if true:\n        assert false\n")
-            .expect_err("false nested assert must fail");
+        let err =
+            run_probe("fn probe():\n    if true:\n        assert false\n").expect_err("false nested assert must fail");
         assert!(
             err.to_string().contains("assertion failed"),
             "unexpected error text: {err}"

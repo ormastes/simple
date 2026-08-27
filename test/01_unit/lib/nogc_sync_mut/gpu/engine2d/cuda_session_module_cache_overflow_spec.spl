@@ -1,34 +1,9 @@
 # @cover src/lib/nogc_sync_mut/gpu/engine2d/cuda_session.spl 60%
 # @tag: unit, gpu, engine2d, cuda, session, cache, leak
 #
-# DEFECT 2 (doc/08_tracking/bug/engine2d_simd_gpu_layer_audit_2026-08-08.md):
-# CudaModuleCache is a hand-unrolled 4-slot cache. Past the 4th distinct
-# module name, `cache_module()` already returned the literal "cache_full",
-# but `CudaComputeSession.load_ptx()` discarded that return value -- so a 5th (and
-# every subsequent) distinct name silently re-created a native module handle
-# every single call, leaking one native module per call, with no counter and
-# no log surfacing it.
-#
-# Fix: the cache-and-count bookkeeping that `load_ptx()` runs after a
-# successful native module load was extracted into `record_module(name,
-# handle)`, which captures the `cache_module()` return and, on
-# "cache_full", increments `session.cache_reject_count` and records
-# `session.last_cache_rejection` -- making the overflow an OBSERVED, counted
-# event instead of a silently-discarded one. `load_ptx()` calls
-# `record_module()` on the real handle it gets back from
-# `cuda_session_module_load()`; this spec drives `record_module()` directly
-# with synthetic handles because `cuda_session_module_load` (and every other
-# session-level CUDA extern in this file: `rt_cuda_primary_ctx_retain`,
-# `rt_cuda_kernel_get`, ...) is registered ONLY for the JIT/native codegen
-# path, not for the tree-walk interpreter `bin/simple test` runs on
-# (confirmed: `semantic: unknown extern function: rt_cuda_primary_ctx_retain`
-# under `test_runner_single --sequential` even with real CUDA hardware
-# present on this host) -- a pre-existing, unrelated engine gap that affects
-# every session-level CUDA/Vulkan/Metal extern in this directory equally,
-# not something this fix introduces or can route around from the spec layer.
-# `record_module()` is the exact production bookkeeping `load_ptx()` calls,
-# so this is a real (not reimplemented) proof of the fix, scoped to what the
-# interpreter engine can reach.
+# `CudaComputeSession` is intentionally a pure bounded cache owner.  This
+# suite proves that cache overflow is observable and that existing module
+# identities remain intact; it does not exercise a foreign CUDA provider.
 
 use std.spec
 use std.nogc_sync_mut.gpu.engine2d.cuda_session.{CudaComputeSession, CudaModuleCache}
@@ -53,7 +28,7 @@ describe "CudaModuleCache overflow contract (pure, no hardware)":
         # silently pretend it was cached.
         assert_equal(cache.find_module("k4"), 0)
 
-describe "CudaComputeSession.record_module overflow is an observed, counted event (real production bookkeeping)":
+describe "CudaComputeSession.record_module overflow is an observed, counted cache event":
 
     it "counts the 5th distinct module name as a rejection instead of discarding it":
         var session = CudaComputeSession.create(0, "managed")

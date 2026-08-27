@@ -126,7 +126,10 @@ pub trait ConcurrentMapProvider: Send + Sync + Debug {
 /// Provider for channel operations (message passing between threads).
 pub trait ChannelProvider: Send + Sync + Debug {
     fn channel_new(&self) -> Result<Handle, CompileError>;
-    fn channel_send(&self, handle: Handle, value: Value) -> Result<(), CompileError>;
+    /// Returns true only when the channel admitted the message. Rejection is a
+    /// normal transport outcome (closed, full, disconnected, or invalid), not
+    /// a fabricated successful unit result.
+    fn channel_send(&self, handle: Handle, value: Value) -> Result<bool, CompileError>;
     fn channel_try_recv(&self, handle: Handle) -> Result<Value, CompileError>;
     fn channel_recv(&self, handle: Handle) -> Result<Value, CompileError>;
     fn channel_close(&self, handle: Handle) -> Result<(), CompileError>;

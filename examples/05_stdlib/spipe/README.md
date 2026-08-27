@@ -35,6 +35,11 @@ such as `.spipe/doc`, `.spipe/spipe_project`, `.spipe/spipe`, and
 When installed as an npm-style package, the binaries are `spipe` and
 `spipe-mcp`.
 
+Protected release policy is available through `release-guide` and
+`release-capabilities`. These are inspection commands, not release mutation
+commands: signing, protected-ref updates, and publication remain external,
+explicitly authorized operations.
+
 The CLI also owns the reusable LLM fine-tune process. It can initialize host
 attempt registries, record data downloads, model research, base-model choice,
 tuning method, training script, eval results, retry decisions, and app/server
@@ -94,6 +99,15 @@ powershell -ExecutionPolicy Bypass -File .spipe\spipe\scripts\setup-spipe-links.
 
 Use `--force` or `-Force` only when replacing existing host directories with
 links to this module.
+
+## Guarded release operations
+
+The CLI and MCP server expose deterministic validation/planning operations for
+isolated sessions, read-only main fix discovery, reviewed beta backports,
+release-first forward ports, immutable candidates, and exact promotion. They
+perform no repository or release mutation. Main-fix discovery never selects or
+cherry-picks a candidate; external protected authorities remain responsible
+for integration, signing, pushing, and publication.
 
 ## Subproject Experts
 

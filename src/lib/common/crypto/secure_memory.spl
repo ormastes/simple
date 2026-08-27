@@ -2,12 +2,19 @@
 # Raw runtime array/volatile calls are confined here; applications consume the
 # typed facade and cannot fabricate successful readback.
 
+@unsafe(reason: "raw array length mutation; wrapper validates length and exact success status", capabilities: [ffi])
 extern fn rt_array_set_len_known(collection: [u8], len: i64) -> i8
+@unsafe(reason: "raw i64-array storage pointer; zero is rejected before access", capabilities: [ffi, raw_ptr])
 extern fn rt_array_data_ptr(collection: [i64]) -> i64
+@unsafe(reason: "volatile secret-memory byte read after bounds and pointer validation", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_read_u8(addr: i64) -> i64
+@unsafe(reason: "volatile secret-memory byte write after bounds and pointer validation", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_write_u8(addr: i64, value: i64)
+@unsafe(reason: "volatile secret-memory word read after bounds and pointer validation", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_read_u64(addr: i64) -> i64
+@unsafe(reason: "volatile secret-memory word write after bounds and pointer validation", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_write_u64(addr: i64, value: i64)
+@unsafe(reason: "compiler-resistant memory ordering boundary for secret zeroization", capabilities: [ffi])
 extern fn rt_memory_barrier()
 
 struct SecureZeroReport:
@@ -27,16 +34,21 @@ fn _secure_zero_slots(data_ptr: i64, slot_count: u64) -> SecureZeroReport:
             residual_nonzero_slots: slot_count)
     var index: u64 = 0u64
     while index < slot_count:
-        rt_volatile_write_u64(data_ptr + (index * 8u64) as i64, 0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_volatile_write_u64(data_ptr + (index * 8u64) as i64, 0)
         index = index + 1u64
-    rt_memory_barrier()
+    unsafe(capabilities: [ffi]):
+        rt_memory_barrier()
     var residual: u64 = 0u64
     index = 0u64
     while index < slot_count:
-        if rt_volatile_read_u64(data_ptr + (index * 8u64) as i64) != 0:
+        val value = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_volatile_read_u64(data_ptr + (index * 8u64) as i64)
+        if value != 0:
             residual = residual + 1u64
         index = index + 1u64
-    rt_memory_barrier()
+    unsafe(capabilities: [ffi]):
+        rt_memory_barrier()
     SecureZeroReport(
         slot_count: slot_count, overwritten_slots: slot_count,
         residual_nonzero_slots: residual)
@@ -58,16 +70,21 @@ fn secure_zero_u8_range(bytes: [u8], start: u64, byte_count: u64) -> SecureZeroR
             residual_nonzero_slots: byte_count)
     var index = 0u64
     while index < byte_count:
-        rt_volatile_write_u8(data_ptr + (start + index) as i64, 0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_volatile_write_u8(data_ptr + (start + index) as i64, 0)
         index = index + 1u64
-    rt_memory_barrier()
+    unsafe(capabilities: [ffi]):
+        rt_memory_barrier()
     var residual = 0u64
     index = 0u64
     while index < byte_count:
-        if rt_volatile_read_u8(data_ptr + (start + index) as i64) != 0:
+        val value = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_volatile_read_u8(data_ptr + (start + index) as i64)
+        if value != 0:
             residual = residual + 1u64
         index = index + 1u64
-    rt_memory_barrier()
+    unsafe(capabilities: [ffi]):
+        rt_memory_barrier()
     SecureZeroReport(
         slot_count: byte_count, overwritten_slots: byte_count,
         residual_nonzero_slots: residual)
@@ -76,9 +93,15 @@ fn secure_zero_i64_slots(words: [i64]) -> SecureZeroReport:
     # The staged compiler only treats byte-array `.data_ptr()` as an intrinsic;
     # the generic i64-array form otherwise lowers to the nonexistent dynamic
     # symbol `Array.data_ptr`. Use the canonical runtime ABI owner explicitly.
-    _secure_zero_slots(rt_array_data_ptr(words), words.len())
+    val data_ptr = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_array_data_ptr(words)
+    _secure_zero_slots(data_ptr, words.len())
 
 fn secure_set_u8_length(bytes: [u8], length: i64) -> bool:
-    length >= 0 and rt_array_set_len_known(bytes, length) == 1i8
+    if length < 0:
+        return false
+    val status = unsafe(capabilities: [ffi]):
+        rt_array_set_len_known(bytes, length)
+    status == 1i8
 
 export SecureZeroReport, secure_zero_u8_slots, secure_zero_u8_range, secure_zero_i64_slots, secure_set_u8_length

@@ -28,6 +28,11 @@ mod c_sffi {
         pub(super) fn rt_progress_init() -> bool;
         pub(super) fn rt_progress_reset() -> bool;
         pub(super) fn rt_progress_get_elapsed_seconds() -> f64;
+        pub(super) fn rt_progress_clock_now_nanos() -> i64;
+        pub(super) fn rt_progress_tls_is_initialized() -> bool;
+        pub(super) fn rt_progress_tls_start_nanos() -> i64;
+        pub(super) fn rt_progress_tls_store_start_nanos(start_nanos: i64);
+        pub(super) fn rt_progress_tls_clear();
     }
 }
 
@@ -129,6 +134,18 @@ pub fn rt_progress_reset() -> bool {
 pub fn rt_progress_get_elapsed_seconds() -> f64 {
     unsafe { c_sffi::rt_progress_get_elapsed_seconds() }
 }
+#[inline(always)]
+pub fn rt_progress_clock_now_nanos() -> i64 { unsafe { c_sffi::rt_progress_clock_now_nanos() } }
+#[inline(always)]
+pub fn rt_progress_tls_is_initialized() -> bool { unsafe { c_sffi::rt_progress_tls_is_initialized() } }
+#[inline(always)]
+pub fn rt_progress_tls_start_nanos() -> i64 { unsafe { c_sffi::rt_progress_tls_start_nanos() } }
+#[inline(always)]
+pub fn rt_progress_tls_store_start_nanos(start_nanos: i64) {
+    unsafe { c_sffi::rt_progress_tls_store_start_nanos(start_nanos) }
+}
+#[inline(always)]
+pub fn rt_progress_tls_clear() { unsafe { c_sffi::rt_progress_tls_clear() } }
 
 #[cfg(test)]
 mod tests {

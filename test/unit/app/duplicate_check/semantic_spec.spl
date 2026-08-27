@@ -7,14 +7,16 @@ Audience: compiler and tooling engineers who maintain this spec.
 
 # Tests for semantic doc similarity analysis
 
-use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, process_doc_text, build_embedding_key, content_hash}
+use compiler.tools.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, extract_docs_from_directory, process_doc_text, build_embedding_key, content_hash}
 use compiler.tools.duplicate_check.config.{default_config}
 use compiler.tools.duplicate_check.ollama_client.{EmbeddingResult, parse_embedding_response, parse_float_safe}
 use compiler.tools.duplicate_check.embedding_cache.{EmbeddingCacheManager, EmbeddingCacheEntry, load_embedding_cache, save_embedding_cache, get_cached, lookup_cached, set_cached, csv_to_floats, floats_to_csv}
-use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, run_semantic_analysis, text_similarity}
+use compiler.tools.duplicate_check.semantic.{SemanticMatch, SemanticReport, cosine_similarity_dense, run_semantic_analysis, run_semantic_analysis_local, semantic_bucket_accepts_member, text_similarity}
 use compiler.tools.duplicate_check.semantic_formatter.{format_match_line, severity_label}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
 # ============================================================================
 # Doc Extractor Tests
 # ============================================================================
@@ -102,6 +104,28 @@ describe "doc_extractor":
         val h2 = content_hash("world")
         val same = h1 == h2
         expect(same).to_equal(false)
+
+    it "does not execute shell metacharacters while reading one file":
+        step("Verify: does not execute shell metacharacters while reading one file")
+        val sentinel = "/tmp/simple_duplicate_doc_file_shell_injection"
+        val _ = rt_file_delete(sentinel)
+        val hostile_path = "/tmp/missing'; touch {sentinel}; #"
+
+        val entries = extract_docs_from_file(hostile_path)
+
+        expect(entries.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(rt_file_exists(sentinel)).to_equal(false)
+
+    it "does not execute shell metacharacters during directory extraction":
+        step("Verify: does not execute shell metacharacters during directory extraction")
+        val sentinel = "/tmp/simple_duplicate_doc_dir_shell_injection"
+        val _ = rt_file_delete(sentinel)
+        val hostile_path = "/tmp/missing; touch {sentinel} #"
+
+        val entries = extract_docs_from_directory(hostile_path, [])
+
+        expect(entries.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(rt_file_exists(sentinel)).to_equal(false)
 
 # ============================================================================
 # Ollama Client Tests
@@ -293,6 +317,83 @@ describe "semantic - entrypoint extraction":
         expect(report.total_items > 0).to_equal(true)
         expect(report.items_with_docs > 0).to_equal(true)
         expect(report.used_fallback).to_equal(true)
+
+describe "semantic - local cross-directory":
+    it "retains the first oversized sentinel but rejects later bucket members":
+        step("Verify: pin the 400/401 comparison boundary")
+        expect(semantic_bucket_accepts_member(400)).to_equal(true)
+        expect(semantic_bucket_accepts_member(401)).to_equal(false)
+
+    it "detects a semantic clone whose two copies live in different directories":
+        step("Verify: detects a semantic clone whose two copies live in different directories")
+        # Regression: local semantic mode used to bucket candidates by directory,
+        # so a doc/signature clone split across two dirs was never compared.
+        var config = default_config()
+        config.exclude_patterns = []
+        config.semantic_threshold = 0.60
+
+        val report = run_semantic_analysis_local("test/fixtures/duplicate_check/crossdir", config)
+
+        expect(report.matches.len()).to_be_greater_than(0)
+        val m = report.matches[0]
+        val cross_dir = m.entry_a.file_path != m.entry_b.file_path
+        expect(cross_dir).to_equal(true)
+
+    it "detects two documented semantic clones in one file":
+        step("Verify: detects two documented semantic clones in one file")
+        val path = "/tmp/simple_duplicate_same_file_semantic.spl"
+        val _ = rt_file_delete(path)
+        val source = "# Normalize ledger transaction records with canonical account currency timestamp identifier validation and stable audit ordering.\n" +
+            "fn normalize_ledger_record(source: text, account: text, currency: text, timestamp: i64) -> text:\n    source\n\n" +
+            "# Normalize ledger transaction records with canonical account currency timestamp identifier validation and stable audit ordering.\n" +
+            "fn canonicalize_ledger_record(source: text, account: text, currency: text, timestamp: i64) -> text:\n    source\n"
+        expect(rt_file_write_text(path, source)).to_equal(true)
+
+        var config = default_config()
+        config.exclude_patterns = []
+        config.semantic_threshold = 0.96
+        val report = run_semantic_analysis_local(path, config)
+        expect(rt_file_delete(path)).to_equal(true)
+
+        expect(report.matches.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        val found = report.matches[0]
+        expect(found.entry_a.file_path).to_equal(path)
+        expect(found.entry_b.file_path).to_equal(path)
+        val names_match = (found.entry_a.item_name == "normalize_ledger_record" and found.entry_b.item_name == "canonicalize_ledger_record") or
+            (found.entry_a.item_name == "canonicalize_ledger_record" and found.entry_b.item_name == "normalize_ledger_record")
+        expect(names_match).to_equal(true)
+
+    it "retains all three members of a processed signature bucket":
+        step("Verify: repeated nested-array appends preserve every pair")
+        val path = "/tmp/simple_duplicate_three_member_semantic.spl"
+        val _ = rt_file_delete(path)
+        val docs = "# Normalize ledger transaction records with canonical account currency timestamp identifier validation and stable audit ordering.\n"
+        val source = docs + "fn normalize_alpha(source: text) -> text:\n    source\n\n" +
+            docs + "fn normalize_beta(source: text) -> text:\n    source\n\n" +
+            docs + "fn normalize_gamma(source: text) -> text:\n    source\n"
+        expect(rt_file_write_text(path, source)).to_equal(true)
+        var config = default_config()
+        config.exclude_patterns = []
+        config.semantic_threshold = 0.96
+        val report = run_semantic_analysis_local(path, config)
+        expect(rt_file_delete(path)).to_equal(true)
+
+        expect(report.matches.len()).to_equal(3)
+        var alpha_beta = false
+        var alpha_gamma = false
+        var beta_gamma = false
+        for found in report.matches:
+            val a = found.entry_a.item_name
+            val b = found.entry_b.item_name
+            if (a == "normalize_alpha" and b == "normalize_beta") or (a == "normalize_beta" and b == "normalize_alpha"):
+                alpha_beta = true
+            if (a == "normalize_alpha" and b == "normalize_gamma") or (a == "normalize_gamma" and b == "normalize_alpha"):
+                alpha_gamma = true
+            if (a == "normalize_beta" and b == "normalize_gamma") or (a == "normalize_gamma" and b == "normalize_beta"):
+                beta_gamma = true
+        expect(alpha_beta).to_equal(true)
+        expect(alpha_gamma).to_equal(true)
+        expect(beta_gamma).to_equal(true)
 
 # ============================================================================
 # Formatter Tests

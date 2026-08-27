@@ -244,6 +244,7 @@ found=0
 scanned=0
 exempted=0
 skipped_deleted=0
+skipped_gitlink=0
 
 while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -252,6 +253,15 @@ while IFS= read -r line; do
     case "$status" in
         D*) skipped_deleted=$((skipped_deleted + 1)); continue ;;
     esac
+    # A submodule (gitlink, mode 160000) has no blob content in THIS repo, so
+    # `git show <tip>:<path>` fails with "bad object". That is not unreadable
+    # content: there is nothing here that could carry a conflict marker, and the
+    # submodule's own history is guarded inside its own repository. Skip it
+    # explicitly and COUNT it, so the skip is visible in the verdict.
+    if [ "$(git ls-tree -d --format='%(objectmode)' "$tip" -- "$path" 2>/dev/null)" = "160000" ]; then
+        skipped_gitlink=$((skipped_gitlink + 1))
+        continue
+    fi
     if is_allowlisted "$path"; then
         exempted=$((exempted + 1))
         continue
@@ -341,6 +351,8 @@ EOF
     echo "$SELF: FAIL — conflict markers found in $range ($scanned file(s) scanned$allow_note)"
     exit 1
 fi
+gitlink_note=""
+[ "$skipped_gitlink" -eq 0 ] || gitlink_note=" ($skipped_gitlink submodule gitlink(s) skipped: no blob content in this repo)"
 
-echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers$allow_note (repo $toplevel)"
+echo "$SELF: PASS — $scanned file(s) scanned at $tip across $ncommits commit(s) in $range, 0 conflict markers$allow_note$gitlink_note (repo $toplevel)"
 exit 0

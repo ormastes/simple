@@ -246,14 +246,14 @@ expect(llvm_medium_skipped.contains("backend_high_test_pass")).to_equal(true)
 
 </details>
 
-#### runs manifest pattern rules only for backend-applicable dynamic passes
+#### routes backend-applicable Remove metadata without deleting live definitions
 
 - ManifestPassContract
 - optimization backend policy only
 - [remove copy rule
    - Expected: manifest_result.? is true
    - Expected: registry_result.? is true
-   - Expected: cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `0`
+   - Expected: cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `1`
    - Expected: llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `1`
 
 
@@ -291,7 +291,7 @@ val manifest = manifest_result.unwrap()
 val cranelift_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "cranlift")
 val llvm_result = run_manifest_pattern_rules_for_backend(manifest_test_module(), registry, manifest, "llvm")
 
-expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
+expect(cranelift_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
 expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
 ```
 
@@ -305,7 +305,7 @@ expect(llvm_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_e
    - Expected: manifest_result.? is true
    - Expected: registry_result.? is true
    - Expected: llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `1`
-   - Expected: llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `0`
+   - Expected: llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `1`
    - Expected: cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len() equals `1`
 
 
@@ -346,7 +346,7 @@ val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_te
 val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
 
 expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
-expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
+expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
 expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
 ```
 
@@ -376,7 +376,7 @@ val llvm_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_te
 val cranelift_high_result = run_manifest_pattern_rules_for_backend_budget(manifest_test_module(), registry, manifest, "cranelift", "high")
 
 expect(llvm_medium_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
-expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(0)
+expect(llvm_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
 expect(cranelift_high_result.functions[SymbolId(id: 1)].blocks[0].instructions.len()).to_equal(1)
 ```
 

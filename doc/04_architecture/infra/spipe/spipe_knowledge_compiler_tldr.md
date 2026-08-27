@@ -44,6 +44,21 @@ runtime adapters.
 - MCP negotiates an explicit supported version, preserves legacy stdio, targets
   `2026-07-28`, exposes deterministic pagination, and never marks private or
   authorization-filtered content publicly cacheable.
+- URI/MCP views are blocked on Wave 5a `SnapshotAuthorityPortV1`: only its
+  opaque workspace/project/worktree/snapshot/revision-bound view can prove
+  manifest target-kind/UID membership before `ProjectionPortV1` renders. Raw
+  snapshot-store lookups, asserted targets, and duck-typed port substitutes
+  fail closed.
+- Target membership is anchored by a sealed, content-addressed inventory root.
+  Resolver order proves workspace/worktree + snapshot + canonical target before
+  receipt verification; an alias yields only a candidate and must itself pass
+  target proof. Workspace aggregates carry the complete canonical
+  `contributingProjectRoots` list in both seal layers, and worktree binding is
+  transitive through the verified manifest tuple.
+- The seal is two-level and non-cyclic: `TargetInventoryManifestV1` binds a
+  base snapshot UID, then `AuthorityManifestV1` binds that base UID plus the
+  inventory root. The sealed alias index is resolved through SnapshotAuthority,
+  never by an external path lookup.
 - Dependency-free JS is the normative lexical provider. Simple acceleration
   must match tokenization, fixed-point scores, ties, explanations, updates, and
   exhaustive top-k exactly; optional semantics only add candidates.

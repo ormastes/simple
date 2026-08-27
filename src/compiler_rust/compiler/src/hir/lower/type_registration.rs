@@ -110,6 +110,11 @@ impl Lowerer {
                 type_bindings: std::collections::HashMap::new(), // Will be filled during specialization
             },
         );
+        if let Some(canonical_key) = self.global_struct_key_for_name(&c.name) {
+            if canonical_key != c.name {
+                self.module.types.register_alias(canonical_key, type_id);
+            }
+        }
 
         // Build combined invariant: parent invariants + child invariants
         let mut hir_invariant = HirTypeInvariant::default();
@@ -200,6 +205,11 @@ impl Lowerer {
         };
 
         let type_id = self.register_named_struct_preserving_distinct_layout(s.name.clone(), hir_type);
+        if let Some(canonical_key) = self.global_struct_key_for_name(&s.name) {
+            if canonical_key != s.name {
+                self.module.types.register_alias(canonical_key, type_id);
+            }
+        }
 
         // Register struct invariant if present
         if let Some(ref invariant) = s.invariant {

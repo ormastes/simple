@@ -17,6 +17,7 @@ use compiler.interp.execution.tiered_jit.{
     jit_hotspot_rebuild_choice,
     jit_hotspot_optimization_plan,
     jit_hotspot_rebuild_backend_name,
+    jit_hotspot_backend_plugin_facts,
     jit_hotspot_cost_allowed,
     jit_var_optimization_facts,
     jit_var_optimization_facts_none,
@@ -203,12 +204,52 @@ fn hot_checksum_profile(call_count: i64) -> FunctionProfile:
         var_facts: jit_var_optimization_facts_none()
     )
 
+fn mixed_source_profile(typed_mir: bool, safe_deopt: bool) -> FunctionProfile:
+    FunctionProfile(
+        name: "mixed_source",
+        call_count: 256,
+        tier: JitTier.Interpreted,
+        compile_time_ms: 0.0,
+        source: "fn mixed_source(buf: [i64], i: i64) -> i64: while i < buf.len: return buf[i]",
+        typed_mir: typed_mir,
+        safe_deopt: safe_deopt,
+        hotspot_specialized_source: "",
+        hotspot_semantic_proof: false,
+        var_facts: jit_var_optimization_facts_none()
+    )
+
 fn hotspot_config() -> TieredJitConfig:
     TieredJitConfig(tier1_threshold: 8, tier2_threshold: 128, debug_mode: false)
 
 use std.spec.step
 
 describe "Tiered JIT hotspot facts":
+    it "keeps mixed shared predicates from implying stronger source facts":
+        step("Classify a loop with indexed access but no index advance")
+        val facts = jit_hotspot_backend_plugin_facts(
+            mixed_source_profile(true, true), hotspot_config(), "cranelift")
+
+        step("Preserve exact fact order and reject advance-dependent facts")
+        expect(facts).to_equal([
+            "profile.hot_count", "typed_mir", "safe_deopt",
+            "loop_preheader", "cranelift_backend_available"
+        ])
+        expect(facts.contains("loop_canonical")).to_equal(false)
+        expect(facts.contains("vectorization_candidate")).to_equal(false)
+        expect(facts.contains("range_facts")).to_equal(false)
+        expect(facts.contains("bounded_scan_terminates")).to_equal(false)
+
+    it "does not classify source predicates when the profile is ineligible":
+        step("Reject source classification without typed MIR")
+        val facts = jit_hotspot_backend_plugin_facts(
+            mixed_source_profile(false, true), hotspot_config(), "cranelift")
+
+        step("Keep profile/backend facts while emitting no source-derived fact")
+        expect(facts).to_equal([
+            "profile.hot_count", "safe_deopt", "cranelift_backend_available"
+        ])
+        expect(facts.contains("loop_preheader")).to_equal(false)
+
     it "does not emit profile.hot_count below threshold":
         step("Verify: does not emit profile.hot_count below threshold")
         # @req: REQ-COMPILER-INTERPRETER-001
@@ -425,8 +466,8 @@ describe "Tiered JIT hotspot facts":
         expect(plan.backend).to_equal("cranelift")
         expect(plan.max_cost_class).to_equal("medium")
         expect(plan.opt_level).to_equal("aggressive")
-        expect(plan.passes.contains("dead_code_elimination")).to_equal(true)
-        expect(plan.passes.contains("loop_unroll")).to_equal(true)
+        expect(plan.passes.contains("dead_code_elimination")).to_equal(false)
+        expect(plan.passes.contains("loop_unroll")).to_equal(false)
         expect(plan.passes.contains("inline_aggressive")).to_equal(false)
         expect(plan.passes.contains("auto_vectorize")).to_equal(false)
         expect(plan.plugin_recommendations.contains("early-dead-code-prune")).to_equal(true)
@@ -435,7 +476,7 @@ describe "Tiered JIT hotspot facts":
         expect(plan.plugin_recommendations.contains("llvm-entry-alloca-shaping")).to_equal(false)
         var found_cost_skip = false
         for decision in plan.skipped_passes:
-            if decision.pass_name == "inline_aggressive" and decision.reason == "cost budget exceeded":
+            if decision.pass_name == "inline_aggressive" and decision.reason == "pass status is Skeleton":
                 found_cost_skip = true
         expect(found_cost_skip).to_equal(true)
         var found_llvm_plugin_skip = false
@@ -454,7 +495,7 @@ describe "Tiered JIT hotspot facts":
         expect(plan.eligible).to_equal(true)
         expect(plan.backend).to_equal("llvm")
         expect(plan.cost_class).to_equal("high")
-        expect(plan.passes.contains("dead_code_elimination")).to_equal(true)
+        expect(plan.passes.contains("dead_code_elimination")).to_equal(false)
         expect(plan.passes.contains("inline_aggressive")).to_equal(false)
         expect(plan.passes.contains("auto_vectorize")).to_equal(false)
         expect(plan.passes.contains("strength_reduction")).to_equal(false)
@@ -466,7 +507,7 @@ describe "Tiered JIT hotspot facts":
         expect(plan.plugin_recommendations.contains("cranelift-local-licm")).to_equal(false)
         var found_llvm_skip = false
         for decision in plan.skipped_passes:
-            if decision.pass_name == "auto_vectorize" and decision.reason == "llvm_runs_vectorizer_pipeline":
+            if decision.pass_name == "predicate_promote" and decision.reason.contains("mask single-use"):
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
         var found_llvm_owned_plugin_skip = false
@@ -540,28 +581,18 @@ describe "Tiered JIT hotspot facts":
                 found_llvm_skip = true
         expect(found_llvm_skip).to_equal(true)
 
-    it "adds predicate promotion recommendations only for safe branch-select facts":
-        step("Verify: adds predicate promotion recommendations only for safe branch-select facts")
+    it "does not add quarantined predicate promotion recommendations":
+        step("Verify: hotspot facts cannot reactivate disabled predicate promotion")
         val cranelift = jit_hotspot_optimization_plan(hot_predicate_profile(256), hotspot_config(), true, true, "high")
         expect(cranelift.backend).to_equal("cranelift")
-        expect(cranelift.plugin_recommendations.contains("simple-predicate-promote")).to_equal(true)
+        expect(cranelift.plugin_recommendations.contains("simple-predicate-promote")).to_equal(false)
 
         val medium = jit_hotspot_optimization_plan(hot_predicate_profile(256), hotspot_config(), true, true, "medium")
         expect(medium.plugin_recommendations.contains("simple-predicate-promote")).to_equal(false)
-        var found_cost_skip = false
-        for decision in medium.skipped_plugin_recommendations:
-            if decision.stable_name == "simple-predicate-promote" and decision.reason == "cost budget exceeded":
-                found_cost_skip = true
-        expect(found_cost_skip).to_equal(true)
 
         val llvm = jit_hotspot_optimization_plan(hot_predicate_profile(256), hotspot_config(), true, true, "high")
         expect(llvm.backend).to_equal("llvm")
         expect(llvm.plugin_recommendations.contains("simple-predicate-promote")).to_equal(false)
-        var found_llvm_skip = false
-        for decision in llvm.skipped_plugin_recommendations:
-            if decision.stable_name == "simple-predicate-promote" and decision.reason == "llvm_runs_if_conversion_and_select_promotion":
-                found_llvm_skip = true
-        expect(found_llvm_skip).to_equal(true)
 
     it "adds vectorization recommendations only when indexed loop facts are alias-stable":
         step("Verify: adds vectorization recommendations only when indexed loop facts are alias-stable")

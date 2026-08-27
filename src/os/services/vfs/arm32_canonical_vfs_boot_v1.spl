@@ -1,0 +1,47 @@
+"""Canonical ARM32 filesystem boot over the shared VirtIO BlockDevice path."""
+
+use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_arm_init}
+use os.services.vfs.vfs_boot_state.{
+    vfs_state_reset_rootfs, vfs_state_mount, vfs_state_mark_rootfs_ready
+}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{MountOptions}
+use std.fs_driver.ops.{FsDriver}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    authenticated_fs_exec_user_install_canonical_vfs_owner_v1
+}
+
+pub fn arm32_canonical_vfs_boot_init_v1() -> bool:
+    """Mount one live device owner and publish authority in commit order.
+
+    No direct-sector or C marker probe can satisfy this function. The kernel
+    canonical MountTable consumes the initialized VirtIO BlockDevice exactly
+    once. Readiness and authenticated execution become visible only after the
+    final root mount succeeds.
+    """
+    if not vfs_state_reset_rootfs():
+        return false
+
+    var device = VirtioBlkDriver.arm_qemu_virt()
+    val initialized = virtio_blk_arm_init(device)
+    if not initialized.ok:
+        return false
+    device = initialized.driver
+
+    var driver = FsFat32Driver.new("arm32-virtio-fat32", device)
+    val driver_mount = driver.mount(MountOptions.default())
+    if driver_mount.is_err():
+        return false
+
+    val root_mount = vfs_state_mount(
+        "/", DriverInstance.Fat32(driver), MountOptions.default())
+    if root_mount.is_err():
+        return false
+
+    if not authenticated_fs_exec_user_install_canonical_vfs_owner_v1():
+        return false
+    # Readiness is the final publication: callers cannot observe a usable root
+    # while authenticated execution still lacks its matching owner epoch.
+    vfs_state_mark_rootfs_ready()
+    true

@@ -226,6 +226,13 @@ pub fn web_service_start(service: WebService) -> Result<(), HttpServerError>:
 pub fn web_service_begin_drain(service: WebService) -> Result<(), HttpServerError>:
     match service.server:
         Some(server):
+            # Drain requests can race or be repeated by shutdown coordinators.
+            # HttpServer.begin_drain() is deliberately idempotent; preserve
+            # that contract at the service boundary instead of attempting a
+            # second lifecycle transition, which would reject Draining ->
+            # Draining and unnecessarily cancel an otherwise healthy server.
+            if service.lifecycle.state == ServerLifecycleState.Draining:
+                return Ok(())
             val server_drain = server.begin_drain(server.generation())
             match server_drain:
                 Err(error): Err(error)

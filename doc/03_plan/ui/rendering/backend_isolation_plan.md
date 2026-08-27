@@ -1,5 +1,29 @@
 # Backend-Isolation Plan — App → Facade → Engine2D → Backend → `rt_*`
 
+## Required-gate inventory reconciliation (2026-08-26)
+
+Promotion of the UI backend-isolation ratchet to the required Repo Hygiene lane
+exposed an inventory drift of **50 new** and **183 stale** exact-path entries
+against the committed baseline. The scanner itself was reproducing its
+documented declaration-or-call rule: all 50 new entries contain code-level
+`extern fn rt_*` declarations or `rt_*(` calls after comment stripping.
+
+The reviewed classification is:
+
+- **15 restricted implementation owners** under SimpleOS architecture or
+  firmware entry/probe closures. Their runtime calls exercise hardware, QEMU
+  exit, target ABI, framebuffer, or firmware coordination and match the exact
+  owner exception established by the 2026-07-17 review.
+- **35 hosted app/check/test consumers**. These are genuine direct-runtime
+  migration debt (file, path, terminal, HTTP, pointer, timing, crypto, or test
+  probe calls), not false positives and not rendering-backend owners.
+
+The baseline was deterministically rebuilt as an exact sorted path inventory:
+183 non-reproducing entries were deleted, 274 reproducing entries were retained,
+and the 50 reviewed entries were added. The resulting ceiling is **324**, a net
+shrink of 133 from 457. No directory glob, symbol wildcard, or scanner exclusion
+was added; an unlisted future file remains a required-gate failure.
+
 ## Owner review update (2026-07-17)
 
 Nineteen newly detected `examples/09_embedded/simple_os/arch/**` entry and

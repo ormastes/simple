@@ -1,0 +1,111 @@
+"""Contract coverage for the unwired provider cleanup attempt fence."""
+
+use std.spec.*
+use os.kernel.scheduler.provider_cleanup_attempt_fence_v1.*
+
+describe "provider cleanup attempt fence v1":
+    it "makes exact completion idempotent and rejects conflicting completion":
+        val provider = provider_cleanup_register_v1("cleanup-fence-complete").unwrap()
+        val attempt = provider_cleanup_issue_attempt_v1(
+            provider, 7101u64, 11u64, 8101u64, 1u64).unwrap()
+        val permit = provider_cleanup_start_side_effect_v1(
+            provider, attempt).unwrap()
+        expect(provider_cleanup_start_side_effect_v1(
+            provider, attempt).is_err()).to_be(true)
+        expect(permit.target.task_id).to_equal(7101u64)
+        expect(permit.target.lifecycle_generation).to_equal(11u64)
+        expect(permit.target.transaction_id).to_equal(8101u64)
+        expect(permit.target.transaction_generation).to_equal(1u64)
+        val first = provider_cleanup_complete_v1(
+            provider, permit, 0, "done:7101:11:8101:1").unwrap()
+        val repeated = provider_cleanup_complete_v1(
+            provider, permit, 0, "done:7101:11:8101:1").unwrap()
+        expect(repeated.outcome_code).to_equal(first.outcome_code)
+        expect(repeated.evidence_digest).to_equal(first.evidence_digest)
+        expect(provider_cleanup_complete_v1(
+            provider, permit, -1, "different").is_err()).to_be(true)
+        expect(provider_cleanup_finish_v1(provider, first).unwrap()).to_be(true)
+
+    it "requires provider quiescence acknowledgment before retry":
+        val provider = provider_cleanup_register_v1("cleanup-fence-retry").unwrap()
+        val attempt = provider_cleanup_issue_attempt_v1(
+            provider, 7102u64, 12u64, 8102u64, 2u64).unwrap()
+        val permit = provider_cleanup_start_side_effect_v1(
+            provider, attempt).unwrap()
+        val request = provider_cleanup_request_cancel_v1(attempt).unwrap()
+        expect(provider_cleanup_start_side_effect_v1(
+            provider, attempt).is_err()).to_be(true)
+        val ack = provider_cleanup_ack_cancelled_v1(
+            provider, request, "quiescent:7102:12:8102:2:1").unwrap()
+        val retry = provider_cleanup_retry_after_cancel_v1(
+            provider, ack).unwrap()
+        expect(provider_cleanup_complete_v1(
+            provider, permit, 0, "late-old-completion").is_err()).to_be(true)
+        val retry_permit = provider_cleanup_start_side_effect_v1(
+            provider, retry).unwrap()
+        val receipt = provider_cleanup_complete_v1(
+            provider, retry_permit, 0, "done-after-quiescence").unwrap()
+        expect(provider_cleanup_finish_v1(provider, receipt).unwrap()).to_be(true)
+
+    it "rejects a copied permit whose non-authorizing target was modified":
+        val provider = provider_cleanup_register_v1("cleanup-fence-target-copy").unwrap()
+        val attempt = provider_cleanup_issue_attempt_v1(
+            provider, 7112u64, 112u64, 8112u64, 12u64).unwrap()
+        val permit = provider_cleanup_start_side_effect_v1(provider, attempt).unwrap()
+        var altered = permit
+        altered.target = ProviderCleanupTargetViewV1(
+            task_id: 9999u64,
+            lifecycle_generation: permit.target.lifecycle_generation,
+            transaction_id: permit.target.transaction_id,
+            transaction_generation: permit.target.transaction_generation,
+            attempt_ordinal: permit.target.attempt_ordinal)
+        expect(provider_cleanup_complete_v1(
+            provider, altered, 0, "forged-target").is_err()).to_be(true)
+        val receipt = provider_cleanup_complete_v1(
+            provider, permit, 0, "canonical-target").unwrap()
+        expect(provider_cleanup_finish_v1(provider, receipt).unwrap()).to_be(true)
+
+    it "lets completion win a cancellation race without dispatching retry":
+        val provider = provider_cleanup_register_v1("cleanup-fence-race").unwrap()
+        val attempt = provider_cleanup_issue_attempt_v1(
+            provider, 7103u64, 13u64, 8103u64, 3u64).unwrap()
+        val permit = provider_cleanup_start_side_effect_v1(
+            provider, attempt).unwrap()
+        val request = provider_cleanup_request_cancel_v1(attempt).unwrap()
+        val receipt = provider_cleanup_complete_v1(
+            provider, permit, 0, "completion-won-cancel-race").unwrap()
+        expect(provider_cleanup_ack_cancelled_v1(
+            provider, request, "too-late-quiescence").is_err()).to_be(true)
+        expect(provider_cleanup_finish_v1(provider, receipt).unwrap()).to_be(true)
+
+    it "rejects cross-provider completion and cancellation acknowledgment":
+        val owner = provider_cleanup_register_v1("cleanup-fence-owner").unwrap()
+        val foreign = provider_cleanup_register_v1("cleanup-fence-foreign").unwrap()
+        val attempt = provider_cleanup_issue_attempt_v1(
+            owner, 7104u64, 14u64, 8104u64, 4u64).unwrap()
+        expect(provider_cleanup_start_side_effect_v1(
+            foreign, attempt).is_err()).to_be(true)
+        val permit = provider_cleanup_start_side_effect_v1(owner, attempt).unwrap()
+        val request = provider_cleanup_request_cancel_v1(attempt).unwrap()
+        expect(provider_cleanup_ack_cancelled_v1(
+            foreign, request, "foreign-proof").is_err()).to_be(true)
+        val receipt = provider_cleanup_complete_v1(
+            owner, permit, 0, "owner-completed").unwrap()
+        expect(provider_cleanup_finish_v1(owner, receipt).unwrap()).to_be(true)
+
+    it "rejects duplicate live transaction identity and fork inheritance":
+        val provider = provider_cleanup_register_v1("cleanup-fence-identity").unwrap()
+        val attempt = provider_cleanup_issue_attempt_v1(
+            provider, 7105u64, 15u64, 8105u64, 5u64).unwrap()
+        expect(provider_cleanup_issue_attempt_v1(
+            provider, 9999u64, 99u64, 8105u64, 5u64).is_err()).to_be(true)
+        expect(provider_cleanup_attempt_survives_fork_v1()).to_be(false)
+        val request = provider_cleanup_request_cancel_v1(attempt).unwrap()
+        val ack = provider_cleanup_ack_cancelled_v1(
+            provider, request, "never-started-is-quiescent").unwrap()
+        val retry = provider_cleanup_retry_after_cancel_v1(provider, ack).unwrap()
+        val retry_request = provider_cleanup_request_cancel_v1(retry).unwrap()
+        val retry_ack = provider_cleanup_ack_cancelled_v1(
+            provider, retry_request, "retry-never-started-is-quiescent").unwrap()
+        expect(provider_cleanup_finish_cancelled_v1(
+            provider, retry_ack).unwrap()).to_be(true)

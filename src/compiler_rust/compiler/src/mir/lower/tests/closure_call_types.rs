@@ -78,9 +78,8 @@ fn a_call_site_that_disagrees_with_the_lambda_is_poisoned_to_any() {
 /// the caller's own argument type, which is what the call site really passes.)
 #[test]
 fn conflicting_closures_in_one_local_propagate_nothing() {
-    let types = indirect_call_types(
-        "fn test() -> i64:\n    var f = \\x: x * 10\n    f = \\x: x > 1\n    return f(32)\n",
-    );
+    let types =
+        indirect_call_types("fn test() -> i64:\n    var f = \\x: x * 10\n    f = \\x: x > 1\n    return f(32)\n");
     assert_eq!(types, vec![(vec![TypeId::I64], TypeId::ANY)]);
 }
 

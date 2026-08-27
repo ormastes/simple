@@ -192,14 +192,9 @@ mod tests {
     #[test]
     fn interpreter_has_no_stable_base_and_says_so() {
         let arr = bytes(4096);
-        let base = rt_packed_span_v1_resolve_base_fn(&[
-            arr,
-            Value::Int(0),
-            Value::Int(4096),
-            Value::Int(1024),
-            Value::Int(4),
-        ])
-        .unwrap();
+        let base =
+            rt_packed_span_v1_resolve_base_fn(&[arr, Value::Int(0), Value::Int(4096), Value::Int(1024), Value::Int(4)])
+                .unwrap();
         assert_eq!(base.as_int().unwrap(), 0);
         // -7 NO_BASE, not a silent zero and not a fabricated pointer.
         assert_eq!(rt_packed_span_v1_last_verdict_fn(&[]).unwrap().as_int().unwrap(), -7);
@@ -209,26 +204,16 @@ mod tests {
     fn structural_refusals_are_adjudicated_by_c() {
         // count * stride != byte_length -> -4
         let arr = bytes(4096);
-        let _ = rt_packed_span_v1_resolve_base_fn(&[
-            arr,
-            Value::Int(0),
-            Value::Int(4096),
-            Value::Int(1000),
-            Value::Int(4),
-        ])
-        .unwrap();
+        let _ =
+            rt_packed_span_v1_resolve_base_fn(&[arr, Value::Int(0), Value::Int(4096), Value::Int(1000), Value::Int(4)])
+                .unwrap();
         assert_eq!(rt_packed_span_v1_last_verdict_fn(&[]).unwrap().as_int().unwrap(), -4);
 
         // one byte past the end -> -3
         let arr = bytes(4096);
-        let _ = rt_packed_span_v1_resolve_base_fn(&[
-            arr,
-            Value::Int(1),
-            Value::Int(4096),
-            Value::Int(1024),
-            Value::Int(4),
-        ])
-        .unwrap();
+        let _ =
+            rt_packed_span_v1_resolve_base_fn(&[arr, Value::Int(1), Value::Int(4096), Value::Int(1024), Value::Int(4)])
+                .unwrap();
         assert_eq!(rt_packed_span_v1_last_verdict_fn(&[]).unwrap().as_int().unwrap(), -3);
 
         // not an array at all -> -6 WRONG_BASIS
@@ -247,14 +232,8 @@ mod tests {
     fn every_refusal_is_counted() {
         let before = rt_packed_span_v1_rejected_count_fn(&[]).unwrap().as_int().unwrap();
         let arr = bytes(64);
-        let _ = rt_packed_span_v1_resolve_base_fn(&[
-            arr,
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(0),
-            Value::Int(4),
-        ])
-        .unwrap();
+        let _ = rt_packed_span_v1_resolve_base_fn(&[arr, Value::Int(0), Value::Int(0), Value::Int(0), Value::Int(4)])
+            .unwrap();
         let after = rt_packed_span_v1_rejected_count_fn(&[]).unwrap().as_int().unwrap();
         assert_eq!(after - before, 1);
         assert_eq!(rt_packed_span_v1_last_verdict_fn(&[]).unwrap().as_int().unwrap(), -5);

@@ -92,13 +92,27 @@ fn is_numbered_placeholder(name: text) -> bool:
         return false
     if name[0:1] != "_":
         return false
+    # Numbered placeholders are one-indexed. Besides making `_0` an invalid
+    # placeholder, spell the digit test with equality rather than text ordering:
+    # the admitted Stage-2 self-host has misclassified ordinary underscore
+    # identifiers such as `_pp` through the `<`/`>` text path, after which
+    # parse_placeholder_number returns 0 and lowering fabricates `__p-1`.
+    val first = name[1:2]
+    if first == "0":
+        return false
     var i = 1
     while i < name.len():
         val ch = name[i:i + 1]
-        if (ch < "0" or ch > "9"):
+        val is_digit = (ch == "0" or ch == "1" or ch == "2" or ch == "3" or
+            ch == "4" or ch == "5" or ch == "6" or ch == "7" or
+            ch == "8" or ch == "9")
+        if not is_digit:
             return false
         i = i + 1
     true
+
+fn placeholder_ident_name(name: text) -> bool:
+    name == "_" or is_numbered_placeholder(name)
 
 fn parse_placeholder_number(name: text) -> i64:
     """Extract N from `_N` identifier. Returns -1 if not a numbered placeholder."""
@@ -108,28 +122,8 @@ fn parse_placeholder_number(name: text) -> i64:
     var result = 0
     var i = 0
     while i < num_text.len():
-        val ch = num_text[i:i + 1]
-        val digit = ch[0:1]
-        if digit == "0":
-            result = result * 10
-        elif digit == "1":
-            result = result * 10 + 1
-        elif digit == "2":
-            result = result * 10 + 2
-        elif digit == "3":
-            result = result * 10 + 3
-        elif digit == "4":
-            result = result * 10 + 4
-        elif digit == "5":
-            result = result * 10 + 5
-        elif digit == "6":
-            result = result * 10 + 6
-        elif digit == "7":
-            result = result * 10 + 7
-        elif digit == "8":
-            result = result * 10 + 8
-        elif digit == "9":
-            result = result * 10 + 9
+        val code = num_text[i:i + 1].ord()
+        result = result * 10 + (code - 48)
         i = i + 1
     result
 
@@ -363,7 +357,7 @@ fn module_has_placeholder_ident(limit: i64) -> bool:
     while i < n:
         if expr_tag[i] == EXPR_IDENT:
             val name = expr_s_val[i]
-            if name == "_" or is_numbered_placeholder(name):
+            if placeholder_ident_name(name):
                 return true
         i = i + 1
     false
@@ -382,6 +376,17 @@ fn transform_placeholder_call_args_after_interpolation():
     # PERF: exact no-op precondition. See module_has_placeholder_ident above.
     if not module_has_placeholder_ident(initial_expr_count):
         return
+    transform_placeholder_call_args_after_interpolation_known_present()
+
+fn transform_placeholder_call_args_after_interpolation_known_present():
+    """Run the transform when a preceding arena walk already proved at least
+    one placeholder identifier exists. This avoids immediately rescanning the
+    entire expression arena solely to rediscover the same boolean.
+    """
+    # Snapshot from this module's authoritative arena owner. A caller-facing
+    # expr_count() can be a re-export/private copy under staged self-hosting and
+    # is not a safe bound for indexing this module's expr_tag arrays.
+    val initial_expr_count = expr_tag.len()
     # Build the marks array in a LOCAL and assign the module-global ONCE. Under
     # the Rust-seed interpreter, `.push()` on a module-global array lands in a
     # per-call copy while `.len()` in a while condition (and later indexed
@@ -575,6 +580,8 @@ fn replace_placeholders(eid: i64) -> i64:
             if is_numbered_placeholder(name):
                 val num = parse_placeholder_number(name)
                 # _1 → __p0 (1-indexed to 0-indexed)
+                if num <= 0:
+                    return eid
                 val param_idx = num - 1
                 return placeholder_retain_span(eid, expr_ident("__p{param_idx}", 0))
         return eid
@@ -738,6 +745,8 @@ fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
         if _ph_has_numbered and not _ph_has_unnumbered:
             if is_numbered_placeholder(name):
                 val num = parse_placeholder_number(name)
+                if num <= 0:
+                    return eid
                 val param_idx = num - 1
                 return placeholder_retain_span(eid, expr_ident("__p{param_idx}", 0))
         return eid

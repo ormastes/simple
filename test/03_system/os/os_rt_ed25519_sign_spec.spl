@@ -156,9 +156,9 @@ describe "os_rt_ed25519_sign: round-trip sign -> verify":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         val msg    = _msg_hello()
-        val sig    = ed25519_sign_pkcs8(pkcs8, msg)
+        val sig    = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
         expect(sig.len()).to_equal(64)  # oracle: value fixed by the spec contract
-        val ok = ed25519_verify_native(pubkey, msg, sig)
+        val ok = ed25519_verify_native(pubkey, msg, sig).unwrap()
         expect(ok).to_equal(true)
 
     it "ed25519_sign round-trips for empty message":
@@ -167,9 +167,9 @@ describe "os_rt_ed25519_sign: round-trip sign -> verify":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         var msg: [u8] = []
-        val sig = ed25519_sign_pkcs8(pkcs8, msg)
+        val sig = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
         expect(sig.len()).to_equal(64)  # oracle: value fixed by the spec contract
-        val ok = ed25519_verify_native(pubkey, msg, sig)
+        val ok = ed25519_verify_native(pubkey, msg, sig).unwrap()
         expect(ok).to_equal(true)
 
 
@@ -187,8 +187,8 @@ describe "os_rt_ed25519_sign: determinism (RFC 8032)":
         # @req: REQ-OS-OsRtEd25Sign-001
         val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
         val msg   = _msg_hello()
-        val sig1  = ed25519_sign_pkcs8(pkcs8, msg)
-        val sig2  = ed25519_sign_pkcs8(pkcs8, msg)
+        val sig1  = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
+        val sig2  = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
         expect(sig1.len()).to_equal(64)  # oracle: value fixed by the spec contract
         expect(sig2.len()).to_equal(64)  # oracle: value fixed by the spec contract
         expect(_bytes_eq(sig1, sig2)).to_equal(true)
@@ -198,25 +198,23 @@ describe "os_rt_ed25519_sign: malformed input contract":
     """
     ## Malformed Input
 
-    ed25519_sign_pkcs8 must return an empty [u8] (not panic) on any error:
-    bad PKCS#8 DER, wrong key type, etc.
+    ed25519_sign_pkcs8 must return a typed error (not panic) for bad PKCS#8
+    DER, wrong key type, and related malformed input.
     """
 
-    it "ed25519_sign_pkcs8 returns empty [u8] on malformed pkcs8":
-        step("Verify: ed25519_sign_pkcs8 returns empty [u8] on malformed pkcs8")
+    it "ed25519_sign_pkcs8 returns error on malformed pkcs8":
+        step("Verify: ed25519_sign_pkcs8 returns error on malformed pkcs8")
         # @req: REQ-OS-OsRtEd25Sign-001
         val bad_pkcs8 = hex_to_bytes(BAD_PKCS8_HEX)
         val msg       = _msg_hello()
-        val bad_sig   = ed25519_sign_pkcs8(bad_pkcs8, msg)
-        expect(bad_sig.len()).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(ed25519_sign_pkcs8(bad_pkcs8, msg).is_err()).to_equal(true)
 
-    it "ed25519_sign_pkcs8 returns empty [u8] on junk raw bytes":
-        step("Verify: ed25519_sign_pkcs8 returns empty [u8] on junk raw bytes")
+    it "ed25519_sign_pkcs8 returns error on junk raw bytes":
+        step("Verify: ed25519_sign_pkcs8 returns error on junk raw bytes")
         # @req: REQ-OS-OsRtEd25Sign-001
         val junk: [u8] = [0x30u8, 0x01, 0x00]
         val msg = _msg_hello()
-        val bad_sig = ed25519_sign_pkcs8(junk, msg)
-        expect(bad_sig.len()).to_equal(0)  # oracle: value fixed by the spec contract
+        expect(ed25519_sign_pkcs8(junk, msg).is_err()).to_equal(true)
 
 
 describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
@@ -233,7 +231,7 @@ describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         val msg    = _msg_hello()
-        val sig    = ed25519_sign_pkcs8(pkcs8, msg)
+        val sig    = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
         expect(sig.len()).to_equal(64)  # oracle: value fixed by the spec contract
         # Build corrupted signature: flip first byte
         var bad_sig: [u8] = []
@@ -242,7 +240,7 @@ describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
         while i < sig.len():
             bad_sig.push(sig[i])
             i = i + 1
-        val ok = ed25519_verify_native(pubkey, msg, bad_sig)
+        val ok = ed25519_verify_native(pubkey, msg, bad_sig).unwrap()
         expect(ok).to_equal(false)
 
     it "ed25519_verify_native rejects signature with one-byte flip (last byte)":
@@ -251,7 +249,7 @@ describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
         val pkcs8  = hex_to_bytes(ED25519_PKCS8_HEX)
         val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
         val msg    = _msg_hello()
-        val sig    = ed25519_sign_pkcs8(pkcs8, msg)
+        val sig    = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
         expect(sig.len()).to_equal(64)  # oracle: value fixed by the spec contract
         # Build corrupted signature: flip last byte
         var bad_sig: [u8] = []
@@ -260,7 +258,7 @@ describe "os_rt_ed25519_sign: signature integrity (one-bit flip)":
             bad_sig.push(sig[i])
             i = i + 1
         bad_sig.push(sig[63] ^ 0x01)
-        val ok = ed25519_verify_native(pubkey, msg, bad_sig)
+        val ok = ed25519_verify_native(pubkey, msg, bad_sig).unwrap()
         expect(ok).to_equal(false)
 
 
@@ -280,15 +278,15 @@ describe "os_rt_ed25519_sign: openssl cross-check":
             val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
             val pubkey = hex_to_bytes(ED25519_PUBKEY_HEX)
             val msg   = _msg_hello()
-            val sig   = ed25519_sign_pkcs8(pkcs8, msg)
+            val sig   = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
             expect(sig.len()).to_equal(64)  # oracle: value fixed by the spec contract
-            val ok = ed25519_verify_native(pubkey, msg, sig)
+            val ok = ed25519_verify_native(pubkey, msg, sig).unwrap()
             expect(ok).to_equal(true)
         else:
             val pkcs8 = hex_to_bytes(ED25519_PKCS8_HEX)
             val spki  = hex_to_bytes(ED25519_SPKI_HEX)
             val msg   = _msg_hello()
-            val sig   = ed25519_sign_pkcs8(pkcs8, msg)
+            val sig   = ed25519_sign_pkcs8(pkcs8, msg).unwrap()
             expect(sig.len()).to_equal(64)  # oracle: value fixed by the spec contract
             val ok = _openssl_ed25519_verify(spki, msg, sig)
             expect(ok).to_equal(true)

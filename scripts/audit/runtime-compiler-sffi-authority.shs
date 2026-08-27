@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/70.backend/backend/runtime_compiler.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+interpreter="$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+interpreter_calls="$root/src/compiler/70.backend/backend/interpreter_calls.spl"
+runtime_header="$root/src/runtime/runtime.h"
+runtime_c="$root/src/runtime/runtime.c"
+runtime_native_c="$root/src/runtime/runtime_native.c"
+
+for suffix in file_exists path_absolute file_delete process_run env_get getpid; do
+    raw="rt_$suffix"
+    owner="_sffi_$suffix"
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^fn ${owner}\\(" "$module")" -eq 1 ]
+    grep -q "insert_simple!(\"$raw\"" "$interpreter"
+done
+
+for raw in rt_file_exists rt_path_absolute rt_file_delete rt_process_run rt_env_get rt_getpid; do
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+done
+grep -q 'RuntimeFuncSpec::new("rt_file_delete", &\[I64, I64\], &\[I8\])' "$registry"
+grep -q '^int[[:space:]]*rt_file_delete(const uint8_t\* path_ptr, uint64_t path_len);$' "$runtime_header"
+grep -q '^int rt_file_delete(const uint8_t\* path_ptr, uint64_t path_len) {$' "$runtime_c"
+grep -q '^int rt_file_delete(const uint8_t\* path_ptr, uint64_t path_len) {$' "$runtime_native_c"
+sed -n '/^int rt_file_remove(/,/^}/p' "$runtime_native_c" | grep -q 'return rt_file_delete(path_ptr, path_len);'
+! sed -n '/^int rt_file_remove(/,/^}/p' "$runtime_native_c" | grep -qE 'malloc|free'
+grep -q '^@unsafe(reason: "raw borrowed filesystem path pointer/length delete ABI", capabilities: \[ffi\])$' "$interpreter_calls"
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$interpreter_calls")" -ge 1 ]
+
+grep -q '^extern fn rt_path_absolute(path: text) -> text?$' "$module"
+grep -q '^extern fn rt_env_get(key: text) -> text?$' "$module"
+[ "$(grep -c '^@unsafe(' "$module")" -eq 6 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 6 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 6 ]
+
+for expected in file_exists:9 path_absolute:5 file_delete:2 process_run:2 \
+    env_get:17 getpid:2; do
+    suffix=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "_sffi_${suffix}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+! grep -q '!= nil' "$module"
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+# One existence probe and at most one compiler execution remain in the
+# per-source loop; authority ownership must not multiply either operation.
+[ "$(sed -n '/^    for name in sources:/,/^        object_count = object_count + 1/p' "$module" | grep -c '_sffi_file_exists(src_path)')" -eq 1 ]
+[ "$(grep -c '_sffi_process_run(cc, comp_args)' "$module")" -eq 1 ]
+
+echo "runtime compiler SFFI authority audit: PASS (6 raw ABIs confined; nullable values decoded before use; compile loop call counts unchanged; delete has typed native and interpreter closure)"

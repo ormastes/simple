@@ -311,6 +311,8 @@ pub use sync::{
     rt_semaphore_try_acquire,
 };
 
+pub use sffi::sync::rt_spin_loop_hint;
+
 // Re-export synchronization types
 pub use sync::{RuntimeAtomic, RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
 
@@ -388,7 +390,7 @@ pub use cli_sffi::{
     rt_cli_print_version, rt_cli_read_file, rt_cli_run_check, rt_cli_run_code, rt_cli_run_sffi_gen, rt_cli_run_file,
     rt_cli_run_fix, rt_cli_run_fmt, rt_cli_run_gen_lean, rt_cli_run_lex, rt_cli_run_lint, rt_cli_run_migrate,
     rt_cli_run_query, rt_cli_run_repl, rt_cli_run_tests, rt_cli_run_tests_process_args, rt_cli_run_verify,
-    rt_cli_version, rt_cli_watch_file, rt_compile_to_llvm_ir, rt_compile_to_native,
+    rt_cli_version, rt_cli_watch_file, rt_compile_to_native,
     rt_compile_to_native_with_opt, rt_exec, rt_exec_output,
 };
 
@@ -396,10 +398,12 @@ pub use cli_sffi::{
 #[cfg(any(unix, windows))]
 pub use wsffi_native::{
     rt_host_dynlib_close, rt_host_dynlib_open, rt_host_dynlib_symbol, spl_dlclose, spl_dlopen,
-    spl_dlsym, spl_fonts_call_init_blob, spl_fonts_call_init_path, spl_fonts_call_layout_text,
-    spl_wffi_call_f64, spl_wffi_call_f64_checked, spl_wffi_call_i64, spl_wffi_call_i64_checked,
+    spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlsym_process_checked,
+    spl_fonts_call_init_blob, spl_fonts_call_init_path, spl_fonts_call_layout_text,
+    spl_wffi_call_bool0_checked, spl_wffi_call_bool1_checked, spl_wffi_call_f64,
+    spl_wffi_call_f64_checked, spl_wffi_call_i64, spl_wffi_call_i64_checked,
     spl_wffi_call_i64_with_bytes,
-    spl_wffi_call_i64_with_bytes_checked, spl_wffi_try_call_i64,
+    spl_wffi_call_i64_with_bytes_checked, spl_wffi_try_call_i64, spl_wffi_try_call_i64_out,
 };
 
 // Re-export file I/O SFFI functions
@@ -492,8 +496,9 @@ pub use sffi::{
 
 // Re-export atomic operations SFFI functions
 pub use sffi::{
-    rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new, rt_atomic_bool_store, rt_atomic_bool_swap,
-    rt_atomic_flag_clear, rt_atomic_flag_free, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
+    rt_atomic_bool_compare_exchange, rt_atomic_bool_free, rt_atomic_bool_load, rt_atomic_bool_new,
+    rt_atomic_bool_store, rt_atomic_bool_swap, rt_atomic_flag_clear, rt_atomic_flag_free,
+    rt_atomic_flag_load, rt_atomic_flag_new, rt_atomic_flag_test_and_set,
     rt_atomic_int_compare_exchange, rt_atomic_int_fetch_add, rt_atomic_int_fetch_and, rt_atomic_int_fetch_or,
     rt_atomic_int_fetch_sub, rt_atomic_int_fetch_xor, rt_atomic_int_free, rt_atomic_int_load, rt_atomic_int_new,
     rt_atomic_int_store, rt_atomic_int_swap,
@@ -890,47 +895,6 @@ pub use net::{
     rt_io_tcp_write,
     rt_io_tcp_write_text,
     rt_io_tcp_write_text_read_exact_len,
-    rt_tls_client_close,
-    rt_tls_client_config_add_root_cert,
-    rt_tls_client_config_enable_sni,
-    rt_tls_client_config_free,
-    rt_tls_client_config_new,
-    rt_tls_client_config_set_alpn,
-    rt_tls_client_config_set_verify_mode,
-    rt_tls_client_connect,
-    rt_tls_client_connect_with_sni,
-    rt_tls_client_connect_address_with_sni_timeout,
-    rt_tls_client_read,
-    rt_tls_client_write,
-    rt_tls_client_read_timeout,
-    rt_tls_client_write_timeout,
-    rt_tls_free_cert,
-    rt_tls_generate_self_signed_cert,
-    rt_tls_get_cert_expiry,
-    rt_tls_get_cert_issuer,
-    rt_tls_get_cert_subject,
-    rt_tls_get_cipher_suite,
-    rt_tls_get_negotiated_alpn,
-    rt_tls_get_peer_cert,
-    rt_tls_get_protocol_version,
-    rt_tls_hash_cert,
-    rt_tls_is_handshake_complete,
-    rt_tls_load_cert,
-    rt_tls_load_key,
-    rt_tls_server_accept,
-    rt_tls_server_close_connection,
-    rt_tls_server_config_free,
-    rt_tls_server_config_new,
-    rt_tls_server_config_require_client_cert,
-    rt_tls_server_config_set_alpn,
-    rt_tls_server_create,
-    rt_tls_server_create_on,
-    rt_tls_server_create_from_der,
-    rt_tls_server_read,
-    rt_tls_server_shutdown,
-    rt_tls_server_write,
-    rt_tls_server_write_bytes,
-    rt_tls_verify_cert,
     // UDP functions
     native_udp_bind,
     native_udp_close,
@@ -954,8 +918,34 @@ pub use net::{
     native_udp_set_read_timeout,
     native_udp_set_ttl,
     native_udp_set_write_timeout,
+    rt_io_udp_bind,
+    rt_io_udp_close,
+    rt_io_udp_connect,
+    rt_io_udp_join_multicast,
+    rt_io_udp_leave_multicast,
+    rt_io_udp_local_addr,
+    rt_io_udp_recv,
+    rt_io_udp_recv_from,
+    rt_io_udp_send,
+    rt_io_udp_send_to,
+    rt_io_udp_set_broadcast,
+    rt_io_udp_set_multicast_loop,
+    rt_io_udp_set_nonblocking,
+    rt_io_udp_set_read_timeout,
     // Error types
     NetError,
+};
+
+#[cfg(feature = "runtime-tls")]
+pub use net::{
+    rt_tls_client_close, rt_tls_client_connect,
+    rt_tls_client_connect_address_with_sni_timeout, rt_tls_client_connect_with_sni,
+    rt_tls_client_read_checked, rt_tls_client_read_timeout_checked, rt_tls_client_write,
+    rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
+    rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept,
+    rt_tls_server_close_connection, rt_tls_server_create, rt_tls_server_create_from_der,
+    rt_tls_server_create_on, rt_tls_server_read_checked, rt_tls_server_shutdown,
+    rt_tls_server_write, rt_tls_server_write_bytes,
 };
 
 // Re-export file I/O SFFI functions - Mold-inspired optimizations
@@ -1097,6 +1087,7 @@ pub use hpcollections::btreeset::clear_btreeset_registry;
 pub use sffi::clear_regex_cache;
 pub use sffi::sync::clear_sync_registries;
 pub use sffi::atomic::clear_atomic_registries;
+pub use sffi::atomic::{rt_atomic_bool_fetch_and, rt_atomic_bool_fetch_not, rt_atomic_bool_fetch_or};
 pub use sffi::hash::clear_hash_registries;
 pub use sffi::concurrent::clear_concurrent_registries;
 pub use net::clear_socket_registry;

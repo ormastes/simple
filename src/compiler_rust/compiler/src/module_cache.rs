@@ -50,12 +50,12 @@ fn rss_kb() -> u64 {
 /// Print a one-line breakdown of every never-evicted loader cache.
 pub fn report_cache_sizes(tag: &str) {
     let exports = MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
-    let (cls_m, cls_e) = MODULE_CLASSES_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
-    let (fn_m, fn_e) = MODULE_FUNCTIONS_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
-    let (en_m, en_e) = MODULE_ENUMS_CACHE
-        .with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (cls_m, cls_e) =
+        MODULE_CLASSES_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (fn_m, fn_e) =
+        MODULE_FUNCTIONS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
+    let (en_m, en_e) =
+        MODULE_ENUMS_CACHE.with(|c| (c.borrow().len(), c.borrow().values().map(|m| m.len()).sum::<usize>()));
     let partial = PARTIAL_MODULE_EXPORTS_CACHE.with(|c| c.borrow().len());
     let (env_m, env_e) =
         MODULE_ENV_BY_OWNER.with(|c| (c.borrow().len(), c.borrow().values().map(|e| e.len()).sum::<usize>()));
@@ -98,6 +98,26 @@ thread_local! {
     static FILTERED_DICT_CACHE: RefCell<HashMap<usize, (Arc<HashMap<String, Value>>, Arc<HashMap<String, Value>>)>> =
         RefCell::new(HashMap::new());
     static LOADER_STATS: RefCell<LoaderStats> = RefCell::new(LoaderStats::default());
+    static PROBE_SOURCE_CACHE: RefCell<HashMap<PathBuf, Option<Arc<String>>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub fn probe_source_cached(path: &Path, max_check_bytes: u64) -> Option<Arc<String>> {
+    if let Some(hit) = PROBE_SOURCE_CACHE.with(|cache| cache.borrow().get(path).cloned()) {
+        crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_HITS, 1);
+        return hit;
+    }
+    crate::perf_counters::bump(&crate::perf_counters::PROBE_SOURCE_READS, 1);
+    let value = match std::fs::metadata(path) {
+        Ok(meta) if meta.len() > max_check_bytes => None,
+        _ => crate::read_trace::rts(file!(), line!(), path).ok().map(Arc::new),
+    };
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(path.to_path_buf(), value.clone()));
+    value
+}
+
+pub fn clear_probe_source_cache() {
+    PROBE_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 /// Maximum depth for recursive module loading to prevent infinite loops
@@ -145,6 +165,7 @@ pub fn clear_module_cache() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
+    clear_probe_source_cache();
     // Print loader summary before clearing (if SIMPLE_LOADER_TRACE=1)
     print_loader_summary();
     crate::mem_trace::report("clear_module_cache");
@@ -644,7 +665,9 @@ pub fn filter_functions_from_value(value: &Value) -> Value {
             // with every other loader cache in `clear_module_cache`.
             let key = Arc::as_ptr(dict) as usize;
             if let Some(hit) = FILTERED_DICT_CACHE.with(|c| {
-                c.borrow().get(&key).and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
+                c.borrow()
+                    .get(&key)
+                    .and_then(|(src, out)| Arc::ptr_eq(src, dict).then(|| Arc::clone(out)))
             }) {
                 crate::perf_counters::bump(&crate::perf_counters::FILTERED_DICT_HITS, 1);
                 return Value::Dict(hit);

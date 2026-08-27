@@ -84,8 +84,36 @@ independently so that lane can be *migrated onto it* rather than blessed.
    (non-empty, AArch64 ELF, has `.text`, read back with `readelf`). It fails
    loudly rather than inventing a kernel, same contract as the ESP builder.
 
-   Verified end to end from a WIPED `build/os/aarch64_limine/` — the state a
-   clean clone is in:
+   **CORRECTION, same day, and the correction is the important part.** The
+   evidence below was produced in a shared working tree that was ~22 commits
+   behind `origin/main`, with a warm object cache (`Build complete: 1 compiled,
+   8 cached`). Re-run on a PRISTINE `git worktree` checked out at `origin/main`,
+   the producer **FAILS**, reproducibly (two independent runs, rc=1):
+
+   ```
+   Build failed: link failed: ld.lld: error: undefined symbol: rt_struct_alloc
+   >>> referenced by mod_7.o:(__module_init_os__kernel__memory__pmm)
+   ```
+
+   `rt_struct_alloc` is a genuine hosted runtime API — declared at
+   `src/runtime/runtime.h:321` — that the aarch64 freestanding runtime
+   (`examples/09_embedded/simple_os/arch/aarch64/boot/freestanding_runtime.c`)
+   does not define. It is codegen-emitted, not written in any `.spl`, so it is
+   invisible to source grep; `src/os/kernel/memory/pmm.spl` is byte-identical
+   between the two trees. This is the SAME defect class as the
+   `rt_raw_i64_to_string` gap fixed earlier
+   (`scripts/check/check-no-unresolved-runtime-symbols.shs`, ADVISORY-RED).
+
+   So the honest state is: **the producer script and the ESP/boot chain are
+   correct, but the aarch64 Limine kernel does not currently build from a clean
+   checkout of `origin/main`.** The lane is RED upstream, and was only ever
+   green against stale sources plus a stale object cache — which is a sharper
+   version of the very defect this bug record was filed about. Fixing it means
+   defining `rt_struct_alloc` in the freestanding runtime; NOT done here, and
+   deliberately not hand-rolled under time pressure in a shared tree.
+
+   The superseded evidence, retained so the two runs can be compared, was
+   produced from a WIPED `build/os/aarch64_limine/` in the STALE tree:
 
    ```
    $ rm -rf build/os/aarch64_limine

@@ -53,6 +53,7 @@ the independently-tested primitives below.
 """
 
 use std.spec
+use std.io_runtime.{file_read}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl, interp_is_uninit_marker_init}
 use compiler.backend.backend.env.{Environment, EvalContext}
 use compiler.backend.backend_types.*
@@ -65,6 +66,37 @@ fn make_module() -> HirModule:
 fn read_x_expr() -> HirExpr:
     val sp = Span.default()
     HirExpr(kind: HirExprKind.Var(SymbolId.new(1)), type_: nil, span: sp)
+
+describe "interpreter environment facade ownership":
+    it "uses exactly two canonical nullable lookups and no raw environment declaration":
+        val source = file_read("src/compiler/70.backend/backend/interpreter.spl")
+        expect(source).to_contain(
+            "use std.nogc_sync_mut.io_runtime.{env_get_opt}")
+        expect(source).not.to_contain("extern fn rt_env_get")
+        expect(source).not.to_contain("rt_env_get(")
+        expect(source.split("env_get_opt(").len()).to_equal(3)
+        val itrace_start = source.index_of("fn itrace(msg: text)")
+        val strict_start = source.index_of("fn interp_strict_mem_enabled()")
+        val resolve_start = source.index_of("fn resolve_sym_name(")
+        val itrace_body = source.substring(itrace_start, strict_start)
+        val strict_body = source.substring(strict_start, resolve_start)
+        expect(itrace_body).to_contain(
+            "(env_get_opt(\"SIMPLE_INTERP_TRACE\") ?? \"\") == \"1\"")
+        expect(itrace_body.split("env_get_opt(").len()).to_equal(2)
+        expect(strict_body).to_contain(
+            "(env_get_opt(\"SIMPLE_STRICT_MEM\") ?? \"\") == \"1\"")
+        expect(strict_body.split("env_get_opt(").len()).to_equal(2)
+
+    it "snapshots strict-memory policy once immediately before context construction":
+        val source = file_read("src/compiler/70.backend/backend/interpreter.spl")
+        val process_start = source.index_of("    fn process_module(")
+        val main_lookup_start = source.index_of("        # Locate `main`")
+        val setup = source.substring(process_start, main_lookup_start)
+        expect(setup.split("interp_strict_mem_enabled()").len()).to_equal(2)
+        expect(setup).to_contain(
+            "val strict_mem_on = interp_strict_mem_enabled()\n" +
+            "        val ctx = EvalContext(")
+        expect(setup).to_contain("strict_mem: strict_mem_on")
 
 describe "interp_is_uninit_marker_init classifies a Let init expression":
     it "true for a bare NilLit (what an initializer-less var lowers to)":

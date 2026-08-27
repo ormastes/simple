@@ -2,6 +2,7 @@
 # Extracted from mod.spl for modularity
 
 use app.io.env_ops.{cwd}
+use app.io.process_ops.{process_run_direct, process_run_inherit}
 
 # Extern fn declarations (runtime resolves at file level)
 
@@ -13,21 +14,17 @@ extern fn sys_get_args() -> [text]
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_exit(code: i64)
-use std.io_runtime.{process_run}
-extern fn rt_process_run_inherit(cmd: text, args: [text]) -> i64
 extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_run_tests_process_args(gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_handle_compile(args: [text]) -> i64
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, file_read_result}
 extern fn rt_env_set(key: text, value: text) -> bool
 use std.io_runtime.{getpid}
 use std.io_runtime.{file_exists}
-extern fn rt_path_absolute(path: text) -> text
-extern fn rt_mkdir_p(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+use std.io_runtime.{mkdir_p}
 use std.io_runtime.{file_delete}
-extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
-extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+use std.nogc_sync_mut.io.file_ops.{file_write_text_at}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
 extern fn print_raw(value: text) -> i64
 
 # --- Shell/file helpers (local copies to avoid circular imports) ---
@@ -67,7 +64,7 @@ pub fn _cli_shell(command: text) -> _CliProcessResult:
         ("cmd.exe", ["/c", command])
     else:
         ("/bin/sh", ["-c", command])
-    val (stdout, stderr, code) = process_run(shell_path, shell_args)
+    val (stdout, stderr, code) = process_run_direct(shell_path, shell_args)
     _CliProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 fn _cli_shell_bool(command: text) -> bool:
@@ -83,7 +80,9 @@ fn _cli_file_exists_impl(path: text) -> bool:
 
 fn _cli_file_read_impl(path: text) -> text:
     # Returns "" on failure like the old `cat` path.
-    rt_file_read_text(path)
+    match file_read_result(path):
+        case Ok(content): content
+        case Err(_): ""
 
 fn _cli_file_write_impl(path: text, content: text) -> bool:
     # rt_file_write_text is also mis-marshalled under the deployed JIT (4-arg
@@ -92,7 +91,8 @@ fn _cli_file_write_impl(path: text, content: text) -> bool:
     if content.len() == 0:
         deleted or true
     else:
-        val written = rt_file_write_text_at(path, 0, content)
+        val written = unsafe(capabilities: [ffi]):
+            file_write_text_at(path, 0, content)
         written >= 0
 
 fn _cli_file_copy_impl(src: text, dst: text) -> bool:
@@ -101,19 +101,20 @@ fn _cli_file_copy_impl(src: text, dst: text) -> bool:
     if not file_exists(src):
         false
     else:
-        val content = rt_file_read_text(src)
+        val content = _cli_file_read_impl(src)
         val deleted = file_delete(dst)
         if content.len() == 0:
             deleted or true
         else:
-            val written = rt_file_write_text_at(dst, 0, content)
+            val written = unsafe(capabilities: [ffi]):
+                file_write_text_at(dst, 0, content)
             written >= 0
 
 fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
-    # mkdir -p semantics for both branches via rt_mkdir_p; rt_file_exists
+    # Canonical mkdir-p semantics for both branches; rt_file_exists
     # fallback accepts a pre-existing directory (verified working under the
     # deployed JIT while the mkdir shell-out reports failure).
-    rt_mkdir_p(path) or file_exists(path)
+    mkdir_p(path) or file_exists(path)
 
 fn _cli_eprint(msg: text):
     eprint(msg)
@@ -133,7 +134,7 @@ pub fn _cli_resolve_argv0(cwd_path: text, argv0: text) -> text:
 
 fn _cli_find_on_path(argv0: text) -> text:
     val command = if _cli_is_windows_platform(): "where" else: "which"
-    val (stdout, _stderr, code) = process_run(command, [argv0])
+    val (stdout, _stderr, code) = process_run_direct(command, [argv0])
     if code != 0:
         return ""
     stdout.split("\n")[0].trim()
@@ -153,7 +154,9 @@ fn _cli_resolve_symlink(path: text) -> text:
     # doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md).
     if path == "":
         return ""
-    rt_path_absolute(path) ?? ""
+    val resolved = unsafe(capabilities: [ffi]):
+        path_absolute(path)
+    resolved ?? ""
 
 fn _cli_current_exe_path() -> text:
     # Prefer the kernel's record of the real executable: argv0-based
@@ -222,15 +225,15 @@ pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
     var resolved_cmd = cmd
     if _cli_is_windows_platform():
         if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
-            val (_stdout, _stderr, code) = process_run("where", [cmd + ".exe"])
+            val (_stdout, _stderr, code) = process_run_direct("where", [cmd + ".exe"])
             if code == 0:
                 resolved_cmd = cmd + ".exe"
     else:
         if not cmd.contains("/"):
-            val (stdout, _stderr, code) = process_run("which", [cmd])
+            val (stdout, _stderr, code) = process_run_direct("which", [cmd])
             if code == 0 and stdout.trim().len() > 0:
                 resolved_cmd = stdout.trim()
-    process_run(resolved_cmd, args)
+    process_run_direct(resolved_cmd, args)
 
 pub fn _cli_run_workspace_root_guard() -> i64:
     val (stdout, stderr, code) = _cli_process_run("sh", ["scripts/check-workspace-root-guard.shs", "audit", "--staged"])
@@ -333,7 +336,7 @@ pub fn _cli_frontend_delegate_binary() -> text:
 pub fn _cli_run_frontend_delegate(delegate: text, args: [text]) -> i64:
     # Set loop guard so the delegate child does not re-delegate.
     rt_env_set("SIMPLE_FRONTEND_DELEGATED", "1")
-    rt_process_run_inherit(delegate, args)
+    process_run_inherit(delegate, args)
 
 
 # ============================================================================

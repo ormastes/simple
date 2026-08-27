@@ -1543,8 +1543,7 @@ fn preprocess_spipe_for_smf(path: &Path) -> Result<PathBuf, String> {
         let needle = format!("{}(", name);
         body_joined.contains(&needle)
             || top_joined.contains(&needle)
-            || (*name == "expect"
-                && top_joined.contains("expect "))
+            || (*name == "expect" && top_joined.contains("expect "))
     });
     let helpers_section = if helpers_used { SPIPE_INLINE_HELPERS } else { "" };
 
@@ -2206,11 +2205,7 @@ mod tests {
     const DROPPING_SPEC_SOURCE: &str = "describe \"alpha\":\n    it \"a1\":\n        expect(1).to_equal(1)\n    it \"a2\":\n        expect(2).to_equal(2)\n\ndescribe \"beta\":\n    return\n    it \"b1\":\n        expect(3).to_equal(3)\n    it \"b2\":\n        expect(4).to_equal(4)\n\ndescribe \"gamma\":\n    it \"g1\":\n        expect(5).to_equal(5)\n";
 
     fn drop_fixture(tag: &str, source: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "simple_testdrop_{}_{}.spl",
-            tag,
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_testdrop_{}_{}.spl", tag, std::process::id()));
         std::fs::write(&path, source).expect("write fixture");
         path
     }
@@ -2400,18 +2395,18 @@ mod tests {
         // so the read failed and the call silently fell back to the original path.
         let tempdir = tempdir().expect("tempdir");
         let spec_path = tempdir.path().join("example_spec.spl");
-        fs::write(&spec_path, "describe \"safe\":\n    it \"runs\":\n        expect value to_equal 1\n")
-            .expect("write spec");
+        fs::write(
+            &spec_path,
+            "describe \"safe\":\n    it \"runs\":\n        expect value to_equal 1\n",
+        )
+        .expect("write spec");
 
         let args = build_safe_mode_child_args(&spec_path, &options);
 
         assert_eq!(args.first().map(String::as_str), Some("run"));
         assert_eq!(
             args.get(1).map(String::as_str),
-            tempdir
-                .path()
-                .join(".spipe_matchers_example_spec.spl")
-                .to_str()
+            tempdir.path().join(".spipe_matchers_example_spec.spl").to_str()
         );
         assert!(!args.iter().any(|arg| arg == "test"));
     }

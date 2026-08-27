@@ -135,7 +135,7 @@ expect(backend_optimization_has_recommendation("llvm", "simple-loop-unroll")).to
 
 </details>
 
-#### keeps Simple predicate promotion away from LLVM if-conversion pipeline
+#### does not advertise quarantined Simple predicate promotion
 
 <details>
 <summary>Executable SSpec</summary>
@@ -144,8 +144,8 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(backend_optimization_has_recommendation("cranelift", "simple-predicate-promote")).to_equal(true)
-expect(backend_optimization_has_recommendation("interpreter", "simple-predicate-promote")).to_equal(true)
+expect(backend_optimization_has_recommendation("cranelift", "simple-predicate-promote")).to_equal(false)
+expect(backend_optimization_has_recommendation("interpreter", "simple-predicate-promote")).to_equal(false)
 expect(backend_optimization_has_recommendation("llvm", "simple-predicate-promote")).to_equal(false)
 ```
 
@@ -248,11 +248,6 @@ for decision in wasm_high.skipped_decisions:
 expect(found_strength_skip).to_equal(true)
 
 expect(wasm_high.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
-var found_predicate_skip = false
-for decision in wasm_high.skipped_decisions:
-    if decision.stable_name == "simple-predicate-promote" and decision.reason == "backend_not_simple_low_tier_jit":
-        found_predicate_skip = true
-expect(found_predicate_skip).to_equal(true)
 
 expect(wasm_high.recommendation_names.contains("simple-loop-unroll")).to_equal(false)
 var found_unroll_skip = false
@@ -442,41 +437,26 @@ expect(found_llvm_skip).to_equal(true)
 
 </details>
 
-#### gates Simple predicate promotion on candidate and safety facts
+#### keeps quarantined predicate promotion absent even with former facts
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val missing = backend_optimization_plan_for_budget_with_facts("cranelift", "high", ["typed_mir", "predication_candidate"])
 expect(missing.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
-var found_missing_safety = false
-for decision in missing.skipped_decisions:
-    if decision.stable_name == "simple-predicate-promote" and decision.reason == "missing predicate_safe":
-        found_missing_safety = true
-expect(found_missing_safety).to_equal(true)
 
 val medium = backend_optimization_plan_for_budget_with_facts("cranelift", "medium", ["typed_mir", "predication_candidate", "predicate_safe"])
 expect(medium.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
-var found_cost_skip = false
-for decision in medium.skipped_decisions:
-    if decision.stable_name == "simple-predicate-promote" and decision.reason == "cost budget exceeded":
-        found_cost_skip = true
-expect(found_cost_skip).to_equal(true)
 
 val ready = backend_optimization_plan_for_budget_with_facts("cranelift", "high", ["typed_mir", "predication_candidate", "predicate_safe"])
-expect(ready.recommendation_names.contains("simple-predicate-promote")).to_equal(true)
+expect(ready.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
 
 val llvm = backend_optimization_plan_for_budget_with_facts("llvm", "high", ["typed_mir", "predication_candidate", "predicate_safe", "llvm_backend_available"])
 expect(llvm.recommendation_names.contains("simple-predicate-promote")).to_equal(false)
-var found_llvm_skip = false
-for decision in llvm.skipped_decisions:
-    if decision.stable_name == "simple-predicate-promote" and decision.reason == "llvm_runs_if_conversion_and_select_promotion":
-        found_llvm_skip = true
-expect(found_llvm_skip).to_equal(true)
 ```
 
 </details>

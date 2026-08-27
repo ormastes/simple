@@ -27,8 +27,56 @@ use compiler.mir.intrinsics.{MIR_STORAGE_ALLOC_OWNED_RAW_V1}
 # Import it explicitly, exactly as the sibling lowering file does
 # (50.mir/_MirLowering/bootstrap_globals.spl:25). (2026-08-08 stage3)
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text
+pub fn mir_trace_requested(
+    compiler_trace: text,
+    bootstrap_diag: text,
+    mir_builder_trace: text
+) -> bool:
+    """Whether fine-grained MIR tracing was explicitly requested.
+
+    Phase profiling owns bounded phase receipts, not per-expression tracing.
+    """
+    compiler_trace == "1" or bootstrap_diag == "1" or mir_builder_trace == "1"
+
+# One immutable trace-policy snapshot per outer MIR lowering. The lowering
+# pipeline is process-global/serial today; nested lowering inherits the parent
+# decision and restores its depth without rewriting environment variables.
+var _mir_trace_scope_slot: [i64] = [0, 0, 0, 0]
+
+pub fn mir_trace_scope_enter() -> i64:
+    val previous_depth = _mir_trace_scope_slot[0]
+    if previous_depth == 0:
+        val compiler_trace = env_get_opt("SIMPLE_COMPILER_TRACE") ?? ""
+        val bootstrap_diag = env_get_opt("SIMPLE_BOOTSTRAP_DIAG") ?? ""
+        val mir_builder_trace = env_get_opt("SIMPLE_MIRB_TRACE") ?? ""
+        _mir_trace_scope_slot[1] = if mir_trace_requested(
+            compiler_trace, bootstrap_diag, ""): 1 else: 0
+        _mir_trace_scope_slot[2] = if mir_trace_requested(
+            "", "", mir_builder_trace): 1 else: 0
+        _mir_trace_scope_slot[3] = _mir_trace_scope_slot[3] + 1
+    _mir_trace_scope_slot[0] = previous_depth + 1
+    previous_depth
+
+pub fn mir_trace_scope_exit(previous_depth: i64):
+    _mir_trace_scope_slot[0] = previous_depth
+
+pub fn mir_trace_generation() -> i64:
+    _mir_trace_scope_slot[3]
+
+pub fn mir_lowering_trace_enabled() -> bool:
+    if _mir_trace_scope_slot[0] > 0:
+        return _mir_trace_scope_slot[1] != 0
+    mir_trace_requested(
+        env_get_opt("SIMPLE_COMPILER_TRACE") ?? "",
+        env_get_opt("SIMPLE_BOOTSTRAP_DIAG") ?? "",
+        "")
+
+pub fn mir_builder_trace_enabled() -> bool:
+    if _mir_trace_scope_slot[0] > 0:
+        return _mir_trace_scope_slot[2] != 0
+    mir_trace_requested("", "", env_get_opt("SIMPLE_MIRB_TRACE") ?? "")
 
 pub fn mir_trace_enabled() -> bool:
     """Shared MIR-lowering trace gate. Default OFF.
@@ -38,13 +86,7 @@ pub fn mir_trace_enabled() -> bool:
     so one switch turns every MIR-lowering receipt back on. Callers on hot
     paths must read this ONCE and cache it (see emit_call_value below), never
     per receipt."""
-    if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
-        return true
-    if (rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1":
-        return true
-    if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-        return true
-    (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+    mir_lowering_trace_enabled() or mir_builder_trace_enabled()
 
 # ============================================================================
 # MIR Builder
@@ -78,6 +120,12 @@ struct MirBuilder:
     # expr_dispatch.spl::lower_expr and mir_lowering_stmts.spl::lower_stmt
     # for the save/restore wrappers that maintain this stack discipline.
     current_span: Span?
+    # Active protected-region destination. Nil outside try blocks, so normal
+    # compilation pays one predictable lowering-time branch and emits exactly
+    # the pre-existing Call instruction shape.
+    unwind_target: BlockId?
+    unwind_payload: LocalId?
+    unwind_type_tag: LocalId?
 
 impl MirBuilder:
     static fn new() -> MirBuilder:
@@ -96,7 +144,10 @@ impl MirBuilder:
             locals: [],
             blocks: [],
             instructions: [],
-            current_span: nil
+            current_span: nil,
+            unwind_target: nil,
+            unwind_payload: nil,
+            unwind_type_tag: nil
         )
 
     # ========================================================================
@@ -146,7 +197,10 @@ impl MirBuilder:
         # prologue instructions) still carries a real, in-function location
         # instead of nil.
         self.current_span = Some(span)
-        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+        self.unwind_target = nil
+        self.unwind_payload = nil
+        self.unwind_type_tag = nil
+        if mir_builder_trace_enabled():
             print "MIRB begin {name} post-reset blocks={self.blocks.len()} locals={self.locals.len()}"
 
         # Create entry block
@@ -157,7 +211,9 @@ impl MirBuilder:
             terminator: MirTerminator.Unreachable  # Placeholder
         ))
 
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        var bootstrap_mode = false
+        bootstrap_mode = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        if not bootstrap_mode:
             # Create return local
             if signature.return_type.kind != MirTypeKind.Unit:
                 self.new_local(Some("_return"), signature.return_type, LocalKind.Return)
@@ -220,7 +276,7 @@ impl MirBuilder:
         fn_.locals = self.locals
         fn_.blocks = self.blocks
         self.current_function = nil
-        if (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1":
+        if mir_builder_trace_enabled():
             var first_insts = -1
             if fn_.blocks.len() > 0:
                 first_insts = fn_.blocks[0].instructions.len()
@@ -256,6 +312,31 @@ impl MirBuilder:
         """Create a new temporary."""
         self.new_local(nil, type_, LocalKind.Temp)
 
+    me _local_position(id: LocalId) -> i64:
+        """Resolve a unique local through the canonical dense index."""
+        if id.id >= 0 and id.id < self.locals.len():
+            if self.locals[id.id].id.id == id.id:
+                return id.id
+        var position = 0
+        while position < self.locals.len():
+            if self.locals[position].id.id == id.id:
+                return position
+            position = position + 1
+        -1
+
+    me local_type(id: LocalId) -> MirType?:
+        """Return a local's type through the dense LocalId position.
+
+        Canonical builder locals are append-only and receive their array
+        position as LocalId. The fallback preserves lookup behavior for a
+        directly constructed sparse or reordered builder with unique LocalIds.
+        Duplicate LocalIds violate the builder invariant.
+        """
+        val position = self._local_position(id)
+        if position >= 0:
+            return self.locals[position].type_
+        nil
+
     me set_local_name(id: LocalId, name: text):
         """Assign a source-level name to an existing local.
 
@@ -263,22 +344,17 @@ impl MirBuilder:
         begin_function creates nameless from the (types-only) MirSignature, so
         backends emit real port names (e.g. imem_rdata) instead of arg0/arg1.
         """
-        var updated: [MirLocal] = []
-        var i = 0
-        while i < self.locals.len():
-            val loc = self.locals[i]
-            if loc.id.id == id.id:
-                updated = updated.push(MirLocal(
-                    id: loc.id,
-                    name: Some(name),
-                    type_: loc.type_,
-                    kind: loc.kind,
-                    is_ghost: loc.is_ghost
-                ))
-            else:
-                updated = updated.push(loc)
-            i = i + 1
-        self.locals = updated
+        val position = self._local_position(id)
+        if position < 0:
+            return
+        val loc = self.locals[position]
+        self.locals[position] = MirLocal(
+            id: loc.id,
+            name: Some(name),
+            type_: loc.type_,
+            kind: loc.kind,
+            is_ghost: loc.is_ghost
+        )
 
     me set_local_type(id: LocalId, ty: MirType):
         """Retype an existing local (mirror of set_local_name).
@@ -289,22 +365,17 @@ impl MirBuilder:
         (print's numeric-coercion check, spill slots) read the local's MIR
         type. Instructions reference locals by id, so a post-hoc retype is
         safe."""
-        var updated: [MirLocal] = []
-        var i = 0
-        while i < self.locals.len():
-            val loc = self.locals[i]
-            if loc.id.id == id.id:
-                updated = updated.push(MirLocal(
-                    id: loc.id,
-                    name: loc.name,
-                    type_: ty,
-                    kind: loc.kind,
-                    is_ghost: loc.is_ghost
-                ))
-            else:
-                updated = updated.push(loc)
-            i = i + 1
-        self.locals = updated
+        val position = self._local_position(id)
+        if position < 0:
+            return
+        val loc = self.locals[position]
+        self.locals[position] = MirLocal(
+            id: loc.id,
+            name: loc.name,
+            type_: ty,
+            kind: loc.kind,
+            is_ghost: loc.is_ghost
+        )
 
     # ========================================================================
     # Basic Blocks
@@ -332,8 +403,29 @@ impl MirBuilder:
 
     me finalize_block():
         """Finalize current block with accumulated instructions."""
+        # Hypothesis probe (bootstrap_stage2_empty_mir_bodies_2026-07-05):
+        # the Stage-2 instruction loss is localised to this ONE statement --
+        # `self.builder` holds 3 finalized instructions immediately before
+        # `end_function`, and `end_function`'s own trace, one call later,
+        # reports 0. If the early return below fails to fire when pending IS
+        # empty (measured 0 at that point), control reaches
+        # `block.instructions = self.instructions` and overwrites the already
+        # finalized instructions with the empty pending list. Print the length
+        # AND the predicate's own answer AND whether the return is taken, so
+        # the three are distinguishable. Reuses this file's existing
+        # SIMPLE_MIRB_TRACE gate; default OFF.
+        val fb_pending_len = self.instructions.len()
+        val fb_is_empty = self.instructions.is_empty()
+        var fb_trace = false
+        fb_trace = (env_get_opt("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        if fb_trace:
+            print "MIRB finalize pending_len={fb_pending_len} is_empty={fb_is_empty} block={self.current_block.id}"
         if self.instructions.is_empty():
+            if fb_trace:
+                print "MIRB finalize early-return-taken"
             return
+        if fb_trace:
+            print "MIRB finalize FELL-THROUGH pending_len={fb_pending_len}"
 
         # Find and update current block
         var found = false
@@ -449,6 +541,16 @@ impl MirBuilder:
         ))
         dest
 
+    me emit_global_addr(symbol: SymbolId, pointee_type: MirType, mutable: bool) -> LocalId:
+        """Emit the typed address of canonical module-static storage."""
+        val ref_type = MirType(kind: MirTypeKind.Ref(pointee_type, mutable))
+        val dest = self.new_temp(ref_type)
+        self.emit(MirInst(
+            kind: MirInstKind.GlobalAddr(dest, symbol, mutable),
+            span: self.current_span
+        ))
+        dest
+
     me emit_load(ptr: MirOperand, type_: MirType) -> LocalId:
         """Emit a load instruction."""
         val dest = self.new_temp(type_)
@@ -522,10 +624,13 @@ impl MirBuilder:
         # flat LocalId? payload then see the box header as the id.
         val dest: LocalId? = if return_type.kind != MirTypeKind.Unit: self.new_temp(return_type) else: nil
 
-        self.emit(MirInst(
-            kind: MirInstKind.Call(dest, func, args),
-            span: self.current_span
-        ))
+        if val unwind = self.unwind_target:
+            val normal = self.new_block(Some("invoke_cont"))
+            self.set_terminator(MirTerminator.CallTerminator(
+                dest, func, args, normal, Some(unwind), self.unwind_payload, self.unwind_type_tag))
+            self.switch_to_block(normal)
+        else:
+            self.emit(MirInst(kind: MirInstKind.Call(dest, func, args), span: self.current_span))
 
         dest
 
@@ -535,16 +640,19 @@ impl MirBuilder:
         # lines 113/186). These probes were unconditional, which on a hot path
         # (every non-unit call emit) floods stderr for the whole build; they are
         # retained, not deleted, per the log-retention policy. (2026-08-08)
-        val mirb_trace = (rt_env_get("SIMPLE_MIRB_TRACE") ?? "") == "1"
+        val mirb_trace = mir_builder_trace_enabled()
         if mirb_trace:
             eprint("[mir-call-value] new-temp-before next={self.next_local_id}\n")
         val dest = self.new_temp(return_type)
         if mirb_trace:
             eprint("[mir-call-value] new-temp-after id={dest.id} next={self.next_local_id}\n")
-        self.emit(MirInst(
-            kind: MirInstKind.Call(dest, func, args),
-            span: self.current_span
-        ))
+        if val unwind = self.unwind_target:
+            val normal = self.new_block(Some("invoke_value_cont"))
+            self.set_terminator(MirTerminator.CallTerminator(
+                Some(dest), func, args, normal, Some(unwind), self.unwind_payload, self.unwind_type_tag))
+            self.switch_to_block(normal)
+        else:
+            self.emit(MirInst(kind: MirInstKind.Call(Some(dest), func, args), span: self.current_span))
         if mirb_trace:
             eprint("[mir-call-value] emit-after id={dest.id}\n")
         dest
@@ -556,10 +664,13 @@ impl MirBuilder:
         # flat LocalId? payload then see the box header as the id.
         val dest: LocalId? = if return_type.kind != MirTypeKind.Unit: self.new_temp(return_type) else: nil
 
-        self.emit(MirInst(
-            kind: MirInstKind.CallIndirect(dest, ptr, args, sig),
-            span: self.current_span
-        ))
+        if val unwind = self.unwind_target:
+            val normal = self.new_block(Some("invoke_indirect_cont"))
+            self.set_terminator(MirTerminator.CallTerminator(
+                dest, ptr, args, normal, Some(unwind), self.unwind_payload, self.unwind_type_tag))
+            self.switch_to_block(normal)
+        else:
+            self.emit(MirInst(kind: MirInstKind.CallIndirect(dest, ptr, args, sig), span: self.current_span))
 
         dest
 
@@ -659,6 +770,19 @@ impl MirBuilder:
         x86_64, BRK #0 on aarch64, EBREAK on riscv32/64.
         """
         self.set_terminator(MirTerminator.Abort(message))
+
+    me terminate_throw(payload: MirOperand, type_tag: MirOperand):
+        """Start recoverable exception propagation without allocation."""
+        self.set_terminator(MirTerminator.Throw(payload, type_tag))
+
+    me terminate_resume(payload: MirOperand, type_tag: MirOperand):
+        """Resume propagation after running a cleanup pad."""
+        self.set_terminator(MirTerminator.Resume(payload, type_tag))
+
+    me set_unwind_target(target: BlockId?, payload: LocalId?, type_tag: LocalId?):
+        self.unwind_target = target
+        self.unwind_payload = payload
+        self.unwind_type_tag = type_tag
 
     me set_terminator(term: MirTerminator):
         """Set terminator for current block."""

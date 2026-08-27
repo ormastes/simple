@@ -958,42 +958,42 @@ impl Lowerer {
     }
 
     fn try_resolve_global_field_for_struct(&mut self, struct_name: &str, field_name: &str) -> Option<(usize, TypeId)> {
-        let (field_index, field_type_spec) = self
-            .global_struct_fields_for_name(struct_name)
-            .and_then(|fields| {
-                fields
-                    .iter()
-                    .enumerate()
-                    .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
-            })
-            .or_else(|| {
-                // The nominal owner's layout lacks this field. When several
-                // modules declare same-named structs, the locally-registered
-                // definition is not necessarily the receiver's own (e.g. three
-                // `GlyphBitmap` classes; only spl_fonts' has `gbm_*` fields).
-                // Fall back to the duplicate-variant consensus scan: it
-                // resolves only when every variant that declares the field
-                // agrees on its index, and stays ambiguous (None) otherwise.
-                // Erroring here is strictly worse — it drops the whole module
-                // to the interpreter for a field exactly one variant owns.
-                self.duplicate_global_struct_defs
-                    .as_ref()
-                    .and_then(|defs| defs.get(struct_name))
-                    .and_then(|variants| {
-                        let mut matches = variants.iter().filter_map(|fields| {
-                            fields.iter().enumerate().find_map(|(idx, (fname, ftype))| {
-                                (fname == field_name).then_some((idx, ftype.clone()))
-                            })
-                        });
-                        let first = matches.next()?;
-                        for m in matches {
-                            if m.0 != first.0 {
-                                return None;
+        let (field_index, field_type_spec) =
+            self.global_struct_fields_for_name(struct_name)
+                .and_then(|fields| {
+                    fields
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, (fname, ftype))| (fname == field_name).then_some((idx, ftype.clone())))
+                })
+                .or_else(|| {
+                    // The nominal owner's layout lacks this field. When several
+                    // modules declare same-named structs, the locally-registered
+                    // definition is not necessarily the receiver's own (e.g. three
+                    // `GlyphBitmap` classes; only spl_fonts' has `gbm_*` fields).
+                    // Fall back to the duplicate-variant consensus scan: it
+                    // resolves only when every variant that declares the field
+                    // agrees on its index, and stays ambiguous (None) otherwise.
+                    // Erroring here is strictly worse — it drops the whole module
+                    // to the interpreter for a field exactly one variant owns.
+                    self.duplicate_global_struct_defs
+                        .as_ref()
+                        .and_then(|defs| defs.get(struct_name))
+                        .and_then(|variants| {
+                            let mut matches = variants.iter().filter_map(|fields| {
+                                fields.iter().enumerate().find_map(|(idx, (fname, ftype))| {
+                                    (fname == field_name).then_some((idx, ftype.clone()))
+                                })
+                            });
+                            let first = matches.next()?;
+                            for m in matches {
+                                if m.0 != first.0 {
+                                    return None;
+                                }
                             }
-                        }
-                        Some(first)
-                    })
-            })?;
+                            Some(first)
+                        })
+                })?;
 
         let field_ty = self.resolve_type(&field_type_spec).unwrap_or(TypeId::ANY);
         Some((field_index, field_ty))

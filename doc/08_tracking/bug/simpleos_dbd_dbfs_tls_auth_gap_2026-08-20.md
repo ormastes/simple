@@ -122,8 +122,14 @@ the private auth/TLS/DBFS startup facts.
 
 DBFS owner discovery is now typed rather than boolean. `DbdServer` resolves the
 actual root `DriverInstance`; only the `DbFs` variant can construct its adapter.
-The adapter supports an exact, bounded recovery read of an existing `/DBD.LOG`,
-tracks open handles and generations, and quarantines short-read/close failures.
+The adapter supports an exact, bounded recovery read of the canonical
+`/srv/data/db/DBD.LOG`, tracks open handles and generations, and quarantines
+short-read/close failures. The journal, generation-owned temporary file,
+quarantine evidence, and namespace-directory sync are all fixed beneath the
+scheduler-admitted `/srv/data/db` namespace; DBD no longer stores mutable
+database state at filesystem root. Protected managed-path open still fails
+closed while the generic VFS fd transaction described in
+`server_data_vfs_fd_binding_blocked_2026-08-24.md` remains unresolved.
 Restart releases its old driver reference but preserves quarantine state and the
 non-secret failure reason; a restart cannot silently reset durable-recovery
 evidence.
@@ -155,6 +161,20 @@ Required closure evidence:
   recovery behavior without host fallback.
 
 Performance/durability blocker:
+
+- the canonical Redis engine mutates through `SET`, `DEL`, `INCR`, `EXPIRE`,
+  and `FLUSHALL`, while the current J1 journal defines exact restart semantics
+  only for `SET` and single-key `DEL`. DBD now classifies all five as mutations
+  and rejects `INCR`, `EXPIRE`, and `FLUSHALL` before engine dispatch with a
+  stable durable-command error. It no longer acknowledges memory-only changes
+  that disappear after filesystem restart. Supporting those commands remains
+  open until their time, ordering, and destructive replay semantics are
+  specified and journaled;
+- a proposed credential-provider generation snapshot was rejected in static
+  review because public value-semantic provider copies can be restored or
+  reconstructed. Exact rotation/revocation authority requires an opaque
+  canonical owner or a non-rollback service epoch; snapshot comparison must
+  not be advertised as hardened session authority;
 
 - the post-auth fragmented-command copying blocker is closed structurally:
   `DbdAuthenticatedRespIngressV1` owns a 64 KiB fixed ring and head offset,

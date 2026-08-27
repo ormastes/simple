@@ -80,17 +80,19 @@ pub(crate) fn runtime_inputs_fingerprint(runtime_root: &Path, inputs: &[&str]) -
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        let bytes = std::fs::read(runtime_root.join(input)).map_err(|e| {
-            // A silent None here surfaces far away as "could not build the
-            // core-C runtime archive" with no compile ever attempted (seen
-            // 2026-08-18: a stale staged compiler listed the since-deleted
-            // runtime_mcp_core.c). Name the offending input.
-            eprintln!(
-                "native-build: core-C runtime input `{}` unreadable in {}: {e}",
-                input,
-                runtime_root.display()
-            );
-        }).ok()?;
+        let bytes = std::fs::read(runtime_root.join(input))
+            .map_err(|e| {
+                // A silent None here surfaces far away as "could not build the
+                // core-C runtime archive" with no compile ever attempted (seen
+                // 2026-08-18: a stale staged compiler listed the since-deleted
+                // runtime_mcp_core.c). Name the offending input.
+                eprintln!(
+                    "native-build: core-C runtime input `{}` unreadable in {}: {e}",
+                    input,
+                    runtime_root.display()
+                );
+            })
+            .ok()?;
         for byte in bytes {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -439,6 +441,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .arg("-fno-stack-protector")
             .arg("-fPIC")
             .arg("-std=gnu11")
+            .arg("-D_GNU_SOURCE")
             .arg("-DSIMPLE_CORE_C_STANDALONE=1")
             .args(core_c_target_flags(target, source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
@@ -1026,20 +1029,12 @@ struct Stage4CliCProviderSpec {
 }
 
 const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
-    "rt_progress_get_elapsed_seconds",
-    "rt_progress_init",
-    "rt_progress_reset",
+    "rt_progress_clock_now_nanos",
+    "rt_progress_tls_clear",
+    "rt_progress_tls_is_initialized",
+    "rt_progress_tls_start_nanos",
+    "rt_progress_tls_store_start_nanos",
     "rt_time_now_seconds_f64",
-    "rt_timestamp_add_days",
-    "rt_timestamp_diff_days",
-    "rt_timestamp_from_components",
-    "rt_timestamp_get_day",
-    "rt_timestamp_get_hour",
-    "rt_timestamp_get_microsecond",
-    "rt_timestamp_get_minute",
-    "rt_timestamp_get_month",
-    "rt_timestamp_get_second",
-    "rt_timestamp_get_year",
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
@@ -1213,7 +1208,11 @@ fn archive_definition_owners(archives: &[(&str, &Path)]) -> Result<BTreeMap<Stri
         // project_stage4_archive_closure), whose output is re-checked. Rejecting
         // them here made every capsule build fail on a core that the projection
         // was designed to sanitize (test_stage4_runtime_capsule_keeps_only_requested_globals).
-        let forbidden_sections = if *label == "core" { Vec::new() } else { forbidden_archive_sections(archive)? };
+        let forbidden_sections = if *label == "core" {
+            Vec::new()
+        } else {
+            forbidden_archive_sections(archive)?
+        };
         if !forbidden_sections.is_empty() {
             return Err(format!(
                 "Stage4 archive {label} retained constructor/destructor sections: {}",

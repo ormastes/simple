@@ -175,7 +175,7 @@ impl HirLowering:
             val owns_byte_at_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
             if not owns_byte_at_alias:
                 self.error("function name '__simple_rt_string_byte_at' is reserved for compiler-generated text calls", fn_.span)
-        val bootstrap_diag = (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and hir_lower_diag_enabled()
+        val bootstrap_diag = self.ambient_bootstrap_enabled() and hir_lower_diag_enabled()
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:start {fn_.name}")
         var fn_symbol_id = SymbolId(id: -1)
@@ -243,7 +243,7 @@ impl HirLowering:
         # signature-declaration pre-pass) already defined for it -- present in
         # the flat table, carrying the real declared type -- so both the
         # call site and the emitted body agree on one real, linkable symbol.
-        if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not fn_.is_method and bootstrap_hir_symbol_known_name(fn_.name):
+        if self.ambient_bootstrap_enabled() and not fn_.is_method and bootstrap_hir_symbol_known_name(fn_.name):
             fn_symbol_id = bootstrap_hir_symbol_for_name(fn_.name)
         else:
             val fn_symbol_lookup = self.symbols.lookup(fn_symbol_name)
@@ -383,7 +383,7 @@ impl HirLowering:
         # fallback for bootstrap functions with no declaration.
         if fn_.has_return_type:
             val declared_ret = self.lower_type(fn_.return_type)
-            if (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+            if self.ambient_bootstrap_enabled():
                 # NARROW (deliberate): in bootstrap mode only Str declared
                 # returns take priority for now. Widening every declared type
                 # (arrays/structs/dicts) immediately broke consumers tuned to
@@ -398,7 +398,7 @@ impl HirLowering:
                         return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
             else:
                 return_type = declared_ret
-        elif (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+        elif self.ambient_bootstrap_enabled():
             return_type = bootstrap_builtin_return_type(fn_.name, fn_.span)
         if bootstrap_diag:
             eprint("[hir-lower] lower_function:return_type {fn_.name}")
@@ -443,7 +443,7 @@ impl HirLowering:
         # nil and traps "field access on nil receiver", dropping the in-guest
         # interpreter's main. main's untyped body returns Unit (defaulted above),
         # so it needs none of this user-function return inference.
-        if (not fn_.has_return_type) and (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and fn_.name != "main":
+        if (not fn_.has_return_type) and not self.ambient_bootstrap_enabled() and fn_.name != "main":
             val fn_sym_type = self.symbols.get_symbol_type(fn_symbol_id)
             if fn_sym_type.?:
                 match fn_sym_type.unwrap().kind:
@@ -466,6 +466,8 @@ impl HirLowering:
 
         # Parse function attributes (@entry, @naked, @noreturn, @section, @interrupt)
         var fa: FunctionAttr = parse_function_attrs(fn_.attributes)
+        if fa.rt_hal_error != "":
+            self.error_fatal(fa.rt_hal_error, Some(fn_.span))
         if fn_.is_kernel:
             fa.is_gpu_kernel = true
         # Parse export attributes (@export("C"))

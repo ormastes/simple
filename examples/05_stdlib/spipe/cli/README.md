@@ -12,7 +12,20 @@ node cli/spipe.js doc-root ../..
 node cli/spipe.js link-plan ../..
 node cli/spipe.js doctor ../..
 node cli/spipe.js skill
+node cli/spipe.js release-guide
+node cli/spipe.js release-capabilities
 ```
+
+The release commands are read-only. `release-guide` prints the canonical
+protected-release process and `release-capabilities` prints the policy schema
+and supported planning boundaries. Provider mutation still requires a unique
+session, live protected-ref authority, and explicit approval.
+
+The guarded operational commands each accept exactly one JSON object:
+`release-session-plan`, `release-main-fix-discovery-plan`,
+`release-beta-backport-plan`, `release-forward-port-plan`,
+`release-candidate-plan`, and `release-promotion-plan`. They validate and hash
+evidence but never checkout, cherry-pick, build, tag, push, delete, or publish.
 
 Fine-tune process examples:
 

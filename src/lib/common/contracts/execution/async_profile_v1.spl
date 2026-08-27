@@ -1,0 +1,412 @@
+# Canonical, pure-Simple async execution profiles for SimpleRing v1.
+#
+# A profile is configuration data, not an executor.  Validation is deliberately
+# local and fail-closed so callers can admit a profile before allocating,
+# spawning, or selecting a provider.
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub enum AsyncProfilePreset:
+    Common
+    Script
+    Server
+    MissionAlloc
+    MissionPool
+
+pub enum AsyncSurface:
+    Implicit
+    Explicit
+    Off
+
+pub enum AsyncPolicy:
+    Allowed
+    RequiredForLatency
+    Forbidden
+
+pub enum AsyncScheduler:
+    Ui
+    Sharded
+    Hybrid
+    ComputeWorkSteal
+    FixedPriority
+    Cooperative
+
+pub enum AsyncMemory:
+    Gc
+    Heap
+    Arena
+    Pool
+    Static
+
+pub enum AsyncRingMapping:
+    DirectRequired
+    CompletionRequired
+    EmulationAllowed
+
+pub enum AsyncAssurance:
+    Normal
+    Hardened
+    Mission
+
+pub enum AsyncInstrumentation:
+    None
+    Error
+    Debug
+    Trace
+    Coverage
+    Profile
+    Sanitize
+
+pub enum AsyncPlacement:
+    Static
+    Dynamic
+    Auto
+
+pub enum AsyncProfileError:
+    None
+    UnsupportedSchema
+    InvalidIdentity
+    InvalidTaskAbi
+    InvalidRingVersion
+    InvalidBounds
+    InvalidSurfacePolicy
+    InvalidSchedulerMemory
+    InvalidMappingFallback
+    InvalidMissionAssurance
+    BlockingForbidden
+    AllocationForbidden
+    DetachForbidden
+    WorkStealingForbidden
+    DeterminismRequired
+    CompilerFrameBoundsRequired
+    SingleOwnerQueueRequired
+    UnboundedPollingForbidden
+    MissionAllocViolation
+    MissionPoolViolation
+
+pub struct AsyncProfileBounds:
+    max_tasks: u64
+    max_operations: u64
+    max_buffers: u64
+    max_traces: u64
+    max_deadlines: u64
+    max_poll_steps: u64
+
+pub struct AsyncProfile:
+    schema_version: u16
+    preset: AsyncProfilePreset
+    profile_id: text
+    configuration_identity: text
+    task_abi: text
+    ring_version: text
+    surface: AsyncSurface
+    policy: AsyncPolicy
+    scheduler: AsyncScheduler
+    memory: AsyncMemory
+    mapping: AsyncRingMapping
+    assurance: AsyncAssurance
+    instrumentation: AsyncInstrumentation
+    placement: AsyncPlacement
+    bounds: AsyncProfileBounds
+    blocking_allowed: bool
+    allocation_after_admission_allowed: bool
+    allocation_in_isr_allowed: bool
+    allocation_in_completion_allowed: bool
+    allocation_in_durable_publication_allowed: bool
+    detached_tasks_allowed: bool
+    fallback_allowed: bool
+    work_stealing_allowed: bool
+    deterministic: bool
+    compiler_known_frame_bounds_required: bool
+    single_owner_mutable_queues_required: bool
+    unbounded_polling_allowed: bool
+
+pub const ASYNC_PROFILE_V1_SCHEMA: u16 = 1u16
+pub const ASYNC_PROFILE_MAX_IDENTITY_CHARS: i64 = 128
+pub const ASYNC_PROFILE_MAX_TASKS: u64 = 1048576u64
+pub const ASYNC_PROFILE_MAX_OPERATIONS: u64 = 4194304u64
+pub const ASYNC_PROFILE_MAX_BUFFERS: u64 = 4194304u64
+pub const ASYNC_PROFILE_MAX_TRACES: u64 = 4194304u64
+pub const ASYNC_PROFILE_MAX_DEADLINES: u64 = 1048576u64
+pub const ASYNC_PROFILE_MAX_POLL_STEPS: u64 = 1048576u64
+
+fn _identity_valid(value: text) -> bool:
+    value.len() > 0 and value.len() <= ASYNC_PROFILE_MAX_IDENTITY_CHARS and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains("\0")
+
+fn _bounds_valid(bounds: AsyncProfileBounds) -> bool:
+    (bounds.max_tasks > 0u64 and bounds.max_tasks <= ASYNC_PROFILE_MAX_TASKS and
+     bounds.max_operations >= bounds.max_tasks and
+     bounds.max_operations <= ASYNC_PROFILE_MAX_OPERATIONS and
+     bounds.max_buffers >= bounds.max_tasks and
+     bounds.max_buffers <= ASYNC_PROFILE_MAX_BUFFERS and
+     bounds.max_traces >= bounds.max_tasks and
+     bounds.max_traces <= ASYNC_PROFILE_MAX_TRACES and
+     bounds.max_deadlines >= bounds.max_tasks and
+     bounds.max_deadlines <= ASYNC_PROFILE_MAX_DEADLINES and
+     bounds.max_poll_steps > 0u64 and
+     bounds.max_poll_steps <= ASYNC_PROFILE_MAX_POLL_STEPS)
+
+fn _surface_text(value: AsyncSurface) -> text:
+    match value:
+        case AsyncSurface.Implicit: "implicit"
+        case AsyncSurface.Explicit: "explicit"
+        case AsyncSurface.Off: "off"
+
+fn _policy_text(value: AsyncPolicy) -> text:
+    match value:
+        case AsyncPolicy.Allowed: "allowed"
+        case AsyncPolicy.RequiredForLatency: "required_for_latency"
+        case AsyncPolicy.Forbidden: "forbidden"
+
+fn _scheduler_text(value: AsyncScheduler) -> text:
+    match value:
+        case AsyncScheduler.Ui: "ui"
+        case AsyncScheduler.Sharded: "sharded"
+        case AsyncScheduler.Hybrid: "hybrid"
+        case AsyncScheduler.ComputeWorkSteal: "compute_work_steal"
+        case AsyncScheduler.FixedPriority: "fixed_priority"
+        case AsyncScheduler.Cooperative: "cooperative"
+
+fn _memory_text(value: AsyncMemory) -> text:
+    match value:
+        case AsyncMemory.Gc: "gc"
+        case AsyncMemory.Heap: "heap"
+        case AsyncMemory.Arena: "arena"
+        case AsyncMemory.Pool: "pool"
+        case AsyncMemory.Static: "static"
+
+fn _mapping_text(value: AsyncRingMapping) -> text:
+    match value:
+        case AsyncRingMapping.DirectRequired: "direct_required"
+        case AsyncRingMapping.CompletionRequired: "completion_required"
+        case AsyncRingMapping.EmulationAllowed: "emulation_allowed"
+
+fn _assurance_text(value: AsyncAssurance) -> text:
+    match value:
+        case AsyncAssurance.Normal: "normal"
+        case AsyncAssurance.Hardened: "hardened"
+        case AsyncAssurance.Mission: "mission"
+
+fn _instrumentation_text(value: AsyncInstrumentation) -> text:
+    match value:
+        case AsyncInstrumentation.None: "none"
+        case AsyncInstrumentation.Error: "error"
+        case AsyncInstrumentation.Debug: "debug"
+        case AsyncInstrumentation.Trace: "trace"
+        case AsyncInstrumentation.Coverage: "coverage"
+        case AsyncInstrumentation.Profile: "profile"
+        case AsyncInstrumentation.Sanitize: "sanitize"
+
+fn _placement_text(value: AsyncPlacement) -> text:
+    match value:
+        case AsyncPlacement.Static: "static"
+        case AsyncPlacement.Dynamic: "dynamic"
+        case AsyncPlacement.Auto: "auto"
+
+fn _preset_text(value: AsyncProfilePreset) -> text:
+    match value:
+        case AsyncProfilePreset.Common: "common"
+        case AsyncProfilePreset.Script: "script"
+        case AsyncProfilePreset.Server: "server"
+        case AsyncProfilePreset.MissionAlloc: "mission_alloc"
+        case AsyncProfilePreset.MissionPool: "mission_pool"
+
+fn _bool_text(value: bool) -> text:
+    if value: "1" else: "0"
+
+fn _profile(
+    preset: AsyncProfilePreset, profile_id: text, surface: AsyncSurface,
+    policy: AsyncPolicy, scheduler: AsyncScheduler, memory: AsyncMemory,
+    mapping: AsyncRingMapping, assurance: AsyncAssurance,
+    instrumentation: AsyncInstrumentation, placement: AsyncPlacement,
+    bounds: AsyncProfileBounds, blocking_allowed: bool,
+    allocation_after_admission_allowed: bool, allocation_in_isr_allowed: bool,
+    allocation_in_completion_allowed: bool,
+    allocation_in_durable_publication_allowed: bool,
+    detached_tasks_allowed: bool, fallback_allowed: bool,
+    work_stealing_allowed: bool, deterministic: bool,
+    compiler_known_frame_bounds_required: bool,
+    single_owner_mutable_queues_required: bool,
+    unbounded_polling_allowed: bool
+) -> AsyncProfile:
+    AsyncProfile(
+        schema_version: ASYNC_PROFILE_V1_SCHEMA, preset: preset,
+        profile_id: profile_id, configuration_identity: profile_id + "-v1",
+        task_abi: "simple-task-frame-v1", ring_version: "simple-ring-v1",
+        surface: surface, policy: policy, scheduler: scheduler, memory: memory,
+        mapping: mapping, assurance: assurance, instrumentation: instrumentation,
+        placement: placement, bounds: bounds, blocking_allowed: blocking_allowed,
+        allocation_after_admission_allowed: allocation_after_admission_allowed,
+        allocation_in_isr_allowed: allocation_in_isr_allowed,
+        allocation_in_completion_allowed: allocation_in_completion_allowed,
+        allocation_in_durable_publication_allowed: allocation_in_durable_publication_allowed,
+        detached_tasks_allowed: detached_tasks_allowed,
+        fallback_allowed: fallback_allowed,
+        work_stealing_allowed: work_stealing_allowed, deterministic: deterministic,
+        compiler_known_frame_bounds_required: compiler_known_frame_bounds_required,
+        single_owner_mutable_queues_required: single_owner_mutable_queues_required,
+        unbounded_polling_allowed: unbounded_polling_allowed)
+
+pub fn async_profile_common_v1() -> AsyncProfile:
+    _profile(AsyncProfilePreset.Common, "common", AsyncSurface.Implicit,
+        AsyncPolicy.Allowed, AsyncScheduler.Hybrid, AsyncMemory.Heap,
+        AsyncRingMapping.CompletionRequired, AsyncAssurance.Normal,
+        AsyncInstrumentation.Error, AsyncPlacement.Auto,
+        AsyncProfileBounds(max_tasks: 65536u64, max_operations: 262144u64,
+            max_buffers: 262144u64, max_traces: 65536u64,
+            max_deadlines: 65536u64, max_poll_steps: 4096u64),
+        true, true, false, false, false, true, true, true, false, false, false, true)
+
+pub fn async_profile_script_v1() -> AsyncProfile:
+    _profile(AsyncProfilePreset.Script, "script", AsyncSurface.Implicit,
+        AsyncPolicy.Allowed, AsyncScheduler.Ui, AsyncMemory.Gc,
+        AsyncRingMapping.EmulationAllowed, AsyncAssurance.Normal,
+        AsyncInstrumentation.Debug, AsyncPlacement.Dynamic,
+        AsyncProfileBounds(max_tasks: 4096u64, max_operations: 16384u64,
+            max_buffers: 16384u64, max_traces: 4096u64,
+            max_deadlines: 4096u64, max_poll_steps: 1024u64),
+        true, true, false, false, false, true, true, false, false, false, false, true)
+
+pub fn async_profile_server_v1() -> AsyncProfile:
+    _profile(AsyncProfilePreset.Server, "server", AsyncSurface.Explicit,
+        AsyncPolicy.RequiredForLatency, AsyncScheduler.Sharded, AsyncMemory.Arena,
+        AsyncRingMapping.CompletionRequired, AsyncAssurance.Hardened,
+        AsyncInstrumentation.Trace, AsyncPlacement.Dynamic,
+        AsyncProfileBounds(max_tasks: 262144u64, max_operations: 1048576u64,
+            max_buffers: 1048576u64, max_traces: 262144u64,
+            max_deadlines: 262144u64, max_poll_steps: 4096u64),
+        false, true, false, false, false, false, true, true, false, false, false, false)
+
+pub fn async_profile_mission_alloc_v1() -> AsyncProfile:
+    _profile(AsyncProfilePreset.MissionAlloc, "mission_alloc", AsyncSurface.Explicit,
+        AsyncPolicy.Allowed, AsyncScheduler.FixedPriority, AsyncMemory.Arena,
+        AsyncRingMapping.DirectRequired, AsyncAssurance.Mission,
+        AsyncInstrumentation.Trace, AsyncPlacement.Static,
+        AsyncProfileBounds(max_tasks: 1024u64, max_operations: 4096u64,
+            max_buffers: 4096u64, max_traces: 1024u64,
+            max_deadlines: 1024u64, max_poll_steps: 64u64),
+        false, false, false, false, false, false, false, false, true, false, true, false)
+
+pub fn async_profile_mission_pool_v1() -> AsyncProfile:
+    _profile(AsyncProfilePreset.MissionPool, "mission_pool", AsyncSurface.Explicit,
+        AsyncPolicy.Allowed, AsyncScheduler.Cooperative, AsyncMemory.Pool,
+        AsyncRingMapping.DirectRequired, AsyncAssurance.Mission,
+        AsyncInstrumentation.Trace, AsyncPlacement.Static,
+        AsyncProfileBounds(max_tasks: 1024u64, max_operations: 4096u64,
+            max_buffers: 4096u64, max_traces: 1024u64,
+            max_deadlines: 1024u64, max_poll_steps: 64u64),
+        false, false, false, false, false, false, false, false, true, true, true, false)
+
+pub fn async_profile_preset_v1(preset: AsyncProfilePreset) -> AsyncProfile:
+    match preset:
+        case AsyncProfilePreset.Common: async_profile_common_v1()
+        case AsyncProfilePreset.Script: async_profile_script_v1()
+        case AsyncProfilePreset.Server: async_profile_server_v1()
+        case AsyncProfilePreset.MissionAlloc: async_profile_mission_alloc_v1()
+        case AsyncProfilePreset.MissionPool: async_profile_mission_pool_v1()
+
+pub fn async_profile_validate_v1(profile: AsyncProfile) -> Result<(), AsyncProfileError>:
+    if profile.schema_version != ASYNC_PROFILE_V1_SCHEMA:
+        return Err(AsyncProfileError.UnsupportedSchema)
+    if not _identity_valid(profile.profile_id) or
+       not _identity_valid(profile.configuration_identity):
+        return Err(AsyncProfileError.InvalidIdentity)
+    if profile.task_abi != "simple-task-frame-v1":
+        return Err(AsyncProfileError.InvalidTaskAbi)
+    if profile.ring_version != "simple-ring-v1":
+        return Err(AsyncProfileError.InvalidRingVersion)
+    if not _bounds_valid(profile.bounds):
+        return Err(AsyncProfileError.InvalidBounds)
+    if profile.surface == AsyncSurface.Off and profile.policy != AsyncPolicy.Forbidden:
+        return Err(AsyncProfileError.InvalidSurfacePolicy)
+    if profile.surface != AsyncSurface.Off and profile.policy == AsyncPolicy.Forbidden:
+        return Err(AsyncProfileError.InvalidSurfacePolicy)
+    if profile.scheduler == AsyncScheduler.ComputeWorkSteal and
+       not profile.work_stealing_allowed:
+        return Err(AsyncProfileError.WorkStealingForbidden)
+    if profile.memory == AsyncMemory.Static and
+       profile.placement != AsyncPlacement.Static:
+        return Err(AsyncProfileError.InvalidSchedulerMemory)
+    if profile.mapping == AsyncRingMapping.DirectRequired and profile.fallback_allowed:
+        return Err(AsyncProfileError.InvalidMappingFallback)
+    if profile.assurance != AsyncAssurance.Mission:
+        return Ok(())
+    if profile.placement != AsyncPlacement.Static or
+       (profile.memory != AsyncMemory.Arena and profile.memory != AsyncMemory.Pool and
+        profile.memory != AsyncMemory.Static):
+        return Err(AsyncProfileError.InvalidMissionAssurance)
+    if profile.blocking_allowed:
+        return Err(AsyncProfileError.BlockingForbidden)
+    if profile.allocation_in_isr_allowed or profile.allocation_in_completion_allowed or
+       profile.allocation_in_durable_publication_allowed:
+        return Err(AsyncProfileError.AllocationForbidden)
+    if profile.detached_tasks_allowed:
+        return Err(AsyncProfileError.DetachForbidden)
+    if profile.fallback_allowed:
+        return Err(AsyncProfileError.InvalidMappingFallback)
+    if profile.work_stealing_allowed:
+        return Err(AsyncProfileError.WorkStealingForbidden)
+    if not profile.deterministic:
+        return Err(AsyncProfileError.DeterminismRequired)
+    if profile.unbounded_polling_allowed:
+        return Err(AsyncProfileError.UnboundedPollingForbidden)
+    match profile.preset:
+        case AsyncProfilePreset.MissionAlloc:
+            if (profile.memory != AsyncMemory.Arena or
+                profile.allocation_after_admission_allowed or
+                profile.scheduler != AsyncScheduler.FixedPriority or
+                profile.compiler_known_frame_bounds_required):
+                return Err(AsyncProfileError.MissionAllocViolation)
+        case AsyncProfilePreset.MissionPool:
+            if ((profile.memory != AsyncMemory.Pool and profile.memory != AsyncMemory.Static) or
+                profile.allocation_after_admission_allowed or
+                (profile.scheduler != AsyncScheduler.FixedPriority and
+                 profile.scheduler != AsyncScheduler.Cooperative)):
+                return Err(AsyncProfileError.MissionPoolViolation)
+            if not profile.compiler_known_frame_bounds_required:
+                return Err(AsyncProfileError.CompilerFrameBoundsRequired)
+            if not profile.single_owner_mutable_queues_required:
+                return Err(AsyncProfileError.SingleOwnerQueueRequired)
+        case _:
+            return Err(AsyncProfileError.InvalidMissionAssurance)
+    Ok(())
+
+pub fn async_profile_canonical_v1(profile: AsyncProfile) -> text:
+    "async-profile-v1" +
+    "|schema=" + profile.schema_version.to_text() +
+    "|preset=" + _preset_text(profile.preset) +
+    "|profile_id=" + profile.profile_id.len().to_text() + ":" + profile.profile_id +
+    "|configuration_identity=" + profile.configuration_identity.len().to_text() + ":" + profile.configuration_identity +
+    "|task_abi=" + profile.task_abi.len().to_text() + ":" + profile.task_abi +
+    "|ring_version=" + profile.ring_version.len().to_text() + ":" + profile.ring_version +
+    "|surface=" + _surface_text(profile.surface) +
+    "|policy=" + _policy_text(profile.policy) +
+    "|scheduler=" + _scheduler_text(profile.scheduler) +
+    "|memory=" + _memory_text(profile.memory) +
+    "|mapping=" + _mapping_text(profile.mapping) +
+    "|assurance=" + _assurance_text(profile.assurance) +
+    "|instrumentation=" + _instrumentation_text(profile.instrumentation) +
+    "|placement=" + _placement_text(profile.placement) +
+    "|max_tasks=" + profile.bounds.max_tasks.to_text() +
+    "|max_operations=" + profile.bounds.max_operations.to_text() +
+    "|max_buffers=" + profile.bounds.max_buffers.to_text() +
+    "|max_traces=" + profile.bounds.max_traces.to_text() +
+    "|max_deadlines=" + profile.bounds.max_deadlines.to_text() +
+    "|max_poll_steps=" + profile.bounds.max_poll_steps.to_text() +
+    "|blocking=" + _bool_text(profile.blocking_allowed) +
+    "|allocation_after_admission=" + _bool_text(profile.allocation_after_admission_allowed) +
+    "|allocation_in_isr=" + _bool_text(profile.allocation_in_isr_allowed) +
+    "|allocation_in_completion=" + _bool_text(profile.allocation_in_completion_allowed) +
+    "|allocation_in_durable_publication=" + _bool_text(profile.allocation_in_durable_publication_allowed) +
+    "|detached=" + _bool_text(profile.detached_tasks_allowed) +
+    "|fallback=" + _bool_text(profile.fallback_allowed) +
+    "|work_stealing=" + _bool_text(profile.work_stealing_allowed) +
+    "|deterministic=" + _bool_text(profile.deterministic) +
+    "|compiler_known_frame_bounds=" + _bool_text(profile.compiler_known_frame_bounds_required) +
+    "|single_owner_mutable_queues=" + _bool_text(profile.single_owner_mutable_queues_required) +
+    "|unbounded_polling=" + _bool_text(profile.unbounded_polling_allowed)
+
+pub fn async_profile_fingerprint_v1(profile: AsyncProfile) -> text:
+    sha256_text(async_profile_canonical_v1(profile))

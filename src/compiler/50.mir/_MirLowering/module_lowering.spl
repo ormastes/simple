@@ -31,15 +31,13 @@ use std.array.{array_sort_by}
 use compiler.common._Attributes.decl_attrs.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.mir.mir_types.{MirConstant, MirFieldDef, MirStatic, MirTypeDefKind}
+use std.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text?
-
-# `rt_env_get` yields nil for an UNSET variable, so both the extern and this
-# wrapper are OPTIONAL — every call site below already uses the optional-safe
-# `?? ""` / `== "1"` form, which distinguishes unset from explicitly-empty.
-# Same fix as flat_bridge_env_get (7825f01def2) and compiler/00.common/config.
+# The canonical runtime contract yields nil for both unset and explicitly empty
+# values. Every call below treats that state as disabled.
+@always_inline
 fn mir_lower_env_get(key: text) -> text?:
-    rt_env_get(key)
+    env_get_opt(key)
 
 fn _text_list_eq(a: [text], b: [text]) -> bool:
     """Order-sensitive equality for two variant-name lists.
@@ -245,6 +243,7 @@ impl MirLowering:
             current_function_symbols: [],
             current_function_names: [],
             loop_stack: empty_loop_stack,
+            unsafe_depth: 0,
             errors: empty_errors,
             field_map: {},
             bitfield_map: {},
@@ -302,9 +301,17 @@ impl MirLowering:
             global_const_exprs: {},
             array_global_mutation_warned: {},
             target_context: target_context,
+            allow_ambient_bootstrap_policy: true,
             resource_owned_locals: [],
             consumed_resource_locals: {}
         )
+
+    me use_explicit_semantic_policy():
+        self.allow_ambient_bootstrap_policy = false
+
+    me ambient_bootstrap_enabled() -> bool:
+        self.allow_ambient_bootstrap_policy and
+            (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
         symbol.id
@@ -1053,6 +1060,7 @@ impl MirLowering:
 
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
+        self.unsafe_depth = 0
         self.symbols = module.symbols
         var function_names: [text] = []
         for raw_func in module.functions.values():
@@ -1092,7 +1100,7 @@ impl MirLowering:
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
         self.global_symbol_ids = {}
-        val bootstrap_mode = (mir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
+        val bootstrap_mode = self.ambient_bootstrap_enabled()
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = bootstrap_mode and trace_enabled
         if bootstrap_trace:

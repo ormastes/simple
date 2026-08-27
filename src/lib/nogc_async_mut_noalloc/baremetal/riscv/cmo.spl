@@ -35,13 +35,21 @@ class CmoCapSnapshot:
     has_zicboz: bool
     has_zicbop: bool
 
+@unsafe(reason: "executes fence.i through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_fence_i()
+@unsafe(reason: "executes Zicbom cache maintenance through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_cbo_clean(addr: u64)
+@unsafe(reason: "executes Zicbom cache maintenance through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_cbo_inval(addr: u64)
+@unsafe(reason: "executes Zicbom cache maintenance through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_cbo_flush(addr: u64)
+@unsafe(reason: "executes Zicboz cache zero through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_cbo_zero(addr: u64)
+@unsafe(reason: "executes a Zicbop prefetch hint through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_prefetch_r(addr: u64)
+@unsafe(reason: "executes a Zicbop prefetch hint through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_prefetch_w(addr: u64)
+@unsafe(reason: "executes a Zicbop prefetch hint through an unsigned target provider", capabilities: [ffi])
 extern fn rt_riscv64_prefetch_i(addr: u64)
 
 # ============================================================================
@@ -50,7 +58,8 @@ extern fn rt_riscv64_prefetch_i(addr: u64)
 
 fn fence_i():
     """Emit fence.i — synchronise instruction and data caches."""
-    rt_riscv64_fence_i()
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_fence_i()
 
 # ============================================================================
 # Zicbom instructions
@@ -58,15 +67,18 @@ fn fence_i():
 
 fn cbo_clean(addr: u64):
     """cbo.clean: write dirty D-cache lines containing addr back to memory."""
-    rt_riscv64_cbo_clean(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_cbo_clean(addr)
 
 fn cbo_inval(addr: u64):
     """cbo.inval: invalidate D-cache lines containing addr."""
-    rt_riscv64_cbo_inval(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_cbo_inval(addr)
 
 fn cbo_flush(addr: u64):
     """cbo.flush: clean + invalidate D-cache lines containing addr."""
-    rt_riscv64_cbo_flush(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_cbo_flush(addr)
 
 # ============================================================================
 # Zicboz instruction
@@ -74,7 +86,8 @@ fn cbo_flush(addr: u64):
 
 fn cbo_zero(addr: u64):
     """cbo.zero: zero the D-cache line containing addr (Zicboz)."""
-    rt_riscv64_cbo_zero(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_cbo_zero(addr)
 
 # ============================================================================
 # Zicbop prefetch hints
@@ -82,15 +95,18 @@ fn cbo_zero(addr: u64):
 
 fn prefetch_r(addr: u64):
     """prefetch.r: hint that addr will be read soon."""
-    rt_riscv64_prefetch_r(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_prefetch_r(addr)
 
 fn prefetch_w(addr: u64):
     """prefetch.w: hint that addr will be written soon."""
-    rt_riscv64_prefetch_w(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_prefetch_w(addr)
 
 fn prefetch_i(addr: u64):
     """prefetch.i: hint that addr will be fetched as instructions soon."""
-    rt_riscv64_prefetch_i(addr)
+    unsafe(capabilities: [ffi]):
+        rt_riscv64_prefetch_i(addr)
 
 # ============================================================================
 # Observable count helpers — shared logic for production + test-log seams
@@ -103,43 +119,28 @@ fn prefetch_i(addr: u64):
 
 fn hal_cache_count_sync_icache_flushes(caps: CmoCapSnapshot, addr: u64, len: u64) -> u32:
     """Return number of cbo.flush calls that hal_cache_sync_icache would emit."""
-    if not caps.has_zicbom:
+    if not caps.has_zicbom or len == 0u64:
         0u32
     else:
         val stride: u64 = 64u64
-        var count: u32 = 0u32
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            count = count + 1u32
-            cur = cur + stride
-        count
+        val count = 1u64 + (len - 1u64) / stride
+        if count > 0xFFFFFFFFu64: 0xFFFFFFFFu32 else: count as u32
 
 fn hal_cache_count_clean_dcache_lines(caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32) -> u32:
     """Return number of cbo.clean calls that hal_cache_clean_dcache would emit."""
-    if not caps.has_zicbom:
+    if not caps.has_zicbom or len == 0u64 or stride == 0u32:
         0u32
     else:
-        var count: u32 = 0u32
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            count = count + 1u32
-            cur = cur + stride as u64
-        count
+        val count = 1u64 + (len - 1u64) / stride as u64
+        if count > 0xFFFFFFFFu64: 0xFFFFFFFFu32 else: count as u32
 
 fn hal_cache_count_inval_dcache_lines(caps: CmoCapSnapshot, addr: u64, len: u64, stride: u32) -> u32:
     """Return number of cbo.inval calls that hal_cache_invalidate_dcache would emit."""
-    if not caps.has_zicbom:
+    if not caps.has_zicbom or len == 0u64 or stride == 0u32:
         0u32
     else:
-        var count: u32 = 0u32
-        var cur = addr
-        val end_addr = addr + len
-        while cur < end_addr:
-            count = count + 1u32
-            cur = cur + stride as u64
-        count
+        val count = 1u64 + (len - 1u64) / stride as u64
+        if count > 0xFFFFFFFFu64: 0xFFFFFFFFu32 else: count as u32
 
 # ============================================================================
 # CMO probe helpers — pure ISA-string / config-flag probing

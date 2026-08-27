@@ -64,6 +64,7 @@ class HirLowering:
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
     module_filename: text          # Filename/path for visibility matching and defining_module population
+    allow_ambient_bootstrap_policy: bool
     module_resolver: ModuleResolverPort?   # Optional resolver for 2-pass import resolution (FR-COMPILER-003)
     loaded_modules: [text]         # Paths of modules already loaded (for cycle detection in A2 resolve pass)
     module_surfaces: ModuleSurfacesByName   # Compact declaration-only import resolver state
@@ -250,6 +251,11 @@ class HirLowering:
     # Registrations skipped by the memo. Observable mechanism counter: a spec
     # pins that repeating one (module, name, local, enum) query registers once.
     registered_import_skip_count: i64
+    # Per-importer callable-dependency tail memo. It is cleared by begin_module
+    # because the tail writes into that importer's symbol table.
+    dep_tail_memo: {text: bool}
+    dep_tail_memo_owner: text
+    dep_tail_skip_count: i64
     # IMPLIDX (2026-08-22): impl positions per (frozen surface, implemented
     # type name). `register_imported_type_methods_inner` swept EVERY impl of
     # the declaring module per imported composite/enum, copying each impl row
@@ -343,6 +349,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_explicit_dep_target_memo: {text: i64} = {}
     val empty_explicit_dep_item_memo: {text: text} = {}
     val empty_registered_import_memo: {text: bool} = {}
+    val empty_dep_tail_memo: {text: bool} = {}
     val empty_impl_index_built: {text: bool} = {}
     val empty_impl_index_positions: {text: [i64]} = {}
     val empty_name_index_built: {text: bool} = {}
@@ -362,6 +369,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         loop_depth: 0,
         type_inference_config: nil,
         module_filename: "",
+        allow_ambient_bootstrap_policy: true,
         module_resolver: nil,
         loaded_modules: empty_loaded_modules,
         module_surfaces: empty_module_surfaces,
@@ -403,6 +411,9 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         registered_import_memo: empty_registered_import_memo,
         registered_import_memo_owner: "",
         registered_import_skip_count: 0,
+        dep_tail_memo: empty_dep_tail_memo,
+        dep_tail_memo_owner: "",
+        dep_tail_skip_count: 0,
         impl_index_built: empty_impl_index_built,
         impl_index_positions: empty_impl_index_positions,
         impl_index_build_count: 0,
@@ -453,6 +464,13 @@ impl HirLowering:
         var lowering: HirLowering = hirlowering_new()
         lowering.type_inference_config = Some(config)
         lowering
+
+    me use_explicit_semantic_policy():
+        self.allow_ambient_bootstrap_policy = false
+
+    me ambient_bootstrap_enabled() -> bool:
+        self.allow_ambient_bootstrap_policy and
+            (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
 
     me error(message: text, span: Span):
         if hir_type_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":

@@ -1,0 +1,108 @@
+# VFS-owned executable byte source.
+#
+# Loader clients do not select FAT32, DBFS, NVFS, or an architecture-specific
+# boot reader. This module owns that dispatch and preserves each backend's
+# existing namespace and device authority boundary.
+#
+# Reading bytes does not authorize execution. Callers must still enter the
+# authenticated executable admission pipeline and consume its one-shot token.
+
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.types.{ExecuteTrust}
+use std.fs_driver.error.{FsError}
+use os.services.vfs.vfs_boot_init.{vfs_ambient_enforce}
+use os.services.vfs.vfs_write_ops.{g_vfs_root_path}
+
+@cfg(arm64)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(arm32)
+use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_read_file_bytes}
+
+@cfg(x86_64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(x86)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv64)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(riscv32)
+use os.services.vfs.vfs_init.{g_vfs_read_executable_bytes}
+
+@cfg(arm64)
+fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(arm32)
+fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
+    arm_fs_exec_read_file_bytes(path)
+
+@cfg(x86_64)
+fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(x86)
+fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv64)
+fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+@cfg(riscv32)
+fn _vfs_read_executable_backend_bytes_v1(path: text) -> [u8]:
+    g_vfs_read_executable_bytes(path)
+
+pub fn vfs_read_executable_bytes_result_v1(path: text) -> Result<[u8], FsError>:
+    """Read executable bytes after the shared ambient authority decision.
+
+    The namespace and file-grant gate intentionally runs before architecture
+    dispatch.  In particular, ARM's minimal FAT32 boot bridge must not bypass
+    the same ambient authority enforced by the x86 and RISC-V VFS reader.
+    Backend selection remains compile-time-only and no backend fallback is
+    added.  Preserve denial, invalid-path, and missing-file distinctions for
+    callers able to consume FsError.
+    """
+    if path == "":
+        return Err(FsError.InvalidArg)
+    val authority = vfs_ambient_enforce("read", g_vfs_root_path(path))
+    if authority.is_err():
+        return Err(FsError.Permission)
+    val bytes = _vfs_read_executable_backend_bytes_v1(path)
+    if bytes.len() == 0:
+        return Err(FsError.NotFound)
+    Ok(bytes)
+
+pub fn vfs_read_executable_bytes_v1(path: text) -> [u8]:
+    """Compatibility byte-only reader; prefer the typed result surface.
+
+    Historical loader callers use an empty array as their failure channel.
+    Keep that API stable while the result-returning entry point preserves the
+    exact shared-boundary denial class for newer callers.
+    """
+    val result = vfs_read_executable_bytes_result_v1(path)
+    if result.is_err():
+        return []
+    result.unwrap()
+
+pub fn vfs_open_authenticated_executable_v1(
+    mut table: MountTable, path: text, trust: ExecuteTrust
+) -> Result<ExecuteOpenBinding, FsError>:
+    """Open one executable through the shared mounted-filesystem owner.
+
+    This is the production read boundary for authenticated launch.  It keeps
+    FAT32, DBFS, NVFS, and future filesystem backends behind MountTable's
+    longest-prefix dispatch instead of selecting a backend here.  MountTable
+    enforces execute capability, noexec/untrusted policy, file type and size,
+    and binds the open handle to mount/namespace/content generations.
+
+    The returned binding is still not execution authority.  A loader must
+    verify the image and sidecars against this exact binding, admit it through
+    executable_admission_pipeline, and consume the resulting one-shot token at
+    scheduler adoption.
+    """
+    if path == "" or not path.starts_with("/"):
+        return Err(FsError.InvalidArg)
+    table.open_for_execute(path, trust)

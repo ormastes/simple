@@ -14,14 +14,20 @@ use compiler.backend.backend.interpreter_calls.*
 use compiler.backend.backend.interpreter_expr.*
 use compiler.backend.backend.interpreter_binop.*
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw enum discriminant ABI shared by interpreter enum kinds", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: HirExprKind) -> i64
+
+@always_inline
+fn interp_enum_discriminant_raw(value: HirExprKind) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Env-gated interpreter trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [EE]/[ES]/[EB] eval probe trail (invaluable for stage4 codegen diagnosis).
 fn itrace(msg: text) -> ():
-    if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+    if (env_get_opt("SIMPLE_INTERP_TRACE") ?? "") == "1":
         eprint(msg)
 
 # M5 pure-Simple parity for the Rust seed's strict interpreter mode
@@ -33,7 +39,7 @@ fn itrace(msg: text) -> ():
 # creation" idiom MirInterpreter.strict_mode already uses
 # (95.interp/mir_interpreter.spl) for the analogous SIMPLE_STRICT_INTERP knob.
 fn interp_strict_mem_enabled() -> bool:
-    (rt_env_get("SIMPLE_STRICT_MEM") ?? "") == "1"
+    (env_get_opt("SIMPLE_STRICT_MEM") ?? "") == "1"
 
 # Resolve a SymbolId to its stable variable name (bug doc iteration 21, target
 # (a)). The environment is name-keyed; a `Let` carries only a SymbolId, so we
@@ -264,7 +270,7 @@ impl InterpreterBackendImpl:
         # SIGILL. Reading the discriminant first (iteration-18 disc pre-dispatch)
         # forces the value to materialize so the qualified arms test correctly.
         # Feed it into itrace so it is never dead-code-eliminated.
-        val stmt_disc = rt_enum_discriminant(stmt.kind)
+        val stmt_disc = interp_enum_discriminant_raw(stmt.kind)
         itrace("[ES] exec_stmt entry disc={stmt_disc}")
         # Arm ORDER matters on stage4: `Expr` and `Block` are struct-shadowed
         # variant names, so their pattern tests compile ALWAYS-TRUE (bug doc
@@ -298,7 +304,7 @@ impl InterpreterBackendImpl:
                 # discriminant (hash("Field")=21232742) BEFORE the name match,
                 # mirroring the eval_expr Field pre-dispatch. The mutation goes
                 # through the shared store so every holder of the handle sees it.
-                val tgt_disc_c: i64 = rt_enum_discriminant(target.kind)
+                val tgt_disc_c: i64 = interp_enum_discriminant_raw(target.kind)
                 if tgt_disc_c == 21232742:  # hash("Field")
                     match target.kind:
                         case HirExprKind.Field(fbase, ffield, _):

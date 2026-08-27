@@ -82,3 +82,94 @@ rows done. Known gaps: Rust notify bridge (src/runtime/fswatch/) TODO;
 SCV-IMPL-B-01 blocked on sj repair; pre-existing reds unchanged
 (parser_wasm 7/12, structural_match 5/9, merge 1/5, gates 4/10, storage,
 parser_incremental, parser_cache, wasm_executor).
+
+## Post-Wave-2 (2026-08-26)
+Wave 2 (SCV-IMPL E-04, E-05, P-04, P-05, G-02, G-03, B-03, B-04, I-03) is
+landed and green (closeout sweep 2026-08-26; regressions all held, incl.
+mvp 11/11, file-identity 8/8, incremental-parse 9/9, wasm-shim 8/8). New
+capabilities: event coalescer/settle layer (`src/lib/scv/event_coalesce.spl`);
+persistent binary worktree index (`worktree_index.spl` — own store; B-04 DB
+migration is the documented adoption seam); parser trust/lock v2 registry
+(`parser_lock.spl` — pins sha256/ABI/protocol/signature, no implicit
+downloads; signature is pinned, NOT cryptographically verified yet); generic
+CST IR (`cst_ir.spl`); forced-unparsed audit path (`--force-unparsed
+--reason`, never public_ready by default); enforced v2 state model with
+legacy-v1 name mapping (`state_model.spl`); dual-byte content model
+(`dual_byte.spl`); metadata DB on textual SdnDatabase+WAL — deliberately NOT
+rt_sqlite emulation; WAL replay needs a prior schema snapshot, so
+crash-before-first-save loses pre-snapshot rows (`metadata_db.spl`); symbol
+entities via interim .spl structural scanner (`symbol_entity.spl`, P-06
+query-pack hookup TODO). Ledger 42/42 done (week-6 rows due 2026-10-13,
+signed step scripts SCV-IMPL-{E-04,E-05,P-04,P-05,G-02,G-03,B-03,B-04,I-03}).
+B-01 remains blocked on sj repair.
+
+## Post-Wave-3 (2026-08-26)
+Wave 3 (SCV-IMPL E-06, E-07, P-06, G-05, D-01, I-04, D-03, D-04, G-04) is
+landed and green (closeout sweep 2026-08-26; regressions all held, incl.
+mvp 11/11, merge 5/5, symbol-entity 3/3, incremental-parse 9/9,
+file-identity 8/8; gates mission-critical PASS with 6 profile rows, crash
+harness 9/9, restore drills 6). New capabilities: warm status with a REAL
+I/O counter at the stat/read choke points — warm clean is 0 stats/0 reads/no
+parse, one change is at most one stable read (`src/lib/scv/warm_status.spl`);
+bulk-update generation that holds the coalescer and reconciles once through
+warm status (`bulk_update.spl`); entity query packs for simple/python/rust on
+one engine — line-structural rules, not grammars; symbol_entity now delegates
+to the simple pack (`query_packs.spl`); interface/HIR fingerprints reusing the
+compiler's `compile_interface_digest` + `implementation_digest_of` as
+`syntactic_interface_id` / `normalized_impl_hash` — `typed_hir_hash` is
+honestly `unavailable`, no typed-HIR extractor exists, TODO(SCV-IMPL-G-06)
+(`hir_fingerprint.spl`); structural-roots diff over REAL P-05 CST roots keyed
+by revision+ContentId via `scv cst-store` — the first producer for the P-05
+root store, interim `cst-spl-1` builder until grammar-backed roots land
+(`diff.spl`, `structural_match.spl`); refactoring relations as many-to-many
+lineage edges with bounds (MAX_PAIRS=512 / CANDIDATES_PER_UNIT=64 /
+AMBIGUITY_MARGIN=50), ties never accepted (`refactoring_relations.spl`);
+`scv diff --view graph` hunks <-> entities <-> ops (`edit_graph.spl`);
+identity-aware merge via per-commit EntityId maps, jj stays conflict authority,
+rename-vs-rename limited by the linear I-02 store (`identity_merge.spl`);
+default/strict/mission_critical profiles pinned in `.scv/profile.sdn`, strict
+and mission_critical refuse forced_unparsed publication (`profiles.spl`).
+Findings: the long-standing "merge 1/5" red was a `scv_text_to_u8` all-zero
+hash collision (every text-derived id collided by length; fixed in
+`store.spl` with `value.bytes()`, seed-side `for ch in text` defect still
+OPEN, pre-fix repos have length-collided ids); merge-commit `parents:`
+separator inconsistency (merge.spl fixed to space-joined; integrity_view/
+recover/maintenance/integrity still split on "," — OPEN); mtime is
+second-granular so warm status only trusts reads whose post-read stat matches
+the pre-read stat. Ledger 51/51 done (week-7 rows due 2026-10-27, signed step
+scripts SCV-IMPL-{E-06,E-07,P-06,G-05,D-01,I-04,D-03,D-04,G-04}). B-01/B-02
+remain blocked on sj repair (`sj --version` rc=139 on 2026-08-26).
+
+## Post-Wave-4 (2026-08-26)
+
+Wave 4 landed ten items across four lanes: E-08 watchman adapter
+(`src/lib/scv/watchman_adapter.spl`, protocol-complete, verified against a
+replay endpoint — watchman is absent on this host), E-09 editor IPC and P-07 nvim
+`scv/editor/v1` protocol (`editor_ipc.spl`, `nvim_protocol.spl`; transport is a
+pipe-spool because the `rt_unix_socket_*` externs are shape-mismatched
+against the Rust runtime's (ptr,len)/out-param ABI — listen/connect return
+-22 EINVAL, recv core-dumps; bug record
+`doc/08_tracking/bug/rt_unix_socket_extern_shape_mismatch_2026-08-26.md`),
+G-06 interface-driven build invalidation (`build_invalidation.spl`;
+syntactic_interface_id drives downstream invalidation in SCV metadata;
+dependency-closure invalidation is reported `unavailable` until a real
+compiler dependency model exists, so the comment-only codegen skip stays
+BLOCKED — file-level invalidation only), D-05/D-06/D-07 region
+merge + merge validation + conflict v2 (`region_merge.spl`,
+`merge_validation.spl`, `conflict_v2.spl`; unparsed remainder publishes as
+`validated_partial`, never promoted), I-05 calibration corpus + oracle and I-06 identity
+corrections CLI (`identity_corrections.spl`, scv identity
+link|unlink|split|merge|trace; the one-rename-per-EntityId ceiling is now
+emitted as `entity_identity_ambiguous` instead of guessing a winner), and
+B-05 shadow-write trigger (`shadow_write.spl` + a config-gated hook in
+`store.spl`, OFF by default; crash harness re-verified green on the edited
+store). Acceptance sweep 2026-08-26: watchman 6/6, editor-ipc 6/6,
+nvim 7/7, build-invalidation 5/5, region-merge 5/5, merge-validation 5/5,
+conflict-v2 4/4, identity-corrections 3/3, shadow-write 3/3;
+`check-scv-identity-precision.shs` PASS 100.0% on the 34-case corpus
+(`test/fixtures/scv_identity_corpus/`); regressions held (mvp 11/11,
+merge 5/5, dual-write 4/4, file-identity 8/8, event-source 4/4,
+hir-fingerprint 3/3, incremental-parse 9/9). Ledger 61/61 done (week-8 rows
+due 2026-11-10, signed step scripts
+SCV-IMPL-{E-08,E-09,P-07,G-06,D-05,D-06,D-07,I-05,I-06,B-05}, WOTS leaves
+59..68).

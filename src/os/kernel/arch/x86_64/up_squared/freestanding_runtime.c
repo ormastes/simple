@@ -9,6 +9,27 @@
 #include <stddef.h>
 #include <stdint.h>
 
+extern uint8_t rt_port_inb(uint16_t port);
+extern void rt_port_outb(uint16_t port, uint8_t value);
+
+static void up2_write_serial_byte(uint8_t byte) {
+    while ((rt_port_inb((uint16_t)0x3fdu) & 0x20u) == 0u) { }
+    rt_port_outb((uint16_t)0x3f8u, byte);
+}
+
+/* Retained C ABI required by the freestanding Simple core. Serial policy,
+ * initialization, println, and readline remain owned by Pure Simple. */
+long write(int descriptor, const void *buffer, size_t count) {
+    if ((descriptor != 1 && descriptor != 2) || buffer == (const void *)0) {
+        return -1;
+    }
+    const uint8_t *bytes = (const uint8_t *)buffer;
+    for (size_t index = 0u; index < count; ++index) {
+        up2_write_serial_byte(bytes[index]);
+    }
+    return (long)count;
+}
+
 extern unsigned char __heap_start[];
 extern unsigned char __heap_end[];
 

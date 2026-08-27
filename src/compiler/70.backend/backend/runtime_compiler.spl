@@ -12,21 +12,17 @@
 
 use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
-use std.io_runtime.{host_arch, host_os}
+use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_path_absolute(path: text) -> text
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_env_get(key: text) -> text
-extern fn rt_getpid() -> i64
+extern fn rt_path_absolute(path: text) -> text?
 
 # ============================================================================
 # Platform Helpers
 # ============================================================================
 
 fn _is_windows() -> bool:
-    val os_env = rt_env_get("OS")
+    val os_env = env_get_nullable("OS")
     if os_env != "" and os_env != nil:
         return os_env.lower().contains("windows")
     false
@@ -38,27 +34,27 @@ fn _is_msvc_cc(cc: text) -> bool:
     driver == "cl" or driver == "cl.exe" or driver == "clang-cl" or driver == "clang-cl.exe"
 
 fn _is_mingw() -> bool:
-    val linker_flavor = rt_env_get("SIMPLE_LINKER_FLAVOR")
+    val linker_flavor = env_get_nullable("SIMPLE_LINKER_FLAVOR")
     if linker_flavor == "msvc":
         return false
     if linker_flavor == "gnu":
         return true
-    val windows_abi = rt_env_get("SIMPLE_WINDOWS_ABI")
+    val windows_abi = env_get_nullable("SIMPLE_WINDOWS_ABI")
     if windows_abi == "msvc":
         return false
     if windows_abi == "gnu":
         return true
-    val msystem = rt_env_get("MSYSTEM")
+    val msystem = env_get_nullable("MSYSTEM")
     msystem != "" and msystem != nil
 
 fn _get_temp_dir() -> text:
-    val tmpdir = rt_env_get("TMPDIR")
+    val tmpdir = env_get_nullable("TMPDIR")
     if tmpdir != "" and tmpdir != nil:
         return tmpdir
-    val tmp = rt_env_get("TMP")
+    val tmp = env_get_nullable("TMP")
     if tmp != "" and tmp != nil:
         return tmp
-    val temp = rt_env_get("TEMP")
+    val temp = env_get_nullable("TEMP")
     if temp != "" and temp != nil:
         return temp
     if _is_windows():
@@ -72,7 +68,7 @@ fn _obj_ext() -> text:
         ".o"
 
 fn runtime_compile_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
 # ============================================================================
 # C Compiler Discovery
@@ -134,13 +130,13 @@ fn find_c_compiler() -> text:
     Tries SIMPLE_CC env var first, then platform-specific discovery.
     Returns the command name or empty string if none found.
     """
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val plan = hosted_c_compiler_plan(target, host_os(), host_arch())
     if not plan.supported:
         return ""
 
     # User override via env var, after target admission.
-    val simple_cc = rt_env_get("SIMPLE_CC")
+    val simple_cc = env_get_nullable("SIMPLE_CC")
     if simple_cc != "" and simple_cc != nil:
         return simple_cc
 
@@ -157,11 +153,11 @@ fn find_c_compiler() -> text:
         return _find_c_compiler_windows()
 
     # Unix: check well-known paths first
-    if rt_file_exists("/usr/bin/clang"):
+    if file_exists("/usr/bin/clang"):
         return "/usr/bin/clang"
-    if rt_file_exists("/usr/bin/gcc"):
+    if file_exists("/usr/bin/gcc"):
         return "/usr/bin/gcc"
-    if rt_file_exists("/usr/bin/cc"):
+    if file_exists("/usr/bin/cc"):
         return "/usr/bin/cc"
 
     val candidates = ["clang", "clang-18", "clang-17", "clang-16", "gcc", "cc"]
@@ -217,7 +213,7 @@ fn _runtime_dir_walk_up(start: text) -> text:
                 prefix = "{prefix}/{parts[i]}"
             i = i + 1
         if prefix != "":
-            if rt_file_exists("{prefix}/src/runtime/runtime.c"):
+            if file_exists("{prefix}/src/runtime/runtime.c"):
                 return "{prefix}/src/runtime"
         depth = depth - 1
     ""
@@ -235,14 +231,14 @@ fn find_runtime_source_dir() -> text:
     """
     # Try SIMPLE_PROJECT_ROOT env var first so tests and callers can force
     # deterministic resolution even when cwd also contains src/runtime.
-    val project_root = rt_env_get("SIMPLE_PROJECT_ROOT")
+    val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT")
     if project_root != "" and project_root != nil:
         val rt_path = "{project_root}/src/runtime/runtime.c"
-        if rt_file_exists(rt_path):
+        if file_exists(rt_path):
             return "{project_root}/src/runtime"
 
     # Try relative to current working directory
-    if rt_file_exists("src/runtime/runtime.c"):
+    if file_exists("src/runtime/runtime.c"):
         return "src/runtime"
 
     # Unix-only: walk up from the executable location.
@@ -268,7 +264,7 @@ fn _runtime_dir_not_found_message() -> text:
     """Honest diagnostic for a failed runtime-source lookup."""
     val cwd = rt_path_absolute(".") ?? "<unknown>"
     val exe_path = rt_path_absolute("/proc/self/exe") ?? "<unknown>"
-    val project_root = rt_env_get("SIMPLE_PROJECT_ROOT")
+    val project_root = env_get_nullable("SIMPLE_PROJECT_ROOT")
     val pr = if project_root != "" and project_root != nil: project_root else: "<unset>"
     var msg = "Runtime source directory not found: no src/runtime/runtime.c under the current directory ({cwd}), "
     msg = msg + "under any ancestor of it, or under any ancestor of the running executable ({exe_path}). "
@@ -313,9 +309,9 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     # doc/08_tracking/bug/interpreter_extern_unreachable_names.md bucket (a)).
     # It needs no extra link flags -- -lpthread/-ldl/-lm are already
     # unconditionally passed below for runtime_thread.c et al.
-    # runtime_framebuffer/runtime_image/runtime_socket_nonblock close out the
-    # rest of bucket (a) that this flat, top-level-only source list can
-    # support (rt_fb_*, rt_image_*, rt_socket_set_nonblocking -- 9 names).
+    # runtime_framebuffer/runtime_image close their bucket (a) providers.
+    # runtime_socket_nonblock supplies only prepare/commit/mask syscalls for
+    # the canonical Pure-Simple rt_socket_set_nonblocking owner.
     # The remaining bucket (a) log-lib names (rt_simpleos_log_*/
     # rt_log_target_*) were fixed only on the interpreter-crate side
     # (src/compiler_rust/runtime/build.rs); their C source
@@ -327,8 +323,8 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     val use_msvc = _is_msvc_cc(cc)
-    val compile_pid = rt_getpid()
-    val target = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
+    val compile_pid = getpid()
+    val target = env_get_nullable("SIMPLE_NATIVE_BUILD_TARGET") ?? "host"
     val object_prefix = "{tmp_dir}/simple_rt_{compile_pid}_{target}_"
     var objects = [
         "{object_prefix}runtime{ext}",
@@ -374,7 +370,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
         val src_path = "{rt_dir}/{name}.c"
         if trace:
             print "[RT-COMPILE] checking existence of {src_path}"
-        if not rt_file_exists(src_path):
+        if not file_exists(src_path):
             cleanup_runtime_objects(objects)
             return Err("Required runtime source not found: {src_path}")
 
@@ -414,7 +410,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")
             # Explicit opt-in: the resulting binary requires an RVV-capable CPU.
-            if name == "runtime_simd_dispatch" and target.starts_with("riscv64") and (rt_env_get("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? "") == "1":
+            if name == "runtime_simd_dispatch" and target.starts_with("riscv64") and (env_get_nullable("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? "") == "1":
                 comp_args.push("-march=rv64gcv")
                 comp_args.push("-mabi=lp64d")
             comp_args.push("-I")
@@ -425,7 +421,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             comp_args.push(obj_path)
             comp_args.push(src_path)
 
-        val (comp_out, comp_err, comp_code) = rt_process_run(cc, comp_args)
+        val (comp_out, comp_err, comp_code) = process_run(cc, comp_args)
         if trace:
             print "[RT-COMPILE] compile result: code={comp_code}"
         if comp_code != 0:
@@ -451,7 +447,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
 fn cleanup_runtime_objects(objects: [text]):
     """Remove temporary runtime object files."""
     for obj in objects:
-        rt_file_delete(obj)
+        file_delete(obj)
 
 # ============================================================================
 # Exports

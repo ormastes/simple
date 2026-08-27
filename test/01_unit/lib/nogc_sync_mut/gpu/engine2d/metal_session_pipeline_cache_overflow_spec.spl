@@ -1,22 +1,9 @@
 # @cover src/lib/nogc_sync_mut/gpu/engine2d/metal_session.spl 60%
 # @tag: unit, gpu, engine2d, metal, session, cache, leak
 #
-# DEFECT 2 (doc/08_tracking/bug/engine2d_simd_gpu_layer_audit_2026-08-08.md):
-# same hand-unrolled 4-slot cache shape as CudaModuleCache, for Metal
-# compute pipelines. `MetalComputeSession.get_or_create_pipeline()` discarded the
-# `cache_pipeline()` return value past the 4th distinct name.
-#
-# Fix: `get_or_create_pipeline()` now captures the return and, on a non-empty
-# ("full") result, increments `session.cache_reject_count` and records
-# `session.last_cache_rejection`.
-#
-# Metal needs real macOS hardware this host does not have, so
-# `MetalComputeSession.init_device()`/`get_or_create_pipeline()` cannot be driven
-# end-to-end here. This spec proves the pure `MetalPipelineCache` reject
-# contract directly (no hardware dependency) -- the same class whose
-# discarded return value was the defect -- and drives the extracted
-# `record_pipeline(name, handle)` bookkeeping (the exact code
-# `get_or_create_pipeline()` calls on a real handle) with synthetic handles.
+# `MetalComputeSession` is intentionally a pure bounded pipeline-cache owner.
+# This suite proves overflow accounting and cache identity behavior; it does
+# not exercise a foreign Metal provider.
 
 use std.spec
 use std.nogc_sync_mut.gpu.engine2d.metal_session.{MetalComputeSession, MetalPipelineCache}
@@ -39,7 +26,7 @@ describe "MetalPipelineCache overflow contract (pure, no hardware)":
         assert_equal(cache.find_pipeline("p3"), 203)
         assert_equal(cache.find_pipeline("p4"), 0)
 
-describe "MetalComputeSession.record_pipeline overflow is an observed, counted event (real production bookkeeping)":
+describe "MetalComputeSession.record_pipeline overflow is an observed, counted cache event":
 
     it "counts the 5th distinct pipeline name as a rejection instead of discarding it":
         var session = MetalComputeSession.create("compute")

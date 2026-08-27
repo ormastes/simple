@@ -149,3 +149,17 @@ pub extern "C" fn rt_vk_available() -> i32 {
         0
     }
 }
+
+/// Distinct provider entry used by the core C runtime fallback.
+#[no_mangle]
+pub extern "C" fn rt_vk_provider_available() -> i32 {
+    rt_vk_available()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn provider_probe_alias_matches_public_vulkan_compute_probe() {
+        assert_eq!(super::rt_vk_provider_available(), super::rt_vk_available());
+    }
+}

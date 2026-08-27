@@ -1,0 +1,134 @@
+"""
+# ModuleSurface semantic projection differential specification
+
+Proves retained surface identity changes for importer-visible declaration
+semantics while ignoring spans, comments, and ordinary executable bodies.
+"""
+
+use std.spec.*
+use std.io_runtime.{read_file_text}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb}
+
+fn semantic_surface(source: text) -> ModuleSurfacesByName:
+    val parsed = parse_and_build_module(source, "semantic_surface.spl")
+    val result = module_surfaces_from_modules(
+        {"semantic.surface": parsed},
+        [SourceFile(path: "semantic_surface.spl", content: source,
+                    module_name: "semantic.surface")])
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+fn semantic_equal(left: text, right: text) -> bool:
+    val a = semantic_surface(left).surfaces[0]
+    val b = semantic_surface(right).surfaces[0]
+    (a.semantic_cacheable and b.semantic_cacheable and
+        a.semantic_hash0 == b.semantic_hash0 and
+        a.semantic_hash1 == b.semantic_hash1 and
+        a.semantic_hash2 == b.semantic_hash2 and
+        a.semantic_hash3 == b.semantic_hash3)
+
+fn routed_facade(owner: text) -> ModuleSurfacesByName:
+    val provider_source = "pub fn item() -> i64:\n    1\n"
+    val facade_source = "use {owner}.\{item\}\nexport item\n"
+    val provider = parse_and_build_module(provider_source, owner.replace(".", "/") + ".spl")
+    val facade = parse_and_build_module(facade_source, "route/facade.spl")
+    var modules = {"route.facade": facade}
+    modules[owner] = provider
+    val result = module_surfaces_from_modules(
+        modules,
+        [SourceFile(path: owner.replace(".", "/") + ".spl", content: provider_source, module_name: owner),
+         SourceFile(path: "route/facade.spl", content: facade_source, module_name: "route.facade")])
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+describe "frozen ModuleSurface semantic identity":
+    it "hoists immutable lengths out of the surface sort comparator":
+        val source = read_file_text("src/compiler/20.hir/hir_lowering/module_surface_semantic_projection.spl")
+        expect(source.contains("val a_len = a.len()\n    val b_len = b.len()")).to_equal(true)
+        expect(source.contains("while i < a_len and i < b_len:")).to_equal(true)
+        expect(source.contains("while i < a.len() and i < b.len():")).to_equal(false)
+
+    it "ignores comments and ordinary function bodies":
+        val a = "# first comment\nfn local(x: i64) -> i64:\n    x + 1\n"
+        val b = "# moved and rewritten comment\nfn local(x: i64) -> i64:\n    x + 99\n"
+        expect(semantic_equal(a, b)).to_equal(true)
+
+    it "ignores declaration documentation and dictionary insertion order":
+        val a = "## first documentation\nfn beta() -> i64:\n    1\nfn alpha() -> i64:\n    2\n"
+        val b = "## replacement documentation\nfn alpha() -> i64:\n    9\nfn beta() -> i64:\n    8\n"
+        expect(semantic_equal(a, b)).to_equal(true)
+
+    it "changes for constant values and parameter defaults":
+        val base = "const LIMIT: i64 = 3\nfn exposed(x: i64 = 4) -> i64:\n    x\n"
+        val const_edit = "const LIMIT: i64 = 5\nfn exposed(x: i64 = 4) -> i64:\n    x\n"
+        val default_edit = "const LIMIT: i64 = 3\nfn exposed(x: i64 = 6) -> i64:\n    x\n"
+        expect(semantic_equal(base, const_edit)).to_equal(false)
+        expect(semantic_equal(base, default_edit)).to_equal(false)
+
+    it "changes for field defaults and array-size expressions":
+        val base = "struct Packet:\n    words: [i64; 2]\n    code: i64 = 7\n"
+        val size_edit = "struct Packet:\n    words: [i64; 3]\n    code: i64 = 7\n"
+        val default_edit = "struct Packet:\n    words: [i64; 2]\n    code: i64 = 8\n"
+        expect(semantic_equal(base, size_edit)).to_equal(false)
+        expect(semantic_equal(base, default_edit)).to_equal(false)
+
+    it "changes for enum discriminants, attributes, and open metadata":
+        val base = "@evolving(repr: u16)\nenum State:\n    Ready = 1\n    complete:\n"
+        val discriminant_edit = "@evolving(repr: u16)\nenum State:\n    Ready = 2\n    complete:\n"
+        val attribute_edit = "@evolving(repr: u32)\nenum State:\n    Ready = 1\n    complete:\n"
+        val open_edit = "@evolving(repr: u16)\nenum State:\n    Ready = 1\n    complete:\n    dyn:\n"
+        expect(semantic_equal(base, discriminant_edit)).to_equal(false)
+        expect(semantic_equal(base, attribute_edit)).to_equal(false)
+        expect(semantic_equal(base, open_edit)).to_equal(false)
+
+    it "changes for trait default bodies and keeps abstract declarations stable":
+        val a = "trait Value:\n    fn get(self) -> i64:\n        1\n"
+        val b = "trait Value:\n    fn get(self) -> i64:\n        2\n"
+        expect(semantic_equal(a, b)).to_equal(false)
+        val abstract_a = "trait Value:\n    fn get(self) -> i64\n"
+        val abstract_b = "## docs only\ntrait Value:\n    fn get(self) -> i64\n"
+        expect(semantic_equal(abstract_a, abstract_b)).to_equal(true)
+
+    it "changes for export route and resolved origin semantics":
+        val direct = "fn item() -> i64:\n    1\nexport item\n"
+        val renamed = "fn item() -> i64:\n    1\nexport item: public_item\n"
+        expect(semantic_equal(direct, renamed)).to_equal(false)
+        val a = routed_facade("owner.alpha")
+        val b = routed_facade("owner.beta")
+        val sa = a.surfaces[a.index_by_name["route.facade"]]
+        val sb = b.surfaces[b.index_by_name["route.facade"]]
+        expect((sa.semantic_hash0 == sb.semantic_hash0 and
+               sa.semantic_hash1 == sb.semantic_hash1 and
+               sa.semantic_hash2 == sb.semantic_hash2 and
+               sa.semantic_hash3 == sb.semantic_hash3)).to_equal(false)
+
+    it "distinguishes eager, lazy, and differently unresolved imports":
+        val eager = "use missing.alpha.\{item\}\nfn local() -> i64:\n    1\n"
+        val lazy = "use lazy missing.alpha.\{item\}\nfn local() -> i64:\n    1\n"
+        val other = "use missing.beta.\{item\}\nfn local() -> i64:\n    1\n"
+        expect(semantic_equal(eager, lazy)).to_equal(false)
+        expect(semantic_equal(eager, other)).to_equal(false)
+
+    it "changes for bitfield widths and enum-extension constructors":
+        val bit4 = "bitfield Flags(u32):\n    mode: 4\n    rest: 28\n"
+        val bit8 = "bitfield Flags(u32):\n    mode: 8\n    rest: 24\n"
+        expect(semantic_equal(bit4, bit8)).to_equal(false)
+        val ext_a = "enum E:\n    A\n    complete:\nextend E:\n    complete:\n        pkg.B(i64)\n"
+        val ext_b = "enum E:\n    A\n    complete:\nextend E:\n    complete:\n        pkg.B(text)\n"
+        expect(semantic_equal(ext_a, ext_b)).to_equal(false)
+
+    it "changes for public function contract predicates":
+        val a = "fn guarded(x: i64) -> i64:\n    in:\n        x > 0\n    x\n"
+        val b = "fn guarded(x: i64) -> i64:\n    in:\n        x >= 0\n    x\n"
+        expect(semantic_equal(a, b)).to_equal(false)
+
+    it "parses all four lower-case SHA-256 limbs without truncation":
+        val hex = "0123456789abcdeffedcba98765432100000000000000000ffffffffffffffff"
+        expect(module_surface_semantic_hex_limb(hex, 0)).to_equal(81985529216486895)
+        expect(module_surface_semantic_hex_limb(hex, 1)).to_equal(-81985529216486896)
+        expect(module_surface_semantic_hex_limb(hex, 2)).to_equal(0)
+        expect(module_surface_semantic_hex_limb(hex, 3)).to_equal(-1)
+        expect(module_surface_semantic_hex_limb(hex, 4)).to_equal(0)

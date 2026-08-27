@@ -1,59 +1,54 @@
-//! `rt_socket_set_nonblocking` extern registration for the interpreter/JIT
-//! path.
+//! Internal scalar syscall-shim registration for the interpreter/JIT path.
 //!
-//! The only prior C definition lived in
-//! `src/runtime/platform/async_linux_epoll.c` -- gated `#if defined(__linux__)`
-//! for the whole file and never compiled by either C-source list that gates
-//! linkage (the native-product-build `sources` array at
-//! `src/compiler/70.backend/backend/runtime_compiler.spl`, or the C sources
-//! this crate's own build script compiles,
-//! `src/compiler_rust/runtime/build.rs`). Its only caller,
-//! `src/lib/nogc_sync_mut/fs/nvfs_posix/posix_driver.spl` (a hosted POSIX fd
-//! shim, not baremetal code), died with
-//! `unknown extern function: rt_socket_set_nonblocking` on every hosted
-//! path. See doc/08_tracking/bug/interpreter_extern_unreachable_names.md
-//! bucket (a).
-//!
-//! Rather than link the whole epoll-backed source file (it drags in
-//! `spl_array_new_i64`/`spl_array_push_i64`, defined in `runtime.c`, which
-//! this crate does not compile -- the same problem `rt_audio_play_pcm_f32`
-//! had), the single self-contained function body was extracted verbatim into
-//! `src/runtime/runtime_socket_nonblock.c`, matching the
-//! `runtime_native_gpu_stub.c` partial-extraction precedent.
+//! Pure Simple owns the public `rt_socket_set_nonblocking` ABI and policy.
+//! This adapter exposes only the primitive syscall/layout shims compiled from
+//! `src/runtime/runtime_socket_nonblock.c`.
 
 use crate::error::CompileError;
 use crate::value::Value;
 
 unsafe extern "C" {
-    fn rt_socket_set_nonblocking(fd: i64, enabled: bool) -> bool;
+    fn rt_socket_nonblock_prepare(fd: i64, mode: i64) -> i64;
+    fn rt_socket_nonblock_commit(fd: i64, flags: i64) -> i64;
+    fn rt_socket_nonblock_mask() -> i64;
 }
 
-/// Dispatch `rt_socket_set_nonblocking`. This is a single name, not a
-/// prefix family, so the caller matches the exact name before routing here.
-pub fn dispatch(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 2 {
+/// Dispatch the three internal shim names used by the Pure-Simple owner.
+pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
+    let expected = if name == "rt_socket_nonblock_mask" { 0 } else { 2 };
+    if args.len() != expected {
         return Err(CompileError::runtime(format!(
-            "rt_socket_set_nonblocking expects 2 argument(s), got {}",
+            "{name} expects {expected} argument(s), got {}",
             args.len()
         )));
+    }
+    if name == "rt_socket_nonblock_mask" {
+        return Ok(Value::Int(unsafe { rt_socket_nonblock_mask() }));
     }
     let fd = match &args[0] {
         Value::Int(n) => *n,
         other => {
             return Err(CompileError::runtime(format!(
-                "rt_socket_set_nonblocking: argument 0 must be an int, got {other:?}"
+                "{name}: argument 0 must be an int, got {other:?}"
             )));
         }
     };
-    let enabled = match &args[1] {
-        Value::Bool(b) => *b,
-        other => {
-            return Err(CompileError::runtime(format!(
-                "rt_socket_set_nonblocking: argument 1 must be a bool, got {other:?}"
-            )));
-        }
+    if name == "rt_socket_nonblock_prepare" {
+        let mode = match &args[1] {
+            Value::Int(n) => *n,
+            other => return Err(CompileError::runtime(format!(
+                "{name}: argument 1 must be an int, got {other:?}"
+            ))),
+        };
+        return Ok(Value::Int(unsafe { rt_socket_nonblock_prepare(fd, mode) }));
+    }
+    let flags = match &args[1] {
+        Value::Int(n) => *n,
+        other => return Err(CompileError::runtime(format!(
+            "{name}: argument 1 must be an int, got {other:?}"
+        ))),
     };
-    Ok(Value::Bool(unsafe { rt_socket_set_nonblocking(fd, enabled) }))
+    Ok(Value::Int(unsafe { rt_socket_nonblock_commit(fd, flags) }))
 }
 
 #[cfg(test)]
@@ -62,23 +57,23 @@ mod tests {
 
     #[test]
     fn wrong_arity_is_rejected() {
-        let err = dispatch(&[Value::Int(0)]).unwrap_err();
+        let err = dispatch("rt_socket_nonblock_prepare", &[Value::Int(0)]).unwrap_err();
         let text = format!("{err}");
         assert!(text.contains("expects 2 argument"), "got: {text}");
     }
 
     #[test]
     fn wrong_arg_type_is_rejected_not_a_bad_transmute() {
-        let err = dispatch(&[Value::Int(0), Value::Int(1)]).unwrap_err();
+        let err = dispatch("rt_socket_nonblock_prepare", &[Value::Int(0), Value::Bool(true)]).unwrap_err();
         let text = format!("{err}");
-        assert!(text.contains("must be a bool"), "got: {text}");
+        assert!(text.contains("must be an int"), "got: {text}");
     }
 
     #[test]
-    fn invalid_fd_returns_false_not_a_crash() {
+    fn invalid_fd_returns_failure_status_not_a_crash() {
         // fd -1 is never a valid descriptor; fcntl(F_GETFL) fails and the C
-        // implementation returns false cleanly (see runtime_socket_nonblock.c).
-        let result = dispatch(&[Value::Int(-1), Value::Bool(true)]).unwrap();
-        assert!(matches!(result, Value::Bool(false)));
+        // shim returns the exact -1 status (see runtime_socket_nonblock.c).
+        let result = dispatch("rt_socket_nonblock_prepare", &[Value::Int(-1), Value::Int(1)]).unwrap();
+        assert!(matches!(result, Value::Int(-1)));
     }
 }

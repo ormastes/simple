@@ -41,6 +41,9 @@ fn weave_key_for(selection_digest: text, descriptor: text) -> AopWeaveKey:
                 weave_mode: "symbolic_call", weaver_schema: 1,
                 backend_policy: "default")
 
+fn visible_catalog_digest() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 describe "AOP selection/weave key stability (core invariant)":
     it "advice body-only change preserves selection key and weave key":
         step("Verify: advice body-only change preserves selection key and weave key")
@@ -48,13 +51,13 @@ describe "AOP selection/weave key stability (core invariant)":
         val r = rule_log(10)
         val iface = aop_advice_interface_digest(r)
         val roots = ["root-a", "root-b"]
-        val sel1 = aop_selection_key_digest(aop_selection_key_today(r.predicate_text, roots, [iface]))
+        val sel1 = aop_selection_key_digest(aop_selection_key_today(r.predicate_text, roots, [iface], visible_catalog_digest()))
         # "Change" the body: the implementation digest moves...
         val impl_old = aop_advice_implementation_digest("body-sha-1")
         val impl_new = aop_advice_implementation_digest("body-sha-2")
         expect(impl_old == impl_new).to_equal(false)
         # ...but the interface digest and therefore selection key do not.
-        val sel2 = aop_selection_key_digest(aop_selection_key_today(r.predicate_text, roots, [aop_advice_interface_digest(r)]))
+        val sel2 = aop_selection_key_digest(aop_selection_key_today(r.predicate_text, roots, [aop_advice_interface_digest(r)], visible_catalog_digest()))
         expect(sel1).to_equal(sel2)
         val d = aop_descriptor_digest(ctx("app.core", "handle", "fn()"))
         val w1 = aop_weave_key_digest(weave_key_for(sel1, d))
@@ -67,16 +70,24 @@ describe "AOP selection/weave key stability (core invariant)":
         var r2 = rule_log(10)
         r2.form = AdviceForm.Around
         val roots = ["root-a"]
-        val s1 = aop_selection_key_digest(aop_selection_key_today(r1.predicate_text, roots, [aop_advice_interface_digest(r1)]))
-        val s2 = aop_selection_key_digest(aop_selection_key_today(r2.predicate_text, roots, [aop_advice_interface_digest(r2)]))
+        val s1 = aop_selection_key_digest(aop_selection_key_today(r1.predicate_text, roots, [aop_advice_interface_digest(r1)], visible_catalog_digest()))
+        val s2 = aop_selection_key_digest(aop_selection_key_today(r2.predicate_text, roots, [aop_advice_interface_digest(r2)], visible_catalog_digest()))
         expect(s1 == s2).to_equal(false)
 
     it "advice ordering (priority) change changes the selection key":
         step("Verify: advice ordering (priority) change changes the selection key")
         val roots = ["root-a"]
-        val s1 = aop_selection_key_digest(aop_selection_key_today("p", roots, [aop_advice_interface_digest(rule_log(10))]))
-        val s2 = aop_selection_key_digest(aop_selection_key_today("p", roots, [aop_advice_interface_digest(rule_log(20))]))
+        val s1 = aop_selection_key_digest(aop_selection_key_today("p", roots, [aop_advice_interface_digest(rule_log(10))], visible_catalog_digest()))
+        val s2 = aop_selection_key_digest(aop_selection_key_today("p", roots, [aop_advice_interface_digest(rule_log(20))], visible_catalog_digest()))
         expect(s1 == s2).to_equal(false)
+
+    it "visible catalog change invalidates the selection key":
+        val roots = ["root-a"]
+        val iface = [aop_advice_interface_digest(rule_log(10))]
+        val old_key = aop_selection_key_digest(aop_selection_key_today("p", roots, iface, visible_catalog_digest()))
+        val new_key = aop_selection_key_digest(aop_selection_key_today("p", roots, iface,
+            "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"))
+        expect(old_key == new_key).to_equal(false)
 
     it "predicate whitespace-only respelling preserves the selector digest":
         step("Verify: predicate whitespace-only respelling preserves the selector digest")

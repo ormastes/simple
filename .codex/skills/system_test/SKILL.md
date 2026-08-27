@@ -425,6 +425,30 @@ evidence.
 
 ## Phase 3: Traceability Matrix
 
+### Performance and memory evidence
+
+For compiler, linter, optimizer, or tooling hot paths, derive scenarios from
+the four tiers in `doc/07_guide/compiler/performance_diagnostics.md`:
+
+- fast typed lints prove high-confidence source diagnostics and suppress
+  unresolved guesses;
+- MIR scenarios pair an exact semantic oracle with a structural activation or
+  rejection oracle and preserve zero-trip, alias, effect, overflow, ownership,
+  and malformed-input boundaries relevant to the transform;
+- deep-analysis scenarios expose bounded symbolic results and explicit
+  `AnalysisIncomplete(reason)` outcomes;
+- profile scenarios bind timing, allocation/copy bytes, cardinality, and peak
+  memory to the same fixture and revision.
+
+Do not present static Big-O reasoning as measured latency/RSS evidence, or one
+successful candidate as proof that a registered pass is active generally.
+Performance fixtures must distinguish user-facing lint findings from passed,
+missed, analysis, and failure optimization remarks. When a change removes a
+copy or allocation pattern, retain a behavior oracle plus a structural or
+counter oracle that would fail if the old hot path returned. Mirror every
+changed SSpec into `doc/06_spec` and state clearly when evidence was authored
+but not executed.
+
 Create a traceability matrix linking requirements to tests:
 
 ```markdown

@@ -1,0 +1,116 @@
+"""Sole one-shot composition owner for authenticated boot catalog records."""
+
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.installer.simplebox_signed_catalog_provisioner_v1.{
+    SimpleboxSignedCatalogProvisionResultV1
+}
+use os.kernel.loader.installed_artifact_catalog_boot_owner_v1.{
+    InstalledArtifactBootPolicyV1, InstalledArtifactBootRecordV1,
+    InstalledArtifactBootPopulationErrorV1,
+    installed_artifact_boot_policy_shape_valid_v1,
+    installed_artifact_catalog_populate_from_boot_policy_v1
+}
+use os.kernel.loader.simplebox_primary_tool_catalog_bundle_v1.{
+    simplebox_primary_tool_catalog_bundle_plan_valid_v1
+}
+use os.kernel.loader.executable_manifest_signature_verifier.{
+    ExecutableManifestTrustedSignerV1
+}
+use os.kernel.loader.clang_sysroot_catalog_bundle_v1.{
+    ClangSysrootCatalogBundleV1, CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1
+}
+
+pub enum InstalledArtifactBootCompositionErrorV1:
+    None
+    Empty
+    SimpleboxRejected
+    ClangRejected
+    TargetMismatch
+    TrustRootsMismatch
+    DuplicatePath
+    CombinedPolicyRejected
+    PopulationRejected
+
+pub struct InstalledArtifactBootCompositionResultV1:
+    ok: bool
+    error: InstalledArtifactBootCompositionErrorV1
+    population_error: InstalledArtifactBootPopulationErrorV1
+    accepted_records: i64
+
+fn _fail_v1(
+    error: InstalledArtifactBootCompositionErrorV1,
+    population_error: InstalledArtifactBootPopulationErrorV1 =
+        InstalledArtifactBootPopulationErrorV1.None
+) -> InstalledArtifactBootCompositionResultV1:
+    InstalledArtifactBootCompositionResultV1(
+        ok: false, error: error, population_error: population_error,
+        accepted_records: 0)
+
+fn _target_equal_v1(left: ManifestTarget, right: ManifestTarget) -> bool:
+    left.os == right.os and left.arch == right.arch and left.abi == right.abi
+
+pub(package) fn installed_artifact_boot_compose_and_populate_v1(
+    simplebox: SimpleboxSignedCatalogProvisionResultV1?,
+    clang: ClangSysrootCatalogBundleV1?
+) -> InstalledArtifactBootCompositionResultV1:
+    """Authenticate one combined policy and open the catalog exactly once."""
+    if not simplebox.? and not clang.?:
+        return _fail_v1(InstalledArtifactBootCompositionErrorV1.Empty)
+    var records: [InstalledArtifactBootRecordV1] = []
+    var required: [text] = []
+    var target = ManifestTarget(os: "", arch: "", abi: "")
+    var roots: [ExecutableManifestTrustedSignerV1] = []
+    if simplebox.?:
+        val provisioned = simplebox.unwrap()
+        if not provisioned.ok or
+           not simplebox_primary_tool_catalog_bundle_plan_valid_v1(
+               provisioned.plan):
+            return _fail_v1(
+                InstalledArtifactBootCompositionErrorV1.SimpleboxRejected)
+        target = provisioned.plan.policy.platform_target
+        roots = provisioned.plan.policy.trust_roots
+        for path in provisioned.plan.policy.required_canonical_paths:
+            required.push(path)
+        for record in provisioned.plan.records: records.push(record)
+    if clang.?:
+        val bundle = clang.unwrap()
+        if not bundle.ok or bundle.records.len() !=
+           CLANG_SYSROOT_CATALOG_RECORD_COUNT_V1 or
+           not installed_artifact_boot_policy_shape_valid_v1(
+               bundle.policy, bundle.records):
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.ClangRejected)
+        if target.os != "" and
+           not _target_equal_v1(target, bundle.policy.platform_target):
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TargetMismatch)
+        if target.os != "" and roots != bundle.policy.trust_roots:
+            return _fail_v1(InstalledArtifactBootCompositionErrorV1.TrustRootsMismatch)
+        if target.os == "":
+            target = bundle.policy.platform_target
+            roots = bundle.policy.trust_roots
+        for path in bundle.policy.required_canonical_paths:
+            required.push(path)
+        for record in bundle.records: records.push(record)
+    var index: i64 = 0
+    while index < required.len():
+        var prior: i64 = 0
+        while prior < index:
+            if required[prior] == required[index]:
+                return _fail_v1(InstalledArtifactBootCompositionErrorV1.DuplicatePath)
+            prior = prior + 1
+        index = index + 1
+    val policy = InstalledArtifactBootPolicyV1(
+        platform_target: target, required_canonical_paths: required,
+        trust_roots: roots)
+    if not installed_artifact_boot_policy_shape_valid_v1(policy, records):
+        return _fail_v1(
+            InstalledArtifactBootCompositionErrorV1.CombinedPolicyRejected)
+    val populated = installed_artifact_catalog_populate_from_boot_policy_v1(
+        policy, records)
+    if not populated.ok:
+        return _fail_v1(
+            InstalledArtifactBootCompositionErrorV1.PopulationRejected,
+            populated.error)
+    InstalledArtifactBootCompositionResultV1(
+        ok: true, error: InstalledArtifactBootCompositionErrorV1.None,
+        population_error: InstalledArtifactBootPopulationErrorV1.None,
+        accepted_records: populated.accepted_records)

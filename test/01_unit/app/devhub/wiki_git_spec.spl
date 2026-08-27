@@ -15,6 +15,7 @@
 
 use std.spec
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime.{read_file_text}
 use app.devhub.wiki_git.{sanitize_wiki_page_name, sanitize_owner_or_repo, sanitize_owner_repo_slug, wiki_git_clone_or_pull, wiki_git_list, wiki_git_read, wiki_git_write, wiki_git_delete, wiki_git_search, wiki_git_page_modified, WikiGrepMatch}
 
 
@@ -69,6 +70,15 @@ fn _fixture_bare_wiki_repo() -> text:
 fn _fresh_temp_dir() -> text:
     val (out, _err, _code) = process_run("/bin/sh", ["-c", "mktemp -d /tmp/devhub-wiki-git-cache.XXXXXX\n"])
     out.trim()
+
+
+describe "wiki_git runtime file-read ownership":
+    it "routes its single page-content read through std.io_runtime":
+        val source = read_file_text("src/app/devhub/wiki_git.spl")
+        expect(source.contains("extern fn rt_file_read_text")).to_equal(false)
+        expect(source.contains("use std.io_runtime.{file_exists, file_write, read_file_text}")).to_equal(true)
+        expect(source.split("read_file_text(path)").len()).to_equal(2)
+        expect(source.contains("if not file_exists(path):\n                Err(\"page not found: {page}\")\n            else:\n                Ok(read_file_text(path))")).to_equal(true)
 
 
 describe "wiki_git sanitizers (mirrors app.portal.git_repo's sanitizer style)":
@@ -174,6 +184,18 @@ describe "wiki_git against a local fixture wiki repo":
                 expect(true).to_equal(true)
             Ok(_content):
                 expect(true).to_equal(false)
+
+    it "returns successful empty content for an existing empty page":
+        val bare_repo = _fixture_bare_wiki_repo()
+        val cache_dir = _fresh_temp_dir() + "/clone"
+        val (_ok, _err) = wiki_git_clone_or_pull(bare_repo, cache_dir)
+        val (write_ok, _write_err) = wiki_git_write(cache_dir, "EmptyPage", "", "add empty page")
+        expect(write_ok).to_equal(true)
+        match wiki_git_read(cache_dir, "EmptyPage"):
+            Err(_msg):
+                expect(true).to_equal(false)
+            Ok(content):
+                expect(content).to_equal("")
 
     it "writes a new page and commits it locally, visible in a subsequent list":
         val bare_repo = _fixture_bare_wiki_repo()

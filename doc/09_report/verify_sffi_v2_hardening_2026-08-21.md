@@ -34,3 +34,95 @@ and P2-P6 remain planned and are not claimed complete.
 **STATUS: FAIL** — the bounded Rust-backed P0 unit tests pass, but this remains
 an explicitly partial hardening and design checkpoint, not release evidence or
 a claim that SFFI v2 is complete.
+
+## Follow-up: interpreter debug raw boundary (2026-08-26)
+
+- PASS (static): both interpreter-debug facades retain 12 used raw declarations,
+  each explicitly `unsafe(ffi)` and each call lexically scoped. Their parity
+  audit passes, as does the canonical debug authority audit.
+- PASS (source check): `bin/simple check` accepts both changed files. The tool
+  identifies itself as the Rust bootstrap seed, so this is not a self-hosted
+  production-verification result.
+- PASS (optimizer review): each mirror reports the same 55 pre-existing
+  opportunities, including two collection-capacity suggestions; the status
+  repair adds no normal-path loop, allocation, copy, lookup, hash, or dispatch.
+- PASS (contract): provider `-1` failures for breakpoint add/remove and nonzero
+  CLI-run status now become `Result.Err`; ordinary boolean behavior is unchanged.
+- FAIL (global admission): no signed artifact-bound provider admission is
+  established by this work. This follow-up does not change the overall FAIL
+  status above.
+
+## Follow-up: advanced scalar math raw boundary (2026-08-26)
+
+- PASS (static): twelve fixed-`f64` declarations and thirteen calls in the
+  canonical advanced-math facade are explicitly and lexically `unsafe(ffi)`;
+  the guard confirms the Rust exports and no per-call admission machinery.
+- PASS (behavior): `math_advanced_spec.spl` executes 13/13 examples with zero
+  failures; NaN/infinity remain values rather than fabricated error signals.
+- PASS (performance review): direct scalar call shape is retained; optimizer
+  reports 25 MIR bounds-check opportunities and zero general patterns.
+- WARN: checks ran through the bootstrap seed, not a self-hosted production
+  binary. No signature or artifact-bound evidence was created, so global SFFI
+  admission remains FAIL.
+
+## Follow-up: interpreter error-handle owner (2026-08-26)
+
+- PASS (static): nine canonical raw calls are explicitly and lexically
+  `unsafe(ffi)`; the compatibility facade has no raw declarations.
+- PASS (source): both canonical and compatibility modules check successfully;
+  the owner audit verifies interpreter-provider symbols and no lexical bypass.
+- PASS (performance review): compatibility now re-exports with no runtime
+  wrapper; optimizer reports 18 MIR-only opportunities and zero general ones.
+- FAIL (global admission): error handles remain interpreter-owned opaque values
+  without artifact-bound signature/evidence admission or cross-lane proof.
+
+## Follow-up: counterpart ABI boundary (2026-08-26)
+
+- PASS (source/static): nine raw dlopen/opaque-handle calls are lexical
+  `unsafe(ffi)`; the guard rejects nil-to-empty coercion and call-time admission.
+- PASS (performance review): no new lookup/hash/dispatch/allocation path;
+  optimizer reports one pre-existing general capacity suggestion.
+- FAIL (runtime): the deployed bootstrap artifact reports unknown
+  `rt_counterpart_open`/`rt_counterpart_probe_abi`; 7 of 8 focused examples
+  fail before provider invocation. This is artifact parity, not a pass.
+- FAIL (global admission): no signed provider/evidence admission is established.
+
+## Follow-up: evidence-admission key algorithm policy (2026-08-26)
+
+- PASS (targeted contract): evidence admission accepts the valid provider-
+  scoped Ed25519 fixture and rejects a trusted RSA key before raw-signature
+  verification; existing artifact, report, trust, canonicalization, and
+  substituted-signature sabotage cases also pass.
+- PASS (performance scope): public-key inspection happens only during provider
+  admission. No SFFI call path, allocation, copy, registry lookup, hash, or
+  dispatch changed.
+- FAIL (global admission): this hardens the verifier but supplies no exact
+  signed provider artifact job, so the repository-wide signed-admitted count
+  remains zero and SFFI is not globally verified.
+
+## Follow-up: AES-XTS raw boundary (2026-08-26)
+
+- PASS (source/static): three raw declarations and sixteen call sites are
+  explicit lexical `unsafe(ffi)`; the owner audit also confirms the Rust
+  inverse-block provider and no call-time admission/generic dispatch.
+- PASS (performance review): direct calls and allocation shape are unchanged;
+  optimizer reports 113 MIR-only opportunities and zero general patterns.
+- WARN (behavior): the existing IEEE 1619 KAT remains blocked by the known
+  upstream interpreter `u8` array-lifting defect, so it was not rerun here.
+- FAIL (global admission): this provides neither a signed artifact job nor
+  cross-lane proof; global SFFI admission remains zero.
+
+## Follow-up: channel admission status (2026-08-26)
+
+- PASS (static): all six raw channel declarations and thirteen calls are
+  lexical `unsafe(ffi)`; the guard verifies the `i64` send status is retained
+  by Simple, interpreter, and both provider backends.
+- PASS (performance review): `try_send` replaces a closed-state query plus
+  ignored send with one direct status-returning send. Optimizer reports 19
+  MIR-only opportunities and zero general patterns.
+- WARN (verification): focused Rust unit compilation is blocked by unrelated
+  missing imports in `interpreter/expr/collections.rs`; the deployed bootstrap
+  executable retains the prior void result and its Simple spec therefore fails
+  one open-channel assertion. Neither is counted as a pass.
+- FAIL (global admission): channel providers remain unsigned and lack exact
+  artifact/cross-lane admission evidence.

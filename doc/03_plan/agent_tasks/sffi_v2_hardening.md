@@ -222,3 +222,57 @@ passing placeholder.
     deferred by a documented JIT deoptimization bug, not silently accepted.
     Continue the remaining 999 untouched process rows and fix alias lowering
     before removing these direct declarations. Signed admission remains zero.
+42. Audit the duplicated interpreter-debug facades against the Rust runtime
+    before consolidating them: retain only used raw declarations, require
+    lexical `unsafe(ffi)`, and convert the provider's negative status returns
+    into `Result.Err` rather than a fabricated success. Keep the two facades
+    byte-equivalent apart from coordinator ownership, and protect that rule with
+    a static audit. This is a cold debugger-control boundary: do not introduce
+    call-time registry work, allocations, copies, or loops. The focused source
+    check and both authority audits pass under the bootstrap seed, while signed
+    provider admission remains zero. Next, migrate another ranked provider
+    family or implement exact artifact-bound admission; do not call the global
+    SFFI inventory safe or verified.
+43. Contain the canonical advanced scalar-math facade without replacing its
+    fixed-`f64` provider with a slower fallback. Require `unsafe(ffi)` on its
+    twelve declarations and lexical scopes on all thirteen calls, including the
+    round helper. Preserve NaN/infinity as valid IEEE-754 values and retain the
+    direct call shape; prohibit call-time admission, lookup, hashing, generic
+    dispatch, allocation, and copying. The static authority audit, source
+    check, 13-case math spec, and optimizer review pass under the bootstrap
+    seed. Signed admission remains zero; continue with a provider that has a
+    complete ABI/evidence path rather than labeling scalar containment verified.
+44. Keep raw interpreter error handles in one canonical SFFI owner. Remove
+    duplicate compatibility declarations, annotate all remaining handle
+    operations `unsafe(ffi)`, and make aliases call the scoped wrapper rather
+    than the raw symbol. Preserve the direct one-call path and reject fabricated
+    handle/message fallbacks. Static owner audit, source check, and optimizer
+    review pass; unsigned, interpreter-owned handle lifetime remains an explicit
+    unsafe limitation until multi-lane provider/evidence admission exists.
+45. Harden the counterpart dynamic-provider ABI owner: tag and lexically scope
+    its nine raw shim calls, remove missing-foreign-value-to-empty-text
+    coercions, and retain its existing status/manifest fail-closed behavior.
+    Preserve direct calls with no call-time admission work. Static authority
+    and source checks pass; runtime proof is blocked by a stale bootstrap
+    artifact missing registered `rt_counterpart_*` handlers. Do not claim the
+    provider signed or globally verified until deployed-artifact parity and
+    artifact-bound evidence are repaired.
+46. Keep SFFI evidence admission cryptographically precise: trust-store keys
+    scoped to a provider must be inspected as Ed25519 before raw signature
+    verification, so a trusted RSA/ECDSA key cannot silently change the stated
+    signature scheme. The dedicated contract fixture must admit a valid
+    Ed25519 provider and reject a trusted RSA key. This check is load-time-only
+    and must not add call-time work. It strengthens the future admission gate;
+    it does not create a provider artifact job or change the zero signed count.
+47. Contain the direct AES-XTS runtime ABI without replacing its fixed-size
+    native block path. Keep the three raw declarations and all sixteen uses
+    lexical `unsafe(ffi)`, require bounds/round preconditions in their owner,
+    and guard the absence of per-call admission or generic dispatch. Preserve
+    direct allocation and AES call shape; the pending interpreter `u8` lifting
+    bug blocks XTS KAT evidence, and artifact-bound admission remains zero.
+48. Repair channel send-result propagation across Simple, interpreter, and
+    native provider paths. Preserve the `1` admitted / `0` rejected ABI instead
+    of manufacturing `true` after a rejected send; tag six raw declarations
+    and scope thirteen calls lexically. Remove the redundant closed-state query
+    from `try_send`, add no allocation/copy/lookup work, and keep unsigned
+    channel ownership explicitly unsafe until exact artifact evidence exists.

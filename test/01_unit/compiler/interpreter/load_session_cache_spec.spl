@@ -21,6 +21,7 @@ for caching SMF module resolution decisions in interpreter mode.
 """
 
 use std.spec.*
+use std.io_runtime.{file_read}
 use compiler.frontend.core.interpreter.load_session_cache.{InterpreterLoadConfig, interpreter_load_config_default, interpreter_load_config_source_only, lsc_init, lsc_cache_target, lsc_get_cached_target_kind, lsc_get_cached_target_path, lsc_cache_freshness, lsc_get_cached_freshness, lsc_mark_compiled_loaded, lsc_is_compiled_loaded, lsc_mark_template_metadata, lsc_has_template_metadata, lsc_record_regen_failure, lsc_has_regen_failure, lsc_get_regen_failure_reason, lsc_invalidate_module, lsc_invalidate_all, lsc_target_hit_count, lsc_target_miss_count, lsc_freshness_hit_count, lsc_freshness_miss_count}
 
 describe "InterpreterLoadConfig":
@@ -111,6 +112,8 @@ describe "LoadSessionCache":
         expect(lsc_has_template_metadata("mod_a")).to_equal(false)
         lsc_mark_template_metadata("mod_a", true)
         expect(lsc_has_template_metadata("mod_a")).to_equal(true)
+        lsc_mark_template_metadata("mod_a", false)
+        expect(lsc_has_template_metadata("mod_a")).to_equal(false)
 
     it "records and checks regen failures":
         step("Verify: records and checks regen failures")
@@ -119,6 +122,9 @@ describe "LoadSessionCache":
         lsc_record_regen_failure("std.broken", "compile error")
         expect(lsc_has_regen_failure("std.broken")).to_equal(true)
         expect(lsc_get_regen_failure_reason("std.broken")).to_equal("compile error")
+        lsc_record_regen_failure("std.empty", "")
+        expect(lsc_has_regen_failure("std.empty")).to_equal(true)
+        expect(lsc_get_regen_failure_reason("std.empty")).to_equal("")
 
     it "invalidates a single module":
         step("Verify: invalidates a single module")
@@ -159,6 +165,32 @@ describe "LoadSessionCache":
         expect(lsc_get_cached_target_kind("mod.b", "/src/main.spl")).to_equal("smf")
         expect(lsc_get_cached_target_path("mod.b", "/src/main.spl")).to_equal("/cache/b.smf")
         expect(lsc_get_cached_freshness("/cache/b.smf")).to_equal(1)
+
+    it "invalidates every distinct module path while retaining unrelated freshness states":
+        step("Cache repeated and distinct paths for one module plus unrelated freshness")
+        lsc_init()
+        lsc_cache_target("mod.a", "/src/one.spl", "source", "/lib/a.spl")
+        lsc_cache_target("mod.a", "/src/two.spl", "source", "/lib/a.spl")
+        lsc_cache_target("mod.a", "/src/three.spl", "smf", "/cache/a.smf")
+        lsc_cache_freshness("/lib/a.spl", true)
+        lsc_cache_freshness("/cache/a.smf", false)
+        lsc_cache_freshness("/lib/keep.spl", false)
+
+        step("Invalidate the module and verify exact freshness membership semantics")
+        lsc_invalidate_module("mod.a")
+        expect(lsc_get_cached_freshness("/lib/a.spl")).to_equal(-1)
+        expect(lsc_get_cached_freshness("/cache/a.smf")).to_equal(-1)
+        expect(lsc_get_cached_freshness("/lib/keep.spl")).to_equal(0)
+
+    it "does not depend on dictionary length to detect invalidated paths":
+        step("Inspect the self-hosted-compatible invalidation guard")
+        val source = file_read("src/compiler/10.frontend/core/interpreter/load_session_cache.spl")
+
+        step("Verify insertion state, not Dict.len, controls the freshness rebuild")
+        expect(source.contains("var invalidated_any = false")).to_equal(true)
+        expect(source.contains("invalidated_any = true")).to_equal(true)
+        expect(source.contains("if invalidated_any:")).to_equal(true)
+        expect(source.contains("invalidated_paths.len()")).to_equal(false)
 
     it "invalidating a module does not evict a prefix-similar module":
         step("Verify: invalidating a module does not evict a prefix-similar module")

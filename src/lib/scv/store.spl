@@ -9,6 +9,10 @@ use std.scv.core.{scv_repo_dir, scv_meta_dir, scv_objects_dir, scv_parsers_dir, 
 use std.scv.core.{scv_state_private, scv_state_valid, scv_format_path, scv_current_format_version}
 use std.io_runtime.{env_get}
 use app.io.cli_ops.{exit}
+# SCV-IMPL-B-05: continuous native shadow write trigger (config-gated no-op by
+# default). Deliberate module cycle store->shadow_write->store; verified to
+# resolve (same pattern as other std.scv cross-imports).
+use std.scv.shadow_write.{scv_shadow_write_on_operation}
 
 export scv_object_path
 
@@ -35,11 +39,12 @@ fn scv_i64_bytes_to_u8(values: [i64]) -> [u8]:
         i = i + 1
     out
 
+# Uses text.bytes(): the previous per-char `ch.to_i64() & 0xFF` loop yields all
+# zeros on the current seed, so every scv_hash_text id collided by LENGTH
+# (chunk ids, file ids, conflict ids) and line/syntax merges saw no changes.
+# Found by SCV-IMPL-D-04 (2026-08-26).
 fn scv_text_to_u8(value: text) -> [u8]:
-    var out: [u8] = []
-    for ch in value:
-        out.push((ch.to_i64() & 0xFF).to_u8())
-    out
+    return value.bytes()
 
 fn scv_hex_nibble(value: i64) -> text:
     "0123456789abcdef".char_at(value & 0x0F)
@@ -477,6 +482,11 @@ fn scv_write_operation(root: text, parent_op: text, commit: text, metadata: text
     scv_write_text(scv_head_path(root), "{op_id}\n")
     scv_fault_exit("head")
     scv_write_text(scv_workspace_path(root), "default: {commit}\n")
+    # SCV-IMPL-B-05: every explicit revision dual-writes to the native shadow
+    # and is compared (tree/content/parent DAG/refs/reachability) when
+    # shadow-write is enabled. Fail-closed via the shadow_write log row; the
+    # operation itself is already durable and is not rolled back here.
+    scv_shadow_write_on_operation(root)
     op_id
 
 fn scv_view_section(content: text, start: text, stop: text) -> text:

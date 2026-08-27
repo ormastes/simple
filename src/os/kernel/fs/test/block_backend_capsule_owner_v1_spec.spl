@@ -1,0 +1,108 @@
+use std.spec.{describe, it, expect, fail, pass_do_nothing}
+use std.fs_driver.block_device.{BlockDevice}
+use os.kernel.fs.block_device_identity_owner_v1.{
+    BlockDeviceRegionBindingV1, block_device_identity_create_v1,
+    block_device_identity_unmount_v1
+}
+use os.kernel.fs.block_backend_capsule_owner_v1.{
+    BlockBackendCapsuleErrorV1, block_backend_capsule_register_v1,
+    block_backend_capsule_acquire_v1, block_backend_capsule_read_v1,
+    block_backend_capsule_write_v1, block_backend_capsule_flush_v1,
+    block_backend_capsule_release_v1, block_backend_capsule_teardown_v1
+}
+
+class CapsuleMemoryDeviceV1:
+    sector_bytes: u32
+
+impl BlockDevice for CapsuleMemoryDeviceV1:
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        Ok([lba as u8, (lba >> 8u64) as u8])
+    fn write_sector(_lba: u64, data: [u8]) -> Result<bool, text>:
+        Ok(data.len() == self.sector_bytes as i64)
+    fn sector_size() -> u32: self.sector_bytes
+    fn flush() -> Result<bool, text>: Ok(true)
+
+fn capsule_binding_v1(owner: u64, generation: u64, base: u64) -> BlockDeviceRegionBindingV1:
+    BlockDeviceRegionBindingV1(
+        backend_kind: 91u32, backend_owner_id: owner,
+        backend_generation: generation, base_lba: base, sector_count: 32u64)
+
+describe "bounded authenticated block backend capsule":
+    it "maps relative I/O only through the exact pinned region":
+        val binding = capsule_binding_v1(9001u64, 1u64, 64u64)
+        val identity = block_device_identity_create_v1(binding).unwrap()
+        val capsule = block_backend_capsule_register_v1(
+            CapsuleMemoryDeviceV1(sector_bytes: 2u32), identity, binding).unwrap()
+        val lease = block_backend_capsule_acquire_v1(
+            capsule.seal(), identity, binding).unwrap()
+        expect(block_backend_capsule_read_v1(lease, 3u64).unwrap()).to_equal([67u8, 0u8])
+        match block_backend_capsule_read_v1(lease, 32u64):
+            Err(BlockBackendCapsuleErrorV1.RegionViolation):
+                pass_do_nothing("the exclusive region end is rejected")
+            _: fail("read escaped the authenticated region")
+        expect(block_backend_capsule_write_v1(lease, 0u64, [1u8, 2u8]).unwrap()).to_be(true)
+        expect(block_backend_capsule_flush_v1(lease).unwrap()).to_be(true)
+        block_backend_capsule_release_v1(lease).unwrap()
+        block_backend_capsule_teardown_v1(capsule).unwrap()
+        block_device_identity_unmount_v1(identity).unwrap()
+
+    it "rejects a different authenticated device for an existing capsule":
+        val first_binding = capsule_binding_v1(9002u64, 1u64, 96u64)
+        val second_binding = capsule_binding_v1(9003u64, 1u64, 96u64)
+        val first = block_device_identity_create_v1(first_binding).unwrap()
+        val second = block_device_identity_create_v1(second_binding).unwrap()
+        val capsule = block_backend_capsule_register_v1(
+            CapsuleMemoryDeviceV1(sector_bytes: 2u32), first, first_binding).unwrap()
+        match block_backend_capsule_acquire_v1(capsule.seal(), second, second_binding):
+            Err(BlockBackendCapsuleErrorV1.IdentityRejected):
+                pass_do_nothing("capsule identity and pin identity must be the same")
+            _: fail("different device identity acquired the capsule")
+        block_backend_capsule_teardown_v1(capsule).unwrap()
+        block_device_identity_unmount_v1(first).unwrap()
+        block_device_identity_unmount_v1(second).unwrap()
+
+    it "admits only one concrete backend for one device identity":
+        val binding = capsule_binding_v1(9006u64, 1u64, 192u64)
+        val identity = block_device_identity_create_v1(binding).unwrap()
+        val capsule = block_backend_capsule_register_v1(
+            CapsuleMemoryDeviceV1(sector_bytes: 2u32), identity, binding).unwrap()
+        match block_backend_capsule_register_v1(
+            CapsuleMemoryDeviceV1(sector_bytes: 2u32), identity, binding):
+            Err(BlockBackendCapsuleErrorV1.IdentityRejected):
+                pass_do_nothing("exclusive backend pin rejects copied registration authority")
+            _: fail("one device identity admitted two backend objects")
+        block_backend_capsule_teardown_v1(capsule).unwrap()
+        block_device_identity_unmount_v1(identity).unwrap()
+
+    it "fences copied leases before consuming the pin":
+        val binding = capsule_binding_v1(9004u64, 1u64, 128u64)
+        val identity = block_device_identity_create_v1(binding).unwrap()
+        val capsule = block_backend_capsule_register_v1(
+            CapsuleMemoryDeviceV1(sector_bytes: 2u32), identity, binding).unwrap()
+        val lease = block_backend_capsule_acquire_v1(capsule.seal(), identity, binding).unwrap()
+        val copied = lease
+        block_backend_capsule_release_v1(lease).unwrap()
+        match block_backend_capsule_read_v1(copied, 0u64):
+            Err(BlockBackendCapsuleErrorV1.StaleLease):
+                pass_do_nothing("owner-consumed reservation invalidates every value copy")
+            _: fail("copied lease dispatched after release")
+        match block_backend_capsule_release_v1(copied):
+            Err(BlockBackendCapsuleErrorV1.StaleLease):
+                pass_do_nothing("copied release cannot consume a second pin")
+            _: fail("copied lease released twice")
+        block_backend_capsule_teardown_v1(capsule).unwrap()
+        block_device_identity_unmount_v1(identity).unwrap()
+
+    it "keeps teardown busy until every operation reservation is released":
+        val binding = capsule_binding_v1(9005u64, 1u64, 160u64)
+        val identity = block_device_identity_create_v1(binding).unwrap()
+        val capsule = block_backend_capsule_register_v1(
+            CapsuleMemoryDeviceV1(sector_bytes: 2u32), identity, binding).unwrap()
+        val lease = block_backend_capsule_acquire_v1(capsule.seal(), identity, binding).unwrap()
+        match block_backend_capsule_teardown_v1(capsule):
+            Err(BlockBackendCapsuleErrorV1.Busy):
+                pass_do_nothing("live pin-coupled reservation blocks teardown")
+            _: fail("teardown raced a live reservation")
+        block_backend_capsule_release_v1(lease).unwrap()
+        block_backend_capsule_teardown_v1(capsule).unwrap()
+        block_device_identity_unmount_v1(identity).unwrap()

@@ -1,0 +1,79 @@
+#!/bin/sh
+# Fail-closed admission for WM, GUI, Web, and Engine2D showcase captures.
+set -eu
+
+WM_CAPTURE=${WM_CAPTURE:-}
+GUI_CAPTURE=${GUI_CAPTURE:-}
+WEB_CAPTURE=${WEB_CAPTURE:-}
+ENGINE2D_CAPTURE=${ENGINE2D_CAPTURE:-}
+GUEST_SERIAL_LOG=${GUEST_SERIAL_LOG:-}
+VULKAN_RECEIPT=${VULKAN_RECEIPT:-}
+REPORT_PATH=${REPORT_PATH:-build/render-lane-mission-showcase/evidence.env}
+
+mkdir -p "$(dirname "$REPORT_PATH")"
+
+fail() {
+    reason=$1
+    {
+        echo 'render_lane_mission_showcase_status=fail'
+        echo "render_lane_mission_showcase_reason=$reason"
+    } >"$REPORT_PATH"
+    echo "render lane mission showcase: FAIL ($reason)" >&2
+    exit 1
+}
+
+is_sha256() {
+    case "$1" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#1}" -eq 64 ]
+}
+
+capture_hash() {
+    path=$1
+    [ -f "$path" ] && [ ! -L "$path" ] || fail "capture-missing-or-symlink:$path"
+    size=$(wc -c <"$path" | tr -d ' ')
+    [ "$size" -ge 4096 ] || fail "capture-too-small:$path"
+    hash=$(sha256sum "$path" | awk '{print $1}')
+    is_sha256 "$hash" || fail "capture-hash-invalid:$path"
+    printf '%s' "$hash"
+}
+
+[ -f "$GUEST_SERIAL_LOG" ] && [ ! -L "$GUEST_SERIAL_LOG" ] || fail guest-serial-missing
+[ -f "$VULKAN_RECEIPT" ] && [ ! -L "$VULKAN_RECEIPT" ] || fail vulkan-receipt-missing
+
+wm_hash=$(capture_hash "$WM_CAPTURE")
+gui_hash=$(capture_hash "$GUI_CAPTURE")
+web_hash=$(capture_hash "$WEB_CAPTURE")
+engine2d_hash=$(capture_hash "$ENGINE2D_CAPTURE")
+
+unique_hashes=$(printf '%s\n' "$wm_hash" "$gui_hash" "$web_hash" "$engine2d_hash" | sort -u | wc -l | tr -d ' ')
+[ "$unique_hashes" -eq 4 ] || fail captures-not-distinct
+
+grep -Fq '[desktop-gui] first-frame-rendered ' "$GUEST_SERIAL_LOG" || fail first-frame-marker-missing
+grep -Fq '[desktop-gui] engine2d-ready backend=' "$GUEST_SERIAL_LOG" || fail engine2d-marker-missing
+grep -Eq '\[desktop-gui\] spawn return app=Browser Demo pid=[1-9][0-9]*' "$GUEST_SERIAL_LOG" || fail browser-process-not-live
+grep -Eq '\[production-readiness\].*wm=live.*simple_gui=object-tree.*simple_web=content-frame.*renderer=engine2d.*process_owned_surfaces=[1-9][0-9]*' "$GUEST_SERIAL_LOG" || fail production-lanes-not-live
+if grep -Eq 'frame-degraded|window-degraded|FATAL:|EXCEPTION FRAME|Triple fault|scanout-invalid' "$GUEST_SERIAL_LOG"; then
+    fail degraded-or-faulted-guest
+fi
+
+grep -Fxq 'status=pass' "$VULKAN_RECEIPT" || fail vulkan-receipt-not-pass
+grep -Fxq 'backend=vulkan' "$VULKAN_RECEIPT" || fail vulkan-backend-not-bound
+grep -Fxq "wm_sha256=$wm_hash" "$VULKAN_RECEIPT" || fail vulkan-wm-capture-unbound
+grep -Fxq "gui_sha256=$gui_hash" "$VULKAN_RECEIPT" || fail vulkan-gui-capture-unbound
+grep -Fxq "web_sha256=$web_hash" "$VULKAN_RECEIPT" || fail vulkan-web-capture-unbound
+grep -Fxq "engine2d_sha256=$engine2d_hash" "$VULKAN_RECEIPT" || fail vulkan-engine2d-capture-unbound
+
+{
+    echo 'render_lane_mission_showcase_status=pass'
+    echo 'render_lane_mission_showcase_reason=pass'
+    echo 'render_lane_mission_showcase_distinct_capture_count=4'
+    echo 'render_lane_mission_showcase_vulkan_backend_count=1'
+    echo "render_lane_mission_showcase_wm_sha256=$wm_hash"
+    echo "render_lane_mission_showcase_gui_sha256=$gui_hash"
+    echo "render_lane_mission_showcase_web_sha256=$web_hash"
+    echo "render_lane_mission_showcase_engine2d_sha256=$engine2d_hash"
+} >"$REPORT_PATH"
+
+cat "$REPORT_PATH"

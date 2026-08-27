@@ -283,7 +283,8 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
             cases = "{cases}]"
             "{\"Switch\":{\"value\":{v},\"targets\":{cases},\"default\":{block_id_value(defaultBlock)}}}"
 
-        case CallTerminator(maybeDest, func, args, normal, maybeUnwind):
+        case CallTerminator(maybeDest, func, args, normal, maybeUnwind,
+                            maybePayloadDest, maybeTypeTagDest):
             val f = serialize_operand(func)
             var argsStr = "["
             var firstArg = true
@@ -300,14 +301,26 @@ fn serialize_mir_terminator(term: MirTerminator) -> text:
             var unwindStr = "null"
             if val unwind = maybeUnwind:
                 unwindStr = "{block_id_value(unwind)}"
+            var payloadDestStr = "null"
+            if val payloadDest = maybePayloadDest:
+                payloadDestStr = "{local_id_value(payloadDest)}"
+            var typeTagDestStr = "null"
+            if val typeTagDest = maybeTypeTagDest:
+                typeTagDestStr = "{local_id_value(typeTagDest)}"
 
-            "{\"CallTerminator\":{\"dest\":{destStr},\"func\":{f},\"args\":{argsStr},\"normal\":{block_id_value(normal)},\"unwind\":{unwindStr}}}"
+            "{\"CallTerminator\":{\"dest\":{destStr},\"func\":{f},\"args\":{argsStr},\"normal\":{block_id_value(normal)},\"unwind\":{unwindStr},\"unwind_payload_dest\":{payloadDestStr},\"unwind_type_tag_dest\":{typeTagDestStr}}}"
 
         case Unreachable:
             "\"Unreachable\""
 
         case Abort(msg):
             "{\"Abort\":\"{escape_json_string(msg)}\"}"
+
+        case Throw(payload, type_tag):
+            "{\"Throw\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}"
+
+        case Resume(payload, type_tag):
+            "{\"Resume\":{\"payload\":{serialize_operand(payload)},\"type_tag\":{serialize_operand(type_tag)}}}"
 
         case _:
             "\"UnknownTerminator\""
@@ -371,6 +384,9 @@ fn serialize_mir_inst_kind(inst: MirInstKind) -> text:
             val p = serialize_operand(ptr)
             val v = serialize_operand(value)
             "{\"Store\":{\"ptr\":{p},\"value\":{v}}}"
+
+        case GlobalAddr(dest, symbol, mutable):
+            "{\"GlobalAddr\":{\"dest\":{local_id_value(dest)},\"symbol\":{symbol.id},\"mutable\":{mutable}}}"
 
         case Call(maybeDest, func, args):
             val f = serialize_operand(func)
@@ -640,26 +656,29 @@ fn serialize_mir_function(func: MirFunction) -> text:
 
 fn escape_json_string(s: text) -> text:
     """Escape string for JSON."""
-    var result = ""
+    # Keep each already-escaped fragment and assemble the output once. Repeated
+    # interpolation copied the full prefix for every input unit, making long
+    # MIR names and diagnostic payloads quadratic in output bytes.
+    var parts: [text] = []
     for i in 0..s.len():
         val c = s[i:i+1]
         if c == "\"":
-            result = "{result}\\\""
+            parts.push("\\\"")
         else:
             if c == "\\":
-                result = "{result}\\\\"
+                parts.push("\\\\")
             else:
                 if c == "\n":
-                    result = "{result}\\n"
+                    parts.push("\\n")
                 else:
                     if c == "\r":
-                        result = "{result}\\r"
+                        parts.push("\\r")
                     else:
                         if c == "\t":
-                            result = "{result}\\t"
+                            parts.push("\\t")
                         else:
-                            result = "{result}{c}"
-    result
+                            parts.push(c)
+    parts.join("")
 
 # ============================================================================
 # Exports

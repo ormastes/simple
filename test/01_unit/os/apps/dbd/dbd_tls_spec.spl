@@ -14,6 +14,7 @@ use os.apps.dbd.dbd_tls.{
 use std.common.net.tls_application_record_stream_v1.{
     TLS_APPLICATION_DATA_TYPE_V1,
     TLS_VERSION_MAJOR_V1, TLS_VERSION_MINOR_V1, TLS_AEAD_TAG_LENGTH_V1,
+    TLS_MAX_FRAGMENT_LENGTH_V1,
     TLS_MAX_RX_BUFFER_LENGTH_V1, TLS_MAX_SEQUENCE_V1
 }
 use os.tls13.handshake13.{CIPHER_AES_128_GCM_SHA256}
@@ -192,6 +193,20 @@ describe "DBD TLS fail-closed record admission":
         expect(ingested.plaintext_frames.len()).to_equal(0u64)
 
 describe "DBD TLS encrypted response ownership":
+    it "seals the maximum plaintext fragment and rejects one byte beyond it":
+        var accepted_session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val accepted = accepted_session.seal_application(
+            _bytes(65u8, TLS_MAX_FRAGMENT_LENGTH_V1))
+        expect(accepted.len().to_i64()).to_equal(
+            TLS_MAX_FRAGMENT_LENGTH_V1 + TLS_AEAD_TAG_LENGTH_V1 + 6)
+        expect(accepted_session.server_sequence).to_equal(1i64)
+
+        var rejected_session = DbdTlsSessionV1.from_context(_context()).unwrap()
+        val rejected = rejected_session.seal_application(
+            _bytes(65u8, TLS_MAX_FRAGMENT_LENGTH_V1 + 1))
+        expect(rejected.len()).to_equal(0u64)
+        expect(rejected_session.server_sequence).to_equal(0i64)
+
     it "delivers authenticated TLS plaintext to the mutable AUTH owner":
         var provider = DbdCredentialProvider.new()
         expect(provider.configure_bytes(

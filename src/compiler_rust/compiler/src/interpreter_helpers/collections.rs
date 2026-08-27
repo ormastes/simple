@@ -464,7 +464,7 @@ pub(crate) fn eval_dict_for_each(
             // a silent no-op. Execute the statements directly against `env`
             // instead. A single-line body is an ordinary expression.
             match body.as_ref() {
-                Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+                Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => {
                     for node in nodes {
                         crate::interpreter::exec_node(node, env, functions, classes, enums, impl_methods)?;
                     }
@@ -555,12 +555,12 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
             };
             Ok(items)
         }
-        _ => {
+        other => {
             let ctx = ErrorContext::new()
                 .with_code(codes::TYPE_MISMATCH)
                 .with_help("iteration requires array, tuple, dict, string, or range types");
             Err(CompileError::semantic_with_context(
-                "cannot iterate over this type".to_string(),
+                format!("cannot iterate over this type: {other:?}"),
                 ctx,
             ))
         }

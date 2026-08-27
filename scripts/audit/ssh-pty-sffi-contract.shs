@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/apps/sshd/ssh_pty.spl"
+provider="$root/src/runtime/runtime_native.c"
+
+externs=$(grep -c '^extern fn ' "$module")
+calls=$(grep -c 'unsafe_addr_of(' "$module")
+scopes=$(grep -c 'unsafe(capabilities: \[ffi, raw_ptr\]):' "$module")
+if [ "$externs" -ne 1 ] || [ "$calls" -ne 9 ] || [ "$scopes" -ne 5 ]; then
+    echo "SSH PTY raw-pointer inventory changed" >&2
+    exit 1
+fi
+
+if grep -q 'mmio_read8' "$module"; then
+    echo "SSH PTY regained unused MMIO read authority" >&2
+    exit 1
+fi
+
+grep -q 'capabilities: \[ffi, raw_ptr\]' "$module"
+grep -q 'failed to address PTY pipe descriptors' "$module"
+if [ "$(grep -c 'n.to_u64() > read_len' "$module")" -ne 2 ]; then
+    echo "SSH PTY read extent checks changed" >&2
+    exit 1
+fi
+if [ "$(grep -c 'written > data.len().to_i64()' "$module")" -ne 2 ]; then
+    echo "SSH PTY write extent checks changed" >&2
+    exit 1
+fi
+grep -q '^uint64_t unsafe_addr_of(int64_t value)' "$provider"
+
+echo "SSH PTY SFFI contract audit: PASS (minimal raw-pointer scopes; nonzero addresses and pipe extents checked)"

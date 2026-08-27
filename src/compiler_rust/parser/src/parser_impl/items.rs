@@ -405,6 +405,16 @@ impl<'a> Parser<'a> {
                 let mut decorators = Vec::new();
                 let mut effects = Vec::new();
                 while self.check(&TokenKind::At) {
+                    // Compiler attributes may follow an effect decorator. Keep
+                    // them on the attribute path instead of turning them into
+                    // runtime decorators solely because of annotation order.
+                    if self.is_at_known_attribute() {
+                        attributes.push(self.parse_at_as_attribute()?);
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                        continue;
+                    }
                     let decorator = self.parse_decorator()?;
 
                     // Check if this is an effect decorator

@@ -1,0 +1,320 @@
+"""Bounded interrupt-quiescence lease owner.
+
+The boot owner allocates one atomic slot per sealed logical CPU before this
+capsule is published.  Every later transition is a bounded sequence of atomic
+loads/stores/CAS operations: it does not grow an array, allocate, lock, wait,
+or call an arbitrary callback while interrupts are disabled.
+
+Architecture adapters are the only intended callers of the package-private
+transition surface.  A lease is a scoped loan of the current CPU's interrupt
+enable state.  The adapter must save-and-disable first, publish that exact
+prior state, prove interrupts remain disabled, redeem a one-shot restore
+permit, restore the saved state, and report the observed post-restore state.
+Failure after disable leaves the slot retained (never falsely reusable).
+"""
+
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+use os.kernel.smp.cpu_topology_identity_owner_v1.{
+    CPU_TOPOLOGY_IDENTITY_CAPACITY_V1,
+    CpuHardwareIdentityKindV1,
+    CpuTopologyIdentitySnapshotV1,
+    cpu_hardware_identity_canonical_v1,
+}
+
+pub val CPU_INTERRUPT_QUIESCENCE_CAPACITY_V1: i32 =
+    CPU_TOPOLOGY_IDENTITY_CAPACITY_V1
+
+val _IRQ_SLOT_IDLE_V1: i64 = 0
+val _IRQ_SLOT_RESERVED_V1: i64 = 1
+val _IRQ_SLOT_PUBLISHING_V1: i64 = 2
+val _IRQ_SLOT_DISABLED_V1: i64 = 3
+val _IRQ_SLOT_COMPLETED_V1: i64 = 4
+val _IRQ_SLOT_RESTORING_V1: i64 = 5
+val _IRQ_SLOT_QUARANTINED_V1: i64 = 6
+val _IRQ_SLOT_PHASE_RADIX_V1: i64 = 8
+val _IRQ_GENERATION_EXHAUSTED_V1: i64 = 1152921504606846975
+
+pub enum CpuInterruptQuiescenceErrorV1:
+    None
+    TopologyNotSealed
+    CpuOutOfRange
+    IdentityMismatch
+    SlotBusy
+    OwnerExhausted
+    InvalidLease
+    InterruptsNotDisabled
+    InvalidCompletion
+    RestoreMismatch
+
+pub struct CpuInterruptQuiescenceLeaseV1:
+    _logical_cpu_id: u32
+    _kind: CpuHardwareIdentityKindV1
+    _hardware_id: u64
+    _generation: i64
+
+pub struct CpuInterruptRestorePermitV1:
+    _logical_cpu_id: u32
+    _kind: CpuHardwareIdentityKindV1
+    _hardware_id: u64
+    _generation: i64
+    _prior_interrupts_enabled: bool
+
+pub struct CpuInterruptLeaseAdmissionV1:
+    ok: bool
+    error: CpuInterruptQuiescenceErrorV1
+    lease: CpuInterruptQuiescenceLeaseV1?
+
+pub struct CpuInterruptRestoreAdmissionV1:
+    ok: bool
+    error: CpuInterruptQuiescenceErrorV1
+    permit: CpuInterruptRestorePermitV1?
+
+pub struct CpuInterruptRestoreReceiptV1:
+    ok: bool
+    error: CpuInterruptQuiescenceErrorV1
+    logical_cpu_id: u32
+    generation: i64
+    prior_interrupts_enabled: bool
+    observed_interrupts_enabled: bool
+
+pub class CpuInterruptQuiescenceOwnerV1:
+    _topology: CpuTopologyIdentitySnapshotV1
+    _states: [AtomicI64]
+    _prior_irq_enabled: [AtomicI64]
+
+    pub static fn create(
+        topology: CpuTopologyIdentitySnapshotV1
+    ) -> CpuInterruptQuiescenceOwnerV1?:
+        if (not topology.is_sealed() or topology.cpu_count() == 0u32 or
+            topology.cpu_count() > CPU_INTERRUPT_QUIESCENCE_CAPACITY_V1.to_u32()):
+            return nil
+        var states: [AtomicI64] = []
+        var prior_irq_enabled: [AtomicI64] = []
+        var i: u32 = 0u32
+        while i < topology.cpu_count():
+            # All runtime atomic handles and array capacity are acquired at
+            # boot construction time, never on the IRQ-disabled path.
+            states.push(atomic_i64_new(_IRQ_SLOT_IDLE_V1))
+            prior_irq_enabled.push(atomic_i64_new(0))
+            i = i + 1u32
+        Some(CpuInterruptQuiescenceOwnerV1(
+            _topology: topology,
+            _states: states,
+            _prior_irq_enabled: prior_irq_enabled))
+
+    pub fn cpu_count() -> u32:
+        self._states.len().to_u32()
+
+    pub fn slot_is_idle(logical_cpu_id: u32) -> bool:
+        if logical_cpu_id >= self.cpu_count(): return false
+        self._states[logical_cpu_id.to_i64()].load(MemoryOrdering.Acquire) %
+            _IRQ_SLOT_PHASE_RADIX_V1 ==
+            _IRQ_SLOT_IDLE_V1
+
+    pub fn slot_is_quarantined(logical_cpu_id: u32) -> bool:
+        if logical_cpu_id >= self.cpu_count(): return false
+        self._states[logical_cpu_id.to_i64()].load(MemoryOrdering.Acquire) %
+            _IRQ_SLOT_PHASE_RADIX_V1 ==
+            _IRQ_SLOT_QUARANTINED_V1
+
+    pub(package) fn reserve_from_architecture_v1(
+        logical_cpu_id: u32,
+        kind: CpuHardwareIdentityKindV1,
+        hardware_id: u64
+    ) -> CpuInterruptLeaseAdmissionV1:
+        if not self._topology.is_sealed():
+            return _irq_admission_error_v1(
+                CpuInterruptQuiescenceErrorV1.TopologyNotSealed)
+        if logical_cpu_id >= self.cpu_count():
+            return _irq_admission_error_v1(
+                CpuInterruptQuiescenceErrorV1.CpuOutOfRange)
+        if not self._topology.contains_exact(logical_cpu_id, kind, hardware_id):
+            return _irq_admission_error_v1(
+                CpuInterruptQuiescenceErrorV1.IdentityMismatch)
+        val index = logical_cpu_id.to_i64()
+        val state = self._states[index]
+        val old_word = state.load(MemoryOrdering.Acquire)
+        if old_word % _IRQ_SLOT_PHASE_RADIX_V1 != _IRQ_SLOT_IDLE_V1:
+            return _irq_admission_error_v1(
+                CpuInterruptQuiescenceErrorV1.SlotBusy)
+        val old_generation = old_word / _IRQ_SLOT_PHASE_RADIX_V1
+        if old_generation < 0 or old_generation >= _IRQ_GENERATION_EXHAUSTED_V1:
+            # Exhaustion is terminal.  Do not wrap and do not make this CPU's
+            # slot available for an identity replay.
+            state.compare_exchange(
+                old_word, _irq_slot_word_v1(
+                    old_generation, _IRQ_SLOT_QUARANTINED_V1),
+                MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+            return _irq_admission_error_v1(
+                CpuInterruptQuiescenceErrorV1.OwnerExhausted)
+        val generation = old_generation + 1
+        if not state.compare_exchange(
+            old_word, _irq_slot_word_v1(generation, _IRQ_SLOT_RESERVED_V1),
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return _irq_admission_error_v1(
+                CpuInterruptQuiescenceErrorV1.SlotBusy)
+        val canonical_hardware_id = cpu_hardware_identity_canonical_v1(
+            kind, hardware_id)
+        CpuInterruptLeaseAdmissionV1(
+            ok: true, error: CpuInterruptQuiescenceErrorV1.None,
+            lease: Some(CpuInterruptQuiescenceLeaseV1(
+                _logical_cpu_id: logical_cpu_id,
+                _kind: kind,
+                _hardware_id: canonical_hardware_id,
+                _generation: generation)))
+
+    pub(package) fn publish_disabled_from_architecture_v1(
+        lease: CpuInterruptQuiescenceLeaseV1,
+        prior_interrupts_enabled: bool,
+        observed_interrupts_disabled: bool
+    ) -> bool:
+        if not observed_interrupts_disabled or not self._lease_matches_v1(lease):
+            return false
+        val index = lease._logical_cpu_id.to_i64()
+        val state = self._states[index]
+        if not state.compare_exchange(
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_RESERVED_V1),
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_PUBLISHING_V1),
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return false
+        self._prior_irq_enabled[index].store(
+            if prior_interrupts_enabled: 1 else: 0, MemoryOrdering.Release)
+        # This owner already exclusively holds Publishing for this exact
+        # generation.  The release store makes the prior-state payload visible
+        # before any adapter can observe Disabled.
+        state.store(
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_DISABLED_V1),
+            MemoryOrdering.Release)
+        true
+
+    pub(package) fn complete_from_architecture_v1(
+        lease: CpuInterruptQuiescenceLeaseV1,
+        observed_logical_cpu_id: u32,
+        observed_kind: CpuHardwareIdentityKindV1,
+        observed_hardware_id: u64,
+        observed_interrupts_disabled: bool
+    ) -> bool:
+        if (not observed_interrupts_disabled or
+            observed_logical_cpu_id != lease._logical_cpu_id or
+            observed_kind != lease._kind or
+            cpu_hardware_identity_canonical_v1(
+                observed_kind, observed_hardware_id) != lease._hardware_id or
+            not self._topology.contains_exact(
+                observed_logical_cpu_id, observed_kind, observed_hardware_id) or
+            not self._lease_matches_v1(lease)):
+            return false
+        self._states[lease._logical_cpu_id.to_i64()].compare_exchange(
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_DISABLED_V1),
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_COMPLETED_V1),
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+
+    pub(package) fn redeem_restore_from_architecture_v1(
+        lease: CpuInterruptQuiescenceLeaseV1,
+        observed_interrupts_disabled: bool
+    ) -> CpuInterruptRestoreAdmissionV1:
+        if not observed_interrupts_disabled:
+            return _irq_restore_error_v1(
+                CpuInterruptQuiescenceErrorV1.InterruptsNotDisabled)
+        if not self._lease_matches_v1(lease):
+            return _irq_restore_error_v1(
+                CpuInterruptQuiescenceErrorV1.InvalidLease)
+        val index = lease._logical_cpu_id.to_i64()
+        if not self._states[index].compare_exchange(
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_COMPLETED_V1),
+            _irq_slot_word_v1(lease._generation, _IRQ_SLOT_RESTORING_V1),
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return _irq_restore_error_v1(
+                CpuInterruptQuiescenceErrorV1.InvalidCompletion)
+        val prior = self._prior_irq_enabled[index].load(MemoryOrdering.Acquire) == 1
+        CpuInterruptRestoreAdmissionV1(
+            ok: true, error: CpuInterruptQuiescenceErrorV1.None,
+            permit: Some(CpuInterruptRestorePermitV1(
+                _logical_cpu_id: lease._logical_cpu_id,
+                _kind: lease._kind,
+                _hardware_id: lease._hardware_id,
+                _generation: lease._generation,
+                _prior_interrupts_enabled: prior)))
+
+    pub(package) fn finish_restore_from_architecture_v1(
+        permit: CpuInterruptRestorePermitV1,
+        observed_logical_cpu_id: u32,
+        observed_kind: CpuHardwareIdentityKindV1,
+        observed_hardware_id: u64,
+        observed_interrupts_enabled: bool
+    ) -> CpuInterruptRestoreReceiptV1:
+        val identity_matches = (
+            observed_logical_cpu_id == permit._logical_cpu_id and
+            observed_kind == permit._kind and
+            cpu_hardware_identity_canonical_v1(
+                observed_kind, observed_hardware_id) == permit._hardware_id and
+            self._topology.contains_exact(
+                observed_logical_cpu_id, observed_kind, observed_hardware_id))
+        val index = permit._logical_cpu_id.to_i64()
+        val generation_matches = (
+            permit._logical_cpu_id < self.cpu_count() and
+            self._states[index].load(MemoryOrdering.Acquire) ==
+                _irq_slot_word_v1(
+                    permit._generation, _IRQ_SLOT_RESTORING_V1))
+        if not generation_matches:
+            return CpuInterruptRestoreReceiptV1(
+                ok: false, error: CpuInterruptQuiescenceErrorV1.InvalidLease,
+                logical_cpu_id: permit._logical_cpu_id,
+                generation: permit._generation,
+                prior_interrupts_enabled: permit._prior_interrupts_enabled,
+                observed_interrupts_enabled: observed_interrupts_enabled)
+        if (not identity_matches or
+            observed_interrupts_enabled != permit._prior_interrupts_enabled):
+            # Quarantine only the still-current generation.  A replay from an
+            # older generation must never poison a newer lease which happens
+            # to have reached Restoring on this same logical CPU.
+            if permit._logical_cpu_id < self.cpu_count():
+                self._states[index].compare_exchange(
+                    _irq_slot_word_v1(
+                        permit._generation, _IRQ_SLOT_RESTORING_V1),
+                    _irq_slot_word_v1(
+                        permit._generation, _IRQ_SLOT_QUARANTINED_V1),
+                    MemoryOrdering.AcqRel, MemoryOrdering.Acquire)
+            return CpuInterruptRestoreReceiptV1(
+                ok: false, error: CpuInterruptQuiescenceErrorV1.RestoreMismatch,
+                logical_cpu_id: permit._logical_cpu_id,
+                generation: permit._generation,
+                prior_interrupts_enabled: permit._prior_interrupts_enabled,
+                observed_interrupts_enabled: observed_interrupts_enabled)
+        if not self._states[index].compare_exchange(
+            _irq_slot_word_v1(permit._generation, _IRQ_SLOT_RESTORING_V1),
+            _irq_slot_word_v1(permit._generation, _IRQ_SLOT_IDLE_V1),
+            MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+            return CpuInterruptRestoreReceiptV1(
+                ok: false, error: CpuInterruptQuiescenceErrorV1.InvalidLease,
+                logical_cpu_id: permit._logical_cpu_id,
+                generation: permit._generation,
+                prior_interrupts_enabled: permit._prior_interrupts_enabled,
+                observed_interrupts_enabled: observed_interrupts_enabled)
+        CpuInterruptRestoreReceiptV1(
+            ok: true, error: CpuInterruptQuiescenceErrorV1.None,
+            logical_cpu_id: permit._logical_cpu_id,
+            generation: permit._generation,
+            prior_interrupts_enabled: permit._prior_interrupts_enabled,
+            observed_interrupts_enabled: observed_interrupts_enabled)
+
+    fn _lease_matches_v1(lease: CpuInterruptQuiescenceLeaseV1) -> bool:
+        if lease._logical_cpu_id >= self.cpu_count() or lease._generation <= 0:
+            return false
+        self._topology.contains_exact(
+            lease._logical_cpu_id, lease._kind, lease._hardware_id) and
+            self._states[lease._logical_cpu_id.to_i64()].load(
+                MemoryOrdering.Acquire) /
+                _IRQ_SLOT_PHASE_RADIX_V1 == lease._generation
+
+fn _irq_slot_word_v1(generation: i64, phase: i64) -> i64:
+    generation * _IRQ_SLOT_PHASE_RADIX_V1 + phase
+
+fn _irq_admission_error_v1(
+    error: CpuInterruptQuiescenceErrorV1
+) -> CpuInterruptLeaseAdmissionV1:
+    CpuInterruptLeaseAdmissionV1(ok: false, error: error, lease: nil)
+
+fn _irq_restore_error_v1(
+    error: CpuInterruptQuiescenceErrorV1
+) -> CpuInterruptRestoreAdmissionV1:
+    CpuInterruptRestoreAdmissionV1(ok: false, error: error, permit: nil)

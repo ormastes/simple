@@ -10,11 +10,19 @@
 use os.crypto.aes128_tables.*
 use os.crypto.gcm_gf128.{gcm_gf128_mul, gcm_ghash_block, gcm_pad_to_16, gcm_ghash}
 
+@unsafe(reason: "foreign byte indexing requires caller-proven array bounds", capabilities: [ffi])
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+@unsafe(reason: "foreign array allocation result is not artifact-verified", capabilities: [ffi])
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 
+@unsafe(reason: "caller must prove the foreign byte index is in bounds", capabilities: [ffi])
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
+
+@always_inline
+fn _a128gcm_new_u8(cap: i64) -> [u8]:
+    unsafe(capabilities: [ffi]):
+        rt_array_new_with_cap(cap)
 
 # ============================================================================
 # Result Type for Decryption
@@ -44,6 +52,7 @@ fn _rot_word(w: u32) -> u32:
 # AES-128 Key Expansion (FIPS 197, Section 5.2)
 # ============================================================================
 
+@unsafe(reason: "requires an exact 16-byte key for unchecked foreign byte access", capabilities: [ffi])
 fn aes128_key_expansion(key: [u8]) -> [u8]:
     """Expand 16-byte AES-128 key into 176 round-key bytes."""
     val nk: u64 = 4
@@ -51,7 +60,7 @@ fn aes128_key_expansion(key: [u8]) -> [u8]:
     val total_words: u64 = 4 * (nr + 1)  # 44
     val total_bytes: u64 = total_words * 4
 
-    var expanded: [u8] = rt_array_new_with_cap(total_bytes.to_i64())
+    var expanded: [u8] = _a128gcm_new_u8(total_bytes.to_i64())
 
     var i: u64 = 0
     while i < 16:
@@ -97,15 +106,17 @@ fn aes128_key_expansion(key: [u8]) -> [u8]:
 # State is represented as [u8] of length 16.
 # state[r + 4*c] = byte at row r, column c.
 
+@unsafe(reason: "requires a 16-byte AES state for unchecked foreign byte access", capabilities: [ffi])
 fn _sub_bytes(state: [u8]) -> [u8]:
     """Apply S-box substitution to each byte."""
-    var result: [u8] = rt_array_new_with_cap(16)
+    var result: [u8] = _a128gcm_new_u8(16)
     var i: u64 = 0
     while i < 16:
         result.push(_aes_sbox(_u8_at(state, i).to_i64()))
         i = i + 1
     result
 
+@unsafe(reason: "requires a 16-byte AES state for unchecked foreign byte access", capabilities: [ffi])
 fn _shift_rows(state: [u8]) -> [u8]:
     """Cyclically shift rows.
 
@@ -114,7 +125,7 @@ fn _shift_rows(state: [u8]) -> [u8]:
     Row 2: shift left 2
     Row 3: shift left 3
     """
-    var r: [u8] = rt_array_new_with_cap(16)
+    var r: [u8] = _a128gcm_new_u8(16)
     r.push(_u8_at(state, 0))
     r.push(_u8_at(state, 5))
     r.push(_u8_at(state, 10))
@@ -155,6 +166,7 @@ fn _gf_mul(a: u8, b: u8) -> u8:
         i = i + 1
     result
 
+@unsafe(reason: "requires a 16-byte AES state for unchecked foreign byte access", capabilities: [ffi])
 fn _mix_columns(state: [u8]) -> [u8]:
     """Mix columns using GF(2^8) matrix multiplication.
 
@@ -164,7 +176,7 @@ fn _mix_columns(state: [u8]) -> [u8]:
     [1, 1, 2, 3]
     [3, 1, 1, 2]
     """
-    var r: [u8] = rt_array_new_with_cap(16)
+    var r: [u8] = _a128gcm_new_u8(16)
     var c: u64 = 0
     while c < 4:
         val base = c * 4
@@ -181,9 +193,10 @@ fn _mix_columns(state: [u8]) -> [u8]:
         c = c + 1
     r
 
+@unsafe(reason: "requires validated AES state, round, and key extents", capabilities: [ffi])
 fn _add_round_key(state: [u8], round_keys: [u8], round: u64) -> [u8]:
     """XOR state with the 16-byte round key for the given round."""
-    var result: [u8] = rt_array_new_with_cap(16)
+    var result: [u8] = _a128gcm_new_u8(16)
     val base = round * 16
     var i: u64 = 0
     while i < 16:
@@ -195,6 +208,7 @@ fn _add_round_key(state: [u8], round_keys: [u8], round: u64) -> [u8]:
 # AES-128 Encryption (single block)
 # ============================================================================
 
+@unsafe(reason: "requires an exact block and expanded-key extent", capabilities: [ffi])
 fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
     """Encrypt one 16-byte block with AES-128 using the expanded round keys."""
     var state = _add_round_key(plaintext, round_keys, 0)
@@ -234,9 +248,10 @@ fn _aes128_gcm_pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
     gcm_pad_to_16(data)
 
+@unsafe(reason: "copies through unchecked foreign byte access", capabilities: [ffi])
 fn _a128gcm_append_bytes(a: [u8], b: [u8]) -> [u8]:
     """Append two byte arrays without relying on array concatenation."""
-    var out: [u8] = rt_array_new_with_cap((a.len() + b.len()).to_i64())
+    var out: [u8] = _a128gcm_new_u8((a.len() + b.len()).to_i64())
     var i: u64 = 0
     while i < a.len():
         out.push(_u8_at(a, i))
@@ -255,6 +270,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
 # GCTR — AES-CTR with Incrementing Counter
 # ============================================================================
 
+@unsafe(reason: "requires an exact 16-byte counter extent", capabilities: [ffi])
 fn _aes128_gcm_inc32(counter: [u8]) -> [u8]:
     """Increment the rightmost 32 bits of a 16-byte counter block."""
     val c = (_u8_at(counter, 12).to_u32() << 24) |
@@ -263,7 +279,7 @@ fn _aes128_gcm_inc32(counter: [u8]) -> [u8]:
             _u8_at(counter, 15).to_u32()
     val c_inc = (c + 1) & 0xFFFFFFFF
 
-    var result: [u8] = rt_array_new_with_cap(16)
+    var result: [u8] = _a128gcm_new_u8(16)
     var i: u64 = 0
     while i < 12:
         result.push(_u8_at(counter, i))
@@ -274,6 +290,7 @@ fn _aes128_gcm_inc32(counter: [u8]) -> [u8]:
     result.push((c_inc & 0xFF).to_u8())
     result
 
+@unsafe(reason: "requires validated expanded-key and counter extents", capabilities: [ffi])
 fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
     """AES-CTR mode encryption/decryption.
 
@@ -289,7 +306,7 @@ fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
     if input.len() == 0:
         return []
 
-    var output: [u8] = rt_array_new_with_cap(input.len().to_i64())
+    var output: [u8] = _a128gcm_new_u8(input.len().to_i64())
     var cb = icb
     val num_full_blocks = input.len() / 16
 
@@ -321,12 +338,13 @@ fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
 # AES-128-GCM Encryption
 # ============================================================================
 
+@unsafe(reason: "requires an exact 12-byte nonce extent", capabilities: [ffi])
 fn _aes128_gcm_make_j0(nonce: [u8]) -> [u8]:
     """Construct J0 (initial counter block) from 12-byte nonce.
 
     For 96-bit nonces: J0 = nonce || 0x00000001.
     """
-    var j0: [u8] = rt_array_new_with_cap(16)
+    var j0: [u8] = _a128gcm_new_u8(16)
     var i: u64 = 0
     while i < 12:
         j0.push(_u8_at(nonce, i))
@@ -338,7 +356,8 @@ fn _aes128_gcm_make_j0(nonce: [u8]) -> [u8]:
     j0.push(0x01)
     j0
 
-fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]:
+@unsafe(reason: "validated core depends on unverified foreign byte-access primitives", capabilities: [ffi])
+fn _aes128_gcm_encrypt_validated(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]:
     """AES-128-GCM authenticated encryption.
 
     Args:
@@ -353,7 +372,7 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
     val round_keys = aes128_key_expansion(key)
 
     # Compute hash subkey H = AES_K(0^128)
-    var zero_block: [u8] = rt_array_new_with_cap(16)
+    var zero_block: [u8] = _a128gcm_new_u8(16)
     var i: u64 = 0
     while i < 16:
         zero_block.push(0x00)
@@ -376,11 +395,21 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
     # Return ciphertext || tag
     _a128gcm_append_bytes(ciphertext, tag)
 
+fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]:
+    """Encrypt after enforcing the fixed AES-128 key and GCM nonce extents."""
+    if key.len() != 16:
+        panic("AES-128 key must be 16 bytes")
+    if nonce.len() != 12:
+        panic("GCM nonce must be 12 bytes")
+    unsafe(capabilities: [ffi]):
+        _aes128_gcm_encrypt_validated(key, nonce, plaintext, aad)
+
 # ============================================================================
 # AES-128-GCM Decryption
 # ============================================================================
 
-fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> Aes128GcmResult:
+@unsafe(reason: "validated core depends on unverified foreign byte-access primitives", capabilities: [ffi])
+fn _aes128_gcm_decrypt_validated(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> Aes128GcmResult:
     """AES-128-GCM authenticated decryption.
 
     Args:
@@ -396,7 +425,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     val round_keys = aes128_key_expansion(key)
 
     # Compute hash subkey H = AES_K(0^128)
-    var zero_block: [u8] = rt_array_new_with_cap(16)
+    var zero_block: [u8] = _a128gcm_new_u8(16)
     var i: u64 = 0
     while i < 16:
         zero_block.push(0x00)
@@ -427,3 +456,14 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     val plaintext = gctr(round_keys, icb, ciphertext)
 
     Aes128GcmResult.Ok(data: plaintext)
+
+fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> Aes128GcmResult:
+    """Decrypt after rejecting invalid fixed-width inputs as typed errors."""
+    if key.len() != 16:
+        return Aes128GcmResult.Err("AES-128 key must be 16 bytes")
+    if nonce.len() != 12:
+        return Aes128GcmResult.Err("GCM nonce must be 12 bytes")
+    if tag.len() != 16:
+        return Aes128GcmResult.Err("GCM tag must be 16 bytes")
+    unsafe(capabilities: [ffi]):
+        _aes128_gcm_decrypt_validated(key, nonce, ciphertext, aad, tag)

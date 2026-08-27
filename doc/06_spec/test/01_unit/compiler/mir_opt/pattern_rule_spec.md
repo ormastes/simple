@@ -1,6 +1,6 @@
 # PatternRulePass Specification
 
-> Validates the data-driven PatternRulePass which loads `.opt.json` rule files, matches MIR instruction sequences against named patterns, and applies rewrites. The AC-7 schema extends `simple.opt.mir.v1` with an optional `rules: [PatternRule]` array.
+> Validates the data-driven PatternRule schema model which loads `.opt.json` rule files and retains named pattern/rewrite metadata. Production MIR execution remains quarantined until legality proofs exist.
 
 <!-- sdn-diagram:id=pattern_rule_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ pattern_rule_spec -> std
 
 # PatternRulePass Specification
 
-Validates the data-driven PatternRulePass which loads `.opt.json` rule files, matches MIR instruction sequences against named patterns, and applies rewrites. The AC-7 schema extends `simple.opt.mir.v1` with an optional `rules: [PatternRule]` array.
+Validates the data-driven PatternRule schema model which loads `.opt.json` rule files and retains named pattern/rewrite metadata. Production MIR execution remains quarantined until legality proofs exist.
 
 ## At a Glance
 
@@ -50,18 +50,18 @@ Validates the data-driven PatternRulePass which loads `.opt.json` rule files, ma
 
 ## Overview
 
-Validates the data-driven PatternRulePass which loads `.opt.json` rule
-files, matches MIR instruction sequences against named patterns, and
-applies rewrites. The AC-7 schema extends `simple.opt.mir.v1` with an
+Validates the data-driven PatternRule schema model which loads `.opt.json`
+rule files and retains named pattern/rewrite metadata. Production MIR
+execution remains quarantined until legality proofs exist. The AC-7 schema extends `simple.opt.mir.v1` with an
 optional `rules: [PatternRule]` array.
 
 ## Behavior
 
 - Rule file with valid schema is loaded without error
 - Pattern matching finds the expected instruction sequence
-- Rewrite replaces matched sequence with the rewritten form
-- Rule with invalid pattern syntax is rejected at load time
-- Applied rule reports its cost_delta
+- Rewrite metadata is retained; the production pass returns MIR unchanged
+- Opaque rewrite metadata remains loadable for v1 compatibility
+- Cost metadata is retained but does not authorize application
 
 ## Scenarios
 
@@ -99,7 +99,7 @@ expect(result.rules.len()).to_equal(1)
 
 </details>
 
-#### rejects rule with invalid pattern syntax
+#### retains opaque rule metadata for v1 compatibility
 
 <details>
 <summary>Executable SSpec</summary>
@@ -108,7 +108,6 @@ Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# Pattern without ":" is structurally invalid.
 val bad_rules = [
     PatternRule(
         name: "bad_rule",
@@ -118,8 +117,8 @@ val bad_rules = [
     )
 ]
 val result = load_opt_json("simple.opt.mir.v1", bad_rules)
-expect(result.ok).to_equal(false)
-expect(result.error_msg).to_contain("invalid pattern")
+expect(result.ok).to_equal(true)
+expect(result.rules.len()).to_equal(1)
 ```
 
 </details>
@@ -181,7 +180,7 @@ expect(match_idx).to_equal(-1)
 
 ### rewrite application
 
-#### applies rewrite to matched instructions
+#### quarantines rewrite metadata and preserves instructions
 
 <details>
 <summary>Executable SSpec</summary>
@@ -194,8 +193,7 @@ val instructions = ["Load %ptr", "BinOp:Add %a 0", "Store %dst"]
 val match_idx = 1
 val rewritten = apply_rewrite(instructions, match_idx, "Copy %a")
 expect(rewritten.len()).to_equal(3)
-expect(rewritten[1]).to_equal("Copy %a")
-# Other instructions unchanged
+expect(rewritten[1]).to_equal("BinOp:Add %a 0")
 expect(rewritten[0]).to_equal("Load %ptr")
 expect(rewritten[2]).to_equal("Store %dst")
 ```
@@ -204,7 +202,7 @@ expect(rewritten[2]).to_equal("Store %dst")
 
 ### cost reporting
 
-#### reports cost delta for applied rule
+#### retains cost delta without authorizing a rewrite
 
 - pattern: "BinOp:Mul
 - rewrite: "BinOp:Shl

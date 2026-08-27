@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/services/netstack/_NetstackService/ipc_handlers.spl"
+
+[ "$(grep -c '^        @unsafe(reason:' "$module")" -eq 14 ]
+[ "$(grep -c '^    @unsafe(reason:' "$module")" -eq 10 ]
+
+call_count=$(perl -0ne '
+    s/""".*?"""//sg;
+    s/#.*//mg;
+    s/^\s*extern fn .*\n//mg;
+    while (/\b(?:syscall|mmio_read8|mmio_read16|mmio_read32|mmio_read64)\s*\(/g) { $count++ }
+    END { print $count + 0 }
+' "$module")
+[ "$call_count" -eq 20 ]
+
+# All fixed-width requests must be rejected before any raw payload read.  The
+# send guard also prevents unsigned `payload_len - 4` underflow.
+grep -q 'NET_SOCKET: if payload_len >= 1u32:' "$module"
+grep -q 'NET_BIND: if payload_len >= 10u32:' "$module"
+grep -q 'NET_LISTEN: if payload_len >= 8u32:' "$module"
+grep -q 'NET_CONNECT: if payload_len >= 10u32:' "$module"
+grep -q 'NET_ACCEPT: if payload_len >= 4u32:' "$module"
+grep -q 'NET_SEND: if payload_len >= 4u32:' "$module"
+grep -q 'NET_RECV: if payload_len >= 8u32:' "$module"
+grep -q 'NET_CLOSE: if payload_len >= 4u32:' "$module"
+
+# Do not fabricate UDP for an invalid protocol discriminator.
+grep -q 'if proto_raw != 1 and proto_raw != 2:' "$module"
+grep -q 'self._send_ipc_error(src_port, "invalid socket protocol")' "$module"
+
+# These kernel-only primitives are not in either hosted typed registry.  Keep
+# that lack of provider/evidence visible instead of treating it as verification.
+for symbol in mmio_read8 mmio_read16 mmio_read32 mmio_read64; do
+    ! grep -q "RuntimeFuncSpec::new(\"$symbol\"" \
+        "$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+    ! grep -q "insert_simple!(\"$symbol\"" \
+        "$root/src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+done
+
+echo "Netstack IPC SFFI authority audit: PASS (20 calls; 14 unsafe local declarations + 10 raw IPC owners; minimum extents and protocol discriminator validated; 0/4 MMIO symbols in either hosted registry)"

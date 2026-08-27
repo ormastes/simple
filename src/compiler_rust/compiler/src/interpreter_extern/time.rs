@@ -104,6 +104,28 @@ pub fn rt_progress_get_elapsed_seconds(_args: &[Value]) -> Result<Value, Compile
     Ok(Value::Float(elapsed))
 }
 
+pub fn rt_progress_clock_now_nanos(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::sffi::rt_progress_clock_now_nanos()))
+}
+pub fn rt_progress_tls_is_initialized(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(simple_runtime::value::sffi::rt_progress_tls_is_initialized()))
+}
+pub fn rt_progress_tls_start_nanos(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(simple_runtime::value::sffi::rt_progress_tls_start_nanos()))
+}
+pub fn rt_progress_tls_store_start_nanos(args: &[Value]) -> Result<Value, CompileError> {
+    let start = match args {
+        [Value::Int(v)] => *v,
+        _ => return Err(CompileError::semantic("rt_progress_tls_store_start_nanos requires one i64")),
+    };
+    simple_runtime::value::sffi::rt_progress_tls_store_start_nanos(start);
+    Ok(Value::Nil)
+}
+pub fn rt_progress_tls_clear(_args: &[Value]) -> Result<Value, CompileError> {
+    simple_runtime::value::sffi::rt_progress_tls_clear();
+    Ok(Value::Nil)
+}
+
 // ============================================================================
 // DateTime SFFI Functions
 // ============================================================================
@@ -288,6 +310,18 @@ pub fn rt_timestamp_diff_days(args: &[Value]) -> Result<Value, CompileError> {
 
     let result = simple_runtime::value::sffi::rt_timestamp_diff_days(micros1, micros2);
     Ok(Value::Int(result))
+}
+
+// Test-only differential oracle aliases. The seed's C runtime enables the
+// bootstrap compatibility implementation; product Stage4 never exports these.
+pub fn rt_timestamp_oracle_from_components(args: &[Value]) -> Result<Value, CompileError> {
+    rt_timestamp_from_components(args)
+}
+pub fn rt_timestamp_oracle_add_days(args: &[Value]) -> Result<Value, CompileError> {
+    rt_timestamp_add_days(args)
+}
+pub fn rt_timestamp_oracle_diff_days(args: &[Value]) -> Result<Value, CompileError> {
+    rt_timestamp_diff_days(args)
 }
 
 // ============================================================================

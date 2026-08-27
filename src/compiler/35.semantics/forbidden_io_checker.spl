@@ -34,7 +34,7 @@
 # Violation Kind
 # ============================================================================
 
-enum ForbiddenIoViolationKind:
+pub enum ForbiddenIoViolationKind:
     """Classification of why a forbidden-I/O-context violation was found.
 
     - DirectAcquire:     the context-tagged function calls a lazy facet
@@ -50,7 +50,7 @@ enum ForbiddenIoViolationKind:
 # Violation
 # ============================================================================
 
-struct ForbiddenIoViolation:
+pub struct ForbiddenIoViolation:
     """A single forbidden-I/O violation inside a real-time/interrupt/noalloc
     context function.
 
@@ -77,7 +77,7 @@ struct ForbiddenIoViolation:
 # `apk_try_facet` would be flagging a call that provably cannot violate the
 # rule, which is exactly the kind of false positive the noalloc checker's
 # own `Unknown`-vs-`None` split was built to avoid on the allocation axis.
-val FORBIDDEN_IO_ACQUIRE_FNS: [text] = [
+pub val FORBIDDEN_IO_ACQUIRE_FNS: [text] = [
     "apk_load_facet",
     "apk_load_aspect_manual",
     "apk_activate_startup",
@@ -85,19 +85,33 @@ val FORBIDDEN_IO_ACQUIRE_FNS: [text] = [
     "_apk_acquire_facet_body",
 ]
 
-fn is_forbidden_io_acquire_fn(callee: text) -> bool:
+val FORBIDDEN_IO_ACQUIRE_MODULES: [text] = [
+    "std.common.aspect_pack",
+    "lib.common.aspect_pack",
+    "src.lib.common.aspect_pack",
+]
+
+val FORBIDDEN_IO_ACQUIRE_SOURCE_PATH = "src/lib/common/aspect_pack.spl"
+
+pub fn is_forbidden_io_acquire_fn(callee: text) -> bool:
     """True when `callee` is one of the loader-level entry points that can
-    perform first-use pack I/O on a miss."""
+    perform first-use pack I/O on a miss. A resolved, path-qualified symbol
+    identity is accepted only for the canonical aspect-pack module/source;
+    an unrelated symbol with the same final component is not an acquisition
+    authority and must not produce a false E-APACK008."""
     for f in FORBIDDEN_IO_ACQUIRE_FNS:
-        if callee == f:
+        if callee == f or callee == FORBIDDEN_IO_ACQUIRE_SOURCE_PATH + "::" + f:
             return true
+        for module_name in FORBIDDEN_IO_ACQUIRE_MODULES:
+            if callee == module_name + "." + f or callee == module_name + "::" + f:
+                return true
     false
 
 # ============================================================================
 # Context Capability Manifest
 # ============================================================================
 
-struct ForbiddenIoFnEntry:
+pub struct ForbiddenIoFnEntry:
     """Per-function forbidden-I/O-context record.
 
     Fields:
@@ -121,7 +135,7 @@ impl ForbiddenIoFnEntry:
         design §19 names -- real-time, interrupt, or noalloc."""
         self.is_realtime or self.is_interrupt or self.is_noalloc
 
-class ForbiddenIoContextManifest:
+pub class ForbiddenIoContextManifest:
     """Registry of per-function context tags plus a caller-supplied call
     graph (name -> direct callees), built once per compilation unit by the
     driver -- same shape as `noalloc_checker.NoallocCapabilityManifest`."""
@@ -175,37 +189,107 @@ impl ForbiddenIoContextManifest:
         result
 
 # ============================================================================
+# Indexed Reachability
+# ============================================================================
+
+pub val FORBIDDEN_IO_MAX_CALL_DEPTH: i64 = 256
+
+struct ForbiddenIoReachabilityIndex:
+    """One compilation-unit index shared by every tagged-function check.
+
+    `acquisition_by_fn[name]` records one forbidden acquisition reachable
+    from `name`; `distance_by_fn[name]` records the bounded edge distance.
+    Both maps also serve as O(1) query indexes after construction.
+    """
+    acquisition_by_fn: {text: text}
+    distance_by_fn: {text: i64}
+
+fn _build_forbidden_io_reachability(manifest: ForbiddenIoContextManifest) -> ForbiddenIoReachabilityIndex:
+    """Build reverse adjacency once, then propagate acquisition reachability.
+
+    The explicit visited map makes cycles terminate. The queue head advances
+    without removing/copying an array prefix, and no per-edge visited array is
+    copied. Construction is O(V + E) time and O(V + E) auxiliary space. The
+    256-edge bound preserves the checker's established termination guard for
+    untrusted graphs.
+    """
+    var reverse_index: {text: i64} = {}
+    var reverse_callers: [[text]] = []
+    var acquisition_by_fn: {text: text} = {}
+    var distance_by_fn: {text: i64} = {}
+    var visited: {text: bool} = {}
+    var queue: [text] = []
+
+    for caller in manifest.callees.keys():
+        for callee in manifest.direct_callees(caller):
+            if is_forbidden_io_acquire_fn(callee):
+                if not visited.has(caller):
+                    acquisition_by_fn[caller] = callee
+                    distance_by_fn[caller] = 1
+                    visited[caller] = true
+                    queue.push(caller)
+            else:
+                if not reverse_index.has(callee):
+                    reverse_index[callee] = reverse_callers.len()
+                    reverse_callers.push([])
+                val bucket = reverse_index[callee]
+                reverse_callers[bucket].push(caller)
+
+    var head = 0
+    while head < queue.len():
+        val reached = queue[head]
+        head = head + 1
+        val distance = distance_by_fn[reached]
+        if distance >= FORBIDDEN_IO_MAX_CALL_DEPTH:
+            continue
+        if not reverse_index.has(reached):
+            continue
+        val bucket = reverse_index[reached]
+        for caller in reverse_callers[bucket]:
+            if not visited.has(caller):
+                acquisition_by_fn[caller] = acquisition_by_fn[reached]
+                distance_by_fn[caller] = distance + 1
+                visited[caller] = true
+                queue.push(caller)
+
+    ForbiddenIoReachabilityIndex(
+        acquisition_by_fn: acquisition_by_fn,
+        distance_by_fn: distance_by_fn
+    )
+
+# ============================================================================
 # Checker -- Main Entry Point
 # ============================================================================
 
-fn _find_io_reachable_chain(manifest: ForbiddenIoContextManifest, callee: text, visited: [text], depth: i64) -> text:
-    """Depth-first search from `callee` for a path to a forbidden I/O
-    acquisition entry point. Returns the acquisition fn name if reachable,
-    "" if not. `visited` guards against a call-graph cycle looping forever
-    (mirrors design §21 E-APACK007's own cycle-guard discipline, applied
-    here to the STATIC call graph rather than a runtime activation stack).
-    `depth` is a hard bound (256) as a second, unconditional guard -- a
-    caller-supplied call graph is untrusted input to this checker, and a
-    malformed one (e.g. `visited` bypassed by an equal-but-differently-cased
-    name) must not hang the compiler."""
-    if depth > 256:
-        return ""
-    if is_forbidden_io_acquire_fn(callee):
-        return callee
-    for v in visited:
-        if v == callee:
-            return ""
-    var next_visited: [text] = []
-    for v in visited:
-        next_visited.push(v)
-    next_visited.push(callee)
-    for grandchild in manifest.direct_callees(callee):
-        val found = _find_io_reachable_chain(manifest, grandchild, next_visited, depth + 1)
-        if found != "":
-            return found
-    ""
+fn _check_forbidden_io_violations_indexed(
+    fn_name: text,
+    manifest: ForbiddenIoContextManifest,
+    reachability: ForbiddenIoReachabilityIndex
+) -> [ForbiddenIoViolation]:
+    var violations: [ForbiddenIoViolation] = []
+    val entry = manifest.lookup(fn_name)
+    if not entry.is_forbidden_context():
+        return violations
 
-fn check_forbidden_io_violations(fn_name: text, manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
+    for callee in manifest.direct_callees(fn_name):
+        if is_forbidden_io_acquire_fn(callee):
+            violations.push(ForbiddenIoViolation(
+                fn_name: fn_name,
+                kind: ForbiddenIoViolationKind.DirectAcquire,
+                detail: "call to lazy facet acquisition '{callee}' from a forbidden execution context",
+                line: 0
+            ))
+        else if reachability.acquisition_by_fn.has(callee):
+            val found = reachability.acquisition_by_fn[callee]
+            violations.push(ForbiddenIoViolation(
+                fn_name: fn_name,
+                kind: ForbiddenIoViolationKind.TransitiveAcquire,
+                detail: "call to '{callee}' transitively reaches lazy facet acquisition '{found}' from a forbidden execution context",
+                line: 0
+            ))
+    violations
+
+pub fn check_forbidden_io_violations(fn_name: text, manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
     """Check a single real-time/interrupt/noalloc-tagged function for
     forbidden-I/O-context violations (design §19 E-APACK008, contextual
     formulation only -- see file header).
@@ -226,38 +310,18 @@ fn check_forbidden_io_violations(fn_name: text, manifest: ForbiddenIoContextMani
         m2.set_callees("isr_tick", ["apk_try_facet"])
         expect(check_forbidden_io_violations("isr_tick", m2).len()).to_equal(0)
     """
-    var violations: [ForbiddenIoViolation] = []
-    val entry = manifest.lookup(fn_name)
-    if not entry.is_forbidden_context():
-        return violations
+    val reachability = _build_forbidden_io_reachability(manifest)
+    _check_forbidden_io_violations_indexed(fn_name, manifest, reachability)
 
-    for callee in manifest.direct_callees(fn_name):
-        if is_forbidden_io_acquire_fn(callee):
-            violations.push(ForbiddenIoViolation(
-                fn_name: fn_name,
-                kind: ForbiddenIoViolationKind.DirectAcquire,
-                detail: "call to lazy facet acquisition '{callee}' from a forbidden execution context",
-                line: 0
-            ))
-        else:
-            var visited: [text] = [fn_name]
-            val found = _find_io_reachable_chain(manifest, callee, visited, 0)
-            if found != "":
-                violations.push(ForbiddenIoViolation(
-                    fn_name: fn_name,
-                    kind: ForbiddenIoViolationKind.TransitiveAcquire,
-                    detail: "call to '{callee}' transitively reaches lazy facet acquisition '{found}' from a forbidden execution context",
-                    line: 0
-                ))
-
-    violations
-
-fn check_all_forbidden_io_fns(manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
+pub fn check_all_forbidden_io_fns(manifest: ForbiddenIoContextManifest) -> [ForbiddenIoViolation]:
     """Check every real-time/interrupt/noalloc-tagged function in a
-    compilation unit. Returns all violations across all of them."""
+    compilation unit. The reachability index is built once and shared across
+    every tagged root, so bulk checking is O(V + E), not O(tagged * (V + E)).
+    Returns all violations across all tagged functions."""
     var all_violations: [ForbiddenIoViolation] = []
+    val reachability = _build_forbidden_io_reachability(manifest)
     for fn_name in manifest.get_context_fns():
-        for v in check_forbidden_io_violations(fn_name, manifest):
+        for v in _check_forbidden_io_violations_indexed(fn_name, manifest, reachability):
             all_violations.push(v)
     all_violations
 
@@ -265,7 +329,7 @@ fn check_all_forbidden_io_fns(manifest: ForbiddenIoContextManifest) -> [Forbidde
 # Formatting
 # ============================================================================
 
-fn format_forbidden_io_violation(v: ForbiddenIoViolation) -> text:
+pub fn format_forbidden_io_violation(v: ForbiddenIoViolation) -> text:
     """Format a single violation as a compiler diagnostic string, carrying
     the E-APACK008 code so it is greppable alongside the runtime-side error
     code emitted by `_apk_acquire_facet`.
@@ -285,7 +349,7 @@ fn format_forbidden_io_violation(v: ForbiddenIoViolation) -> text:
         return "error[E-APACK008]: in forbidden-context fn '{v.fn_name}' (line {v.line}): {kind_label} — {v.detail}"
     "error[E-APACK008]: in forbidden-context fn '{v.fn_name}': {kind_label} — {v.detail}"
 
-fn format_forbidden_io_violations(violations: [ForbiddenIoViolation]) -> [text]:
+pub fn format_forbidden_io_violations(violations: [ForbiddenIoViolation]) -> [text]:
     """Format all violations as diagnostic strings."""
     var messages: [text] = []
     for v in violations:

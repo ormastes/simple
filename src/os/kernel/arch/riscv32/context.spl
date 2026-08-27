@@ -16,8 +16,11 @@ use os.kernel.arch.riscv32.cpu.{SSTATUS_SPIE, SSTATUS_SPP, csrr_sepc, csrr_sstat
 # Extern Declarations (implemented in assembly or native runtime)
 # ============================================================================
 
+@unsafe(reason: "raw mutable context pointer; provider layout and save semantics are target-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_rv32_context_save(ctx_ptr: u32)
+@unsafe(reason: "raw context pointer; restores privileged state and does not normally return", capabilities: [ffi, raw_ptr])
 extern fn rt_rv32_context_restore(ctx_ptr: u32)
+@unsafe(reason: "raw mutable context pointers; saves and transfers privileged execution state", capabilities: [ffi, raw_ptr])
 extern fn rt_rv32_context_switch(from_ptr: u32, to_ptr: u32)
 
 # ============================================================================
@@ -73,7 +76,7 @@ impl Rv32ContextSwitch:
         ctx.sepc = entry_point as u32
 
         # sp = stack top (must be 16-byte aligned)
-        ctx.sp = stack_top as u32
+        ctx.sp = (stack_top as u32) & 0xFFFFFFF0
 
         # a0 = first argument
         ctx.a0 = arg as u32
@@ -87,34 +90,37 @@ impl Rv32ContextSwitch:
         """Alias for create() — matches HalContext trait signature."""
         self.create(entry, stack, arg)
 
+    @unsafe(reason: "by-value context ABI is not yet proven to persist the saved source state", capabilities: [ffi, raw_ptr])
     fn switch(from_ctx: Riscv32Context, to_ctx: Riscv32Context):
         """Switch from one context to another.
 
         Saves current register state into from_ctx, loads to_ctx.
         This is the core context switch — implemented in assembly.
         """
-        unsafe:
+        unsafe(capabilities: [ffi, raw_ptr]):
             rt_rv32_context_switch((&from_ctx) as u32, (&to_ctx) as u32)
 
+    @unsafe(reason: "raw assembly provider writes the complete context layout", capabilities: [ffi, raw_ptr])
     fn save() -> ArchContext:
         """Save the current CPU callee-saved register state."""
         var ctx = _zero_context()
         ctx.sepc = csrr_sepc()
         ctx.sstatus = csrr_sstatus()
         # Save callee-saved registers via extern assembly helper into ctx
-        unsafe:
+        unsafe(capabilities: [ffi, raw_ptr]):
             val ctx_ptr = &ctx as u32
             rt_rv32_context_save(ctx_ptr)
         ArchContext.Riscv32(ctx: ctx)
 
+    @unsafe(reason: "restores privileged state and transfers control through an unverified provider", capabilities: [ffi, raw_ptr])
     fn restore(ctx: ArchContext):
         """Restore a previously saved CPU register state."""
         match ctx:
             ArchContext.Riscv32(rv32_ctx):
                 csrw_sepc(rv32_ctx.sepc)
                 csrw_sstatus(rv32_ctx.sstatus)
-                unsafe:
+                unsafe(capabilities: [ffi, raw_ptr]):
                     val ctx_ptr = &rv32_ctx as u32
                     rt_rv32_context_restore(ctx_ptr)
             _:
-                pass_do_nothing     # Wrong architecture — should not happen
+                panic("RV32 context restore received a non-RV32 context")

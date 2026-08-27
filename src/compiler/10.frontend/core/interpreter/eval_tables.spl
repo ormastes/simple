@@ -402,64 +402,41 @@ fn must_use_get_reason(name: text) -> text:
 fn must_use_is_critical() -> bool:
     must_use_critical_mode
 
-fn must_use_scan_source(source: text):
-    mu_keys = []
-    mu_reasons = []
-    mu_buckets = hm_make_global_buckets()
-    mu_nexts = []
-    must_use_critical_mode = false
-    # Split source into lines and scan for comment annotations
-    var lines: [text] = []
-    var line_chars: [text] = []
-    var ci: i64 = 0
-    for _unused in source:
-        if ci >= source.len(): break
-        val ch = source[ci]
-        if ch == "\n":
-            lines.push(line_chars.join(""))
-            line_chars = []
-        else:
-            line_chars.push(ch)
-        ci = ci + 1
-    if line_chars.len() > 0:
-        lines.push(line_chars.join(""))
-    # Scan for annotations
-    var pending_must_use: bool = false
-    var pending_reason: text = ""
-    var pending_init: bool = false
-    var pending_teardown: bool = false
-    var pending_when: text = ""
-    var li: i64 = 0
-    for line in lines:
-        # Trim leading spaces
-        var trimmed_chars: [text] = []
-        var started: bool = false
-        var ti: i64 = 0
-        for _c in line:
-            if ti >= line.len(): break
-            val lc = line[ti]
-            if started:
-                trimmed_chars.push(lc)
-            elif lc != " " and lc != "\t":
-                started = true
-                trimmed_chars.push(lc)
-            ti = ti + 1
-        val trimmed = trimmed_chars.join("")
+class MustUseSourceScanState:
+    pending_must_use: bool
+    pending_reason: text
+    pending_init: bool
+    pending_teardown: bool
+    pending_when: text
+
+    # This must remain a mutable method: returning this five-field state from a
+    # free helper would copy it at every line under Simple value semantics.
+    # `@always_inline` is established for free functions, but not for `me`
+    # methods, so the interpreter method dispatch is an intentional bounded
+    # tradeoff (once per source line) until method inlining is supported.
+    me scan_line(line: text):
+        # Preserve the scanner's historical leading trim exactly: spaces and
+        # tabs are ignored, while every other character (including CR) stays.
+        # Indexing avoids a second growable character array for every line.
+        var trim_start: i64 = 0
+        while trim_start < line.len() and (line[trim_start] == " " or line[trim_start] == "\t"):
+            trim_start = trim_start + 1
+        val trimmed = line[trim_start:]
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
             must_use_critical_mode = true
         # Check for @tailrec annotation — marks function for tail-call optimization
         if trimmed.starts_with("# @tailrec"):
-            pending_init = false  # @tailrec isn't @init
-            pending_teardown = false
+            self.pending_init = false  # @tailrec isn't @init
+            self.pending_teardown = false
             # Simply note the next fn as tailrec-annotated for warning purposes
 
         # Check for @init annotation
         if trimmed.starts_with("# @init"):
-            pending_init = true
+            self.pending_init = true
         # Check for @teardown annotation
         if trimmed.starts_with("# @teardown"):
-            pending_teardown = true
+            self.pending_teardown = true
         # Check for @when(condition) conditional compilation (comment form: backward compat)
         if trimmed.starts_with("# @when("):
             # Extract condition: "# @when(condition)"
@@ -472,7 +449,7 @@ fn must_use_scan_source(source: text):
                 when_cond_chars.push(wch)
                 wci = wci + 1
             val when_cond = when_cond_chars.join("")
-            pending_when = when_cond
+            self.pending_when = when_cond
         # Check for @cfg(condition) — new proper syntax (no # prefix)
         if trimmed.starts_with("@cfg("):
             var cfg_chars: [text] = []
@@ -501,12 +478,12 @@ fn must_use_scan_source(source: text):
                     if cfg_val.len() >= 2 and cfg_val.starts_with("\"") and cfg_val.ends_with("\""):
                         cfg_val = cfg_val[1:cfg_val.len() - 1]
                     cfg_cond = "{cfg_key}={cfg_val}"
-            pending_when = cfg_cond
+            self.pending_when = cfg_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
-            pending_must_use = true
+            self.pending_must_use = true
             # Extract reason from @must_use("reason")
-            pending_reason = ""
+            self.pending_reason = ""
             if trimmed.contains("(\""):
                 # Find text between (" and ")
                 var in_reason: bool = false
@@ -527,9 +504,9 @@ fn must_use_scan_source(source: text):
                             in_reason = true
                             ri = ri + 1
                     ri = ri + 1
-                pending_reason = reason_chars.join("")
+                self.pending_reason = reason_chars.join("")
         # Check if line declares a function (and we have a pending annotation)
-        if pending_must_use:
+        if self.pending_must_use:
             if trimmed.starts_with("fn "):
                 # Extract function name
                 var fname_chars: [text] = []
@@ -542,15 +519,15 @@ fn must_use_scan_source(source: text):
                     fi = fi + 1
                 val fname = fname_chars.join("")
                 if fname != "":
-                    must_use_register(fname, pending_reason)
-                pending_must_use = false
-                pending_reason = ""
+                    must_use_register(fname, self.pending_reason)
+                self.pending_must_use = false
+                self.pending_reason = ""
             elif trimmed.starts_with("# ") == false and trimmed != "":
                 # Non-comment, non-empty line without fn => cancel pending
-                pending_must_use = false
-                pending_reason = ""
+                self.pending_must_use = false
+                self.pending_reason = ""
         # Handle @init and @teardown function registration
-        if pending_init or pending_teardown or pending_when != "":
+        if self.pending_init or self.pending_teardown or self.pending_when != "":
             if trimmed.starts_with("fn ") or trimmed.starts_with("val ") or trimmed.starts_with("var "):
                 # Extract declaration name
                 var anno_fname_chars: [text] = []
@@ -565,22 +542,54 @@ fn must_use_scan_source(source: text):
                     anno_fi = anno_fi + 1
                 val anno_fname = anno_fname_chars.join("")
                 if anno_fname != "":
-                    if pending_init:
+                    if self.pending_init:
                         init_functions.push(anno_fname)
-                    if pending_teardown:
+                    if self.pending_teardown:
                         teardown_functions.push(anno_fname)
-                    if pending_when != "":
-                        val when_ok = when_check_condition(pending_when)
+                    if self.pending_when != "":
+                        val when_ok = when_check_condition(self.pending_when)
                         if when_ok == false:
                             when_disabled_decls.push(anno_fname)
-                pending_init = false
-                pending_teardown = false
-                pending_when = ""
+                self.pending_init = false
+                self.pending_teardown = false
+                self.pending_when = ""
             elif trimmed.starts_with("# ") == false and trimmed != "":
-                pending_init = false
-                pending_teardown = false
-                pending_when = ""
-        li = li + 1
+                self.pending_init = false
+                self.pending_teardown = false
+                self.pending_when = ""
+
+fn must_use_scan_source(source: text):
+    mu_keys = []
+    mu_reasons = []
+    mu_buckets = hm_make_global_buckets()
+    mu_nexts = []
+    must_use_critical_mode = false
+
+    var state = MustUseSourceScanState(
+        pending_must_use: false,
+        pending_reason: "",
+        pending_init: false,
+        pending_teardown: false,
+        pending_when: ""
+    )
+
+    # Stream one line buffer into the state machine. The old implementation
+    # retained a [text] containing every line until the scan completed, then
+    # allocated another [text] of characters just to remove leading whitespace.
+    # This keeps peak scratch proportional to the longest line instead of the
+    # entire source while preserving blank-line and final-line behavior.
+    var line_chars: [text] = []
+    var ci: i64 = 0
+    while ci < source.len():
+        val ch = source[ci]
+        if ch == "\n":
+            state.scan_line(line_chars.join(""))
+            line_chars = []
+        else:
+            line_chars.push(ch)
+        ci = ci + 1
+    if line_chars.len() > 0:
+        state.scan_line(line_chars.join(""))
 
 # ===== Struct Definition Table (Hash Map) =====
 # Maps struct name -> decl_id for constructor resolution
@@ -692,11 +701,60 @@ var enum_reg_variants: [text] = []
 var enum_hm_buckets: [i64] = []
 var enum_hm_nexts: [i64] = []
 
+# Reverse variant index for the pattern-classification hot path. Counts, rather
+# than booleans, preserve a variant that is declared by more than one enum when
+# one owner is unloaded.
+var enum_variant_reg_names: [text] = []
+var enum_variant_reg_counts: [i64] = []
+var enum_variant_hm_buckets: [i64] = []
+var enum_variant_hm_nexts: [i64] = []
+
+fn _enum_variant_index_add(variant: text):
+    # enum_variant_is_declared has always rejected the empty spelling.
+    if variant == "": return
+    if enum_variant_hm_buckets.len() == 0:
+        enum_variant_hm_buckets = hm_make_global_buckets()
+    val bucket = hm_hash_text(variant) % HM_SIZE
+    var idx = enum_variant_hm_buckets[bucket]
+    while idx != -1:
+        if enum_variant_reg_names[idx] == variant:
+            enum_variant_reg_counts[idx] = enum_variant_reg_counts[idx] + 1
+            return
+        idx = enum_variant_hm_nexts[idx]
+    val new_idx = enum_variant_reg_names.len()
+    enum_variant_reg_names.push(variant)
+    enum_variant_reg_counts.push(1)
+    enum_variant_hm_nexts.push(enum_variant_hm_buckets[bucket])
+    enum_variant_hm_buckets[bucket] = new_idx
+
+fn _enum_variant_index_remove(variant: text):
+    if variant == "" or enum_variant_hm_buckets.len() == 0: return
+    val bucket = hm_hash_text(variant) % HM_SIZE
+    var idx = enum_variant_hm_buckets[bucket]
+    while idx != -1:
+        if enum_variant_reg_names[idx] == variant:
+            if enum_variant_reg_counts[idx] > 0:
+                enum_variant_reg_counts[idx] = enum_variant_reg_counts[idx] - 1
+            return
+        idx = enum_variant_hm_nexts[idx]
+
+fn _enum_variant_index_add_csv(variants_csv: text):
+    for variant in variants_csv.split(","):
+        _enum_variant_index_add(variant)
+
+fn _enum_variant_index_remove_csv(variants_csv: text):
+    for variant in variants_csv.split(","):
+        _enum_variant_index_remove(variant)
+
 fn enum_table_reset():
     enum_reg_names = []
     enum_reg_variants = []
     enum_hm_buckets = hm_make_global_buckets()
     enum_hm_nexts = []
+    enum_variant_reg_names = []
+    enum_variant_reg_counts = []
+    enum_variant_hm_buckets = hm_make_global_buckets()
+    enum_variant_hm_nexts = []
 
 # Bare enum names already warned about, so a repeatedly re-registered enum
 # reports once instead of once per module. Mirrors `_ftr_collision_warned`.
@@ -730,11 +788,15 @@ fn enum_table_register(name: text, variants: [text]):
             _enum_warn_bare_name_collision(name, enum_reg_variants[idx], variants.join(","))
             return
         idx = enum_hm_nexts[idx]
+    val variants_csv = variants.join(",")
     val new_idx = enum_reg_names.len()
     enum_reg_names.push(name)
-    enum_reg_variants.push(variants.join(","))
+    enum_reg_variants.push(variants_csv)
     enum_hm_nexts.push(enum_hm_buckets[bucket])
     enum_hm_buckets[bucket] = new_idx
+    # The legacy scan ignored the empty enum-name sentinel entirely.
+    if name != "":
+        _enum_variant_index_add_csv(variants_csv)
 
 fn enum_table_lookup(name: text) -> text:
     if enum_hm_buckets.len() == 0: return ""
@@ -751,12 +813,13 @@ fn enum_variant_is_declared(variant: text) -> bool:
     enum_table_lookup — match_pattern needs it to tell a nullary variant
     pattern (`case Red:`) apart from a binding pattern (`case other:`)."""
     if variant == "": return false
-    var ei = 0
-    while ei < enum_reg_names.len():
-        if enum_reg_names[ei] != "":
-            for v in enum_reg_variants[ei].split(","):
-                if v == variant: return true
-        ei = ei + 1
+    if enum_variant_hm_buckets.len() == 0: return false
+    val bucket = hm_hash_text(variant) % HM_SIZE
+    var idx = enum_variant_hm_buckets[bucket]
+    while idx != -1:
+        if enum_variant_reg_names[idx] == variant:
+            return enum_variant_reg_counts[idx] > 0
+        idx = enum_variant_hm_nexts[idx]
     false
 
 fn enum_table_remove(name: text) -> bool:
@@ -766,6 +829,8 @@ fn enum_table_remove(name: text) -> bool:
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
         if enum_reg_names[idx] == name:
+            if name != "":
+                _enum_variant_index_remove_csv(enum_reg_variants[idx])
             if prev == -1:
                 enum_hm_buckets[bucket] = enum_hm_nexts[idx]
             else:

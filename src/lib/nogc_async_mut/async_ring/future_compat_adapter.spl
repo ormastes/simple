@@ -1,0 +1,36 @@
+# Explicit compatibility seam from the legacy nonblocking Future poll surface
+# to the canonical SimpleRing task ABI. This adapter never waits, schedules,
+# allocates ring storage, or synthesizes a token: the caller supplies the exact
+# admitted wait token that owns the wakeup.
+
+use std.common.contracts.execution.simple_ring_async_v1.{
+    RingToken, TaskPollResult, ring_token_validate
+}
+use std.nogc_async_mut.async.future.Future
+use std.nogc_async_mut.async.poll.Poll
+
+pub enum FutureCompatError:
+    InvalidWaitToken
+
+pub struct FutureCompatReceipt<T>:
+    poll_result: TaskPollResult<T>
+    waited: bool
+    blocking_used: bool
+    scheduler_created: bool
+
+pub fn poll_future_compat<T>(
+    future: Future<T>, wait_token: RingToken
+) -> Result<FutureCompatReceipt<T>, FutureCompatError>:
+    if not ring_token_validate(wait_token).ok:
+        return Err(FutureCompatError.InvalidWaitToken)
+    match future.poll():
+        case Poll.Ready(value):
+            Ok(FutureCompatReceipt(
+                poll_result: TaskPollResult.Ready(value), waited: false,
+                blocking_used: false, scheduler_created: false))
+        case Poll.Pending:
+            Ok(FutureCompatReceipt(
+                poll_result: TaskPollResult.Pending(wait_token), waited: true,
+                blocking_used: false, scheduler_created: false))
+
+export FutureCompatError, FutureCompatReceipt, poll_future_compat

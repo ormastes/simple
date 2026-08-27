@@ -1,0 +1,141 @@
+use std.spec.*
+use std.common.contracts.execution.simpleos_executable_v1.{
+    ManifestTarget, ManifestResourceLimits, SimpleArtifactManifest
+}
+use os.kernel.loader.installed_artifact_manifest_execution_policy_v1.{
+    InstalledArtifactManifestPolicyErrorV1,
+    installed_artifact_manifest_policy_check_for_target_v1,
+    installed_artifact_trust_binding_check_v1
+}
+use os.kernel.loader.installed_artifact_catalog_v1.{InstalledArtifactRecordV1}
+
+fn policy_manifest_v1() -> SimpleArtifactManifest:
+    SimpleArtifactManifest(
+        format_version: 1, artifact_kind: "elf",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        entrypoint: "main", required_abi_features: ["elf64", "w_xor_x"],
+        required_services: [], required_capabilities: 5u32,
+        resource_limits: ManifestResourceLimits(
+            max_memory_bytes: 0, max_open_handles: 0,
+            max_threads: 0, cpu_budget_us: 0),
+        namespace_template: "", native_libraries: [], smf_libraries: [],
+        interpreter: "", argument_schema: [], startup_preloads: [],
+        content_hashes: ["0000000000000000000000000000000000000000000000000000000000000000"],
+        signature: "signed", debug_identity: "policy-spec")
+
+describe "installed artifact manifest execution policy v1":
+    it "admits the exact bounded ELF policy":
+        val checked = installed_artifact_manifest_policy_check_for_target_v1(
+            policy_manifest_v1(),
+            ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+            5u32)
+        expect(checked.ok).to_equal(true)
+
+    it "denies non ELF kinds before load planning":
+        var manifest = policy_manifest_v1()
+        manifest.artifact_kind = "script"
+        manifest.interpreter = "/bin/simple"
+        val checked = installed_artifact_manifest_policy_check_for_target_v1(
+            manifest, manifest.target, 5u32)
+        expect(checked.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ArtifactKindDenied)
+
+    it "denies an under capability child":
+        val manifest = policy_manifest_v1()
+        val checked = installed_artifact_manifest_policy_check_for_target_v1(
+            manifest, manifest.target, 1u32)
+        expect(checked.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.CapabilityDenied)
+
+    it "denies unowned services and resource limits":
+        var service_manifest = policy_manifest_v1()
+        service_manifest.required_services = ["netstack"]
+        val service = installed_artifact_manifest_policy_check_for_target_v1(
+            service_manifest, service_manifest.target, 5u32)
+        expect(service.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ServicePolicyUnavailable)
+
+        var limited_manifest = policy_manifest_v1()
+        limited_manifest.resource_limits.max_threads = 2
+        val limited = installed_artifact_manifest_policy_check_for_target_v1(
+            limited_manifest, limited_manifest.target, 5u32)
+        expect(limited.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ResourcePolicyUnavailable)
+
+    it "denies format target and ABI substitutions":
+        var versioned = policy_manifest_v1()
+        versioned.format_version = 2
+        val version_check = installed_artifact_manifest_policy_check_for_target_v1(
+            versioned, versioned.target, 5u32)
+        expect(version_check.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.FormatVersionDenied)
+
+        val manifest = policy_manifest_v1()
+        val target_check = installed_artifact_manifest_policy_check_for_target_v1(
+            manifest,
+            ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos"),
+            5u32)
+        expect(target_check.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.TargetDenied)
+
+        var duplicated = policy_manifest_v1()
+        duplicated.required_abi_features = ["elf64", "elf64"]
+        val abi_check = installed_artifact_manifest_policy_check_for_target_v1(
+            duplicated, duplicated.target, 5u32)
+        expect(abi_check.error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.AbiFeatureDenied)
+
+    it "denies every signed resource axis and unc carried metadata":
+        var memory = policy_manifest_v1()
+        memory.resource_limits.max_memory_bytes = 4096
+        expect(installed_artifact_manifest_policy_check_for_target_v1(
+            memory, memory.target, 5u32).error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ResourcePolicyUnavailable)
+
+        var handles = policy_manifest_v1()
+        handles.resource_limits.max_open_handles = 1
+        expect(installed_artifact_manifest_policy_check_for_target_v1(
+            handles, handles.target, 5u32).error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ResourcePolicyUnavailable)
+
+        var threads = policy_manifest_v1()
+        threads.resource_limits.max_threads = -1
+        expect(installed_artifact_manifest_policy_check_for_target_v1(
+            threads, threads.target, 5u32).error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ResourcePolicyUnavailable)
+
+        var cpu = policy_manifest_v1()
+        cpu.resource_limits.cpu_budget_us = 1
+        expect(installed_artifact_manifest_policy_check_for_target_v1(
+            cpu, cpu.target, 5u32).error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.ResourcePolicyUnavailable)
+
+        var namespaced = policy_manifest_v1()
+        namespaced.namespace_template = "isolated"
+        expect(installed_artifact_manifest_policy_check_for_target_v1(
+            namespaced, namespaced.target, 5u32).error).to_equal(
+            InstalledArtifactManifestPolicyErrorV1.LaunchMetadataPolicyUnavailable)
+
+    it "binds catalog signer signature and root to per open trust":
+        var manifest = policy_manifest_v1()
+        val signature = "ed25519:root-a:" + "01" * 64
+        manifest.signature = signature
+        val root_hash = "12" * 32
+        val record = InstalledArtifactRecordV1(
+            canonical_path: "/bin/simple", aliases: ["/usr/bin/simple"],
+            target: manifest.target,
+            content_sha256: "34" * 32,
+            signature_scheme: "ed25519", signer_identity: "root-a",
+            detached_signature: signature,
+            expected_trust_root_sha256: root_hash,
+            manifest_identity_sha256: "56" * 32,
+            manifest: manifest)
+        expect(installed_artifact_trust_binding_check_v1(
+            record, signature, "root-a", root_hash)).to_equal(true)
+        expect(installed_artifact_trust_binding_check_v1(
+            record, signature, "root-b", root_hash)).to_equal(false)
+        expect(installed_artifact_trust_binding_check_v1(
+            record, signature, "root-a", "78" * 32)).to_equal(false)
+        expect(installed_artifact_trust_binding_check_v1(
+            record, "ed25519:root-a:" + "02" * 64,
+            "root-a", root_hash)).to_equal(false)

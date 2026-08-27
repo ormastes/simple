@@ -883,7 +883,13 @@ impl LlvmBackend {
                     vreg_map.insert(*dest, default_val.into());
                 }
             }
-            MirInst::AggregateCopy { dest, src, byte_size, deep_fields, .. } => {
+            MirInst::AggregateCopy {
+                dest,
+                src,
+                byte_size,
+                deep_fields,
+                ..
+            } => {
                 self.compile_aggregate_copy(*dest, *src, *byte_size, deep_fields, vreg_map, builder)?;
             }
             MirInst::BinOp { dest, op, left, right } => {
@@ -2324,6 +2330,72 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // Builtin-receiver methods that today resolve ONLY through the
+                // qualifier-discarding fallback in `resolve_name_variants`
+                // (pipeline/native_project/imports.rs). That fallback matches on
+                // the bare method name, so `Array.is_empty` could bind to any
+                // user `is_empty` in the entry closure -- measured doing exactly
+                // that, which silently emptied every MIR body
+                // (bootstrap_stage2_empty_mir_bodies_2026-07-05). The fallback
+                // cannot be tightened until these have real lowerings, because
+                // the Stage-2 link depends on them resolving to something.
+                //
+                // All targets are existing `&[I64] -> &[I64]` runtime entries; no
+                // new ABI surface is introduced, deliberately -- codegen-emitted
+                // names the runtime never defines are a recurring defect class.
+                //
+                // Placed AFTER the `direct_func` block above, so a genuine user
+                // method always wins and never reaches here.
+                if args.is_empty() {
+                    let recv_type = func_name.split('.').next().unwrap_or("");
+                    let seq = matches!(recv_type, "Array" | "Slice" | "List" | "Tuple");
+                    let txt = matches!(recv_type, "text" | "String" | "str");
+                    let builtin_recv = seq || txt || matches!(recv_type, "Dict" | "Map" | "Set" | "Range");
+                    // (runtime entry, needs `== 0` on the result)
+                    let lowering: Option<(&str, bool)> = if !builtin_recv {
+                        None
+                    } else {
+                        match method {
+                            "is_empty" => Some(("rt_len", true)),
+                            "ptr" if seq => Some(("rt_array_data_ptr", false)),
+                            "ptr" if txt => Some(("rt_string_data", false)),
+                            "to_bytes" if txt => Some(("rt_string_bytes", false)),
+                            _ => None,
+                        }
+                    };
+                    if let Some((rt_name, compare_zero)) = lowering {
+                        let recv_val = self.get_vreg(receiver, vreg_map)?;
+                        let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
+                        let rt_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let rt_func = module
+                            .get_function(rt_name)
+                            .unwrap_or_else(|| module.add_function(rt_name, rt_fn_type, None));
+                        let rt_call = builder
+                            .build_call(rt_func, &[recv_casted.into()], "builtin_method")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("builtin method redirect", &e))?;
+                        let mut result = rt_call
+                            .try_as_basic_value()
+                            .left()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if compare_zero {
+                            let as_int = self
+                                .coerce_value_to_type(result, Some(i64_type.into()), builder)?
+                                .into_int_value();
+                            let cmp = builder
+                                .build_int_compare(inkwell::IntPredicate::EQ, as_int, i64_type.const_zero(), "is_empty")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("is_empty compare", &e))?;
+                            result = builder
+                                .build_int_z_extend(cmp, i64_type, "is_empty_i64")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("is_empty zext", &e))?
+                                .into();
+                        }
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, result);
+                        }
+                        return Ok(());
+                    }
+                }
+
                 // Special case: substring(start) → rt_slice(receiver, start, rt_len(receiver), 1)
                 if method == "substring" && args.len() == 1 {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
@@ -2553,7 +2625,7 @@ impl LlvmBackend {
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
                     "to_int" | "to_i64" => Some("rt_string_to_int"),
-                "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
+                    "parse_int" | "parse_i32" | "parse_i64" => Some("rt_string_parse_int"),
                     "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => {
                         Some("rt_string_to_float")
                     }
@@ -2874,14 +2946,39 @@ impl LlvmBackend {
                         .map(|(indices, _)| indices)
                         .or_else(|| crate::codegen::instr::calls::text_arg_indices(runtime_name));
                     if let Some(boxed_indices) = boxed_indices {
-                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None));
-                        let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None));
-                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| module.add_function("rt_string_new", i64_type.fn_type(&[i64_type.into(), i64_type.into()], false), None));
+                        let rt_string_data = module.get_function("rt_string_data").unwrap_or_else(|| {
+                            module.add_function("rt_string_data", i64_type.fn_type(&[i64_type.into()], false), None)
+                        });
+                        let rt_string_len = module.get_function("rt_string_len").unwrap_or_else(|| {
+                            module.add_function("rt_string_len", i64_type.fn_type(&[i64_type.into()], false), None)
+                        });
+                        let rt_string_new = module.get_function("rt_string_new").unwrap_or_else(|| {
+                            module.add_function(
+                                "rt_string_new",
+                                i64_type.fn_type(&[i64_type.into(), i64_type.into()], false),
+                                None,
+                            )
+                        });
                         for (i, val) in raw_arg_vals.iter().enumerate() {
                             if boxed_indices.contains(&i) {
-                                let ptr = builder.build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?.try_as_basic_value().left().unwrap();
-                                let len = builder.build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?.try_as_basic_value().left().unwrap();
-                                let boxed = builder.build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value").map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?.try_as_basic_value().left().unwrap();
+                                let ptr = builder
+                                    .build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap();
+                                let len = builder
+                                    .build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap();
+                                let boxed = builder
+                                    .build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
+                                    .try_as_basic_value()
+                                    .left()
+                                    .unwrap();
                                 arg_vals.push(boxed.into());
                             } else {
                                 arg_vals.push((*val).into());
@@ -3829,8 +3926,14 @@ mod tests {
         );
         // Negative artifacts: these two symbols do not exist in ANY runtime.
         // Emitting them is what this test previously asserted.
-        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
-        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
+        assert!(
+            !ir.contains("rt_box_float"),
+            "rt_box_float does not exist in any runtime"
+        );
+        assert!(
+            !ir.contains("rt_unbox_float"),
+            "rt_unbox_float does not exist in any runtime"
+        );
         assert!(!ir.contains("bitcast i32"));
         backend.verify().unwrap();
     }
@@ -3893,7 +3996,9 @@ mod tests {
         // Search the backend code only, never this test module, or the
         // assertions would match their own text and prove nothing.
         let src = include_str!("functions.rs");
-        let split = src.find("#[cfg(all(test, feature = \"llvm\"))]").expect("test module marker");
+        let split = src
+            .find("#[cfg(all(test, feature = \"llvm\"))]")
+            .expect("test module marker");
         let code = &src[..split];
 
         assert!(

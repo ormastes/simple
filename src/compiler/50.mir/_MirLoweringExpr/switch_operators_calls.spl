@@ -28,13 +28,21 @@ use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_na
 # with "unresolved name: eprint" without this (same fix as mir_data.spl:27).
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.mir.mir_types.{LocalId}  # explicit: a glob is not an import-origin for surface projection
+use compiler.semantics.rt_hal_tag.{rt_hal_compilation_requires_finalize}
+use compiler.mir.mir_rt_hal_boundary.{inject_rt_hal_worker_complete}
+use std.io_runtime.{env_get_opt}
 
-extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw tagged-value discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
-# Two-word (ptr, len) text-extern-ABI split -- see text_extern_abi.spl and
-# doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md.
-extern fn rt_string_data(s: text) -> i64
-extern fn rt_string_len(value: text) -> i64
+
+@always_inline
+fn _sffi_env_get(key: text) -> text?:
+    env_get_opt(key)
+
+@always_inline
+fn _sffi_enum_discriminant(value: Any) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_enum_discriminant(value)
 
 # Monotonic counter for lambda-lift synthesized top-level function names. A
 # non-capturing `Lambda` used as a first-class VALUE (passed to a HOF) is lifted
@@ -79,11 +87,21 @@ impl MirLowering:
 
         This is how a call site that only ever had a bare name obtains a key
         that distinguishes two same-bare-named enums."""
-        val info = self.symbols.get_symbol_raw(symbol.id)
-        if not info.?:
+        # Do not carry `HirSymbol?` across this boundary. Stage-native has a
+        # proven struct-Option transport defect where `.?` reports Some but
+        # `unwrap()` returns a null payload (the Stage 3 SIGSEGV was the field
+        # load below at address 0x48). Scalar readers keep the struct-valued
+        # Dict access inside SymbolTable.
+        val symbol_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+        if symbol_name == "":
+            # Returning "" is still necessary so diagnostic collection can
+            # continue, but it is not a silent bare-key fallback: this error is
+            # explicitly fatal and therefore blocks code generation.
+            self.error_fatal(
+                "enum symbol resolution: missing or invalid symbol id {symbol.id}",
+                nil)
             return ""
-        val sym = info.unwrap()
-        val defining_module = sym.defining_module ?? ""
+        val defining_module = self.symbols.symbol_defining_module_scalar_raw(symbol.id)
         if defining_module == "":
             return ""
         # `defining_module` is a SOURCE PATH; HIR built `runtime_name` from the
@@ -99,7 +117,7 @@ impl MirLowering:
         val owner_module = bootstrap_mir_logical_module_name(defining_module)
         if owner_module == "":
             return ""
-        "{owner_module}.{sym.name}"
+        "{owner_module}.{symbol_name}"
 
     me enum_bare_of(enum_key: text) -> text:
         """The BARE name behind a key that may be a runtime_name.
@@ -738,7 +756,7 @@ impl MirLowering:
             val default_local = self.lower_expr(default_expr)
             result = result.push(mir_operand_copy(default_local))
             i = i + 1
-        if (rt_env_get("SIMPLE_MIR_DEFAULT_PAD_TRACE") ?? "") == "1":
+        if (_sffi_env_get("SIMPLE_MIR_DEFAULT_PAD_TRACE") ?? "") == "1":
             eprint("[mir-default-pad] callee={callee_name} given={args_in.len()} arity={params.len()}\n")
         result
 
@@ -933,18 +951,16 @@ impl MirLowering:
         self.builder = b_d2
 
         # Merge block.
-        var b_m = self.builder
-        b_m.switch_to_block(merge_block)
+        self.builder.switch_to_block(merge_block)
         # Mirrors lower_if's merge-placeholder fix: every arm/default that
         # falls through to merge without producing a value (e.g. a void
         # statement as the arm's last expression) leaves `result` undefined
         # on that path -- a NULL llvm::Value* read downstream (ICmp/binop
         # SIGSEGV in llvm-lib). Define it here if no arm ever did.
         if not result_defined:
-            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+            self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
-            b_m.set_local_type(result, inferred_ty)
-        self.builder = b_m
+            self.builder.set_local_type(result, inferred_ty)
 
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
@@ -1069,17 +1085,15 @@ impl MirLowering:
         self.builder = b_def
 
         # Merge block.
-        var b_m = self.builder
-        b_m.switch_to_block(merge_block)
+        self.builder.switch_to_block(merge_block)
         # Mirrors lower_if's merge-placeholder fix: every arm/default that
         # falls through to merge without producing a value leaves `result`
         # undefined on that path -- a NULL llvm::Value* read downstream
         # (ICmp/binop SIGSEGV in llvm-lib). Define it here if no arm ever did.
         if not result_defined:
-            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+            self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
-            b_m.set_local_type(result, inferred_ty)
-        self.builder = b_m
+            self.builder.set_local_type(result, inferred_ty)
 
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
@@ -1104,8 +1118,8 @@ impl MirLowering:
         if args.len() != 1:
             return nil
         val fallback_symbol = SymbolId(id: -1)
-        val callee_disc = rt_enum_discriminant(callee.kind)
-        if callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+        val callee_disc = _sffi_enum_discriminant(callee.kind)
+        if callee_disc == _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
             match callee.kind:
                 case HirExprKind.NamedVar(symbol, _):
                     # Use the symbol already resolved onto this HIR node --
@@ -1124,7 +1138,7 @@ impl MirLowering:
                     return self.try_lower_bitfield_construct_for_symbol(symbol, args)
                 case _:
                     return nil
-        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+        if callee_disc == _sffi_enum_discriminant(HirExprKind.Var(fallback_symbol)):
             match callee.kind:
                 case HirExprKind.Var(symbol):
                     return self.try_lower_bitfield_construct_for_symbol(symbol, args)
@@ -1297,10 +1311,10 @@ impl MirLowering:
 
     me lower_unaryop(op: HirUnaryOp) -> MirUnaryOp:
         """Convert HIR unary op to MIR unary op."""
-        val disc = rt_enum_discriminant(op)
-        if disc == rt_enum_discriminant(HirUnaryOp.Not): return MirUnaryOp.Not
-        if disc == rt_enum_discriminant(HirUnaryOp.BitNot): return MirUnaryOp.BitNot
-        if disc == rt_enum_discriminant(HirUnaryOp.Transpose): return MirUnaryOp.Transpose
+        val disc = _sffi_enum_discriminant(op)
+        if disc == _sffi_enum_discriminant(HirUnaryOp.Not): return MirUnaryOp.Not
+        if disc == _sffi_enum_discriminant(HirUnaryOp.BitNot): return MirUnaryOp.BitNot
+        if disc == _sffi_enum_discriminant(HirUnaryOp.Transpose): return MirUnaryOp.Transpose
         MirUnaryOp.Neg
 
     me infer_binop_type(op: HirBinOp) -> MirType:
@@ -1342,7 +1356,7 @@ impl MirLowering:
             return MirType.i64()
         if name == "rt_simd_engine2d_neon_hits" or name == "rt_simd_engine2d_neon_reset" or name == "rt_engine2d_simd_row_probe":
             return MirType.i64()
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             # Name-keyed prescan registry: covers callees whose symbol id is
             # invalid at this call site (wildcard imports), where
             # resolved_call_return_type would default to i64 and rv32 callers
@@ -1397,7 +1411,7 @@ impl MirLowering:
         self.resolved_call_return_type(symbol)
 
     me try_lower_bootstrap_cli_arg_index(base: HirExpr, index_local: LocalId) -> LocalId?:
-        if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+        if (_sffi_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
             return nil
         match base.kind:
             case Call(callee, args, _):
@@ -1492,7 +1506,13 @@ impl MirLowering:
         # `<Type>{field: v}`), returning a tagged heap string handle that the
         # existing `rt_interp_cstr` unwrap further below already knows how to
         # consume, same as any other string operand.
-        var arg_is_aggregate = false
+        # Runtime arrays are registered in `runtime_array_locals` whether the
+        # local carries an Array/Slice kind or an ABI-shaped integer handle.
+        # The aggregate type switch below does not include Array/Slice, so the
+        # authoritative marker must select this arm before a handle can reach
+        # the empty/invalid cstr path.  Tuple/dict/struct/enum values retain
+        # their existing type-kind routing.
+        var arg_is_aggregate = self.runtime_array_locals.contains(arg_local.id)
         # Tagged scalar renderer results deliberately retain their I64 MIR ABI
         # for LLVM.  The compiler-only text marker is therefore authoritative
         # before ABI-type dispatch: print must bridge that tagged text directly
@@ -1633,6 +1653,7 @@ impl MirLowering:
         after the panic still have somewhere to go -- they are unreachable at
         runtime, but they must still lower rather than corrupt the builder.
         """
+        self.emit_mcdc_abort_if_active()
         var panic_temp = LocalId(id: 0)
         if args.len() == 0:
             # No argument: still panic, and still say so. Emitting the literal
@@ -1877,8 +1898,9 @@ impl MirLowering:
         var equalified = ""
         match etype.kind:
             case Named(esym, _):
-                val s = self.symbols.get_symbol_raw(esym.id)
-                ename = if s.?: s.name else: ""
+                # Keep the sibling name lookup on the same scalar-only path as
+                # enum_qualified_key; do not reintroduce HirSymbol? transport.
+                ename = self.symbols.symbol_name_scalar_raw(esym.id)
                 equalified = self.enum_qualified_key(esym)
             case _:
                 ()
@@ -2109,7 +2131,7 @@ impl MirLowering:
 
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
-        rt_enum_discriminant(e) compared to each variant's index; binds a single
+        _sffi_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
         val scrut_local = self.lower_expr(scrutinee)
         var bd = self.builder
@@ -2128,11 +2150,10 @@ impl MirLowering:
         var enum_binds: [[SymbolId]] = []
         var enum_bind_pos: [[i64]] = []
         var enum_arities: [i64] = []
-        var enum_bodies: [HirBlock] = []
         # Parallel to enum_discs: whether the arm's payload contains a nested
         # Enum/Literal sub-pattern (1/0), and the arm's index in `arms`, so
         # the deep payload walk (emit_enum_payload_deep) can re-read the
-        # pattern via the proven `val arm = arms[i]` copy shape. Deliberately
+        # pattern via an explicitly typed `HirMatchArm` rebind. Deliberately
         # PRIMITIVE arrays: storing the HirPattern itself in a pushed array
         # and matching on `stored[ci].kind` mis-extracted the enum payload
         # under the seed engine (same ANY-erased-element landmine documented
@@ -2162,14 +2183,15 @@ impl MirLowering:
         var enum_key = ""
         var ai = 0
         while ai < arms.len():
-            val arm = arms[ai]
+            # Stage-2 stores array elements through ANY. The explicit type is
+            # required before any composite field access.
+            val arm: HirMatchArm = arms[ai]
             match arm.pattern.kind:
                 case Enum(etype, variant, epayload):
                     if enum_name == "":
                         enum_name = match etype.kind:
                             case Named(esym, _):
-                                val s = self.symbols.get_symbol_raw(esym.id)
-                                if s.?: s.name else: ""
+                                self.symbols.symbol_name_scalar_raw(esym.id)
                             case _: ""
                         enum_key = match etype.kind:
                             case Named(esym2, _):
@@ -2259,7 +2281,6 @@ impl MirLowering:
                     enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
                     enum_bind_pos = enum_bind_pos.push(enum_pat_binding_positions(epayload))
                     enum_arities = enum_arities.push(enum_pat_arity(epayload))
-                    enum_bodies = enum_bodies.push(arm.body)
                     enum_variants = enum_variants.push(variant)
                     # Classify HERE, on the proven-good `epayload` binding —
                     # see the enum_deep_flags declaration comment. The scan is
@@ -2448,10 +2469,10 @@ impl MirLowering:
             # sub-patterns keep the exact pre-existing single-compare shape.
             if enum_deep_flags[ci] == 1:
                 # Re-read the arm's payload through the proven copy shape
-                # (`val arm = arms[i]` + match on the copy's field) — see the
+                # (typed arm rebind + match on the copy's field) — see the
                 # enum_deep_flags declaration comment for why the pattern is
                 # not stored in a pushed array instead.
-                val deep_arm = arms[enum_arm_srcidx[ci]]
+                val deep_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
                 var arm_payload: HirPatternPayload? = nil
                 match deep_arm.pattern.kind:
                     case Enum(_, _, deep_ep):
@@ -2674,7 +2695,12 @@ impl MirLowering:
                             self.local_map[bind_syms[fi].id] = gl
                             self.bind_local(bind_syms[fi].id, gl)
                     fi = fi + 1
-            val arm_result = self.lower_block_expected(enum_bodies[ci], expected_type)
+            # Do not copy HirBlock composites through another pushed array:
+            # Stage-2 stores those elements through ANY and repeated enum
+            # matches eventually read a corrupted body carrier. Reuse the
+            # primitive source index and restore the original typed arm.
+            val body_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
+            val arm_result = self.lower_block_expected(body_arm.body, expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
             # NOTHING more into this block. set_terminator would clobber the
@@ -2821,11 +2847,84 @@ impl MirLowering:
                     enum_symbol_id, enum_symbol_id, enum_name,
                     all_ids, all_names, covered_ids, has_default,
                 )
-                if match_coverage_requires_hard_error(coverage, rt_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
+                if match_coverage_requires_hard_error(coverage, _sffi_env_get("SIMPLE_SAFETY_PROFILE") ?? ""):
                     val missing_names = coverage.missing_variant_names()
                     var cmsg = "critical-profile match coverage: non-exhaustive match on '" + enum_name
                     cmsg = cmsg + "' (no default/wildcard arm). Missing: " + missing_names.join(", ") + "."
                     self.error_fatal(cmsg, Some(scrutinee.span))
+
+            # Runtime fall-through TRAP for a TOTAL match (2026-08-24).
+            #
+            # Deliberately the COMPLEMENT of the warn-only case above:
+            # `missing_v` EMPTY means the arms name every variant of
+            # `enum_name`, so no legitimate value of that enum can reach this
+            # block. A fall-through here is therefore never "the programmer
+            # forgot a variant" -- it is the scrutinee not being a value of
+            # this enum at all (mis-bound receiver, corrupt tag, colliding
+            # bare enum name). Until now that produced the `const 0`
+            # placeholder emitted at merge_block below, and the zero flowed
+            # onward as a valid-looking pointer: the `Poll<T>.unwrap` mis-bind
+            # of 2026-08-24 cost a full lane-day in exactly this shape. See
+            # doc/08_tracking/bug/total_enum_match_fallthrough_zeroes_2026-08-24.md
+            #
+            # rt_panic(msg) + MirTerminator.Abort, the same two-halves shape
+            # `lower_bootstrap_panic_call` documents: the call makes the
+            # message survive, the Abort makes the block DIVERGE so control
+            # cannot run on even if rt_panic is stubbed or returns. No new MIR
+            # opcode is introduced -- every backend already lowers Abort.
+            #
+            # Four gates, all required, each removing a way a VALID value
+            # could reach here:
+            #   * variant set actually known (`enum_variant_index.has`) --
+            #     otherwise `missing_v` is empty vacuously.
+            #   * bare enum name NOT contested -- with a collision the index
+            #     may be a different enum's (possibly shorter) variant list,
+            #     which is the soundness gap the warn-only TODO above cites.
+            #   * every arm discriminant RESOLVED (>= 0) -- an arm left at the
+            #     -1 sentinel never matches a real value, so a name-exhaustive
+            #     match containing one can fall through on a valid scrutinee.
+            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
+            #     textually but does not fire when the guard is false, so its
+            #     fall-through is reachable and correct.
+            # Non-exhaustive matches keep the placeholder-0 behaviour: the 286
+            # in-tree sites the warn-only choice above was measured against are
+            # untouched by this, which is why this is a runtime trap on
+            # provably-unreachable code and not the compile-time promotion the
+            # TODO defers.
+            var all_discs_resolved = true
+            for dchk in enum_discs:
+                if dchk < 0:
+                    all_discs_resolved = false
+            var any_guarded = false
+            for arm_g in arms:
+                if arm_g.has_guard:
+                    any_guarded = true
+            var total_match_trap_ok = missing_v.len() == 0 and enum_discs.len() > 0
+            if not self.enum_variant_index.has(enum_name):
+                total_match_trap_ok = false
+            if self.enum_bare_name_collisions.has(enum_name):
+                total_match_trap_ok = false
+            if not all_discs_resolved:
+                total_match_trap_ok = false
+            if any_guarded:
+                total_match_trap_ok = false
+            if total_match_trap_ok:
+                var b_ft = self.builder
+                if not b_ft.current_block_has_explicit_terminator():
+                    var tmsg = "total enum match fell through on '" + enum_name
+                    tmsg = tmsg + "': the value's discriminant matched NONE of the arms ("
+                    tmsg = tmsg + covered_txt + "), which cover every variant of that enum."
+                    tmsg = tmsg + " The scrutinee is not a valid '" + enum_name
+                    tmsg = tmsg + "' value (mis-bound receiver, corrupt tag, or bare-name enum collision)."
+                    val tmsg_local = b_ft.new_temp(self.bootstrap_text_type())
+                    b_ft.emit_const(tmsg_local, MirConstValue.Str(tmsg), self.bootstrap_text_type())
+                    val tpanic_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_panic"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+                    ))
+                    b_ft.emit_call(tpanic_op, [mir_operand_copy(tmsg_local)], MirType.unit())
+                    b_ft.terminate_abort(tmsg)
+                self.builder = b_ft
 
         if has_default:
             val dres = self.lower_block_expected(default_body, expected_type)
@@ -2847,17 +2946,15 @@ impl MirLowering:
             b_end.terminate_goto(merge_block)
         self.builder = b_end
 
-        var b_m = self.builder
-        b_m.switch_to_block(merge_block)
+        self.builder.switch_to_block(merge_block)
         if result_match_candidate and result_ok_arm.id >= 0 and result_err_arm.id >= 0 and result_ok_payload.id >= 0 and result_err_payload.id >= 0:
-            b_m.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
+            self.builder.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
                 scrut_local, result, result_ok_arm, result_err_arm,
                 merge_block, result_ok_payload, result_err_payload), span: nil))
         if not result_defined:
-            b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
+            self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
-            b_m.set_local_type(result, inferred_ty)
-        self.builder = b_m
+            self.builder.set_local_type(result, inferred_ty)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -3048,6 +3145,7 @@ impl MirLowering:
                     # exit -- drop every still-owned resource local on this
                     # path (the None handle itself is never a resource).
                     self.emit_pending_resource_drops(nil)
+                    self.emit_mcdc_abort_if_active()
                     var b_none2 = self.builder
                     b_none2.terminate_return(Some(mir_operand_copy(none_handle)))
                     self.builder = b_none2
@@ -3090,6 +3188,7 @@ impl MirLowering:
         # carries the Result/Err wrapper being returned, never a resource
         # itself).
         self.emit_pending_resource_drops(nil)
+        self.emit_mcdc_abort_if_active()
         var b_err2 = self.builder
         b_err2.terminate_return(Some(mir_operand_copy(res_local)))
         self.builder = b_err2
@@ -3162,8 +3261,7 @@ impl MirLowering:
         handled here — Option/Result use a separate path and fall through."""
         val enum_name = match type_.kind:
             case Named(symbol, _):
-                val s = self.symbols.get_symbol_raw(symbol.id)
-                if s.?: s.name else: ""
+                self.symbols.symbol_name_scalar_raw(symbol.id)
             case _: ""
         # Step (c): resolve against THIS declaration's runtime_name when the
         # symbol carries a defining module, so `Shape.Circle(7)` constructs the
@@ -3364,14 +3462,16 @@ impl MirLowering:
             if enum_name == "Option":
                 self.option_value_locals[tagged.id] = true
             elif enum_name != "Result":
-                val enum_symbol = self.symbols.lookup(enum_name)
-                if val enum_symbol_id = enum_symbol:
-                    val enum_definition = self.symbols.get_symbol_raw(enum_symbol_id.id)
-                    if val found_enum_definition = enum_definition:
-                        self.remember_local_hir_type(tagged.id, HirType(
-                            kind: HirTypeKind.Named(enum_symbol_id, []),
-                            span: found_enum_definition.span
-                        ), 2, 0)
+                # Avoid both Option<SymbolId> and Option<HirSymbol> transport on
+                # this custom-enum route. The raw-id lookup and proven Dict
+                # bracket hit keep the struct values in their owning frames.
+                val enum_symbol_id = self.symbols.lookup_or_invalid(enum_name)
+                if enum_symbol_id.id >= 0 and self.symbols.symbols.has(enum_symbol_id.id):
+                    val enum_span = self.symbols.symbols[enum_symbol_id.id].span
+                    self.remember_local_hir_type(tagged.id, HirType(
+                        kind: HirTypeKind.Named(enum_symbol_id, []),
+                        span: enum_span
+                    ), 2, 0)
             return tagged
         payload_local
 
@@ -3682,17 +3782,10 @@ impl MirLowering:
         dest
 
     me lookup_local_type(local: LocalId) -> MirType:
-        """Find `local`'s declared MirType by scanning the current builder's
-        locals (mirrors the linear scan `set_local_name` already does in
-        mir_data.spl). Defaults to i64 -- every local this pipeline currently
+        """Find `local`'s declared MirType through the builder's canonical
+        indexed lookup. Defaults to i64 -- every local this pipeline currently
         snapshots for capture-by-value is an i64-ABI value or fnptr word."""
-        var i = 0
-        val locs = self.builder.locals
-        while i < locs.len():
-            if locs[i].id.id == local.id:
-                return locs[i].type_
-            i = i + 1
-        MirType.i64()
+        self.builder.local_type(local) ?? MirType.i64()
 
     me collect_free_var_syms(body: HirExpr, param_syms: [i64], acc: [i64]) -> [i64]:
         """Collect free-variable symbol ids referenced by a lambda body that
@@ -3909,6 +4002,7 @@ impl MirLowering:
                 # frozen snapshot and the params, lower, and restore.
                 val saved_ids = self.local_symbol_ids
                 val saved_values = self.local_symbol_values
+                val saved_index_slots = self.local_symbol_index_slots
                 if self.lambda_capture_snapshot.has(sid):
                     # Re-derive the free-variable list instead of iterating
                     # `snap.keys()`: under the seed interpreter dict keys come
@@ -3936,6 +4030,7 @@ impl MirLowering:
                 val result = self.lower_expr(body)
                 self.local_symbol_ids = saved_ids
                 self.local_symbol_values = saved_values
+                self.local_symbol_index_slots = saved_index_slots
                 Some(result)
             case _:
                 nil
@@ -3944,6 +4039,7 @@ impl MirLowering:
         """Lower a lambda body at its call site with already-lowered args."""
         val saved_ids = self.local_symbol_ids
         val saved_values = self.local_symbol_values
+        val saved_index_slots = self.local_symbol_index_slots
         var pi = 0
         while pi < params.len():
             if pi < arg_locals.len():
@@ -3954,6 +4050,7 @@ impl MirLowering:
         val result = self.lower_expr(body)
         self.local_symbol_ids = saved_ids
         self.local_symbol_values = saved_values
+        self.local_symbol_index_slots = saved_index_slots
         result
 
     me lower_iife_call(params: [HirParam], body: HirExpr, args: [HirCallArg]) -> LocalId:
@@ -4273,6 +4370,9 @@ impl MirLowering:
                 # Lift the body in a FRESH lowering so the in-progress function's
                 # builder/local_map are untouched.
                 var lw = MirLowering.new_for_target(self.symbols, self.target_context)
+                lw.configure_mcdc_mode(
+                    self.mcdc_mode, self.mcdc_owner_bytes, self.mcdc_global_bytes,
+                    self.mcdc_include_csv, self.mcdc_exclude_csv)
                 lw.current_function_names = self.current_function_names
                 lw.current_function_symbols = self.current_function_symbols
                 lw.field_map = self.field_map
@@ -4306,9 +4406,16 @@ impl MirLowering:
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
+                lw.global_statics_by_id = self.global_statics_by_id
+                lw.global_constants_by_id = self.global_constants_by_id
+                lw.global_const_exprs = self.global_const_exprs
                 var b = lw.builder
                 b.begin_function(gen_symbol, gen_name, sig, lam.span)
                 lw.builder = b
+                # Lifted closures are the compiler-owned task/thread entry
+                # boundary. Register their execution owner before user code;
+                # static-off emits no call or dependency.
+                lw.emit_mcdc_worker_registration()
                 # Map each lambda parameter symbol to its Arg local. begin_function
                 # lays out [ _return?, Arg0..Arg(n-1) ]; the argument-local offset
                 # is (locals.len() - arity), matching function_lowering.spl.
@@ -4350,6 +4457,8 @@ impl MirLowering:
                 lw.builder = b2
                 var b3 = lw.builder
                 var mir_fn = b3.end_function()
+                if rt_hal_compilation_requires_finalize():
+                    mir_fn = inject_rt_hal_worker_complete(mir_fn)
                 lw.builder = b3
                 mir_fn.name = gen_name
                 mir_fn.symbol = gen_symbol
@@ -4361,6 +4470,19 @@ impl MirLowering:
                 # real `define @<gen>`.
                 var host_b = self.builder
                 var host_mod = host_b.module
+                # A folded immutable may take its first address inside this
+                # lifted body. Its storage was then materialized in the
+                # temporary lowering module; merge that exact storage back
+                # before publishing the function that references it.
+                var host_statics = host_mod.statics
+                val lifted_statics = b3.module.statics.values()
+                var lifted_static_i = 0
+                while lifted_static_i < lifted_statics.len():
+                    val lifted_static = lifted_statics[lifted_static_i]
+                    host_statics[lifted_static.symbol] = lifted_static
+                    self.global_statics_by_id[lifted_static.symbol.id] = lifted_static
+                    lifted_static_i = lifted_static_i + 1
+                host_mod.statics = host_statics
                 var host_fns = host_mod.functions
                 host_fns[gen_symbol] = mir_fn
                 host_mod.functions = host_fns
@@ -4445,12 +4567,12 @@ impl MirLowering:
         if val bf_local = bitfield_construct:
             return bf_local
 
-        val callee_disc = rt_enum_discriminant(callee.kind)
+        val callee_disc = _sffi_enum_discriminant(callee.kind)
         val fallback_symbol = SymbolId(id: -1)
         var direct_symbol = fallback_symbol
         var direct_name = ""
         var is_direct = false
-        if callee_disc == rt_enum_discriminant(HirExprKind.Var(fallback_symbol)):
+        if callee_disc == _sffi_enum_discriminant(HirExprKind.Var(fallback_symbol)):
             match callee.kind:
                 case HirExprKind.Var(symbol):
                     direct_symbol = symbol
@@ -4459,7 +4581,7 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.Var", callee.span)
-        elif callee_disc == rt_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
+        elif callee_disc == _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_symbol, "")):
             match callee.kind:
                 case HirExprKind.NamedVar(symbol, name):
                     # `name` already carries a --entry-closure cross-module
@@ -4482,7 +4604,7 @@ impl MirLowering:
                     is_direct = true
                 case _:
                     self.payload_decode_failed("HirExprKind.NamedVar", callee.span)
-        elif callee_disc == rt_enum_discriminant(HirExprKind.Lambda([], callee, [])):
+        elif callee_disc == _sffi_enum_discriminant(HirExprKind.Lambda([], callee, [])):
             # IIFE: a raw lambda literal used directly as the call callee,
             # `(\x: x + 1)(5)`. try_inline_lambda_call below only fires for a
             # `Var`/`NamedVar` callee resolved through `lambda_bindings` (a
@@ -4665,9 +4787,9 @@ impl MirLowering:
             val arg_value: HirExpr = arg.value
             val arg_kind: HirExprKind = arg_value.kind
             val fallback_arg_symbol = SymbolId(id: -1)
-            val named_var_disc = rt_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
+            val named_var_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(fallback_arg_symbol, ""))
             var emitted_function = false
-            if rt_enum_discriminant(arg_kind) == named_var_disc:
+            if _sffi_enum_discriminant(arg_kind) == named_var_disc:
                 match arg_kind:
                     case HirExprKind.NamedVar(symbol, name):
                         if not self.local_map.has(mir_expr_symbol_id_value(symbol)):
@@ -4681,8 +4803,8 @@ impl MirLowering:
                 continue
             # A lambda passed as a first-class VALUE (`apply(\x: x+1, 5)`):
             # materialize a raw lifted fnptr or a closure handle.
-            val lambda_disc = rt_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
-            if rt_enum_discriminant(arg_kind) == lambda_disc:
+            val lambda_disc = _sffi_enum_discriminant(HirExprKind.Lambda([], arg_value, []))
+            if _sffi_enum_discriminant(arg_kind) == lambda_disc:
                 val lambda_operand = self.lower_lambda_value(arg_value)
                 if lambda_operand != nil:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
@@ -4787,7 +4909,7 @@ impl MirLowering:
                 # existing valid aliasing (the same object passed twice) as
                 # a borrow conflict. Opt-in until the checker models
                 # shared-mutation semantics.
-                if (rt_env_get("SIMPLE_BORROW_REF_CALL_ARGS") ?? "") == "1":
+                if (_sffi_env_get("SIMPLE_BORROW_REF_CALL_ARGS") ?? "") == "1":
                     match declared_param_type.kind:
                         case HirTypeKind.Named(cls_sym, _):
                             val cls_rec = self.symbols.get_symbol_raw(cls_sym.id)

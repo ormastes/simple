@@ -1,23 +1,25 @@
 # Bulk-Copy Elision (SG-1.3)
 
-A C-backend MIR optimization that collapses a contiguous element-wise array copy into a
-single `memmove`. It is **default-OFF**, **C-backend only**, and **sound by strictness**.
+A quarantined C-backend MIR optimization that formerly collapsed a contiguous element-wise
+array copy into a single `memmove`. It is **disabled**, including when the legacy environment
+flag is set, because distinct MIR base locals do not prove non-overlapping storage.
 
 ## Enabling
 
 ```bash
-SIMPLE_MIR_BULK_OPS=1 bin/simple compile prog.spl --emit-c   # C backend only
+SIMPLE_MIR_BULK_OPS=1 bin/simple compile prog.spl --emit-c   # remains disabled
 ```
 
-Default (flag unset / `=0`) is an exact passthrough — no MIR change, identical codegen. The
-optimization is gated in `optimize_module_for_backend` (`60.mir_opt/mir_opt/mod.spl`):
+All flag values are exact passthroughs. `mir_bulk_ops_enabled()` returns false,
+`apply_bulk_recognizers()` returns its module unchanged, and the direct
+`elide_bulk_copy()` adapter returns its function unchanged.
 
 ```
-if backend_name == "c" and mir_bulk_ops_enabled():
-    optimized = apply_bulk_recognizers(optimized)   # runs elide_bulk_copy per function
+if backend_name == "c" and mir_bulk_ops_enabled(): # currently always false
+    optimized = apply_bulk_recognizers(optimized)
 ```
 
-## What it does
+## Why it is quarantined
 
 A lowered array copy appears in MIR as a run of 4-instruction units, one per element:
 
@@ -25,9 +27,7 @@ A lowered array copy appears in MIR as a run of 4-instruction units, one per ele
 GEP gs = src[i]      Load ld = *gs      GEP gd = dst[i]      Store *gd = ld
 ```
 
-`elide_bulk_copy` (`60.mir_opt/optimization_passes_part2.spl`) replaces a qualifying run with one
-intrinsic, which the C backend (`70.backend/.../c_backend_translate_ops.spl`, `emit_bulk_copy`)
-lowers to:
+The dormant matcher can recognize that shape, and the C backend can lower an active intrinsic to:
 
 ```c
 memmove((void*)dst, (void*)src, count * 8);
@@ -35,10 +35,19 @@ memmove((void*)dst, (void*)src, count * 8);
 
 (element stride is 8 bytes, matching the GEP lowering `(char*)base + idx*8`).
 
-## When it fires — the soundness conditions
+Structural matching, H1 temp-liveness, and H2 element-size checks are not enough. Two distinct
+base LocalIds may alias overlapping spans. A forward element loop can read a value written by
+the prior iteration, while `memmove` snapshots the original source semantics. Replacing one
+with the other can therefore change results.
 
-It fires **only** when every condition holds; otherwise the function is returned unchanged
-(a missed copy is a perf miss, never a miscompile):
+Reactivation requires a dominance-scoped region/alias proof that the complete source and
+destination byte spans are disjoint, plus the existing conditions below and semantic
+differential coverage. Until then it never fires.
+
+## Dormant structural conditions
+
+The dormant matcher checks these conditions, but they do not authorize a rewrite without the
+missing alias proof:
 
 1. **Canonical consecutive run** — the units are exactly back-to-back, nothing interleaved
    (so the element-wise version cannot observe a half-copied state that `memmove` wouldn't).
@@ -50,25 +59,24 @@ It fires **only** when every condition holds; otherwise the function is returned
    (`MirType.primitive_size() == 8`). A sub-8-byte element (i32/i16/bool/f32) is rejected: the
    per-element Store writes `sizeof(ty)` bytes, but `memmove` would copy the full `count*8`.
 
-## Verifying
+## Quarantine evidence
 
 ```bash
 SIMPLE_BOOTSTRAP_DRIVER=bin/release/x86_64-unknown-linux-gnu/simple_seed \
-  bin/simple run src/compiler/60.mir_opt/bulk_copy_elision_spec.spl   # firing + non-firing
+  bin/simple run src/compiler/60.mir_opt/bulk_copy_elision_spec.spl
 ```
 
-The non-firing tests (non-contiguous indices, `dst!=src`, interleaved op, temp-used-after,
-escaping pointer, sub-8-byte element) are the **safety proof** — each asserts the block is left
-unchanged. See also `bulk_ops_flag_spec.spl` (flag wiring) and
+The spec requires canonical positive witnesses and former rejection cases alike to remain
+unchanged. See also `bulk_ops_flag_spec.spl` (legacy flag cannot activate the pass) and
 `test/01_unit/compiler/backend/c_backend_bulk_copy_memmove_spec.spl` (the memmove lowering).
 
 ## Scope & limitations
 
-- C backend only. The active `bulk_copy` intrinsic traps/links-errors on other backends, so the
-  pass is never run for them.
+- The active `bulk_copy` intrinsic remains a C-backend lowering surface, but no Simple MIR pass
+  currently produces it.
 - The self-hosted compiler is dormant relative to the Rust seed, so this path is **not** exercised
   by `bin/simple test` or by seed-run benchmarks; it is verified at the MIR unit level.
-- `bulk_fill` / `bulk_cmp` are **not** elided — only copy is currently sound.
+- `bulk_fill` / `bulk_cmp` are not elided; bulk copy is also disabled.
 - The older additive `optimize_bulk_copy` recognizer (index-blind, emits the no-op
   `bulk_copy_hint`) is retained as an advisory pass but is **not** on the pipeline path; never
   lower its hint to the active intrinsic without the guards above — see bug

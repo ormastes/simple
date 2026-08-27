@@ -1,7 +1,7 @@
 # Supervised test runner cannot report peak RSS — no child-rusage extern exists
 
 - **Filed:** 2026-08-17 (lane RSS)
-- **Status:** OPEN — NOT implemented. Blocked on a new runtime extern + seed redeploy.
+- **Status:** OPEN — PARTIAL 2026-08-24. The C owned-process provider now captures per-child `wait4` rusage and exposes an additive observation receipt, but the Simple/Rust-provider facade, test-result wiring, and self-hosted redeploy remain.
 - **Requirement:** `doc/02_requirements/infra/supervised_test_runner.md` R6
   ("path, outcome, signal/exit code, wall time, peak RSS").
 - **Related:** `doc/08_tracking/bug/supervised_builder_unwired_and_no_peak_rss_2026-08-17.md`
@@ -110,6 +110,22 @@ would trade a missing metric for a corrupted verdict. Rejected.
 
 **R6 therefore remains NOT SATISFIED, and must not be marked otherwise until a
 real number is observed for a real spec.**
+
+## 2026-08-24 implementation progress
+
+`src/runtime/runtime_process_owned.c` now reaps the v2 owned child with
+`wait4`, preserves `ru_utime`, `ru_stime`, and `ru_maxrss`, converts Linux KiB
+to bytes, and exposes them through
+`rt_process_owned_observation_v1`. The additive receipt leaves the existing v2
+lifecycle result ABI intact. The conversion helper retains the macOS byte-unit
+rule for the future Unix provider, but the current v2 provider remains Linux-only.
+`runtime_process_owned_selfcheck` passes with a nonzero direct-child memory
+observation, and the non-Unix selfcheck proves explicit `ENOTSUP`/zero evidence.
+
+This is direct-child evidence only, not aggregate tree RSS. R6 stays open until
+the Rust/interpreter provider and pure-Simple process facade consume the sibling
+receipt, `TestFileResult`/run SDN persist it, a source-matched self-hosted binary
+is deployed, and a real per-spec run reports nonzero evidence.
 
 ## Resume command (for whoever redeploys the seed next)
 

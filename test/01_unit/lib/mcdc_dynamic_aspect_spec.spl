@@ -1,0 +1,87 @@
+# @cover src/lib/nogc_sync_mut/mcdc/dynamic_aspect.spl 80%
+use std.spec
+use std.common.aspect_readiness.{READINESS_FULL, readiness_declare}
+use std.common.facet_registry.{catalog_new, catalog_register_aspect, catalog_aspect_loaded}
+use std.common.mcdc.model.{McdcMode, McdcOverflowPolicy, McdcPolicy, mcdc_default_policy}
+use std.nogc_sync_mut.mcdc.dynamic_aspect.{MCDC_ASPECT_ABI_V1, MCDC_ASPECT_SCHEMA_V1, McdcDynamicAspect, mcdc_dynamic_storage_error}
+
+describe "MC/DC dynamic aspect activation":
+    it "keeps dormant decision entry inert then records after admitted activation":
+        val module_name = "test.mcdc.dynamic.admitted"
+        val cat = catalog_new()
+        expect(catalog_register_aspect(cat, "mcdc", "packs/mcdc.apk")).to_equal(true)
+        expect(readiness_declare(module_name, READINESS_FULL, 1, 4)).to_equal(true)
+        val aspect = McdcDynamicAspect.create(
+            cat, "mcdc", module_name, MCDC_ASPECT_ABI_V1,
+            MCDC_ASPECT_SCHEMA_V1, 7,
+            mcdc_default_policy(McdcMode.DynamicAspect))
+
+        expect(aspect.enter_decision(7)).to_equal(0)
+        expect(aspect.active_regions).to_equal(0)
+        expect(aspect.recorded_count()).to_equal(0)
+        expect(aspect.has_recorder_storage()).to_equal(false)
+        expect(aspect.activate(7, 1)).to_equal(true)
+        expect(catalog_aspect_loaded(cat, "mcdc")).to_equal(true)
+
+        val token = aspect.enter_decision(7)
+        expect(token).to_be_greater_than(0)
+        expect(aspect.finish_decision(
+            7, token, 19, true, 3, 0, 0, 0, 1, 0, 0, 0,
+            0, 0, 0, 0)).to_equal(true)
+        expect(aspect.recorded_count()).to_equal(1)
+        expect(aspect.deactivate(7, 2)).to_equal(true)
+        expect(aspect.has_recorder_storage()).to_equal(false)
+        expect(aspect.enter_decision(7)).to_equal(0)
+
+    it "rejects activation without full readiness and rejects withdrawal while pinned":
+        val unsupported_module = "test.mcdc.dynamic.unsupported"
+        val cat = catalog_new()
+        expect(catalog_register_aspect(cat, "mcdc", "packs/mcdc.apk")).to_equal(true)
+        val unsupported = McdcDynamicAspect.create(
+            cat, "mcdc", unsupported_module, MCDC_ASPECT_ABI_V1,
+            MCDC_ASPECT_SCHEMA_V1, 8,
+            mcdc_default_policy(McdcMode.DynamicAspect))
+        expect(unsupported.activate(8, 1)).to_equal(false)
+        expect(unsupported.last_error).to_equal("MCDC-E-DYNAMIC-UNSUPPORTED")
+
+        val ready_module = "test.mcdc.dynamic.pinned"
+        expect(readiness_declare(ready_module, READINESS_FULL, 1, 1)).to_equal(true)
+        val pinned = McdcDynamicAspect.create(
+            cat, "mcdc", ready_module, MCDC_ASPECT_ABI_V1,
+            MCDC_ASPECT_SCHEMA_V1, 9,
+            mcdc_default_policy(McdcMode.DynamicAspect))
+        expect(pinned.activate(9, 1)).to_equal(true)
+        val token = pinned.enter_decision(9)
+        expect(pinned.deactivate(9, 2)).to_equal(false)
+        expect(pinned.last_error).to_equal("MCDC-E-DYNAMIC-NOT-QUIESCENT")
+        expect(pinned.abort_decision(9, token)).to_equal(true)
+        expect(pinned.deactivate(9, 2)).to_equal(true)
+
+    it "rejects cross-owner mutation without changing owner-local state":
+        val module_name = "test.mcdc.dynamic.owner"
+        val cat = catalog_new()
+        expect(catalog_register_aspect(cat, "mcdc", "packs/mcdc.apk")).to_equal(true)
+        expect(readiness_declare(module_name, READINESS_FULL, 1, 1)).to_equal(true)
+        val aspect = McdcDynamicAspect.create(
+            cat, "mcdc", module_name, MCDC_ASPECT_ABI_V1,
+            MCDC_ASPECT_SCHEMA_V1, 11,
+            mcdc_default_policy(McdcMode.DynamicAspect))
+        expect(aspect.activate(12, 1)).to_equal(false)
+        expect(aspect.enabled).to_equal(false)
+        expect(aspect.barrier_generation).to_equal(0)
+        expect(aspect.has_recorder_storage()).to_equal(false)
+
+    it "rejects nesting storage that exceeds the owner budget before allocation":
+        val policy = McdcPolicy(
+            mode: McdcMode.DynamicAspect, retain_unique_cause: true,
+            max_conditions: 256, max_nesting: 257,
+            owner_bytes: 1048576, global_bytes: 1048576,
+            overflow: McdcOverflowPolicy.DropNewest
+        )
+        expect(mcdc_dynamic_storage_error(policy)).to_equal("MCDC-E-NESTING-CAP")
+        val aspect = McdcDynamicAspect.create(
+            0, "mcdc", "invalid", MCDC_ASPECT_ABI_V1,
+            MCDC_ASPECT_SCHEMA_V1, 1, policy)
+        expect(aspect.valid).to_equal(false)
+        expect(aspect.eval_decision_ids.len()).to_equal(0)
+        expect(aspect.has_recorder_storage()).to_equal(false)

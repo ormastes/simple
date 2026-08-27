@@ -79,11 +79,11 @@ impl ContainerError:
             case LoadFailed(id, reason): "Failed to load module {id}: {reason}"
 
 fn _insert_sorted_unique(values: [text], value: text) -> [text]:
-    if values.contains(value):
-        return values
     var out: [text] = []
     var inserted = false
     for existing in values:
+        if existing == value:
+            return values
         if not inserted and value < existing:
             out.push(value)
             inserted = true
@@ -165,11 +165,11 @@ impl SettlementContainer:
         # removes replaced names, restores weak symbols that were shadowed by
         # the old set, and keeps duplicate rejection atomic.
         val staged = SettlementLinker.create()
-        var replayed: [text] = []
+        var replayed: Dict<text, bool> = {}
         for replay_id in self.linker.modules:
             if replayed.contains(replay_id):
                 continue
-            replayed.push(replay_id)
+            replayed[replay_id] = true
             if not self.modules.contains(replay_id):
                 continue
             val replay_exports = if replay_id == module_id:
@@ -191,7 +191,7 @@ impl SettlementContainer:
         # Preserve other directly registered non-module exports as well.
         for name in self.linker.exports.keys():
             val existing = self.linker.exports[name]
-            if not self.linker.modules.contains(existing.module_id) and not staged.exports.contains(name):
+            if not replayed.contains(existing.module_id) and not staged.exports.contains(name):
                 staged.exports[name] = existing
 
         var entry = self.modules[module_id]
@@ -316,17 +316,46 @@ impl SettlementContainer:
                 if in_degree.contains(dep_id):
                     in_degree[id] = in_degree[id] + 1
 
-        # Keep every ready set lexical so hash-map iteration cannot change the
-        # serialized settlement order across hosts.
-        var queue: [text] = []
+        # A lexical min-heap keeps hash-map iteration from changing serialized
+        # settlement order without copying the whole ready suffix per insert.
+        var ready: [text] = []
         for id in in_degree.keys():
             if in_degree[id] == 0:
-                queue = _insert_sorted_unique(queue, id)
+                ready.push(id)
+                var ready_index = ready.len() - 1
+                while ready_index > 0:
+                    val parent = (ready_index - 1) / 2
+                    if not (ready[ready_index] < ready[parent]):
+                        break
+                    val temporary = ready[parent]
+                    ready[parent] = ready[ready_index]
+                    ready[ready_index] = temporary
+                    ready_index = parent
 
         var sorted: [text] = []
-        while queue.len() > 0:
-            val current = queue[0]
-            queue = queue[1..]
+        while ready.len() > 0:
+            val current = ready[0]
+            val last = ready.len() - 1
+            if last == 0:
+                val _ = ready.pop()
+            else:
+                ready[0] = ready[last]
+                val _ = ready.pop()
+                var ready_index = 0i64
+                while true:
+                    if ready_index >= ready.len() / 2:
+                        break
+                    val left = ready_index * 2 + 1
+                    val right = left + 1
+                    var first = left
+                    if right < ready.len() and ready[right] < ready[left]:
+                        first = right
+                    if not (ready[first] < ready[ready_index]):
+                        break
+                    val temporary = ready[ready_index]
+                    ready[ready_index] = ready[first]
+                    ready[first] = temporary
+                    ready_index = first
             sorted.push(current)
 
             val entry = self.modules[current]
@@ -334,13 +363,25 @@ impl SettlementContainer:
                 if in_degree.contains(dependent_id):
                     in_degree[dependent_id] = in_degree[dependent_id] - 1
                     if in_degree[dependent_id] == 0:
-                        queue = _insert_sorted_unique(queue, dependent_id)
+                        ready.push(dependent_id)
+                        var ready_index = ready.len() - 1
+                        while ready_index > 0:
+                            val parent = (ready_index - 1) / 2
+                            if not (ready[ready_index] < ready[parent]):
+                                break
+                            val temporary = ready[parent]
+                            ready[parent] = ready[ready_index]
+                            ready[ready_index] = temporary
+                            ready_index = parent
 
         if sorted.len() != self.modules.keys().len():
             # Circular dependency — find the cycle
             var cycle: [text] = []
             for id in self.modules.keys():
-                if not sorted.contains(id):
+                # Kahn processing reduces every emitted node to zero. Any
+                # positive residual belongs to the same unprocessed set that
+                # used to be found by scanning `sorted` once per module.
+                if in_degree[id] > 0:
                     cycle = _insert_sorted_unique(cycle, id)
             return Err(ContainerError.CircularDependency(cycle))
 

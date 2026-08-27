@@ -322,8 +322,9 @@ The translator uses a static `VerbEntry` string table (see R-D Canonical Transla
    | `sj git stash` | `jj new @-`; stash commit ID saved to `.sj/stash_stack.json` |
    | `sj git stash pop` | `jj rebase -s <stash_id> -d @`; pop stash_stack.json |
    | `sj git rebase -i` | `ERROR[FORBIDDEN]`: jj arrange not in 0.32.0; suggest `sj split` / `sj squash --into` / `sj rebase --onto` |
-   | `sj push` (shorthand) | `jj bookmark set main -r @- && jj git push --bookmark main` (two jj calls) |
-   | `sj git push --via-worktree` | Invokes push-via-worktree path (D-7 opt-in) |
+   | `sj git push --bookmark work/<...>` | Pushes one explicit session-owned work bookmark |
+   | Any direct `main`, `release/*`, `candidate/*`, or `v*` mutation | `ERROR[FORBIDDEN]`; only the bound integration/release authority may mutate it |
+   | `sj git push --via-worktree`, raw push, force/delete/bulk push | `ERROR[FORBIDDEN]`; these forms cannot prove an owned destination |
    | `sj git submodule <mut>` | raw-passthrough + warn + auto-pin within exclusive lease (D-8) |
 
 5. **Read-bypass injection** (jj_exec.spl): verbs in the read lane automatically receive

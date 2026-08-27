@@ -501,6 +501,32 @@ Before starting any phase, check if prerequisite artifacts exist:
 
 **Rule:** Never fail because another LLM didn't run. Never overwrite another LLM's work -- append and annotate.
 
+### Performance and memory lanes
+
+All cooperating LLMs use the same compiler-performance contract rather than
+inventing agent-specific lint or benchmark rules. The canonical operator guide
+is [Compiler Performance Diagnostics](../../compiler/performance_diagnostics.md),
+with the source audit at
+[Simple Compiler Performance and Memory Efficiency Audit](../../../01_research/local/simple_compiler_performance_memory_efficiency_audit.md).
+
+Route work by evidence strength:
+
+| Tier | Normal surface | Evidence responsibility |
+|------|----------------|-------------------------|
+| Fast typed checks | `simple check`, LSP, normal builds | High-confidence collection, copy, allocation, layout, and API diagnostics |
+| MIR optimization and remarks | Optimized builds | Proved transformations and exact rejection reasons |
+| Deep analysis | `simple perf --deep`, CI | Bounded interprocedural complexity/resource summaries and explicit incomplete states |
+| Profile-guided diagnosis | Benchmarks/production sampling | Hotness, cardinality, allocation/copy bytes, latency, and peak-memory evidence |
+
+Review hot paths in this order: algorithmic complexity, allocations/copies,
+data layout/locality, loop-invariant work, then dispatch overhead. Preserve
+Pure Simple behavior and APIs. Static reasoning is not runtime measurement;
+record unavailable evidence honestly. Risky optimizer work requires paired
+semantic and structural SSpec coverage, and uncertain missed opportunities
+belong in structured remarks rather than ordinary warning noise. Before
+handoff, synchronize the research, architecture, design, plan, guide, skill,
+executable SSpec, and mirrored manual affected by the lane.
+
 ---
 
 ## Artifact Directory Map

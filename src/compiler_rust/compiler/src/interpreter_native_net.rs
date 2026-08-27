@@ -385,6 +385,13 @@ fn extract_handle(args: &[Value], idx: usize) -> Result<i64, CompileError> {
         .ok_or_else(|| crate::error::factory::expected_handle(idx))
 }
 
+fn extract_bool(args: &[Value], idx: usize) -> Result<bool, CompileError> {
+    match args.get(idx) {
+        Some(Value::Bool(value)) => Ok(*value),
+        _ => Err(crate::error::factory::argument_must_be(idx, "bool")),
+    }
+}
+
 fn extract_timeout(args: &[Value], idx: usize) -> Option<Duration> {
     args.get(idx)
         .and_then(|v| v.as_int().ok())
@@ -512,8 +519,15 @@ pub fn rt_io_tcp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_socket_create_interp(args: &[Value]) -> Result<Value, CompileError> {
     use socket2::{Domain, Protocol, Type};
-    // family: 0 = IPv4 (default), 1 = IPv6
-    let family = args.first().and_then(|v| v.as_int().ok()).unwrap_or(0);
+    // family: 0 = IPv4, 1 = IPv6. Unknown values are contract failures and
+    // must not silently select a provider family.
+    let family = args
+        .first()
+        .and_then(|value| value.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(0, "i64"))?;
+    if family != 0 && family != 1 {
+        return Ok(Value::Int(-1));
+    }
     let domain = if family == 1 { Domain::IPV6 } else { Domain::IPV4 };
     match socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP)) {
         Ok(socket) => Ok(Value::Int(allocate_socket(SocketHandle::RawSocket(socket)))),
@@ -577,12 +591,15 @@ pub fn rt_io_tcp_accept_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
-    let deadline = if timeout_ms <= 0 {
-        None
-    } else {
-        Some(std::time::Instant::now() + Duration::from_millis(timeout_ms as u64))
-    };
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    if timeout_ms <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let bounded_ms = timeout_ms.min(i32::MAX as i64) as u64;
+    let deadline = std::time::Instant::now() + Duration::from_millis(bounded_ms);
     loop {
         let accept_result = with_tcp_listener(handle, |listener| {
             listener.set_nonblocking(true).ok();
@@ -593,10 +610,8 @@ pub fn rt_io_tcp_accept_timeout_interp(args: &[Value]) -> Result<Value, CompileE
         match accept_result {
             Ok((stream, _)) => return Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if let Some(limit) = deadline {
-                    if std::time::Instant::now() >= limit {
-                        return Ok(Value::Int(-1));
-                    }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(Value::Int(-1));
                 }
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -615,12 +630,14 @@ pub fn rt_io_tcp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let addr = extract_socket_addr(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0);
-    let timeout = if timeout_ms <= 0 {
-        Duration::from_millis(0)
-    } else {
-        Duration::from_millis(timeout_ms as u64)
-    };
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    if timeout_ms <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let timeout = Duration::from_millis(timeout_ms as u64);
     match TcpStream::connect_timeout(&addr, timeout) {
         Ok(stream) => Ok(Value::Int(allocate_socket(SocketHandle::TcpStream(stream)))),
         Err(_) => Ok(Value::Int(-1)),
@@ -648,7 +665,11 @@ pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
 
 pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096).max(0) as usize;
+    let requested_size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096);
+    if requested_size < 0 {
+        return Ok(Value::Nil);
+    }
+    let size = requested_size as usize;
     let mut buf = vec![0u8; size];
     match with_tcp_stream_mut(handle, |stream| stream.read(&mut buf)) {
         Ok(n) => {
@@ -657,7 +678,7 @@ pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
                 buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
             )))
         }
-        Err(_) => Ok(Value::Array(Arc::new(Vec::new()))),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -965,14 +986,15 @@ pub fn native_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, Compi
 
 pub fn rt_io_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok());
-    let timeout = timeout_ms.and_then(|ms| {
-        if ms < 0 {
-            None
-        } else {
-            Some(Duration::from_millis(ms as u64))
-        }
-    });
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    let timeout = if timeout_ms <= 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms as u64))
+    };
     Ok(Value::Bool(
         with_tcp_stream(handle, |stream| stream.set_read_timeout(timeout)).is_ok(),
     ))
@@ -984,14 +1006,15 @@ pub fn native_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, Comp
 
 pub fn rt_io_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_handle(args, 0)?;
-    let timeout_ms = args.get(1).and_then(|v| v.as_int().ok());
-    let timeout = timeout_ms.and_then(|ms| {
-        if ms < 0 {
-            None
-        } else {
-            Some(Duration::from_millis(ms as u64))
-        }
-    });
+    let timeout_ms = args
+        .get(1)
+        .and_then(|v| v.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    let timeout = if timeout_ms <= 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms as u64))
+    };
     Ok(Value::Bool(
         with_tcp_stream(handle, |stream| stream.set_write_timeout(timeout)).is_ok(),
     ))
@@ -1028,6 +1051,179 @@ pub fn native_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
         }
         Err(e) => Ok(Value::Tuple(vec![Value::Int(-1), Value::Int(io_error_to_code(&e))])),
     }
+}
+
+pub fn rt_io_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let addr = extract_socket_addr(args, 0)?;
+    match UdpSocket::bind(addr) {
+        Ok(socket) => Ok(Value::Int(allocate_socket(SocketHandle::UdpSocket(socket)))),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
+pub fn rt_io_udp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    Ok(Value::Bool(release_socket(handle)))
+}
+
+pub fn rt_io_udp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let addr = extract_socket_addr(args, 1)?;
+    Ok(Value::Bool(
+        with_udp_socket(handle, |socket| socket.connect(addr)).is_ok(),
+    ))
+}
+
+pub fn rt_io_udp_set_broadcast_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let enabled = extract_bool(args, 1)?;
+    Ok(Value::Bool(
+        with_udp_socket(handle, |socket| socket.set_broadcast(enabled)).is_ok(),
+    ))
+}
+
+pub fn rt_io_udp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let timeout_ms = args
+        .get(1)
+        .and_then(|value| value.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(1, "i64"))?;
+    let timeout = if timeout_ms <= 0 {
+        None
+    } else {
+        Some(Duration::from_millis(timeout_ms as u64))
+    };
+    Ok(Value::Bool(
+        with_udp_socket(handle, |socket| socket.set_read_timeout(timeout)).is_ok(),
+    ))
+}
+
+pub fn rt_io_udp_set_nonblocking_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let enabled = extract_bool(args, 1)?;
+    Ok(Value::Bool(
+        with_udp_socket(handle, |socket| socket.set_nonblocking(enabled)).is_ok(),
+    ))
+}
+
+pub fn rt_io_udp_set_multicast_loop_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let enabled = extract_bool(args, 1)?;
+    Ok(Value::Bool(with_udp_socket(handle, |socket| {
+        match socket.local_addr()?.ip() {
+            std::net::IpAddr::V4(_) => socket.set_multicast_loop_v4(enabled),
+            std::net::IpAddr::V6(_) => socket.set_multicast_loop_v6(enabled),
+        }
+    }).is_ok()))
+}
+
+fn rt_io_udp_multicast_membership_interp(
+    args: &[Value],
+    join: bool,
+) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let address = match args.get(1) {
+        Some(Value::Str(address)) => address.parse::<std::net::IpAddr>().ok(),
+        _ => None,
+    };
+    let Some(address) = address else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(with_udp_socket(handle, |socket| match address {
+        std::net::IpAddr::V4(address) => {
+            if join {
+                socket.join_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                socket.leave_multicast_v4(&address, &std::net::Ipv4Addr::UNSPECIFIED)
+            }
+        }
+        std::net::IpAddr::V6(address) => {
+            if join {
+                socket.join_multicast_v6(&address, 0)
+            } else {
+                socket.leave_multicast_v6(&address, 0)
+            }
+        }
+    }).is_ok()))
+}
+
+pub fn rt_io_udp_join_multicast_interp(args: &[Value]) -> Result<Value, CompileError> {
+    rt_io_udp_multicast_membership_interp(args, true)
+}
+
+pub fn rt_io_udp_leave_multicast_interp(args: &[Value]) -> Result<Value, CompileError> {
+    rt_io_udp_multicast_membership_interp(args, false)
+}
+
+fn extract_udp_payload_size(args: &[Value], idx: usize) -> Result<Option<usize>, CompileError> {
+    let size = args
+        .get(idx)
+        .and_then(|value| value.as_int().ok())
+        .ok_or_else(|| crate::error::factory::argument_must_be(idx, "i64"))?;
+    if !(0..=65_535).contains(&size) {
+        return Ok(None);
+    }
+    Ok(Some(size as usize))
+}
+
+pub fn rt_io_udp_recv_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let Some(size) = extract_udp_payload_size(args, 1)? else {
+        return Ok(Value::Nil);
+    };
+    let mut bytes = vec![0u8; size];
+    match with_udp_socket(handle, |socket| socket.recv(&mut bytes)) {
+        Ok(received) => {
+            bytes.truncate(received);
+            Ok(Value::byte_array(bytes))
+        }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+pub fn rt_io_udp_recv_from_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let Some(size) = extract_udp_payload_size(args, 1)? else {
+        return Ok(Value::Nil);
+    };
+    let mut bytes = vec![0u8; size];
+    match with_udp_socket(handle, |socket| socket.recv_from(&mut bytes)) {
+        Ok((received, peer)) => {
+            bytes.truncate(received);
+            let data = Value::byte_array(bytes);
+            Ok(Value::Tuple(vec![data, Value::text(peer.to_string())]))
+        }
+        Err(_) => Ok(Value::Nil),
+    }
+}
+
+pub fn rt_io_udp_send_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let bytes = extract_bytes(args, 1)?;
+    Ok(Value::Int(
+        with_udp_socket(handle, |socket| socket.send(&bytes))
+            .map(|sent| sent as i64)
+            .unwrap_or(-1),
+    ))
+}
+
+pub fn rt_io_udp_send_to_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    let bytes = extract_bytes(args, 1)?;
+    let address = extract_socket_addr(args, 2)?;
+    Ok(Value::Int(
+        with_udp_socket(handle, |socket| socket.send_to(&bytes, address))
+            .map(|sent| sent as i64)
+            .unwrap_or(-1),
+    ))
+}
+
+pub fn rt_io_udp_local_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = extract_handle(args, 0)?;
+    Ok(match with_udp_socket(handle, |socket| socket.local_addr()) {
+        Ok(address) => Value::text(address.to_string()),
+        Err(_) => Value::Nil,
+    })
 }
 
 pub fn native_udp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -1281,4 +1477,136 @@ pub fn clear_net_state() {
         // Drop all socket handles (this closes them)
         handles.borrow_mut().clear();
     });
+}
+
+#[cfg(test)]
+mod tcp_read_contract_tests {
+    use super::*;
+
+    #[test]
+    fn tcp_read_failure_is_nil_not_empty_bytes() {
+        let result = rt_io_tcp_read_interp(&[Value::Int(-1), Value::Int(16)])
+            .expect("invalid descriptor is a provider result, not a bridge error");
+        assert!(matches!(result, Value::Nil));
+    }
+
+    #[test]
+    fn tcp_socket_family_rejects_unknown_or_non_scalar_values() {
+        assert!(matches!(
+            rt_io_tcp_socket_create_interp(&[Value::Int(4)]),
+            Ok(Value::Int(-1))
+        ));
+        assert!(rt_io_tcp_socket_create_interp(&[Value::Bool(false)]).is_err());
+    }
+
+    #[test]
+    fn tcp_timeout_rejects_non_scalar_bridge_values() {
+        let args = [Value::Int(-1), Value::text("not milliseconds")];
+        assert!(rt_io_tcp_set_read_timeout_interp(&args).is_err());
+        assert!(rt_io_tcp_set_write_timeout_interp(&args).is_err());
+    }
+
+    #[test]
+    fn tcp_connect_timeout_rejects_invalid_budget_before_connecting() {
+        let address = Value::text("127.0.0.1:1");
+        assert!(rt_io_tcp_connect_timeout_interp(&[address.clone(), Value::text("bad")]).is_err());
+        assert!(matches!(
+            rt_io_tcp_connect_timeout_interp(&[address, Value::Int(0)]),
+            Ok(Value::Int(-1))
+        ));
+    }
+
+    #[test]
+    fn tcp_accept_timeout_rejects_invalid_budget_before_polling() {
+        assert!(rt_io_tcp_accept_timeout_interp(&[
+            Value::Int(-1),
+            Value::text("bad"),
+        ])
+        .is_err());
+        assert!(matches!(
+            rt_io_tcp_accept_timeout_interp(&[Value::Int(-1), Value::Int(0)]),
+            Ok(Value::Int(-1))
+        ));
+    }
+
+    #[test]
+    fn invalid_udp_close_is_false() {
+        assert!(matches!(
+            rt_io_udp_close_interp(&[Value::Int(-1)]),
+            Ok(Value::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn invalid_udp_bind_is_bridge_error() {
+        assert!(rt_io_udp_bind_interp(&[Value::Nil]).is_err());
+    }
+
+    #[test]
+    fn udp_boolean_options_reject_non_boolean_bridge_values() {
+        assert!(rt_io_udp_set_broadcast_interp(&[Value::Int(-1), Value::Int(1)]).is_err());
+        assert!(rt_io_udp_set_nonblocking_interp(&[Value::Int(-1), Value::Int(1)]).is_err());
+    }
+
+    #[test]
+    fn udp_timeout_rejects_non_scalar_bridge_values() {
+        assert!(rt_io_udp_set_read_timeout_interp(&[
+            Value::Int(-1),
+            Value::text("not milliseconds"),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn invalid_udp_option_handles_fail_closed() {
+        assert!(matches!(
+            rt_io_udp_connect_interp(&[Value::Int(-1), Value::text("127.0.0.1:1")]),
+            Ok(Value::Bool(false))
+        ));
+        assert!(matches!(
+            rt_io_udp_set_broadcast_interp(&[Value::Int(-1), Value::Bool(true)]),
+            Ok(Value::Bool(false))
+        ));
+        assert!(matches!(
+            rt_io_udp_set_read_timeout_interp(&[Value::Int(-1), Value::Int(-1)]),
+            Ok(Value::Bool(false))
+        ));
+        assert!(matches!(
+            rt_io_udp_set_nonblocking_interp(&[Value::Int(-1), Value::Bool(true)]),
+            Ok(Value::Bool(false))
+        ));
+    }
+
+    #[test]
+    fn udp_receive_bounds_fail_as_nil_and_types_are_bridge_errors() {
+        assert!(matches!(
+            rt_io_udp_recv_interp(&[Value::Int(-1), Value::Int(-1)]),
+            Ok(Value::Nil)
+        ));
+        assert!(matches!(
+            rt_io_udp_recv_from_interp(&[Value::Int(-1), Value::Int(65_536)]),
+            Ok(Value::Nil)
+        ));
+        assert!(rt_io_udp_recv_interp(&[Value::Int(-1), Value::text("bad")]).is_err());
+    }
+
+    #[test]
+    fn invalid_udp_data_handles_do_not_fabricate_empty_success() {
+        assert!(matches!(
+            rt_io_udp_recv_interp(&[Value::Int(-1), Value::Int(1)]),
+            Ok(Value::Nil)
+        ));
+        assert!(matches!(
+            rt_io_udp_recv_from_interp(&[Value::Int(-1), Value::Int(1)]),
+            Ok(Value::Nil)
+        ));
+        assert!(matches!(
+            rt_io_udp_send_interp(&[Value::Int(-1), Value::array(Vec::new())]),
+            Ok(Value::Int(-1))
+        ));
+        assert!(matches!(
+            rt_io_udp_local_addr_interp(&[Value::Int(-1)]),
+            Ok(Value::Nil)
+        ));
+    }
 }

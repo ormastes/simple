@@ -39,6 +39,8 @@ pub enum Ret {
     V,
     /// `const char*`
     T,
+    /// nullable `const char*`; NULL is ordinary absence
+    NT,
 }
 
 /// The full exported `rt_glfw_*` family, generated from the prototypes in
@@ -51,7 +53,7 @@ pub enum Ret {
 /// `family_matches_runtime_c_source`.
 pub const GLFW_FNS: &[(&str, Ret, &str)] = &[
     ("rt_glfw_buffer_growth_count", Ret::I, "i"),
-    ("rt_glfw_clipboard_get", Ret::T, "i"),
+    ("rt_glfw_clipboard_get", Ret::NT, "i"),
     ("rt_glfw_clipboard_set", Ret::I, "is"),
     ("rt_glfw_content_scale_milli", Ret::I, "i"),
     ("rt_glfw_create_window", Ret::I, "sii"),
@@ -94,8 +96,12 @@ pub const GLFW_FNS: &[(&str, Ret, &str)] = &[
 ];
 
 /// Look up a symbol's signature in the family table.
-fn signature_of(name: &str) -> Option<(Ret, &'static str)> {
-    GLFW_FNS.iter().find(|(n, _, _)| *n == name).map(|(_, r, a)| (*r, *a))
+fn signature_of(name: &str) -> Option<(usize, Ret, &'static str)> {
+    GLFW_FNS
+        .iter()
+        .enumerate()
+        .find(|(_, (n, _, _))| *n == name)
+        .map(|(index, (_, ret, args))| (index, *ret, *args))
 }
 
 /// Platform-specific satellite library file name.
@@ -133,6 +139,7 @@ fn candidate_paths() -> Vec<String> {
 }
 
 static HANDLE: AtomicUsize = AtomicUsize::new(0);
+static SYMBOLS: [AtomicUsize; GLFW_FNS.len()] = [const { AtomicUsize::new(0) }; GLFW_FNS.len()];
 static LOAD_ERROR: OnceLock<Mutex<String>> = OnceLock::new();
 
 fn load_error_slot() -> &'static Mutex<String> {
@@ -175,10 +182,20 @@ fn library_handle() -> Result<usize, CompileError> {
 }
 
 /// Resolve a symbol address in the satellite library.
-fn symbol(name: &str) -> Result<usize, CompileError> {
+fn symbol(index: usize, name: &str) -> Result<usize, CompileError> {
+    let cached = SYMBOLS[index].load(Ordering::Acquire);
+    if cached != 0 {
+        return Ok(cached);
+    }
     let handle = library_handle()?;
     match super::dl_compat::dlsym_compat(handle as *mut std::ffi::c_void, name) {
-        Some(addr) => Ok(addr as usize),
+        Some(addr) => {
+            let resolved = addr as usize;
+            match SYMBOLS[index].compare_exchange(0, resolved, Ordering::Release, Ordering::Acquire) {
+                Ok(_) => Ok(resolved),
+                Err(existing) => Ok(existing),
+            }
+        }
         None => Err(CompileError::runtime(format!(
             "GLFW runtime library does not export '{name}'"
         ))),
@@ -225,7 +242,7 @@ unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char, symbol: &str) -> Resul
 /// which is what made a missing registration look like a missing
 /// capability.
 pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
-    let Some((ret, spec)) = signature_of(name) else {
+    let Some((symbol_index, ret, spec)) = signature_of(name) else {
         return Err(CompileError::runtime(format!("unknown GLFW extern function: {name}")));
     };
 
@@ -267,7 +284,7 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
         }
     }
 
-    let fptr = symbol(name)?;
+    let fptr = symbol(symbol_index, name)?;
     let n = raw.len();
 
     // Safety: `fptr` came from dlsym on the satellite built from
@@ -307,6 +324,15 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
             (Ret::T, 1) => {
                 let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
                 text_from_ptr(f(raw[0]), name)?
+            }
+            (Ret::NT, 1) => {
+                let f: extern "C" fn(i64) -> *const std::os::raw::c_char = std::mem::transmute(fptr);
+                let ptr = f(raw[0]);
+                if ptr.is_null() {
+                    Value::Nil
+                } else {
+                    text_from_ptr(ptr, name)?
+                }
             }
             (kind, arity) => {
                 return Err(CompileError::runtime(format!(

@@ -291,18 +291,65 @@ pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::metadata(&path) {
-        Ok(meta) => Ok(Value::Int(meta.len() as i64)),
+        Ok(meta) => i64::try_from(meta.len())
+            .map(Value::Int)
+            .map_err(|_| CompileError::runtime("rt_file_size exceeds i64 range")),
         Err(_) => Ok(Value::Int(-1)),
     }
 }
 
 /// Get file size in bytes
 pub fn rt_file_size(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_file_size requires 1 argument"));
+    }
     let path = extract_path(args, 0)?;
     match fs::metadata(&path) {
         Ok(meta) => Ok(Value::Int(meta.len() as i64)),
         Err(_) => Ok(Value::Int(-1)),
     }
+}
+
+/// Open a raw Unix file descriptor for the loader's mmap path.
+#[cfg(unix)]
+pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_open_fd requires 3 arguments"));
+    }
+    let path = match &args[0] {
+        Value::Str(path) => CString::new(path.as_bytes()).map_err(|_| {
+            CompileError::runtime("rt_open_fd path contains an interior NUL byte")
+        })?,
+        _ => return Err(CompileError::runtime("rt_open_fd path must be text")),
+    };
+    let flags = args[1].as_int()? as libc::c_int;
+    let mode = args[2].as_int()? as libc::mode_t;
+    let fd = unsafe { libc::open(path.as_ptr(), flags, mode) };
+    Ok(Value::Int(i64::from(fd)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_open_fd(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_open_fd is unavailable on this host"))
+}
+
+/// Close a raw Unix file descriptor. Invalid descriptors fail closed.
+#[cfg(unix)]
+pub fn rt_close_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_close_fd requires 1 argument"));
+    }
+    let fd = args[0].as_int()?;
+    if fd < 0 || fd > i64::from(i32::MAX) {
+        return Ok(Value::Int(-1));
+    }
+    let status = unsafe { libc::close(fd as libc::c_int) };
+    Ok(Value::Int(i64::from(status)))
+}
+
+#[cfg(not(unix))]
+pub fn rt_close_fd(_args: &[Value]) -> Result<Value, CompileError> {
+    Err(CompileError::runtime("rt_close_fd is unavailable on this host"))
 }
 
 /// Compute SHA256 hash of file (simplified - uses basic hash for MVP)
@@ -503,30 +550,64 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(unix)]
     {
     let file = {
-        let parent = match target.parent() { Some(value) => value, None => Path::new(".") };
+        let parent = match target.parent() {
+            Some(value) => value,
+            None => Path::new("."),
+        };
         let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
         let mut parent_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if parent_fd < 0 { return Ok(Value::Int(-1)); }
+        if parent_fd < 0 {
+            return Ok(Value::Int(-1));
+        }
         for component in parent.components() {
             use std::path::Component;
             let name = match component {
                 Component::RootDir | Component::CurDir => continue,
                 Component::Normal(value) => value,
-                Component::ParentDir | Component::Prefix(_) => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); }
+                Component::ParentDir | Component::Prefix(_) => {
+                    unsafe { libc::close(parent_fd) };
+                    return Ok(Value::Int(-1));
+                }
             };
-            let name = match CString::new(name.as_bytes()) { Ok(value) => value, Err(_) => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); } };
-            let next = unsafe { libc::openat(parent_fd, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            let name = match CString::new(name.as_bytes()) {
+                Ok(value) => value,
+                Err(_) => {
+                    unsafe { libc::close(parent_fd) };
+                    return Ok(Value::Int(-1));
+                }
+            };
+            let next = unsafe {
+                libc::openat(
+                    parent_fd,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
             unsafe { libc::close(parent_fd) };
-            if next < 0 { return Ok(Value::Int(-1)); }
+            if next < 0 {
+                return Ok(Value::Int(-1));
+            }
             parent_fd = next;
         }
         let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
             Some(value) => value,
-            None => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); }
+            None => {
+                unsafe { libc::close(parent_fd) };
+                return Ok(Value::Int(-1));
+            }
         };
-        let fd = unsafe { libc::openat(parent_fd, leaf.as_ptr(), libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                leaf.as_ptr(),
+                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
         unsafe { libc::close(parent_fd) };
-        if fd < 0 { return Ok(Value::Int(-1)); }
+        if fd < 0 {
+            return Ok(Value::Int(-1));
+        }
         unsafe { std::fs::File::from_raw_fd(fd) }
     };
     if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
@@ -541,7 +622,10 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 fn snapshot_int(args: &[Value], index: usize) -> Option<i64> {
-    match args.get(index) { Some(Value::Int(value)) => Some(*value), _ => None }
+    match args.get(index) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 fn snapshot_token(value: &str) -> String {
@@ -556,11 +640,16 @@ fn snapshot_token(value: &str) -> String {
 }
 
 fn process_status_kib(key: &str) -> i64 {
-    fs::read_to_string("/proc/self/status").ok().and_then(|status| {
-        status.lines().find(|line| line.starts_with(key))
-            .and_then(|line| line[key.len()..].split_whitespace().next())
-            .and_then(|value| value.parse::<i64>().ok())
-    }).unwrap_or(-1)
+    fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with(key))
+                .and_then(|line| line[key.len()..].split_whitespace().next())
+                .and_then(|value| value.parse::<i64>().ok())
+        })
+        .unwrap_or(-1)
 }
 
 fn snapshot_monotonic_ms() -> i64 {
@@ -568,41 +657,60 @@ fn snapshot_monotonic_ms() -> i64 {
     unsafe {
         let mut value: libc::timespec = std::mem::zeroed();
         if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) == 0 {
-            return value.tv_sec.saturating_mul(1000)
-                + value.tv_nsec.saturating_div(1_000_000);
+            return value.tv_sec.saturating_mul(1000) + value.tv_nsec.saturating_div(1_000_000);
         }
     }
     -1
 }
 
 pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 17 { return Ok(Value::Bool(false)); }
-    let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
-    let seq = match snapshot_int(args, 1) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    if args.len() != 17 {
+        return Ok(Value::Bool(false));
+    }
+    let handle = match snapshot_int(args, 0) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
+    let seq = match snapshot_int(args, 1) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
     let event = snapshot_token(&extract_content(args, 2)?);
     let phase = snapshot_token(&extract_content(args, 3)?);
-    let source_index = match snapshot_int(args, 4) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let source_index = match snapshot_int(args, 4) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
     let path = snapshot_token(&extract_content(args, 5)?);
     let mut counts = [0i64; 11];
     for (slot, arg_index) in (6usize..17).enumerate() {
-        counts[slot] = match snapshot_int(args, arg_index) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+        counts[slot] = match snapshot_int(args, arg_index) {
+            Some(v) => v,
+            None => return Ok(Value::Bool(false)),
+        };
     }
     let heap_live = simple_runtime::value::heap::rt_heap_live_bytes();
     let heap_peak = simple_runtime::value::heap::rt_heap_peak_bytes();
-    let run_id = snapshot_token(&std::env::var("SIMPLE_EVIDENCE_RUN_ID")
-        .unwrap_or_else(|_| "none".to_string()));
+    let run_id = snapshot_token(&std::env::var("SIMPLE_EVIDENCE_RUN_ID").unwrap_or_else(|_| "none".to_string()));
     let line = format!("schema=simple.compiler.mem_snapshot.v1 run_id={run_id} seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={} validation_keys={} validation_values={} shared_traits={} hir_names={} hir_symbols={} hir_functions={} hir_constants={} hir_enums={} hir_structs={} hir_classes={} heap_live_bytes={heap_live} heap_peak_bytes={heap_peak} rss_kib={} hwm_kib={}\n",
         std::process::id(), snapshot_monotonic_ms(),
         if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
         process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
-    let ok = files.1.get_mut(&handle).map(|file| file.write_all(line.as_bytes()).is_ok() && file.sync_all().is_ok()).unwrap_or(false);
+    let ok = files
+        .1
+        .get_mut(&handle)
+        .map(|file| file.write_all(line.as_bytes()).is_ok() && file.sync_all().is_ok())
+        .unwrap_or(false);
     Ok(Value::Bool(ok))
 }
 
 pub fn rt_mem_snapshot_close(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let handle = match snapshot_int(args, 0) {
+        Some(v) => v,
+        None => return Ok(Value::Bool(false)),
+    };
     let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
     Ok(Value::Bool(files.1.remove(&handle).is_some()))
 }
@@ -932,7 +1040,16 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Read file bytes through the mmap-named API in interpreter mode.
 pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
-    rt_file_read_bytes(args)
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "rt_file_mmap_read_bytes requires 1 argument",
+        ));
+    }
+    let path = extract_path(args, 0)?;
+    let bytes = fs::read(&path).map_err(|error| {
+        CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}"))
+    })?;
+    Ok(Value::byte_array(bytes))
 }
 
 /// Identity function the optimizer must not see through.
@@ -1059,7 +1176,6 @@ pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 fn parse_smf_relocs_from_bytes(args: &[Value], data: &[u8]) -> Result<Value, CompileError> {
-
     let sections_off = match args.get(1) {
         Some(Value::Int(n)) => *n as usize,
         _ => return Ok(Value::byte_array(vec![])),
@@ -1330,10 +1446,18 @@ pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileErro
         _ => None,
     };
     let (ptr, capacity, destination_row_bytes, source_stride, source_x, source_y, width, height) = match (
-        int_at(0), int_at(1), int_at(2), int_at(4), int_at(5), int_at(6), int_at(7), int_at(8),
+        int_at(0),
+        int_at(1),
+        int_at(2),
+        int_at(4),
+        int_at(5),
+        int_at(6),
+        int_at(7),
+        int_at(8),
     ) {
-        (Some(ptr), Some(capacity), Some(row_bytes), Some(stride), Some(x), Some(y), Some(width), Some(height)) =>
-            (ptr, capacity, row_bytes, stride, x, y, width, height),
+        (Some(ptr), Some(capacity), Some(row_bytes), Some(stride), Some(x), Some(y), Some(width), Some(height)) => {
+            (ptr, capacity, row_bytes, stride, x, y, width, height)
+        }
         _ => return Ok(Value::Int(0)),
     };
     let items: &[Value] = match args.get(3) {
@@ -1342,19 +1466,45 @@ pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileErro
         Some(Value::FixedSizeArray { data, .. }) => data,
         _ => return Ok(Value::Int(0)),
     };
-    if ptr <= 0 || capacity < 0 || destination_row_bytes <= 0 || source_stride <= 0 || source_x < 0 || source_y < 0 || width <= 0 || height <= 0 || width > destination_row_bytes / 4 || width > source_stride || source_x > source_stride - width {
+    if ptr <= 0
+        || capacity < 0
+        || destination_row_bytes <= 0
+        || source_stride <= 0
+        || source_x < 0
+        || source_y < 0
+        || width <= 0
+        || height <= 0
+        || width > destination_row_bytes / 4
+        || width > source_stride
+        || source_x > source_stride - width
+    {
         return Ok(Value::Int(0));
     }
-    let row_bytes = match width.checked_mul(4) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let row_bytes = match width.checked_mul(4) {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
     if row_bytes > capacity {
         return Ok(Value::Int(0));
     }
-    let source_end_row = match source_y.checked_add(height) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let source_end_row = match source_y.checked_add(height) {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
     if source_end_row > items.len() as i64 / source_stride {
         return Ok(Value::Int(0));
     }
-    let copied = match width.checked_mul(height) { Some(value) => value, None => return Ok(Value::Int(0)) };
-    let last_row_bytes = match height.checked_sub(1).and_then(|rows| rows.checked_mul(destination_row_bytes)) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let copied = match width.checked_mul(height) {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
+    let last_row_bytes = match height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(destination_row_bytes))
+    {
+        Some(value) => value,
+        None => return Ok(Value::Int(0)),
+    };
     if last_row_bytes > capacity - row_bytes {
         return Ok(Value::Int(0));
     }
@@ -1368,7 +1518,13 @@ pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileErro
                 Value::UInt { value, .. } => *value as u32,
                 _ => 0,
             };
-            unsafe { std::ptr::copy_nonoverlapping(word.to_le_bytes().as_ptr(), destination.add((destination_base + col * 4) as usize), 4) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    word.to_le_bytes().as_ptr(),
+                    destination.add((destination_base + col * 4) as usize),
+                    4,
+                )
+            };
         }
     }
     Ok(Value::Int(copied))
@@ -1545,10 +1701,7 @@ mod tests {
 
     #[test]
     fn file_read_text_distinguishes_empty_success_from_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_file_read_text_empty_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_file_read_text_empty_{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let path_value = Value::text(path.to_string_lossy().to_string());
 
@@ -1592,31 +1745,26 @@ mod tests {
 
     #[test]
     fn file_size_matches_native_missing_file_sentinel() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_file_size_missing_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_file_size_missing_{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         assert_eq!(
             rt_file_size(&[Value::text(path.to_string_lossy().to_string())]).unwrap(),
             Value::Int(-1)
         );
+        assert!(rt_file_size(&[])
+            .expect_err("file size must reject missing arguments")
+            .to_string()
+            .contains("requires 1 argument"));
     }
 
     #[test]
     fn file_hash_distinguishes_empty_file_digest_from_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_file_hash_empty_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_file_hash_empty_{}", std::process::id()));
         std::fs::write(&path, "").unwrap();
         let path_value = Value::text(path.to_string_lossy().to_string());
         assert_eq!(
             rt_file_hash_sha256(std::slice::from_ref(&path_value)).unwrap(),
-            Value::text(
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-                    .to_string()
-            )
+            Value::text("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string())
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(rt_file_hash_sha256(&[path_value]).unwrap(), Value::Nil);
@@ -1624,10 +1772,7 @@ mod tests {
 
     #[test]
     fn checked_offset_read_distinguishes_empty_success_from_failure() {
-        let path = std::env::temp_dir().join(format!(
-            "simple_checked_offset_read_{}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("simple_checked_offset_read_{}", std::process::id()));
         std::fs::write(&path, "abc").unwrap();
         let path_value = Value::text(path.to_string_lossy().to_string());
 
@@ -1666,10 +1811,7 @@ mod tests {
         };
         assert_eq!(packed >> 32, 2);
         assert_eq!(packed & 0xffff_ffff, 2);
-        assert_eq!(
-            rt_file_exists_probe_end(&[Value::Int(token)]).unwrap(),
-            Value::Int(-2)
-        );
+        assert_eq!(rt_file_exists_probe_end(&[Value::Int(token)]).unwrap(), Value::Int(-2));
     }
 
     #[test]
@@ -1678,7 +1820,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(file_exists_probe_test_seed_generation(0x7fff_ffff_ffff_fffe), 0);
-        assert_eq!(rt_file_exists_probe_begin(&[]).unwrap(), Value::Int(0x7fff_ffff_ffff_ffff));
+        assert_eq!(
+            rt_file_exists_probe_begin(&[]).unwrap(),
+            Value::Int(0x7fff_ffff_ffff_ffff)
+        );
         assert_eq!(
             rt_file_exists_probe_end(&[Value::Int(0x7fff_ffff_ffff_ffff)]).unwrap(),
             Value::Int(0)
@@ -1720,13 +1865,21 @@ mod tests {
                 panic!("rt_bytes_alloc must produce packed byte storage");
             };
             assert_eq!(bytes.as_slice(), &[0, 0, 0, 0]);
-            assert!(bytes.capacity() <= 8, "small packed allocation must not box one Value per byte");
+            assert!(
+                bytes.capacity() <= 8,
+                "small packed allocation must not box one Value per byte"
+            );
         }
     }
 
     #[test]
     fn bytes_alloc_invalid_lengths_fail_closed() {
-        for args in [vec![], vec![Value::Int(0)], vec![Value::Int(-1)], vec![Value::Bool(true)]] {
+        for args in [
+            vec![],
+            vec![Value::Int(0)],
+            vec![Value::Int(-1)],
+            vec![Value::Bool(true)],
+        ] {
             let allocated = rt_bytes_alloc(&args).unwrap();
             assert_eq!(allocated.byte_array_view(), Some([].as_slice()));
         }
@@ -1748,7 +1901,11 @@ mod tests {
 
         const LEN: usize = 8 * 1024 * 1024;
         let before = rss_bytes();
-        let allocated = rt_bytes_alloc(&[Value::UInt { value: LEN as u64, width: 64 }]).unwrap();
+        let allocated = rt_bytes_alloc(&[Value::UInt {
+            value: LEN as u64,
+            width: 64,
+        }])
+        .unwrap();
         let after = rss_bytes();
         assert_eq!(allocated.byte_array_view().map(<[u8]>::len), Some(LEN));
         let delta = after.saturating_sub(before);
@@ -1756,7 +1913,10 @@ mod tests {
             delta <= (LEN as u64 * 4) + (4 * 1024 * 1024),
             "packed allocation RSS delta {delta} exceeds 4x payload plus measurement slack"
         );
-        assert!(std::mem::size_of::<Value>() > 4, "boxed Value storage would not demonstrate the regression");
+        assert!(
+            std::mem::size_of::<Value>() > 4,
+            "boxed Value storage would not demonstrate the regression"
+        );
     }
 
     // Regression coverage for the P2 interpreter-over-count bug
@@ -1976,6 +2136,15 @@ mod tests {
             Value::ByteArray(values) => assert_eq!(values.len(), 11),
             other => panic!("unexpected bytes value: {other:?}"),
         }
+
+        let missing = dir.path().join("missing.bin").to_string_lossy().to_string();
+        let error = rt_file_mmap_read_bytes(&[Value::text(missing)])
+            .expect_err("missing mmap input must not become Nil");
+        assert!(error.to_string().contains("rt_file_mmap_read_bytes failed"));
+
+        let arity = rt_file_mmap_read_bytes(&[])
+            .expect_err("mmap byte reader must reject missing arguments");
+        assert!(arity.to_string().contains("requires 1 argument"));
     }
 
     // Regression coverage for the make_some/make_none latent bug flagged in
@@ -2090,7 +2259,7 @@ pub fn rt_dir_list(args: &[Value]) -> Result<Value, CompileError> {
                 .collect();
             Ok(Value::array(names))
         }
-        Err(_) => Ok(Value::array(vec![])),
+        Err(_) => Ok(Value::Nil),
     }
 }
 
@@ -2743,6 +2912,226 @@ pub fn rt_file_is_regular_no_follow(args: &[Value]) -> Result<Value, CompileErro
         .map(|metadata| metadata.file_type().is_file())
         .unwrap_or(false);
     Ok(Value::Bool(regular))
+}
+
+#[cfg(unix)]
+fn safe_artifact_open_root(root: &str) -> Option<i32> {
+    if !root.starts_with('/') || root.len() > 4095 || root.contains("//") || (root != "/" && root.ends_with('/')) {
+        return None;
+    }
+    let components: Vec<&str> = root.split('/').skip(1).filter(|part| !part.is_empty()).collect();
+    if components.iter().any(|part| *part == "." || *part == ".." || part.len() > 255 || part.as_bytes().contains(&0)) {
+        return None;
+    }
+    let slash = CString::new("/").ok()?;
+    let mut current = unsafe { libc::open(slash.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if current < 0 { return None }
+    for component in components {
+        let component = match CString::new(component.as_bytes()) {
+            Ok(value) => value,
+            Err(_) => { unsafe { libc::close(current) }; return None; }
+        };
+        let mut retries = 0;
+        let next = loop {
+            let fd = unsafe { libc::openat(current, component.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 { break fd }
+            retries += 1;
+        };
+        if next < 0 || unsafe { libc::close(current) } != 0 {
+            if next >= 0 { unsafe { libc::close(next) }; }
+            return None;
+        }
+        current = next;
+    }
+    Some(current)
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct SafeArtifactOpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn safe_artifact_open_beneath(root_fd: i32, relative: &str, flags: i32, mode: u32) -> i32 {
+    let Ok(relative) = CString::new(relative.as_bytes()) else { return -1 };
+    let how = SafeArtifactOpenHow {
+        flags: flags as u64,
+        mode: mode as u64,
+        resolve: 0x01 | 0x02 | 0x04 | 0x08,
+    };
+    let mut retries = 0;
+    loop {
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2, root_fd, relative.as_ptr(), &how,
+                std::mem::size_of::<SafeArtifactOpenHow>(),
+            ) as i32
+        };
+        if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 {
+            return fd;
+        }
+        retries += 1;
+    }
+}
+
+pub fn rt_hosted_safe_artifact_root_open_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let root = extract_path(args, 0)?;
+    #[cfg(target_os = "linux")]
+    let handle = safe_artifact_open_root(&root).map(i64::from).unwrap_or(-1);
+    #[cfg(not(target_os = "linux"))]
+    let handle = { let _ = root; -1 };
+    Ok(Value::Int(handle))
+}
+
+pub fn rt_hosted_safe_artifact_root_close_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
+    #[cfg(target_os = "linux")]
+    let closed = handle >= 0 && handle <= i32::MAX as i64 && unsafe { libc::close(handle as i32) } == 0;
+    #[cfg(not(target_os = "linux"))]
+    let closed = false;
+    Ok(Value::Bool(closed))
+}
+
+/// Descriptor-bound bounded read for the Pure Simple hosted-artifact owner.
+/// Nil is the sole fail-closed provider result; an empty array is valid.
+pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let root_handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
+    let relative = extract_path(args, 1)?;
+    let max_bytes = match args.get(2) {
+        Some(value) => value.as_int()?,
+        None => -1,
+    };
+    if max_bytes < 0 || max_bytes > 16_777_216 {
+        return Ok(Value::Nil);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root_handle, relative);
+        return Ok(Value::Nil);
+    }
+    #[cfg(unix)]
+    {
+        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Nil) }
+        let root_fd = root_handle as i32;
+        let mut retries = 0;
+        let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 { return Ok(Value::Nil) }
+        #[cfg(target_os = "linux")]
+        let fd = safe_artifact_open_beneath(root_fd, &relative, libc::O_RDONLY | libc::O_CLOEXEC, 0);
+        #[cfg(not(target_os = "linux"))]
+        let fd = -1;
+        let mut ok = fd >= 0;
+        let mut before: libc::stat = unsafe { std::mem::zeroed() };
+        if ok { ok = unsafe { libc::fstat(fd, &mut before) } == 0 }
+        if ok { ok = before.st_dev == root_identity.st_dev && (before.st_mode & libc::S_IFMT) == libc::S_IFREG && before.st_size >= 0 && before.st_size <= max_bytes }
+        let wanted = if ok { before.st_size as usize } else { 0 };
+        let mut bytes = vec![0u8; wanted];
+        let mut used = 0usize;
+        retries = 0;
+        while ok && used < wanted {
+            let count = unsafe { libc::read(fd, bytes[used..].as_mut_ptr().cast(), wanted - used) };
+            if count > 0 { used += count as usize; retries = 0; continue; }
+            if count < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
+                retries += 1;
+                continue;
+            }
+            ok = false;
+        }
+        let mut after: libc::stat = unsafe { std::mem::zeroed() };
+        if ok { ok = unsafe { libc::fstat(fd, &mut after) } == 0 }
+        if ok {
+            ok = before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+                before.st_mode == after.st_mode && before.st_size == after.st_size &&
+                before.st_mtime == after.st_mtime && before.st_ctime == after.st_ctime;
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            { ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec; }
+            #[cfg(target_os = "macos")]
+            { ok = ok && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec; }
+        }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 { ok = false }
+        if ok {
+            Ok(Value::byte_array(bytes))
+        } else {
+            bytes.fill(0);
+            Ok(Value::Nil)
+        }
+    }
+}
+
+/// Unnamed private staging plus absent-destination publication.  Status:
+/// 0 durable success, -2 already exists, -3 unsupported, -4 published but the
+/// directory/close durability fence failed, -1 all other fail-closed errors.
+pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let root_handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
+    let relative = extract_path(args, 1)?;
+    let Some(payload) = args.get(2).and_then(Value::byte_array_view) else { return Ok(Value::Int(-1)) };
+    let max_bytes = match args.get(3) {
+        Some(value) => value.as_int()?,
+        None => -1,
+    };
+    if max_bytes < 0 || max_bytes > 16_777_216 || payload.len() > max_bytes as usize {
+        return Ok(Value::Int(-1));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root_handle, relative, payload);
+        return Ok(Value::Int(-3));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Int(-1)) }
+        let root_fd = root_handle as i32;
+        let (parent_path, leaf_text) = match relative.rsplit_once('/') {
+            Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (parent, leaf),
+            None => (".", relative.as_str()),
+            _ => return Ok(Value::Int(-1)),
+        };
+        let Ok(leaf) = CString::new(leaf_text.as_bytes()) else { return Ok(Value::Int(-1)) };
+        let parent_fd = safe_artifact_open_beneath(
+            root_fd, parent_path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC, 0);
+        if parent_fd < 0 { return Ok(Value::Int(-1)) }
+        let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
+        let mut parent_identity: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 ||
+            unsafe { libc::fstat(parent_fd, &mut parent_identity) } != 0 ||
+            root_identity.st_dev != parent_identity.st_dev {
+            unsafe { libc::close(parent_fd); }
+            return Ok(Value::Int(-1));
+        }
+        let dot = CString::new(".").expect("literal has no NUL");
+        let fd = unsafe { libc::openat(parent_fd, dot.as_ptr(), libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC, 0o600) };
+        let mut status = if fd < 0 { -3 } else { -1 };
+        let mut published = false;
+        let mut used = 0usize;
+        let mut retries = 0;
+        while fd >= 0 && used < payload.len() {
+            let written = unsafe { libc::write(fd, payload[used..].as_ptr().cast(), payload.len() - used) };
+            if written > 0 { used += written as usize; retries = 0; continue; }
+            if written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
+                retries += 1;
+                continue;
+            }
+            break;
+        }
+        let mut identity: libc::stat = unsafe { std::mem::zeroed() };
+        if fd >= 0 && used == payload.len() && unsafe { libc::fdatasync(fd) } == 0 &&
+            unsafe { libc::fsync(fd) } == 0 && unsafe { libc::fstat(fd, &mut identity) } == 0 &&
+            identity.st_dev == root_identity.st_dev && (identity.st_mode & libc::S_IFMT) == libc::S_IFREG && identity.st_size == payload.len() as i64 {
+            let empty = CString::new("").expect("literal has no NUL");
+            if unsafe { libc::linkat(fd, empty.as_ptr(), parent_fd, leaf.as_ptr(), libc::AT_EMPTY_PATH) } == 0 {
+                status = if unsafe { libc::fsync(parent_fd) } == 0 { 0 } else { -4 };
+                published = true;
+            } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
+                status = -2;
+            }
+        }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 { status = if published { -4 } else { -5 } }
+        if unsafe { libc::close(parent_fd) } != 0 { status = if published { -4 } else { -5 } }
+        Ok(Value::Int(status))
+    }
 }
 
 /// No-shell stat(2)-backed char-device probe. Mirrors the C runtime's

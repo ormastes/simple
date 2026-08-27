@@ -20,10 +20,7 @@
 use compiler.common.driver_core_types.{CompileMode, CompileResult}
 use compiler.driver.driver_public_api.{interpret_file}
 use compiler.driver.driver_public_shared.{find_simple_binary, clean_child_output, check_compile_delegation_guard, mark_compile_delegated}
-
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+use std.nogc_sync_mut.io_runtime.{process_run, file_exists, file_read_nullable}
 
 pub fn external_compile_file(path: text) -> CompileResult:
     val simple_bin = find_simple_binary()
@@ -32,9 +29,9 @@ pub fn external_compile_file(path: text) -> CompileResult:
         return CompileResult.RuntimeError(guard_error)
     mark_compile_delegated()
     val default_output = _default_smf_output(path)
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path])
+    val (stdout, stderr, exit_code) = process_run(simple_bin, ["compile", path])
     val combined = clean_child_output(stdout, stderr)
-    if exit_code == 0 and rt_file_exists(default_output):
+    if exit_code == 0 and file_exists(default_output):
         return CompileResult.Success(default_output)
     if exit_code == 0:
         return CompileResult.RuntimeError("compile reported success but did not create output: {default_output}")
@@ -46,9 +43,9 @@ pub fn external_compile_to_smf(path: text, output: text) -> Result<text, text>:
     if guard_error != "":
         return Err(guard_error)
     mark_compile_delegated()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["compile", path, "-o", output])
+    val (stdout, stderr, exit_code) = process_run(simple_bin, ["compile", path, "-o", output])
     val combined = clean_child_output(stdout, stderr)
-    if exit_code == 0 and rt_file_exists(output):
+    if exit_code == 0 and file_exists(output):
         return Ok(output)
     if exit_code == 0:
         return Err("compile reported success but did not create output: {output}")
@@ -83,7 +80,7 @@ pub fn external_jit_file(path: text) -> CompileResult:
     if guard_error != "":
         return CompileResult.RuntimeError(guard_error)
     mark_compile_delegated()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, [path])
+    val (stdout, stderr, exit_code) = process_run(simple_bin, [path])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0:
         return CompileResult.Success(combined)
@@ -95,14 +92,14 @@ pub fn external_check_file(path: text) -> CompileResult:
     if guard_error != "":
         return CompileResult.RuntimeError(guard_error)
     mark_compile_delegated()
-    val (stdout, stderr, exit_code) = rt_process_run(simple_bin, ["check", path])
+    val (stdout, stderr, exit_code) = process_run(simple_bin, ["check", path])
     val combined = clean_child_output(stdout, stderr)
     if exit_code == 0:
         return CompileResult.Success(combined)
     CompileResult.RuntimeError(combined)
 
 pub fn external_parse_sdn_file(path: text) -> CompileResult:
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     if content.trim() == "":
         return CompileResult.RuntimeError("failed to read SDN file: {path}")
     CompileResult.Success(content)

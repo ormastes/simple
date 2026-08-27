@@ -62,7 +62,8 @@ fn test_exists_check_uses_presence_predicate_without_nil_equality() {
 /// wrong-branch bug, strictly worse than the loud SIGILL it replaces.
 #[test]
 fn test_exists_check_in_condition_position_stays_bool() {
-    let module = parse_and_lower("fn present(value: i64?) -> i64:\n    if value.?:\n        return 1\n    return 0\n").unwrap();
+    let module =
+        parse_and_lower("fn present(value: i64?) -> i64:\n    if value.?:\n        return 1\n    return 0\n").unwrap();
     let func = &module.functions[0];
 
     let HirStmt::If { condition, .. } = &func.body[0] else {
@@ -79,6 +80,25 @@ fn test_exists_check_in_condition_position_stays_bool() {
             HirExprKind::BuiltinCall { name, .. } if name == "rt_is_some"
         ),
         "if-condition `.?` did not lower to the bare presence predicate: {condition:?}"
+    );
+}
+
+#[test]
+fn test_implicit_exists_check_in_bool_method_stays_bool() {
+    let module = parse_and_lower(
+        "class Presence:\n    values: Dict<String, String>\n\nimpl Presence:\n    fn has(key: String) -> Bool:\n        self.values.get(key).?\n",
+    )
+    .unwrap();
+    let func = module
+        .functions
+        .iter()
+        .find(|function| function.name.ends_with("has"))
+        .expect("method was not lowered");
+    let repr = format!("{:?}", func.body);
+    assert_eq!(func.return_type, TypeId::BOOL);
+    assert!(
+        repr.contains("rt_is_some") && !repr.contains("Nil"),
+        "implicit bool method return retained optional value form: {repr}"
     );
 }
 
@@ -378,11 +398,16 @@ fn test_if_let_identifier_binding_copies_subject_value() {
         HirStmt::Let {
             local_index: 2,
             value: Some(HirExpr {
-                kind: HirExprKind::Local(1),
+                kind:
+                    HirExprKind::BuiltinCall {
+                        name,
+                        args,
+                    },
                 ..
             }),
             ..
-        }
+        } if name == "rt_unwrap_or_self"
+            && matches!(args.as_slice(), [HirExpr { kind: HirExprKind::Local(1), .. }])
     ));
 }
 
@@ -597,21 +622,22 @@ fn test_if_val_exists_check_binds_unwrapped_option_value() {
     let HirStmt::If { then_block, .. } = &func.body[1] else {
         panic!("expected lowered if-val statement: {:?}", func.body)
     };
-    let binds_v_to_subject = then_block.iter().any(|stmt| {
+    let binds_v_to_unwrapped_subject = then_block.iter().any(|stmt| {
         matches!(
             stmt,
             HirStmt::Let {
                 value: Some(HirExpr {
-                    kind: HirExprKind::Local(idx),
+                    kind: HirExprKind::BuiltinCall { name, args },
                     ..
                 }),
                 ..
-            } if idx == subject_idx
+            } if name == "rt_unwrap_or_self"
+                && matches!(args.as_slice(), [HirExpr { kind: HirExprKind::Local(idx), .. }] if idx == subject_idx)
         )
     });
     assert!(
-        binds_v_to_subject,
-        "`v` binding did not copy the unwrapped subject (local {subject_idx}): {then_block:?}"
+        binds_v_to_unwrapped_subject,
+        "`v` binding did not unwrap the optional subject (local {subject_idx}): {then_block:?}"
     );
 }
 
@@ -644,6 +670,41 @@ fn test_value_position_match_arm_return_actually_returns() {
         mir_repr.contains("Return(Some("),
         "match-arm return did not reach MIR as a Return terminator: {mir_repr}"
     );
+}
+
+#[test]
+fn test_unwrap_or_return_lowers_to_native_branch_and_real_return() {
+    let source = "fn fallback_code() -> i64:\n    return -1\n\nfn choose(value: i64?) -> i64:\n    val unwrapped = value ?? return fallback_code()\n    return unwrapped\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name == "choose").unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(hir_repr.contains("LetIn"), "subject was not bound once: {hir_repr}");
+    assert!(hir_repr.contains("rt_is_none"), "optional absence was not tested: {hir_repr}");
+    assert!(hir_repr.contains("rt_unwrap_or_value"), "present optional was not unwrapped: {hir_repr}");
+    assert!(
+        hir_repr.contains("Return(Some") && hir_repr.contains("fallback_code"),
+        "fallback was not preserved as a real early return: {hir_repr}"
+    );
+
+    let mir = crate::mir::lower_to_mir(&module).expect("MIR lowering should succeed");
+    let mir_repr = format!("{mir:?}");
+    assert!(mir_repr.contains("rt_is_none"), "absence check did not reach MIR: {mir_repr}");
+    assert!(
+        mir_repr.contains("Return(Some(") && mir_repr.contains("fallback_code"),
+        "fallback return did not reach MIR: {mir_repr}"
+    );
+}
+
+#[test]
+fn test_unwrap_or_return_fallback_registers_implicit_self() {
+    let source = "class Picker:\n    fallback: i64\n\n    fn choose(value: i64?) -> i64:\n        val unwrapped = value ?? return self.fallback\n        return unwrapped\n";
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name.ends_with("choose")).unwrap();
+    let hir_repr = format!("{:?}", function.body);
+
+    assert!(function.params.iter().any(|param| param.name == "self"), "{hir_repr}");
+    assert!(!hir_repr.contains("Global(\"self\")"), "{hir_repr}");
 }
 
 /// A `-> bool` body's tail is not always a single trailing `HirStmt::Expr`.
@@ -713,7 +774,6 @@ fn test_exists_check_in_while_body_tail_is_not_coerced() {
         "a `.?` in a while body was treated as the function's return value: {repr}"
     );
 }
-
 
 /// `??` on a statically non-nullable scalar must lower to the left operand with
 /// NO runtime nil check.

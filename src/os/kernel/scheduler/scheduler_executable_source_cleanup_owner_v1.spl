@@ -1,0 +1,156 @@
+# Shared scheduler-owned source-close cleanup for authenticated executables.
+#
+# A published task owns its mapped image, but the loader registry still owns
+# the exact retained source handle until close succeeds.  Keep that retry
+# coordinate under the scheduler lifecycle so a failed post-publication close
+# cannot be lost or later applied to a reused task ID.
+
+use std.fs_driver.mount_table.{MountTable}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1,
+    ExecutableAuthorityStateV1, ExecutableAuthorityErrorV1,
+    executable_authority_snapshot
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    executable_loader_release_retrieved
+}
+
+struct SchedulerExecutableSourceCleanupSlotV1:
+    task_id: u64
+    lifecycle_generation: u64
+    table: MountTable
+    authorities: ExecutableAuthorityRegistryV1
+    token: ExecutableAuthorityTokenV1
+    active: bool
+    in_flight: bool
+
+pub(package) struct SchedulerExecutableSourceCleanupReceiptV1:
+    complete: bool
+    retryable: bool
+    indeterminate: bool
+
+val SCHEDULER_EXECUTABLE_SOURCE_CLEANUP_LIMIT_V1: i64 = 512
+val _executable_source_cleanup_mutex_v1: i64 = mutex_raw_create()
+var _executable_source_cleanup_slots_v1: [SchedulerExecutableSourceCleanupSlotV1] = []
+var _executable_source_cleanup_quarantined_v1: bool = false
+
+fn _source_cleanup_lock_v1() -> bool:
+    _executable_source_cleanup_mutex_v1 > 0 and
+        not _executable_source_cleanup_quarantined_v1 and
+        mutex_raw_lock(_executable_source_cleanup_mutex_v1)
+
+fn _source_cleanup_unlock_v1() -> bool:
+    if mutex_raw_unlock(_executable_source_cleanup_mutex_v1): return true
+    # The caller cannot distinguish an unlock that left the mutex held from
+    # one that released it but failed to report success.  Slot state may also
+    # already contain a newly retained authority or an in-flight claim.  Make
+    # that ambiguity terminal for this owner instead of later replaying close
+    # through state whose lock history is no longer trustworthy.
+    _executable_source_cleanup_quarantined_v1 = true
+    false
+
+fn _source_cleanup_receipt_v1(
+    complete: bool, indeterminate: bool
+) -> SchedulerExecutableSourceCleanupReceiptV1:
+    SchedulerExecutableSourceCleanupReceiptV1(
+        complete: complete, retryable: not complete,
+        indeterminate: indeterminate)
+
+fn _source_cleanup_index_v1(task_id: u64, generation: u64) -> i64:
+    var index = 0
+    while index < _executable_source_cleanup_slots_v1.len():
+        val slot = _executable_source_cleanup_slots_v1[index]
+        if slot.active and slot.task_id == task_id and
+            slot.lifecycle_generation == generation:
+            return index
+        index = index + 1
+    -1
+
+pub(package) fn scheduler_executable_source_cleanup_reserve_v1(
+    task_id: u64,
+    lifecycle_generation: u64,
+    table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1
+) -> SchedulerExecutableSourceCleanupReceiptV1:
+    """Retain the close authority before irreversible task publication."""
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        not _source_cleanup_lock_v1():
+        return _source_cleanup_receipt_v1(false, true)
+    if _source_cleanup_index_v1(task_id, lifecycle_generation) >= 0:
+        _ = _source_cleanup_unlock_v1()
+        return _source_cleanup_receipt_v1(false, true)
+    var reusable = -1
+    var index = 0
+    while index < _executable_source_cleanup_slots_v1.len():
+        if not _executable_source_cleanup_slots_v1[index].active:
+            reusable = index
+            break
+        index = index + 1
+    if reusable < 0 and _executable_source_cleanup_slots_v1.len() >=
+        SCHEDULER_EXECUTABLE_SOURCE_CLEANUP_LIMIT_V1:
+        _ = _source_cleanup_unlock_v1()
+        return _source_cleanup_receipt_v1(false, true)
+    val fresh = SchedulerExecutableSourceCleanupSlotV1(
+        task_id: task_id, lifecycle_generation: lifecycle_generation,
+        table: table, authorities: authorities, token: token,
+        active: true, in_flight: false)
+    if reusable >= 0:
+        _executable_source_cleanup_slots_v1[reusable] = fresh
+    else:
+        _executable_source_cleanup_slots_v1.push(fresh)
+    if not _source_cleanup_unlock_v1():
+        return _source_cleanup_receipt_v1(false, true)
+    _source_cleanup_receipt_v1(false, false)
+
+pub(package) fn scheduler_executable_source_cleanup_retry_v1(
+    task_id: u64,
+    lifecycle_generation: u64
+) -> SchedulerExecutableSourceCleanupReceiptV1:
+    """Retry only the exact scheduler lifecycle's retained close authority."""
+    if task_id == 0u64 or lifecycle_generation == 0u64 or
+        not _source_cleanup_lock_v1():
+        return _source_cleanup_receipt_v1(false, true)
+    val index = _source_cleanup_index_v1(task_id, lifecycle_generation)
+    if index < 0:
+        if not _source_cleanup_unlock_v1():
+            return _source_cleanup_receipt_v1(false, true)
+        return _source_cleanup_receipt_v1(true, false)
+    var claimed = _executable_source_cleanup_slots_v1[index]
+    if claimed.in_flight:
+        _ = _source_cleanup_unlock_v1()
+        return _source_cleanup_receipt_v1(false, true)
+    claimed.in_flight = true
+    _executable_source_cleanup_slots_v1[index] = claimed
+    if not _source_cleanup_unlock_v1():
+        return _source_cleanup_receipt_v1(false, true)
+
+    var table = claimed.table
+    var complete = executable_loader_release_retrieved(
+        table, claimed.authorities, claimed.token).is_ok()
+    if not complete:
+        val snapshot = executable_authority_snapshot(
+            claimed.authorities, claimed.token)
+        match snapshot:
+            Ok(value): complete = value.state == ExecutableAuthorityStateV1.Released
+            Err(ExecutableAuthorityErrorV1.InvalidToken): complete = true
+            Err(ExecutableAuthorityErrorV1.Released): complete = true
+            Err(_): complete = false
+
+    if not _source_cleanup_lock_v1():
+        return _source_cleanup_receipt_v1(false, true)
+    val current = _source_cleanup_index_v1(task_id, lifecycle_generation)
+    if current < 0:
+        _ = _source_cleanup_unlock_v1()
+        return _source_cleanup_receipt_v1(false, true)
+    _executable_source_cleanup_slots_v1[current].in_flight = false
+    if complete:
+        _executable_source_cleanup_slots_v1[current].active = false
+    if not _source_cleanup_unlock_v1():
+        return _source_cleanup_receipt_v1(false, true)
+    _source_cleanup_receipt_v1(complete, false)
+
+export SchedulerExecutableSourceCleanupReceiptV1
+export scheduler_executable_source_cleanup_reserve_v1
+export scheduler_executable_source_cleanup_retry_v1

@@ -34,16 +34,11 @@
 # guessing is exactly how a stale-parser hit becomes a wrong module.
 
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
-
-extern fn rt_env_get(key: text) -> text
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_hash_sha256(path: text) -> text
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_getpid() -> i64
-extern fn rt_file_move(src: text, dst: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
+use std.io_runtime.{
+    env_get_opt, file_exists, file_read_result, file_write_exact,
+    file_hash_sha256_or_empty, dir_create_all, getpid,
+    file_move_cross_device, file_delete
+}
 
 # Entry format version. Bumping this invalidates every stored entry without
 # anyone having to delete a directory: an old entry's first line no longer
@@ -62,10 +57,10 @@ var _fe_cache_stores: i64 = 0
 pub fn frontend_parse_cache_scope() -> text:
     if _fe_cache_scope_memo != "@@unset@@":
         return _fe_cache_scope_memo
-    if (rt_env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
+    if (env_get_opt("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
         _fe_cache_scope_memo = ""
         return ""
-    val published = rt_env_get("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
+    val published = env_get_opt("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
     _fe_cache_scope_memo = published
     published
 
@@ -76,10 +71,10 @@ pub fn frontend_parse_cache_enabled() -> bool:
 # out-of-scope entry -- the same partitioning the object cache uses. The
 # default root matches the bootstrap lane's other caches.
 pub fn frontend_parse_cache_dir() -> text:
-    val root = rt_env_get("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
+    val root = env_get_opt("SIMPLE_FRONTEND_CACHE_DIR") ?? ""
     if root != "":
         return root
-    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane = env_get_opt("SIMPLE_CACHE_SCOPE") ?? ""
     val lane_name = if lane == "": "default" else: lane
     "build/bootstrap/native_cache/{lane_name}/frontend"
 
@@ -87,12 +82,9 @@ pub fn frontend_parse_cache_dir() -> text:
 # header and in the directory, not in the filename, so a scope mismatch is a
 # loud version mismatch rather than a silent miss on a differently-named file.
 pub fn frontend_parse_cache_key(file_path: text) -> text:
-    if not rt_file_exists(file_path):
+    if not file_exists(file_path):
         return ""
-    val digest = rt_file_hash_sha256(file_path)
-    if digest.len() != 64:
-        return ""
-    digest
+    file_hash_sha256_or_empty(file_path)
 
 fn frontend_parse_cache_path(key: text) -> text:
     frontend_parse_cache_dir() + "/" + key + ".fpc"
@@ -107,9 +99,11 @@ pub fn frontend_parse_cache_load(key: text) -> text:
     if key == "" or not frontend_parse_cache_enabled():
         return ""
     val path = frontend_parse_cache_path(key)
-    if not rt_file_exists(path):
+    if not file_exists(path):
         return ""
-    val raw = rt_file_read_text(path) ?? ""
+    val raw = match file_read_result(path):
+        case Ok(content): content
+        case Err(_): return ""
     if raw == "":
         return ""
     val nl = raw.index_of("\n")
@@ -128,15 +122,15 @@ pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
     if key == "" or blob == "" or not frontend_parse_cache_enabled():
         return false
     val dir = frontend_parse_cache_dir()
-    val _made = rt_dir_create_all(dir)
+    val _made = dir_create_all(dir)
     val final_path = frontend_parse_cache_path(key)
-    val tmp = final_path + ".{rt_getpid()}.tmp"
-    if not rt_file_write_text(tmp, frontend_parse_cache_header() + "\n" + blob):
+    val tmp = final_path + ".{getpid()}.tmp"
+    if not file_write_exact(tmp, frontend_parse_cache_header() + "\n" + blob):
         return false
-    if rt_file_move(tmp, final_path):
+    if file_move_cross_device(tmp, final_path):
         _fe_cache_stores = _fe_cache_stores + 1
         return true
-    val _cleaned = rt_file_delete(tmp)
+    val _cleaned = file_delete(tmp)
     false
 
 pub fn frontend_parse_cache_note_hit():

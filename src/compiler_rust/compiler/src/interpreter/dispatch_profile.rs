@@ -95,7 +95,11 @@ pub fn render() -> String {
     let mut out = String::from("interp-dispatch-profile:\n");
     out.push_str(&format!("  total_dispatches: {}\n", total));
     for (k, v) in &rows {
-        let pct = if total == 0 { 0.0 } else { (*v as f64) * 100.0 / (total as f64) };
+        let pct = if total == 0 {
+            0.0
+        } else {
+            (*v as f64) * 100.0 / (total as f64)
+        };
         out.push_str(&format!("  {:<20} {:>12}  {:>6.2}%\n", k, v, pct));
     }
     out.push_str(&format!(
@@ -126,7 +130,7 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::If { .. } => "If",
         Expr::Match { .. } => "Match",
         Expr::DoBlock(_) => "DoBlock",
-        Expr::UnsafeBlock(_) => "UnsafeBlock",
+        Expr::UnsafeBlock(_, _) => "UnsafeBlock",
         Expr::Call { .. } => "Call",
         Expr::MethodCall { .. } => "MethodCall",
         Expr::FieldAccess { .. } => "FieldAccess",

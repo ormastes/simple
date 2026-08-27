@@ -15,6 +15,7 @@
 #   WRITE:  fd (u64) | data (bytes)
 #   CLOSE:  fd (u64)
 #   STAT:   path (text)
+#   STAT_NO_FOLLOW: path (text)
 #   READDIR: path (text)
 #   MKDIR:  path (text)
 #   UNLINK: path (text)
@@ -23,6 +24,7 @@
 #   MOUNT_LIST: (empty)
 #   CHMOD:  path (text) \0 mode (u16)
 #   SYMLINK: target (text) \0 link_path (text)
+#   READLINK: path (text)
 
 use os.services.vfs.vfs.{VfsManager, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
@@ -48,6 +50,8 @@ val VFS_SEEK: u32 = 11
 val VFS_CHMOD: u32 = 12
 val VFS_SYMLINK: u32 = 13
 val VFS_RMDIR: u32 = 14
+val VFS_READLINK: u32 = 17
+val VFS_STAT_NO_FOLLOW: u32 = 18
 
 # VFS_OPEN carries the kernel's POSIX O_* bit layout, never a service-private
 # flag encoding.  Keep this decoding boundary aligned with os.kernel.fd_table.
@@ -73,6 +77,9 @@ val VFS_SERVICE_NAME: text = "vfs"
 val VFS_IPC_REQUEST_PAYLOAD_MAX: u32 = 4096u32
 val VFS_IPC_REPLY_PAYLOAD_MAX: u64 = 4092u64
 val VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
+val VFS_READDIR_ENTRY_MAX: u64 = 128u64
+val VFS_READDIR_NAME_BYTES_MAX: u64 = 255u64
+val VFS_READDIR_TOTAL_NAME_BYTES_MAX: u64 = 3072u64
 val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 # Response status codes
@@ -205,6 +212,8 @@ impl VfsService:
             VFS_CHMOD: self.dispatch_chmod(src_port, payload_addr, payload_len)
             VFS_SYMLINK: self.dispatch_symlink(src_port, payload_addr, payload_len)
             VFS_RMDIR: self.dispatch_rmdir(src_port, payload_addr, payload_len)
+            VFS_READLINK: self.dispatch_readlink(src_port, payload_addr, payload_len)
+            VFS_STAT_NO_FOLLOW: self.dispatch_stat_no_follow(src_port, payload_addr, payload_len)
             _: self.send_error_reply(src_port, STATUS_INVALID, "unknown VFS method")
 
     # ========================================================================
@@ -304,16 +313,54 @@ impl VfsService:
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
+    me dispatch_stat_no_follow(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse STAT_NO_FOLLOW request: path(text)."""
+        val path = _read_text(payload_addr, payload_len)
+        match self.vfs.stat_no_follow(path):
+            Result.Ok(node):
+                var reply: [u8] = []
+                val kind_val: u8 = match node.kind:
+                    FsNodeKind.File: 0
+                    FsNodeKind.Directory: 1
+                    FsNodeKind.Symlink: 2
+                    FsNodeKind.Device: 3
+                    FsNodeKind.Pipe: 4
+                reply.push(kind_val)
+                _push_u64(reply, node.size)
+                _push_u16(reply, node.permissions)
+                self.send_bytes_reply(src_port, STATUS_OK, reply)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
+
     me dispatch_readdir(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse READDIR request: path(text)."""
         val path = _read_text(payload_addr, payload_len)
         match self.vfs.readdir(path):
             Result.Ok(entries):
-                # Encode as newline-separated "kind:name" entries
-                var reply_text = ""
-                var i = 0
+                # Encode as newline-separated ``kind:name`` entries into one
+                # bounded byte buffer. Avoid quadratic text concatenation and
+                # reject names the wire envelope cannot represent.
+                if entries.len().to_u64() > VFS_READDIR_ENTRY_MAX:
+                    self.send_error_reply(src_port, STATUS_INVALID, "directory exceeds entry limit")
+                    return
+                var reply: [u8] = []
+                var total_name_bytes: u64 = 0u64
+                var i: u64 = 0u64
                 while i < entries.len():
                     val entry = entries[i]
+                    val name_bytes = entry.name.len().to_u64()
+                    val name_unencodable = name_bytes == 0u64 or name_bytes > VFS_READDIR_NAME_BYTES_MAX or
+                        entry.name.contains("\0") or entry.name.contains("\n") or
+                        entry.name.contains("\r")
+                    if name_unencodable:
+                        self.send_error_reply(src_port, STATUS_INVALID, "directory contains unencodable entry")
+                        return
+                    val name_bytes_overflow = total_name_bytes > VFS_READDIR_TOTAL_NAME_BYTES_MAX or
+                        name_bytes > VFS_READDIR_TOTAL_NAME_BYTES_MAX - total_name_bytes
+                    if name_bytes_overflow:
+                        self.send_error_reply(src_port, STATUS_INVALID, "directory exceeds name byte limit")
+                        return
+                    total_name_bytes = total_name_bytes + name_bytes
                     val kind_val: u8 = match entry.node.kind:
                         FsNodeKind.File: 0
                         FsNodeKind.Directory: 1
@@ -321,10 +368,15 @@ impl VfsService:
                         FsNodeKind.Device: 3
                         FsNodeKind.Pipe: 4
                     if i > 0:
-                        reply_text = reply_text + "\n"
-                    reply_text = reply_text + "{kind_val}:{entry.name}"
+                        reply.push(10u8)
+                    reply.push(48u8 + kind_val)
+                    reply.push(58u8)
+                    var name_index: u64 = 0u64
+                    while name_index < entry.name.len():
+                        reply.push(entry.name.byte_at(name_index))
+                        name_index = name_index + 1u64
                     i = i + 1
-                self.send_text_reply(src_port, STATUS_OK, reply_text)
+                self.send_bytes_reply(src_port, STATUS_OK, reply)
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
@@ -391,6 +443,15 @@ impl VfsService:
                 self.send_u64_reply(src_port, STATUS_OK, 1)
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_ERR, e)
+
+    me dispatch_readlink(src_port: u64, payload_addr: u64, payload_len: u32):
+        """Parse READLINK request: path(text)."""
+        val path = _read_text(payload_addr, payload_len)
+        match self.vfs.readlink(path):
+            Result.Ok(target):
+                self.send_text_reply(src_port, STATUS_OK, target)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
     me dispatch_mount_list(src_port: u64):
         """Return list of mount points."""
@@ -559,6 +620,8 @@ fn _vfs_request_payload_is_valid(method: u32, addr: u64, payload_len: u32) -> bo
         VFS_CHMOD: _vfs_has_exact_path_before_trailer(addr, payload_len, 2u32)
         VFS_SYMLINK: _vfs_has_exact_two_nonempty_nul_paths(addr, payload_len)
         VFS_RMDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_READLINK: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_STAT_NO_FOLLOW: _vfs_has_nonempty_plain_path(addr, payload_len)
         _: true
 
 fn _read_text(addr: u64, len: u32) -> text:

@@ -16,6 +16,7 @@ use compiler.mir.mir_instructions.{
     MirTerminator, MirOperand, MirOperandKind,
     BlockId
 }
+use std.fs.{read_file}
 use compiler.mir_opt.mir_opt.mir_visitor.{
     mir_inst_counter_new, mir_inst_counter_count_module
 }
@@ -492,7 +493,7 @@ describe "OptimizerPlugin":
     # ====================================================================
 
     describe "MIR routing adapter":
-        # WriteCoalesce proves transformation (inst count 4→5 on GEP+Store pairs).
+        # Analysis-only passes must remain identities through plugin routing.
 
         it "nil-guard returns function unchanged for source plugin":
             step("Verify: nil-guard returns function unchanged for source plugin")
@@ -526,8 +527,8 @@ describe "OptimizerPlugin":
                 case Err(msg):
                     assert_true(false)
 
-        it "WriteCoalesce via plugin transforms GEP+Store (inst count 4 to 5)":
-            step("Verify: WriteCoalesce via plugin transforms GEP+Store (inst count 4 to 5)")
+        it "WriteCoalesce via plugin preserves GEP+Store (inst count 4)":
+            step("Verify: analysis-only WriteCoalesce is an exact plugin identity")
             val ty = MirType(kind: MirTypeKind.I64)
             val sig = MirSignature(params: [], return_type: ty, is_variadic: false)
             var idx0: [MirOperand] = []
@@ -568,7 +569,7 @@ describe "OptimizerPlugin":
             match result_r:
                 case Ok(result):
                     val after = mir_inst_counter_count_module(result)
-                    expect(after.inst_count).to_equal(5)  # oracle: 5 — named expected value from the requirement
+                    expect(after.inst_count).to_equal(4)
                 case Err(msg):
                     assert_true(false)
 
@@ -669,6 +670,15 @@ describe "OptimizerPlugin":
             val result = run_typed_pass_on_function(PassKind.CommonSubexprElim, func)
             expect(result.name).to_equal("cse_probe")
 
+        it "CSE skeleton contains no expression reuse rewrite":
+            step("Prevent direct activation without ownership and memory versions")
+            val source = read_file("src/compiler/60.mir_opt/mir_opt/cse.spl")
+            expect(source).not.to_contain("eliminate_block")
+            expect(source).not.to_contain("try_eliminate_instruction")
+            expect(source).not.to_contain("operands_to_binop_expr")
+            expect(source).not.to_contain("MirInstKind.Copy(dest, cached.unwrap())")
+            expect(source).not.to_contain("self.expr_table.insert(expr, dest)")
+
         it "InlineSmallFunctions pass returns function unchanged":
             step("Verify: InlineSmallFunctions pass returns function unchanged")
             val ty = MirType(kind: MirTypeKind.I64)
@@ -729,6 +739,40 @@ describe "OptimizerPlugin":
             val result = run_typed_pass_on_function(PassKind.TailCallOptimization, func)
             expect(result.name).to_equal("tco_probe")
 
+        it "TailCallOptimization skeleton contains no dormant sequential rewrite":
+            step("Prevent mechanical activation of argument-clobbering TCO")
+            val source = read_file("src/compiler/60.mir_opt/mir_opt/tco.spl")
+            expect(source).not.to_contain("transform_tail_call")
+            expect(source).not.to_contain("is_tail_call_block")
+            expect(source).not.to_contain("param_idx")
+
+        it "StringBuilderOpt skeleton contains no incomplete push-only rewrite":
+            step("Prevent activation without builder construction and final join")
+            val source = read_file(
+                "src/compiler/60.mir_opt/mir_opt/string_builder_opt.spl")
+            expect(source).not.to_contain("StrConcatCandidate")
+            expect(source).not.to_contain("transform_concat_block")
+            expect(source).not.to_contain("next_local_id")
+            expect(source).not.to_contain("MirConstValue.Str(\"push\")")
+
+        it "GeneratorStateMachine skeleton contains no dispatcher rewrite":
+            step("Keep yield analysis separate from state-machine activation")
+            val source = read_file("src/compiler/60.mir_opt/mir_opt/generator_sm.spl")
+            expect(source).to_contain("fn analyze_yields")
+            expect(source).not.to_contain("sm_dispatch")
+            expect(source).not.to_contain("state_ptr_id")
+            expect(source).not.to_contain("split_at_yields")
+            expect(source).not.to_contain("switch_cases")
+
+        it "BodyOutlining skeleton contains no cold-region rewrite":
+            step("Prevent direct activation of incomplete outlining machinery")
+            val source = read_file("src/compiler/60.mir_opt/mir_opt/outline.spl")
+            expect(source).not.to_contain("outline_cold_group")
+            expect(source).not.to_contain("collect_cold_groups")
+            expect(source).not.to_contain("remap_exits")
+            expect(source).not.to_contain("outlined_name")
+            expect(source).not.to_contain("for sym in module.functions.keys()")
+
         it "GlobalValueNumbering pass returns function unchanged":
             step("Verify: GlobalValueNumbering pass returns function unchanged")
             val ty = MirType(kind: MirTypeKind.I64)
@@ -741,6 +785,14 @@ describe "OptimizerPlugin":
             val result = run_typed_pass_on_function(PassKind.GlobalValueNumbering, func)
             expect(result.name).to_equal("gvn_probe")
 
+        it "GlobalValueNumbering skeleton contains no block-order rewrite":
+            step("Prevent storage order from substituting for dominance")
+            val source = read_file("src/compiler/60.mir_opt/mir_opt/gvn.spl")
+            expect(source).not.to_contain("ValueNumberTable")
+            expect(source).not.to_contain("process_instruction")
+            expect(source).not.to_contain("sig_to_vn")
+            expect(source).not.to_contain("approximated by block order")
+
         it "TypedByteCanon pass returns function unchanged":
             step("Verify: TypedByteCanon pass returns function unchanged")
             val ty = MirType(kind: MirTypeKind.I64)
@@ -752,4 +804,3 @@ describe "OptimizerPlugin":
             val func = MirFunction(symbol: SymbolId.new(0), name: "tbc_probe", signature: sig, locals: locals, blocks: [blk], entry_block: BlockId.new(0), span: nil, generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
             val result = run_typed_pass_on_function(PassKind.TypedByteCanon, func)
             expect(result.name).to_equal("tbc_probe")
-

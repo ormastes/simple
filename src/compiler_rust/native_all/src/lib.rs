@@ -1443,8 +1443,8 @@ pub extern "C" fn to_string(val: i64) -> i64 {
 
 // -- Compiler backend stubs --
 //
-// `rt_compile_to_llvm_ir`, `rt_compile_to_native`, and
-// `rt_compile_to_native_with_opt` are provided by the bundled `simple-runtime`
+// `rt_compile_to_native` and `rt_compile_to_native_with_opt` are provided by
+// the bundled `simple-runtime`
 // (duplicate symbols fail the macOS link), so they are not redefined here.
 
 /// Execute a native binary with arguments and timeout.

@@ -38,6 +38,31 @@ extern "C" {
 void rt_set_macro_trace(bool enabled);
 bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
+
+/* ===== Recoverable language exception frames =====
+ *
+ * Frames are fixed-capacity, per-thread runtime storage.  The compiler owns
+ * the language semantics and calls `_setjmp` directly with the pointer
+ * returned by rt_exception_frame_push(); the runtime only owns bounded frame
+ * storage and the non-local transfer mechanism.
+ */
+void*    rt_exception_frame_push(void);
+void     rt_exception_frame_pop(void);
+typedef struct RtExceptionCapture {
+    int64_t payload;
+    int64_t status;
+} RtExceptionCapture;
+RtExceptionCapture rt_exception_frame_capture(int64_t setjmp_status);
+int64_t  rt_exception_frame_finish(int64_t setjmp_status);
+int64_t  rt_exception_peek_payload(void);
+int64_t  rt_exception_peek_type_tag(void);
+int64_t  rt_exception_caught_type_tag(void);
+int64_t  rt_exception_frame_depth(void);
+int64_t  rt_exception_frame_capacity(void);
+int64_t  __simple_exception_type_tag(void);
+int64_t  __simple_exception_set_type_tag(int64_t type_tag);
+void     rt_exception_throw(int64_t payload, int64_t type_tag);
+void     rt_exception_resume(int64_t payload, int64_t type_tag);
 bool rt_is_debug_mode_enabled(void);
 bool rt_is_interpreter_runtime(void);
 bool rt_is_jit_runtime(void);
@@ -330,6 +355,10 @@ int32_t  rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
 int64_t  rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode);
 int64_t  rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len);
 int64_t  rt_host_dynlib_close(int64_t handle);
+int64_t  rt_gpu_provider_loaded(int64_t backend_bit);
+int64_t  rt_gpu_provider_abi_version(int64_t backend_bit);
+int64_t  rt_gpu_provider_backend_bits(int64_t backend_bit);
+const char* rt_gpu_provider_path(int64_t backend_bit);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);
@@ -449,6 +478,13 @@ int8_t   rt_array_clear(SplArray* array);
 int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
                              int64_t src_off, int64_t count);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
+int64_t  spl_wffi_call_i64_checked(int64_t fptr, int64_t args_value,
+                                    int64_t nargs);
+int64_t  spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
+                                    int64_t nargs, int64_t* out_value);
+int64_t  spl_wffi_call_bool0_checked(int64_t fptr, int8_t* out_value);
+int64_t  spl_wffi_call_bool1_checked(int64_t fptr, int64_t arg0,
+                                     int8_t* out_value);
 int8_t   rt_array_extend_i64(int64_t dst, int64_t src, int64_t count); /* append count (<0 = all) elems of src onto dst */
 int64_t  rt_array_get_i64_raw(SplArray* array, int64_t index);
 /* Closure-invoking collection ops. rt_array_reduce takes `init` BEFORE the
@@ -569,7 +605,47 @@ int64_t rt_path_filename(int64_t path_value);
 int64_t  rt_path_extension(int64_t path_value);
 int64_t  rt_http_get(int64_t url);
 int64_t  rt_http_request(int64_t method, int64_t url, int64_t headers, int64_t body);
+int64_t  rt_http_request_v2(int64_t method, int64_t url, int64_t headers,
+                            int64_t body, int64_t timeout_ms);
 int64_t  rt_http_download(int64_t url, int64_t output_path);
+int64_t  rt_io_tcp_socket_create(int64_t family);
+int64_t  rt_io_tcp_bind(int64_t addr);
+bool     rt_io_tcp_bind_fd(int64_t fd, int64_t addr);
+bool     rt_io_tcp_listen(int64_t fd, int64_t backlog);
+int64_t  rt_io_tcp_accept(int64_t fd);
+int64_t  rt_io_tcp_accept_timeout(int64_t fd, int64_t timeout_ms);
+int64_t  rt_io_tcp_connect(int64_t addr);
+int64_t  rt_io_tcp_connect_timeout(int64_t addr, int64_t timeout_ms);
+int64_t  rt_io_tcp_read(int64_t fd, int64_t size);
+int64_t  rt_io_tcp_read_line(int64_t fd);
+int64_t  rt_io_tcp_write(int64_t fd, int64_t data);
+int64_t  rt_io_tcp_write_text(int64_t fd, int64_t text);
+int64_t  rt_io_tcp_write_bytes(int64_t fd, int64_t data);
+bool     rt_io_tcp_flush(int64_t fd);
+bool     rt_io_tcp_close(int64_t fd);
+int64_t  rt_io_tcp_local_addr(int64_t fd);
+int64_t  rt_io_tcp_peer_addr(int64_t fd);
+bool     rt_io_tcp_set_nonblocking(int64_t fd, bool enabled);
+bool     rt_io_tcp_set_nodelay(int64_t fd, bool enabled);
+bool     rt_io_tcp_set_reuseport(int64_t fd, bool enabled);
+bool     rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled);
+bool     rt_io_tcp_set_read_timeout(int64_t fd, int64_t timeout_ms);
+bool     rt_io_tcp_set_write_timeout(int64_t fd, int64_t timeout_ms);
+bool     rt_io_tcp_shutdown(int64_t fd, int64_t how);
+int64_t  rt_io_udp_bind(int64_t addr);
+int64_t  rt_io_udp_recv_from(int64_t fd, int64_t size);
+int64_t  rt_io_udp_send_to(int64_t fd, int64_t data, int64_t addr);
+bool     rt_io_udp_connect(int64_t fd, int64_t addr);
+int64_t  rt_io_udp_send(int64_t fd, int64_t data);
+int64_t  rt_io_udp_recv(int64_t fd, int64_t size);
+int64_t  rt_io_udp_local_addr(int64_t fd);
+bool     rt_io_udp_set_broadcast(int64_t fd, bool enabled);
+bool     rt_io_udp_set_read_timeout(int64_t fd, int64_t timeout_ms);
+bool     rt_io_udp_set_nonblocking(int64_t fd, bool enabled);
+bool     rt_io_udp_set_multicast_loop(int64_t fd, bool enabled);
+bool     rt_io_udp_join_multicast(int64_t fd, int64_t multicast_addr);
+bool     rt_io_udp_leave_multicast(int64_t fd, int64_t multicast_addr);
+bool     rt_io_udp_close(int64_t fd);
 int64_t  rt_http_client_create(void);
 bool     rt_http_client_set_timeout(int64_t client, int64_t timeout_ms);
 int64_t  rt_http_client_request(int64_t client, int64_t method, int64_t url,
@@ -587,7 +663,6 @@ int64_t  rt_closure_get_capture(int64_t closure, int64_t index);
 int64_t  rt_closure_func_ptr(int64_t closure);
 int8_t   rt_enum_check_discriminant(int64_t value, int64_t expected);
 int64_t  rt_hash_text(int64_t value);
-int64_t  rt_text_eq_fast(int64_t left, int64_t right);
 int64_t  rt_index_get(int64_t collection, int64_t idx);
 int8_t   rt_index_set(int64_t collection, int64_t idx, int64_t value);
 int64_t  rt_string_eq(int64_t left, int64_t right);
@@ -832,6 +907,30 @@ typedef struct RtOwnedProcessResultV2 {
     int32_t runtime_error;
 } RtOwnedProcessResultV2;
 
+/* Additive observation receipt. Unlike the lifecycle result above, these
+ * quantities are optional provider evidence and retain their exact meaning.
+ * peak_direct_child_rss_bytes is wait4(2) ru_maxrss converted to bytes; it is
+ * never aggregate tree RSS. Tree charge/job commit fields remain zero until a
+ * provider marks them available in evidence_flags. */
+#define RT_OWNED_PROCESS_OBSERVATION_VERSION 2
+#define RT_PROCESS_EVIDENCE_DIRECT_CHILD_RUSAGE (1ULL << 0)
+#define RT_PROCESS_EVIDENCE_TREE_CHARGE         (1ULL << 1)
+#define RT_PROCESS_EVIDENCE_TREE_PIDS           (1ULL << 2)
+#define RT_PROCESS_EVIDENCE_SAMPLED_TREE        (1ULL << 3)
+typedef struct RtOwnedProcessObservationV1 {
+    uint64_t version;
+    uint64_t evidence_flags;
+    int64_t user_cpu_ms;
+    int64_t system_cpu_ms;
+    int64_t peak_direct_child_rss_bytes;
+    int64_t peak_tree_charge_bytes;
+    int64_t io_read_bytes;
+    int64_t io_write_bytes;
+    int64_t pids_peak;
+    int64_t termination_signal;
+    int32_t runtime_error;
+} RtOwnedProcessObservationV1;
+
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 /* -> RuntimeValue (I64), per runtime_sffi.rs:1419. NOT a bare SplArray*. */
@@ -847,9 +946,17 @@ bool      rt_process_run_owned_bounded(const char* cmd, const char* const* argv,
                                        int64_t timeout_ms, uint64_t max_output_bytes,
                                        char* out, uint64_t out_cap, char* err,
                                        uint64_t err_cap, RtOwnedProcessReceipt* receipt);
+bool      rt_process_run_owned_observed_bounded(const char* cmd, const char* const* argv,
+                                                int64_t timeout_ms, uint64_t max_output_bytes,
+                                                char* out, uint64_t out_cap, char* err,
+                                                uint64_t err_cap, RtOwnedProcessReceipt* receipt,
+                                                RtOwnedProcessObservationV1* observation);
 int64_t*  rt_process_run_owned_bounded_value(const char* cmd, uint64_t cmd_len,
                                              SplArray* args, int64_t timeout_ms,
                                              int64_t max_output_bytes);
+int64_t*  rt_process_run_owned_observed_bounded_value(const char* cmd, uint64_t cmd_len,
+                                                      SplArray* args, int64_t timeout_ms,
+                                                      int64_t max_output_bytes);
 #ifdef _WIN32
 char* rt_windows_build_command_line(const char* cmd, const char** args, int64_t arg_count);
 #endif
@@ -881,12 +988,17 @@ bool     rt_process_owned_cancel_v2(RtOwnedProcessTokenV2 token,
                                     RtOwnedProcessCancelReceipt* receipt);
 bool     rt_process_owned_result_v2(RtOwnedProcessTokenV2 token,
                                     RtOwnedProcessResultV2* result);
+bool     rt_process_owned_observation_v1(RtOwnedProcessTokenV2 token,
+                                         RtOwnedProcessObservationV1* observation);
 bool     rt_process_owned_collect_v2(RtOwnedProcessTokenV2 token,
                                      RtOwnedProcessResultV2* result);
 
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+int64_t     rt_process_pin_executable(const char* canonical_path);
+bool        rt_process_close_pinned_executable(int64_t handle);
+int64_t     rt_process_spawn_pinned_piped(int64_t executable_handle, SplArray* args);
 int64_t     rt_browser_renderer_spawn_sandboxed(const char* cmd, SplArray* args);
 bool        rt_browser_renderer_sandbox_enter(void);
 bool        rt_browser_renderer_sandbox_netns_active(void);
@@ -969,7 +1081,14 @@ int64_t  rt_atomic_bool_new(bool initial);
 bool     rt_atomic_bool_load(int64_t handle);
 void     rt_atomic_bool_store(int64_t handle, bool value);
 bool     rt_atomic_bool_swap(int64_t handle, bool value);
+bool     rt_atomic_bool_compare_exchange(int64_t handle, bool current, bool new_value);
 void     rt_atomic_bool_free(int64_t handle);
+int64_t  rt_atomic_flag_new(void);
+bool     rt_atomic_flag_test_and_set(int64_t handle);
+bool     rt_atomic_flag_load(int64_t handle);
+void     rt_atomic_flag_clear(int64_t handle);
+void     rt_atomic_flag_free(int64_t handle);
+void     rt_spin_loop_hint(void);
 void     rt_bdd_describe_start_rv(int64_t name_rv);
 void     rt_bdd_describe_end(void);
 void     rt_bdd_it_start_rv(int64_t name_rv);
@@ -1023,7 +1142,7 @@ int64_t     rt_file_atomic_write(int64_t path_value, int64_t content_value);
 int         rt_file_write_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
 int         rt_file_append(const char* path, const char* content);
 int         rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* content, uint64_t content_len);
-int         rt_file_delete(const char* path);
+int         rt_file_delete(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                          const uint8_t* dst_ptr, uint64_t dst_len);
 bool        rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
@@ -1075,7 +1194,11 @@ int         rt_mkdir_p(const char* path);
 
 /* ===== Dynamic Loading (WFFI) ===== */
 int64_t spl_dlopen(int64_t path_value);
+int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle);
+int64_t spl_dynlib_snapshot_linux(int64_t path_value);
 int64_t spl_dlsym(int64_t handle, int64_t name_value);
+int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol);
+int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol);
 int64_t spl_dlclose(int64_t handle);
 int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, int64_t* out);
 int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs);
@@ -1150,6 +1273,9 @@ int64_t     rt_epoll_create(void);
 int64_t     rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events);
 SplArray*   rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms);
 bool        rt_socket_set_nonblocking(int64_t fd, bool enabled);
+int64_t     rt_socket_nonblock_prepare(int64_t fd, int64_t mode);
+int64_t     rt_socket_nonblock_commit(int64_t fd, int64_t flags);
+int64_t     rt_socket_nonblock_mask(void);
 
 /* ===== Raw 32-bit framebuffer operations ===== */
 

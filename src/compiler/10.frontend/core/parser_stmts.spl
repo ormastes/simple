@@ -81,6 +81,8 @@ use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_wa
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
 use compiler.core.parser.{rt_is_debug_mode_enabled}
+use compiler.core.parser.{parser_diagnostics_suppressed_get}
+use compiler.frontend.trace_policy.{frontend_trace_suppressed, frontend_compiler_trace_enabled}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 # Import expression parsing
@@ -89,10 +91,8 @@ use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_sn
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.ast.{expr_assign, expr_compound_assign}
 use compiler.frontend.core._ParserPrimary.primary_expr.{parse_fn_lambda_after_kw}
-extern fn rt_env_get(key: text) -> text
-
 fn parser_stmt_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    frontend_compiler_trace_enabled()
 
 fn parser_stmt_trace_line_enabled() -> bool:
     parser_stmt_trace_enabled() and par_line_get() >= 60
@@ -464,6 +464,91 @@ fn try_parse_contract_stmt() -> i64:
     lex_snapshot_commit(snap)
     stmt_contract_clause(tag, binding, body, 0)
 
+fn parse_unsafe_block_expr_if_present() -> i64:
+    """Parse contextual `unsafe...:` in expression position; return -1 on no match."""
+    if par_kind_get() != TOK_IDENT:
+        return -1
+    val unsafe_name = par_text_get()
+    if unsafe_name != "unsafe" and unsafe_name != "danger":
+        return -1
+
+    val unsafe_snap = lex_snapshot_save()
+    val (unsafe_tok_nums, unsafe_tok_text) = parser_tok_save()
+    parser_advance()
+    if par_kind_get() == TOK_COLON:
+        parser_advance()
+        val unsafe_body = parse_block()
+        lex_snapshot_commit(unsafe_snap)
+        return expr_unsafe_block(unsafe_body, 0)
+
+    if par_kind_get() == TOK_LPAREN:
+        var unsafe_caps: [text] = []
+        var unsafe_ok = true
+        parser_advance()
+        while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_EOF:
+            parser_skip_newlines()
+            if par_kind_get() != TOK_IDENT:
+                unsafe_ok = false
+                break
+            val unsafe_arg = par_text_get()
+            if unsafe_arg != "reason" and unsafe_arg != "capabilities":
+                unsafe_ok = false
+                break
+            parser_advance()
+            if par_kind_get() != TOK_COLON:
+                unsafe_ok = false
+                break
+            parser_advance()
+            if unsafe_arg == "reason" and par_kind_get() == TOK_STRING_LIT:
+                parser_advance()
+            elif unsafe_arg == "capabilities" and par_kind_get() == TOK_LBRACKET:
+                parser_advance()
+                if par_kind_get() != TOK_RBRACKET:
+                    while par_kind_get() != TOK_EOF:
+                        if par_kind_get() != TOK_IDENT:
+                            unsafe_ok = false
+                            break
+                        unsafe_caps.push(par_text_get())
+                        parser_advance()
+                        if par_kind_get() == TOK_RBRACKET:
+                            break
+                        if par_kind_get() != TOK_COMMA:
+                            unsafe_ok = false
+                            break
+                        parser_advance()
+                        if par_kind_get() == TOK_RBRACKET:
+                            break
+                    if not unsafe_ok:
+                        break
+                if par_kind_get() != TOK_RBRACKET:
+                    unsafe_ok = false
+                    break
+                parser_advance()
+            else:
+                unsafe_ok = false
+                break
+            parser_skip_newlines()
+            if par_kind_get() == TOK_RPAREN:
+                break
+            if par_kind_get() != TOK_COMMA:
+                unsafe_ok = false
+                break
+            parser_advance()
+            parser_skip_newlines()
+            if par_kind_get() == TOK_RPAREN:
+                break
+        if unsafe_ok and par_kind_get() == TOK_RPAREN:
+            parser_advance()
+            if par_kind_get() == TOK_COLON:
+                parser_advance()
+                val unsafe_body = parse_block()
+                lex_snapshot_commit(unsafe_snap)
+                return expr_unsafe_block_with_caps(unsafe_body, unsafe_caps, 0)
+
+    lex_snapshot_rollback(unsafe_snap)
+    parser_tok_restore(unsafe_tok_nums, unsafe_tok_text)
+    -1
+
 fn parse_statement() -> i64:
     var kind = par_kind_get()
     val contract_stmt = try_parse_contract_stmt()
@@ -654,7 +739,9 @@ fn parse_statement() -> i64:
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_todo requires a comment string: pass_todo(\"what remains\", \"hint or issue\")")
-        if rt_is_debug_mode_enabled() and msg != "":
+        if (rt_is_debug_mode_enabled() and msg != "" and
+            not frontend_trace_suppressed() and
+            not parser_diagnostics_suppressed_get()):
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
 
@@ -663,7 +750,9 @@ fn parse_statement() -> i64:
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_do_nothing requires a comment string: pass_do_nothing(\"reason\")")
-        if rt_is_debug_mode_enabled() and msg != "":
+        if (rt_is_debug_mode_enabled() and msg != "" and
+            not frontend_trace_suppressed() and
+            not parser_diagnostics_suppressed_get()):
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_do_nothing(msg, 0), 0)
 
@@ -672,84 +761,18 @@ fn parse_statement() -> i64:
         val msg = parse_optional_rationale_args()
         if msg == "":
             parser_warn("REQC001: pass_dn requires a comment string: pass_dn(\"reason\")")
-        if rt_is_debug_mode_enabled() and msg != "":
+        if (rt_is_debug_mode_enabled() and msg != "" and
+            not frontend_trace_suppressed() and
+            not parser_diagnostics_suppressed_get()):
             print "[debug:pass] {msg}"
         return stmt_expr_stmt(expr_pass_dn(msg, 0), 0)
 
     if kind == TOK_IDENT:
         val ident_text = par_text_get()
-        # `unsafe:` / `danger:` block (contextual keyword, mirrors the seed
-        # parser: compiler_rust/parser/src/parser_impl/core.rs:829-836). Only
-        # treated as a block when the identifier is directly followed by a
-        # colon (char-level lookahead past spaces/tabs).
-        #
-        # NOTE: `lex_peek_at` (module-level, lexer.spl) reads a legacy
-        # `lex_state_get("pos", ...)` slot that CoreLexer.next_token() never
-        # writes back to — it is permanently stale (observed stuck at "0"),
-        # so peeking through it inspected the wrong end of the source and
-        # this rule silently never fired. `lex_token_end_get()` returns the
-        # live CoreLexer struct's `pos` right after the just-scanned token
-        # (set in lexer.spl's `lex_next()`), so anchor the lookahead there
-        # instead via plain source-char access.
         if ident_text == "unsafe" or ident_text == "danger":
-            val uns_snap = lex_snapshot_save()
-            val (uns_tok_nums, uns_tok_text) = parser_tok_save()
-            parser_advance()
-            if par_kind_get() == TOK_COLON:
-                parser_advance()
-                val unsafe_body = parse_block()
-                lex_snapshot_commit(uns_snap)
-                return stmt_expr_stmt(expr_unsafe_block(unsafe_body, 0), 0)
-            if par_kind_get() == TOK_LPAREN:
-                # `unsafe(reason: "...", capabilities: [type_erasure, ...]):`
-                # — the capability-scoped block form (hardening plan §8.1).
-                # Same argument grammar as the declaration-level `@unsafe(...)`
-                # in _ParserDecls/enum_module_body.spl; the reason is accepted
-                # and the capability names are carried on the block node.
-                var uns_caps: [text] = []
-                var uns_ok = true
-                parser_advance()
-                while par_kind_get() != TOK_RPAREN and par_kind_get() != TOK_EOF:
-                    parser_skip_newlines()
-                    if par_kind_get() != TOK_IDENT:
-                        uns_ok = false
-                        break
-                    val uns_arg = par_text_get()
-                    parser_advance()
-                    if par_kind_get() != TOK_COLON:
-                        uns_ok = false
-                        break
-                    parser_advance()
-                    if uns_arg == "reason" and par_kind_get() == TOK_STRING_LIT:
-                        parser_advance()
-                    elif uns_arg == "capabilities" and par_kind_get() == TOK_LBRACKET:
-                        parser_advance()
-                        while par_kind_get() != TOK_RBRACKET and par_kind_get() != TOK_EOF:
-                            if par_kind_get() == TOK_IDENT:
-                                uns_caps.push(par_text_get())
-                            elif par_kind_get() != TOK_COMMA:
-                                uns_ok = false
-                                break
-                            parser_advance()
-                        if par_kind_get() != TOK_RBRACKET:
-                            uns_ok = false
-                            break
-                        parser_advance()
-                    else:
-                        uns_ok = false
-                        break
-                    parser_skip_newlines()
-                    if par_kind_get() == TOK_COMMA:
-                        parser_advance()
-                if uns_ok and par_kind_get() == TOK_RPAREN:
-                    parser_advance()
-                    if par_kind_get() == TOK_COLON:
-                        parser_advance()
-                        val caps_body = parse_block()
-                        lex_snapshot_commit(uns_snap)
-                        return stmt_expr_stmt(expr_unsafe_block_with_caps(caps_body, uns_caps, 0), 0)
-            lex_snapshot_rollback(uns_snap)
-            parser_tok_restore(uns_tok_nums, uns_tok_text)
+            val unsafe_expr = parse_unsafe_block_expr_if_present()
+            if unsafe_expr >= 0:
+                return stmt_expr_stmt(unsafe_expr, 0)
         if ident_text == "todo":
             parser_advance()
             val msg = parse_optional_rationale_args()
@@ -1728,14 +1751,14 @@ fn parse_match_arms_common() -> (i64, [i64]):
 
             # Expect colon after all patterns
             parser_expect(161)
-            val arm_body = parse_block()
+            val case_arm_body = parse_block()
 
             # Create an arm for each pattern (they share the same body and guard)
             for i in 0..patterns.len():
                 val pattern_idx = patterns[i]
                 val rationale = extract_wildcard_rationale(pattern_idx)
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
         else:
             # Caseless arm: pattern directly followed by ':' (no 'case' keyword required)
@@ -1765,25 +1788,25 @@ fn parse_match_arms_common() -> (i64, [i64]):
 
             # G28: accept `=>` as either a single-expression separator or the
             # established block-arm spelling used by UI/web renderers.
-            var arm_body: [i64] = []
+            var case_arm_body: [i64] = []
             if par_kind_get() == TOK_FAT_ARROW:
                 parser_advance()
                 if par_kind_get() == TOK_NEWLINE:
-                    arm_body = parse_block()
+                    case_arm_body = parse_block()
                 else:
                     val arrow_expr = parse_expr()
-                    arm_body.push(stmt_expr_stmt(arrow_expr, 0))
+                    case_arm_body.push(stmt_expr_stmt(arrow_expr, 0))
             else:
                 # Expect colon after pattern
                 parser_expect(161)
-                arm_body = parse_block()
+                case_arm_body = parse_block()
 
             # Create arm
             for i in 0..patterns.len():
                 val pattern_idx = patterns[i]
                 val rationale = extract_wildcard_rationale(pattern_idx)
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
 
     lex_disable_forced_indentation()
@@ -1894,12 +1917,12 @@ fn parse_receive_stmt() -> i64:
                 parser_advance()
                 guard_expr_idx = parse_expr()
             parser_expect(161)
-            val arm_body = parse_block()
+            val case_arm_body = parse_block()
             for j in 0..patterns.len():
                 val pattern_idx = patterns[j]
                 val rationale = extract_wildcard_rationale(pattern_idx)
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, "", rationale)
+                val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, case_arm_body, "", rationale)
                 arm_indices.push(arm_idx)
             saw_arm = true
         else:
@@ -2263,5 +2286,6 @@ export try_parse_bare_ident_string_call
 export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt
 export parse_match_stmt_tail, parse_match_expr_tail, g33_kw_ident_follow
+export parse_unsafe_block_expr_if_present
 export parse_receive_stmt, parse_bind_stmt
 export parse_if_expr, parse_for_expr, parse_while_expr

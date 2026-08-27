@@ -1,0 +1,126 @@
+"""Executable HIR integration coverage for E-APACK008 pipeline wiring."""
+
+use std.spec.*
+use compiler.common.attributes.{FunctionAttr, vhdl_hardware_metadata_default}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.semantics.forbidden_io_validation.{validate_forbidden_io_contexts}
+
+fn fio_span() -> Span: Span.at(1, 1, 1)
+fn fio_unit_type() -> HirType: HirType(kind: HirTypeKind.Unit, span: fio_span())
+fn fio_unit_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: true,
+        type_: fio_unit_type(), span: fio_span())
+
+fn fio_body_call(symbol_id: i64, name: text) -> HirBlock:
+    val callee = HirExpr(kind: HirExprKind.NamedVar(
+        SymbolId(id: symbol_id), name), has_type_: false,
+        type_: fio_unit_type(), span: fio_span())
+    val call = HirExpr(kind: HirExprKind.Call(callee, [], []),
+        has_type_: true, type_: fio_unit_type(), span: fio_span())
+    HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(call), span: fio_span())],
+        has: false, value: fio_unit_expr(), span: fio_span())
+
+fn fio_empty_body() -> HirBlock:
+    HirBlock(stmts: [], has: false, value: fio_unit_expr(), span: fio_span())
+
+fn fio_function(symbol_id: i64, name: text, body: HirBlock,
+                attr: FunctionAttr) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: symbol_id), name: name, type_params: [], params: [],
+        return_type: fio_unit_type(), body: body, effects: [],
+        visibility: Visibility.Private, is_async: false, is_static: false,
+        is_public: false, is_method: false, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: attr, has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false, doc_comment: "", span: fio_span(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil)
+
+fn fio_import(module_path: text, name: text) -> HirImport:
+    HirImport(module_path: module_path, items: [HirImportItem(
+        name: name, alias: nil, resolved: nil)], is_lazy: false, span: fio_span())
+
+fn fio_module(name: text, path: text, imports: [HirImport],
+              fns: [HirFunction]) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    for fn_ in fns: functions[fn_.symbol] = fn_
+    HirModule(name: name, path: path, imports: imports, exports: [], domain_blocks: [],
+        symbols: SymbolTable.new(), functions: functions,
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [])
+
+fn fio_modules(app: HirModule, provider: HirModule) -> Dict<text, HirModule>:
+    var modules: Dict<text, HirModule> = {}
+    modules[app.name] = app
+    modules[provider.name] = provider
+    modules
+
+describe "forbidden-I/O semantic HIR integration":
+    it "rejects a resolved canonical loader call from an interrupt root":
+        var attr = FunctionAttr.default()
+        attr.is_interrupt = true
+        val root = fio_function(200, "irq_tick",
+            fio_body_call(100, "std.common.aspect_pack.apk_load_facet"), attr)
+        val loader = fio_function(100, "apk_load_facet", fio_empty_body(),
+            FunctionAttr.default())
+        val messages = validate_forbidden_io_contexts(fio_modules(
+            fio_module("app", "app.spl",
+                [fio_import("std.common.aspect_pack", "apk_load_facet")], [root]),
+            fio_module("src.lib.common.aspect_pack",
+                "src/lib/common/aspect_pack.spl", [], [loader])))
+        expect(messages.len()).to_equal(1)
+        expect(messages[0]).to_contain("error[E-APACK008]")
+        expect(messages[0]).to_contain("direct-acquire")
+
+    it "does not classify an unrelated same-basename function as loader I/O":
+        var attr = FunctionAttr.default()
+        attr.is_interrupt = true
+        val root = fio_function(201, "irq_tick",
+            fio_body_call(300, "apk_load_facet"), attr)
+        val unrelated = fio_function(201, "apk_load_facet", fio_empty_body(),
+            FunctionAttr.default())
+        val messages = validate_forbidden_io_contexts(fio_modules(
+            fio_module("app", "app.spl",
+                [fio_import("unrelated", "apk_load_facet")], [root]),
+            fio_module("unrelated", "unrelated.spl", [], [unrelated])))
+        expect(messages.len()).to_equal(0)
+
+    it "rejects a canonical loader call from a no-allocation root":
+        var attr = FunctionAttr.default()
+        attr.is_no_alloc = true
+        val root = fio_function(204, "bounded_tick",
+            fio_body_call(999, "apk_load_aspect_manual"), attr)
+        val provider = fio_function(101, "apk_load_aspect_manual",
+            fio_empty_body(), FunctionAttr.default())
+        val messages = validate_forbidden_io_contexts(fio_modules(
+            fio_module("app", "app.spl", [fio_import(
+                "std.common.aspect_pack", "apk_load_aspect_manual")], [root]),
+            fio_module("src.lib.common.aspect_pack",
+                "src/lib/common/aspect_pack.spl", [], [provider])))
+        expect(messages.len()).to_equal(1)
+        expect(messages[0]).to_contain("direct-acquire")
+
+    it "finds a transitive canonical loader call from a non-flat RT root":
+        var attr = FunctionAttr.default()
+        attr.is_rt_hal = true
+        val root = fio_function(202, "control_tick",
+            fio_body_call(203, "app.helper"), attr)
+        val helper = fio_function(203, "helper",
+            fio_body_call(100, "apk_load_facet"), FunctionAttr.default())
+        val loader = fio_function(100, "apk_load_facet", fio_empty_body(),
+            FunctionAttr.default())
+        val messages = validate_forbidden_io_contexts(fio_modules(
+            fio_module("app", "app.spl",
+                [fio_import("std.common.aspect_pack", "apk_load_facet")],
+                [root, helper]),
+            fio_module("src.lib.common.aspect_pack",
+                "src/lib/common/aspect_pack.spl", [], [loader])))
+        expect(messages.len()).to_equal(1)
+        expect(messages[0]).to_contain("transitive-acquire")

@@ -239,7 +239,7 @@ step("Run the wrapper against a timed-out child spec")
 # just because whatever it printed before being killed looked clean.
 val root = "build/test-runner-single-timeout-kill"
 val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-    "printf 'extern fn rt_sleep_ms(ms: i64)\\n\\nuse std.spec.*\\n\\ndescribe \"timeout probe\":\\n    it \"sleeps past the tiny budget\":\\n        rt_sleep_ms(5000)\\n        expect(1).to_equal(1)\\n' > " + root + "/child_timeout_spec.spl && " +
+    "printf 'use std.io_runtime.{thread_sleep}\\nuse std.spec.*\\n\\ndescribe \"timeout probe\":\\n    it \"sleeps past the tiny budget\":\\n        thread_sleep(5000)\\n        expect(1).to_equal(1)\\n' > " + root + "/child_timeout_spec.spl && " +
     "bin/simple run src/app/test_runner_new/test_runner_single.spl " + root + "/child_timeout_spec.spl --timeout=1"
 val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
 val output = stdout + stderr

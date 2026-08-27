@@ -53,7 +53,7 @@ fn _raw_rt_wrapper_is_in_scope(content: text, wrapper: text) -> bool:
     # Auto-fix requires an exact selective import of this symbol. Broad module
     # imports, comments, strings, lookalike module names, and unrelated wrapper
     # symbols are intentionally insufficient evidence for a Safe edit.
-    val modules = ["app.io.mod", "std.io_runtime"]
+    val modules = ["app.io.mod", "std.io_runtime", "std.nogc_sync_mut.io_runtime"]
     for raw_line in raw_rt_lexical_code_lines(content):
         val line = raw_line.trim()
         if not line.starts_with("use "):
@@ -68,7 +68,7 @@ fn _raw_rt_wrapper_is_in_scope(content: text, wrapper: text) -> bool:
     false
 
 impl Linter:
-    static fn new() -> Linter:
+    static fn new(discover_project_config: bool = true) -> Linter:
         var lints = []
 
         # Safety lints
@@ -229,12 +229,25 @@ impl Linter:
 
         # Try to load project-level lint config from simple.sdn
         # Search in common project root locations
-        var config = LintConfig.new()
-        val sdn_path = find_project_sdn(".")
-        if sdn_path != "":
-            config = LintConfig.from_sdn_file(sdn_path)
+        val manifest_free_config = LintConfig.new()
+        var config = manifest_free_config.child()
+        if discover_project_config:
+            val sdn_path = find_project_sdn(".")
+            if sdn_path != "":
+                config = LintConfig.from_sdn_file(sdn_path)
 
-        Linter(lints: lints, results: [], config: config)
+        Linter(
+            lints: lints, results: [], config: config,
+            last_resolved_path: "", last_resolved_config: nil,
+            retain_combined_view: false, last_source_locations_valid: false,
+            last_source_function_lines: {}, last_source_collection_fix_lines: {},
+            last_source_export_star_lines: {}, last_option_me_warnings: [],
+            parsed_sdn_index: {}, parsed_sdn_configs: [],
+            parsed_sdn_count: 0, manifest_free_config: manifest_free_config,
+            critical_dynamic_acquire_loaded: false,
+            critical_dynamic_acquire_mode: "allow",
+            manifest_dir_cache: {}, manifest_dir_cache_count: 0,
+            prepared_config_path: "")
     
     me lint_source(path: String, content: String) -> [LintRunResult]:
         self.results = []
@@ -400,12 +413,14 @@ impl Linter:
 
     me check_raw_rt_access_spl(path: String, content: String):
         val findings = check_raw_rt_access_with_allowlist(content, path, _raw_rt_canonical_allowlist())
-        # There is currently one signature-proven mechanical mapping. Resolve
-        # its import evidence once per file, not once per finding.
+        # Resolve import evidence for signature-proven mechanical mappings once
+        # per file, not once per finding.
         val process_run_fixable = if findings.len() > 0: _raw_rt_wrapper_is_in_scope(content, "process_run") else: false
+        val env_set_fixable = if findings.len() > 0: _raw_rt_wrapper_is_in_scope(content, "env_set") else: false
+        val has_fixable_wrapper = process_run_fixable or env_set_fixable
         var fix_lines: [text] = []
         var fix_line_starts: [i64] = []
-        if process_run_fixable:
+        if has_fixable_wrapper:
             fix_lines = content.split("\n")
             var next_start = 0
             for fix_line in fix_lines:
@@ -415,7 +430,9 @@ impl Linter:
             var lint = LintDiag.new(finding.code, LintLevel.Warn, LintCategory.Correctness, finding.message)
                 .with_fix(finding.note)
             val wrapper = raw_rt_wrapper_replacement(finding.name)
-            if finding.code == "RAW-RT-002" and wrapper == "process_run" and process_run_fixable:
+            val wrapper_fixable = ((wrapper == "process_run" and process_run_fixable) or
+                (wrapper == "env_set" and env_set_fixable))
+            if finding.code == "RAW-RT-002" and finding.kind == "call" and wrapper_fixable:
                 val line_idx = finding.line_num - 1
                 if line_idx >= 0 and line_idx < fix_lines.len():
                     val source_line = fix_lines[line_idx]

@@ -50,19 +50,50 @@ fn incremental_hash_text(content: text) -> i64:
     rt_hash_text(content)
 
 var _compiler_src_fingerprint_memo: text = "@@unset@@"
+var _frontend_src_fingerprint_memo: text = "@@unset@@"
+
+fn incremental_sift_down(mut values: [text], root_index: i64, heap_len: i64):
+    var root = root_index
+    while true:
+        val left = root * 2 + 1
+        if left >= heap_len:
+            return
+
+        var largest = root
+        if values[largest] < values[left]:
+            largest = left
+        val right = left + 1
+        if right < heap_len and values[largest] < values[right]:
+            largest = right
+        if largest == root:
+            return
+
+        val tmp = values[root]
+        values[root] = values[largest]
+        values[largest] = tmp
+        root = largest
 
 fn incremental_sorted_text(values: [text]) -> [text]:
     var result = values
-    var i = 0
-    while i < result.len():
-        var j = i + 1
-        while j < result.len():
-            if result[j] < result[i]:
-                val tmp = result[i]
-                result[i] = result[j]
-                result[j] = tmp
-            j = j + 1
-        i = i + 1
+    if result.len() < 2:
+        return result
+
+    # Build a max heap bottom-up, then place each maximum at the shrinking
+    # suffix.  This keeps the old byte-for-byte text ordering while reducing
+    # every directory sort from quadratic comparisons to O(n log n), with no
+    # auxiliary array allocation beyond the existing value-semantics result.
+    var start = result.len() / 2
+    while start > 0:
+        start = start - 1
+        incremental_sift_down(result, start, result.len())
+
+    var end = result.len()
+    while end > 1:
+        end = end - 1
+        val tmp = result[0]
+        result[0] = result[end]
+        result[end] = tmp
+        incremental_sift_down(result, 0, end)
     result
 
 fn native_build_compiler_source_fingerprint() -> text:
@@ -108,6 +139,43 @@ fn native_build_compiler_source_fingerprint() -> text:
         if digest.len() == 64:
             fp = "{digest.substring(0, 16)}n{lines.len()}"
     _compiler_src_fingerprint_memo = fp
+    fp
+
+fn native_build_frontend_source_fingerprint() -> text:
+    """Fingerprint only parser/cache sources for front-end cache admission.
+
+    Parsed modules are independent of HIR, MIR, and backend implementation
+    edits. Binding their cache to the whole compiler tree caused every unrelated
+    rendering or codegen change to force a cold multi-thousand-file parse.
+    """
+    if _frontend_src_fingerprint_memo != "@@unset@@":
+        return _frontend_src_fingerprint_memo
+    val root = "src/compiler/10.frontend"
+    if not rt_dir_exists(root):
+        _frontend_src_fingerprint_memo = ""
+        return ""
+    var lines: [text] = []
+    var dirs: [text] = [root]
+    var i = 0
+    while i < dirs.len():
+        val dir = dirs[i]
+        i = i + 1
+        val entries = incremental_sorted_text(dir_list(dir) ?? [])
+        for entry in entries:
+            val full = dir + "/" + entry
+            if rt_dir_exists(full):
+                dirs = dirs.push(full)
+            elif entry.ends_with(".spl"):
+                lines = lines.push("{full}|{rt_file_size(full)}|{rt_file_hash_sha256(full)}")
+    var fp = "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    dir_create_all("build")
+    val tmp = "build/.frontend_src_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, lines.join("\n")):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
+        if digest.len() == 64:
+            fp = "{digest.substring(0, 16)}n{lines.len()}"
+    _frontend_src_fingerprint_memo = fp
     fp
 
 fn native_build_compiler_executable_hash() -> text:
@@ -193,6 +261,14 @@ fn native_build_compiler_identity() -> text:
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
         return native_build_producer_identity(hash, compiler_fp, runtime_fp, runtime_bundle)
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
+    "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+pub fn native_build_frontend_identity() -> text:
+    """Identity of the interpreter and front-end sources that create .fpc data."""
+    val frontend_fp = native_build_frontend_source_fingerprint()
+    val hash = native_build_compiler_executable_hash()
+    if hash != "" and frontend_fp != "":
+        return "frontend-exe={hash};sources={frontend_fp}"
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
 pub fn native_build_cache_lane() -> text:
@@ -396,6 +472,56 @@ impl IncrChangeSet:
             if item.kind == ChangeKind.Deleted:
                 out = out.push(item.path)
         out
+
+# Append missing cached paths without repeatedly scanning source_files.  The
+# membership index is deliberately local: it is derived from this invocation,
+# so it cannot become stale when callers construct BuildCache directly or
+# reuse the cache after an invalidation.
+fn incremental_append_deleted_changes(changes: IncrChangeSet,
+                                      source_files: [text],
+                                      cached_paths: [text]) -> IncrChangeSet:
+    var result = changes
+    var source_paths: {text: bool} = {}
+    for path in source_files:
+        source_paths[path] = true
+
+    # Keep cached_paths order exactly; only membership changes from a linear
+    # source_files scan to an expected-constant-time dictionary lookup.
+    for path in cached_paths:
+        if not source_paths.contains_key(path):
+            result = result.add(path, ChangeKind.Deleted)
+    result
+
+# Append the direct dependents of existing Added/Modified changes.  `changes`
+# stays the ordering authority; changed_paths is membership-only and is
+# updated at the same point as every append.  DependencyChanged entries
+# deliberately do not propagate again: this retains the established one-hop
+# invalidation contract independently of for-loop array snapshot semantics.
+fn incremental_propagate_dependency_changes(changes: IncrChangeSet,
+                                            entries: {text: DependencyEntry}) -> IncrChangeSet:
+    var result = changes
+    var changed_paths: {text: bool} = {}
+    for change in result.changes:
+        changed_paths[change.path] = true
+
+    # entries is not mutated, so its key order is stable for every change.  A
+    # single snapshot also avoids allocating a new keys array per iteration.
+    val entry_sources = entries.keys()
+    var change_index: i64 = 0
+    while change_index < result.changes.len():
+        val change = result.changes[change_index]
+        match change.kind:
+            case Added | Modified:
+                for src in entry_sources:
+                    val entry = entries[src]
+                    if entry.dependencies.contains(change.path):
+                        if not changed_paths.contains_key(src):
+                            changed_paths[src] = true
+                            result = result.add(src, ChangeKind.DependencyChanged)
+            case DependencyChanged | Deleted:
+                pass_do_nothing("derived and deleted changes retain the existing non-propagating contract")
+        change_index = change_index + 1
+    result
 
 struct IncrementalCompileResult:
     files: [text]
@@ -617,26 +743,10 @@ impl BuildCache:
                 if cur_fp.is_stale(fresh_fingerprint):
                     changes = changes.add(path, ChangeKind.Modified)
 
-        # Check for deleted files
-        for path in self.fingerprints.keys():
-            if not source_files.contains(path):
-                changes = changes.add(path, ChangeKind.Deleted)
+        changes = incremental_append_deleted_changes(
+            changes, source_files, self.fingerprints.keys())
 
-        # Check transitive dependencies
-        for change in changes.changes:
-            val path = change.path
-            match change.kind:
-                case Added | Modified:
-                    # Find all files that depend on this one
-                    # BUG-001 fix: Use keys()-based iteration (for (k,v) in dict is broken in compiled mode)
-                    for src in self.entries.keys():
-                        val entry = self.entries[src]
-                        if entry.dependencies.contains(path):
-                            if not changes.changed_files().contains(src):
-                                changes = changes.add(src, ChangeKind.DependencyChanged)
-                case _: ()
-
-        changes
+        incremental_propagate_dependency_changes(changes, self.entries)
 
     me invalidate_all():
         """Clear entire cache."""
@@ -913,7 +1023,7 @@ pub fn build_cache_persist(cache: BuildCache):
 
 
 
-export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash, native_build_producer_identity
+export merge_mir, native_build_cache_lane, native_build_cache_scope_key, native_build_compiler_identity, native_build_frontend_identity, native_build_compiler_executable_hash, native_build_producer_identity
 # Path-based entry points: the BuildCache instance never crosses a module
 # boundary (the current self-hosted child binary erases class values that do,
 # losing both methods and fields). All parameters and results are plain data.

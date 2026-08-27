@@ -933,7 +933,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.expect(&TokenKind::Colon)?;
                     let block = self.parse_block()?;
-                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements, vec![])))
                 } else if self.peek_is(&TokenKind::LParen) && self.unsafe_block_header_is_valid() {
                     // Capability-scoped form at STATEMENT position:
                     // `unsafe(capabilities: [ffi]):`. Delegate to the single
@@ -946,15 +946,14 @@ impl<'a> Parser<'a> {
                     // Capability-scoped form:
                     // `unsafe(capabilities: [ffi, raw_ptr]): ...`
                     //
-                    // The seed AST records the unsafe block but does not yet
-                    // carry capability names. Parse the complete call-shaped
-                    // header so execution never mistakes `unsafe` for a
-                    // runtime function; the self-hosted HIR owns capability
-                    // preservation and enforcement.
+                    // Legacy call-shaped header fallback. The validated
+                    // capability-scoped form above preserves capability names;
+                    // this branch stays capability-empty and therefore cannot
+                    // grant FFI authority accidentally.
                     let _capability_header = self.parse_expression()?;
                     self.expect(&TokenKind::Colon)?;
                     let block = self.parse_block()?;
-                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements)))
+                    Ok(Node::Expression(Expr::UnsafeBlock(block.statements, vec![])))
                 } else {
                     self.parse_expression_or_assignment()
                 }
@@ -1150,6 +1149,22 @@ impl<'a> Parser<'a> {
                 | TokenKind::Examples
                 | TokenKind::AndThen
                 | TokenKind::Identifier { .. }
+                // `self` and `_` start a statement just as an identifier does
+                // (`self.slots[i].state = X`, `_ = f()`), but were missing from
+                // this list. Both callers ask "can a statement start here?":
+                // `parse_block_after_newline` (flat-body shape) and
+                // `header_continuation_is_equal_column`. The second is what made
+                // this visible: an `if`/`while` whose condition used a
+                // multi-line operator continuation at the SAME column as the
+                // body emits no fresh Indent for the body, so the parser must
+                // recognise the body's first token as a statement start. With
+                // `self` missing it fell through to `expect(Indent)` and failed
+                // with "expected Indent, found Self_" — the exact error in
+                // src/os/kernel/loader/authenticated_fs_exec_submission_service_v1.spl.
+                // Item 23 of doc/08_tracking/bug/
+                // unit_sweep_language_and_interpreter_gaps_2026-08-26.md.
+                | TokenKind::Self_
+                | TokenKind::Underscore
         )
     }
 

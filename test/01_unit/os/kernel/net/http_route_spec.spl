@@ -28,6 +28,11 @@ describe "http route: happy paths":
             HttpRouteKind.Status: expect(true).to_equal(true)
             _: expect("status").to_equal("other")
 
+    it "GET / accepts HTTP/1.0":
+        match _kind("GET / HTTP/1.0\r\n\r\n"):
+            HttpRouteKind.Status: expect(true).to_equal(true)
+            _: expect("status").to_equal("other")
+
     it "GET /health classifies as Health":
         val route = http_classify_request("GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
         match route.kind:
@@ -40,6 +45,21 @@ describe "http route: happy paths":
             HttpRouteKind.File: expect(route.file_path).to_equal("/VERSION.TXT")
             _: expect("file").to_equal("other")
 
+    it "query data does not change fixed endpoint identity":
+        match _kind("GET /?view=compact HTTP/1.1\r\n\r\n"):
+            HttpRouteKind.Status: expect(true).to_equal(true)
+            _: expect("status").to_equal("other")
+        match _kind("GET /health?probe=ready HTTP/1.1\r\n\r\n"):
+            HttpRouteKind.Health: expect(true).to_equal(true)
+            _: expect("health").to_equal("other")
+
+    it "query data is not incorporated into a filesystem name":
+        val route = http_classify_request(
+            "GET /files/VERSION.TXT?download=1 HTTP/1.1\r\n\r\n")
+        match route.kind:
+            HttpRouteKind.File: expect(route.file_path).to_equal("/VERSION.TXT")
+            _: expect("file").to_equal("other")
+
 describe "http route: fail-closed hardening":
     it "a malformed request line is BadRequest":
         match _kind("GARBAGE\r\n\r\n"):
@@ -48,6 +68,14 @@ describe "http route: fail-closed hardening":
 
     it "a request with no HTTP version is BadRequest":
         match _kind("GET /\r\n\r\n"):
+            HttpRouteKind.BadRequest: expect(true).to_equal(true)
+            _: expect("badrequest").to_equal("other")
+
+    it "rejects invented HTTP/1.x versions":
+        match _kind("GET / HTTP/1.xyz\r\n\r\n"):
+            HttpRouteKind.BadRequest: expect(true).to_equal(true)
+            _: expect("badrequest").to_equal("other")
+        match _kind("GET / HTTP/1.2\r\n\r\n"):
             HttpRouteKind.BadRequest: expect(true).to_equal(true)
             _: expect("badrequest").to_equal("other")
 

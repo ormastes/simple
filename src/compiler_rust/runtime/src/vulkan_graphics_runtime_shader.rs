@@ -231,12 +231,8 @@ pub extern "C" fn rt_vulkan_destroy_shader(_module: i64) -> i64 {
 
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Create a compute pipeline.
-///
-/// `shader` is the handle from `rt_vulkan_compile_spirv`.
-#[no_mangle]
 #[cfg(feature = "vulkan")]
-pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, entry: i64, push_size: i64) -> i64 {
+fn create_compute_pipeline_named(shader: i64, entry_name: &str, push_size: i64) -> i64 {
     let mut state = STATE.lock();
     if !(0..=u32::MAX as i64).contains(&push_size) {
         state.set_error("create_compute_pipeline: push size is outside u32 range".to_string());
@@ -260,15 +256,7 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, entry: i64, pus
         return 0;
     };
 
-    let entry_name = match runtime_entry_name(entry) {
-        Ok(name) => name,
-        Err(e) => {
-            state.set_error(format!("create_compute_pipeline: {e}"));
-            return 0;
-        }
-    };
-
-    match ComputePipeline::new(device, &spirv_owned, &entry_name, push_size as u32) {
+    match ComputePipeline::new(device, &spirv_owned, entry_name, push_size as u32) {
         Ok(pipe) => {
             let h = alloc_handle();
             state.compute_pipelines.insert(h, Arc::new(pipe));
@@ -281,9 +269,59 @@ pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, entry: i64, pus
     }
 }
 
+/// Create a compute pipeline.
+///
+/// `shader` is the handle from `rt_vulkan_compile_spirv`.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_create_compute_pipeline(shader: i64, entry: i64, push_size: i64) -> i64 {
+    let entry_name = match runtime_entry_name(entry) {
+        Ok(name) => name,
+        Err(e) => {
+            STATE.lock().set_error(format!("create_compute_pipeline: {e}"));
+            return 0;
+        }
+    };
+    create_compute_pipeline_named(shader, &entry_name, push_size)
+}
+
+/// Provider ABI: call-scoped UTF-8 entry-point loan. No RuntimeValue crosses
+/// from the independently linked core heap into the provider heap.
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_create_compute_pipeline_raw(
+    shader: i64,
+    entry_ptr: i64,
+    entry_len: i64,
+    push_size: i64,
+) -> i64 {
+    if entry_ptr <= 0 || entry_len <= 0 || entry_len > 4096 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(entry_ptr as *const u8, entry_len as usize) };
+    let Ok(entry_name) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    if entry_name.as_bytes().contains(&0) {
+        return 0;
+    }
+    create_compute_pipeline_named(shader, entry_name, push_size)
+}
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_create_compute_pipeline(_shader: i64, _entry: i64, _push_size: i64) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_create_compute_pipeline_raw(
+    _shader: i64,
+    _entry_ptr: i64,
+    _entry_len: i64,
+    _push_size: i64,
+) -> i64 {
     0
 }
 

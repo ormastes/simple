@@ -77,6 +77,7 @@ respectively (`src/compiler/20.hir/hir_types.spl:643-666`).
 """
 
 use std.spec
+use std.io.{file_read}
 use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirField, HirStruct, HirTypeParam}
 use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind}
 use compiler.common.diagnostics.span.{Span}
@@ -213,7 +214,20 @@ describe "validate_value_struct_layouts rejects genuine direct by-value cycles":
         val hir = mk_module("vsl_chain_cycle", table, [a_struct, b_struct, c_struct])
         val errors = validate_value_struct_layouts(["vsl_chain_cycle"], [hir])
         expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(errors[0]).to_contain("recursive by-value struct layout")
+        expect(errors[0]).to_equal(
+            "recursive by-value struct layout: VslChainA.b -> VslChainB.c -> VslChainC.a -> VslChainA")
+
+    it "keeps root insertion order when more than one cycle exists":
+        step("Verify: keeps root insertion order when more than one cycle exists")
+        var table = SymbolTable.new()
+        val first_sym = table.define("VslFirstCycle", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val second_sym = table.define("VslSecondCycle", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val first_struct = mk_struct(first_sym, "VslFirstCycle", [mk_field("first", named_type(first_sym))], [])
+        val second_struct = mk_struct(second_sym, "VslSecondCycle", [mk_field("second", named_type(second_sym))], [])
+        val hir = mk_module("vsl_cycle_order", table, [first_struct, second_struct])
+        val errors = validate_value_struct_layouts(["vsl_cycle_order"], [hir])
+        expect(errors).to_equal([
+            "recursive by-value struct layout: VslFirstCycle.first -> VslFirstCycle"])
 
 describe "validate_value_struct_layouts accepts layouts that only look recursive":
     it "does not flag self-reference through an optional (T?) indirection — classic linked-list node":
@@ -312,6 +326,23 @@ describe "validate_value_struct_layouts aligned input boundary":
             ["physical.vsl_alias", "physical.vsl_alias"], [hir, hir])
         expect(errors.len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
+    it "keeps one ordered root while the last duplicate definition supplies its layout":
+        step("Verify: keeps one ordered root while the last duplicate definition supplies its layout")
+        var first_table = SymbolTable.new()
+        val first_sym = first_table.define("VslDuplicate", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val first_struct = mk_struct(first_sym, "VslDuplicate", [mk_field("value", i64_type())], [])
+        val first_hir = mk_module("registry.first_alias", first_table, [first_struct])
+
+        var second_table = SymbolTable.new()
+        val second_sym = second_table.define("VslDuplicate", SymbolKind.Struct, nil, mk_span(), Visibility.Public, false, nil)
+        val second_struct = mk_struct(second_sym, "VslDuplicate", [mk_field("self", named_type(second_sym))], [])
+        val second_hir = mk_module("registry.second_alias", second_table, [second_struct])
+
+        val errors = validate_value_struct_layouts(
+            ["physical.duplicate", "physical.duplicate"], [first_hir, second_hir])
+        expect(errors).to_equal([
+            "recursive by-value struct layout: VslDuplicate.self -> VslDuplicate"])
+
     it "resolves a by-value cycle through aligned physical module keys":
         step("Verify: resolves a by-value cycle through aligned physical module keys")
         var left_table = SymbolTable.new()
@@ -330,3 +361,17 @@ describe "validate_value_struct_layouts aligned input boundary":
             ["physical.left", "physical.right"], [left_hir, right_hir])
         expect(errors.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(errors[0]).to_contain("recursive by-value struct layout")
+
+describe "value struct layout membership-index source contract":
+    it "keeps ordered traversal arrays and uses dictionaries only for membership":
+        step("Verify: keeps ordered traversal arrays and uses dictionaries only for membership")
+        val source = file_read("src/compiler/35.semantics/value_struct_layout.spl")
+        expect(source).to_contain("var roots: [text] = []")
+        expect(source).to_contain("var root_keys: Dict<text, bool> = {}")
+        expect(source).to_contain("for root in roots:")
+        expect(source).to_contain("var visited: Dict<text, bool> = {}")
+        expect(source).to_contain("if visited.has(walk.node_key):")
+        expect(source).to_contain("if not visited.has(target):")
+        expect(source.contains("roots.contains(")).to_equal(false)
+        expect(source.contains("visited.contains(")).to_equal(false)
+        expect(source.contains("seen_module_keys")).to_equal(false)

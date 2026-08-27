@@ -105,6 +105,39 @@ describe "settlement export updates are transactional":
         expect(container.linker.get_export("old") == nil).to_equal(true)
         expect(container.linker.get_export("fresh") != nil).to_equal(true)
 
+    it "deduplicates replay membership while preserving stale and direct ownership semantics":
+        step("Verify: deduplicates replay membership while preserving stale and direct ownership semantics")
+        val container = SettlementContainer.create()
+        expect(container.add_module("A", "/a.smf").is_ok()).to_equal(true)
+        # Exercise the defensive replay path with externally supplied duplicate
+        # and stale module IDs. The stale ID remains a module owner for the
+        # preservation decision even though it cannot be replayed.
+        container.linker.add_module("A")
+        container.linker.add_module("ghost")
+        expect(container.linker.add_export(
+            export_symbol("ghost_owned", 30, "ghost", SymbolBinding.Strong)
+        ).is_ok()).to_equal(true)
+        expect(container.linker.add_export(
+            export_symbol("direct", 40, "__direct__", SymbolBinding.Strong)
+        ).is_ok()).to_equal(true)
+
+        expect(container.set_exports("A", [
+            export_symbol("owned", 20, "A", SymbolBinding.Strong)
+        ]).is_ok()).to_equal(true)
+        expect(container.linker.get_export("ghost_owned") == nil).to_equal(true)
+        match container.linker.get_export("owned"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("A")
+                expect(symbol.address).to_equal(20)
+            case nil:
+                expect(false).to_equal(true)
+        match container.linker.get_export("direct"):
+            case Some(symbol):
+                expect(symbol.module_id).to_equal("__direct__")
+                expect(symbol.address).to_equal(40)
+            case nil:
+                expect(false).to_equal(true)
+
     it "preserves fallback exports across an unrelated module update":
         step("Verify: preserves fallback exports across an unrelated module update")
         val container = SettlementContainer.create()
@@ -229,24 +262,56 @@ describe "settlement export updates are transactional":
             case Ok(order): expect(order).to_equal(["base", "left", "right", "app"])
             case Err(_): expect(false).to_equal(true)
 
+    it "keeps the unprocessed ready suffix lexical as modules are unlocked":
+        step("Verify: keeps the unprocessed ready suffix lexical as modules are unlocked")
+        val container = SettlementContainer.create()
+        for id in ["zulu", "yankee", "beta", "alpha", "aardvark", "omega"]:
+            expect(container.add_module(id, "/{id}.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("aardvark", "alpha").is_ok()).to_equal(true)
+        expect(container.add_dependency("beta", "alpha").is_ok()).to_equal(true)
+        expect(container.add_dependency("yankee", "alpha").is_ok()).to_equal(true)
+        expect(container.add_dependency("omega", "yankee").is_ok()).to_equal(true)
+        match container.topological_sort():
+            case Ok(order): expect(order).to_equal(["alpha", "aardvark", "beta", "yankee", "omega", "zulu"])
+            case Err(_): expect(false).to_equal(true)
+
+    it "keeps a wide ready frontier lexical across interleaved unlocks":
+        step("Verify: keeps a wide ready frontier lexical across interleaved unlocks")
+        val container = SettlementContainer.create()
+        for id in ["zulu", "yankee", "xray", "tail", "root", "mike", "kilo", "charlie", "bravo", "alpha"]:
+            expect(container.add_module(id, "/{id}.smf").is_ok()).to_equal(true)
+        expect(container.add_dependency("bravo", "alpha").is_ok()).to_equal(true)
+        expect(container.add_dependency("root", "bravo").is_ok()).to_equal(true)
+        expect(container.add_dependency("root", "charlie").is_ok()).to_equal(true)
+        expect(container.add_dependency("tail", "root").is_ok()).to_equal(true)
+        expect(container.add_dependency("tail", "mike").is_ok()).to_equal(true)
+        match container.topological_sort():
+            case Ok(order):
+                expect(order).to_equal(["alpha", "bravo", "charlie", "kilo", "mike", "root", "tail", "xray", "yankee", "zulu"])
+            case Err(_):
+                expect(false).to_equal(true)
+
     it "rejects cycles without publishing a partial load order":
         step("Verify: rejects cycles without publishing a partial load order")
         val container = SettlementContainer.create()
-        for id in ["A", "B", "C", "D"]:
+        for id in ["A", "B", "C", "D", "E"]:
             expect(container.add_module(id, "/{id}.smf").is_ok()).to_equal(true)
         expect(container.add_dependency("A", "B").is_ok()).to_equal(true)
         expect(container.add_dependency("B", "C").is_ok()).to_equal(true)
+        expect(container.add_dependency("E", "A").is_ok()).to_equal(true)
         match container.topological_sort():
-            case Ok(order): expect(order).to_equal(["C", "B", "A", "D"])
+            case Ok(order): expect(order).to_equal(["C", "B", "A", "D", "E"])
             case Err(_): expect(false).to_equal(true)
         expect(container.add_dependency("C", "A").is_ok()).to_equal(true)
         expect(container.get_load_order().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
         expect(container.modules["A"].load_order).to_equal(-1)
         match container.topological_sort():
             case Err(ContainerError.CircularDependency(cycle)):
-                expect(cycle).to_equal(["A", "B", "C"])
+                # E is not itself in the cycle, but remains blocked by it and
+                # therefore preserves the established unprocessed-set error.
+                expect(cycle).to_equal(["A", "B", "C", "E"])
             case _:
                 expect(false).to_equal(true)
         expect(container.get_load_order().len()).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        for id in ["A", "B", "C", "D"]:
+        for id in ["A", "B", "C", "D", "E"]:
             expect(container.modules[id].load_order).to_equal(-1)  # oracle: -1 — named expected value from the requirement

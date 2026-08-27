@@ -1,0 +1,415 @@
+"""Pure-Simple RV32 QEMU-virt VirtIO-MMIO block owner.
+
+The public value is only an opaque generation token. All queue, DMA, progress,
+and quarantine state remains in this package-private single-owner registry, so
+copying a Simple value cannot duplicate device authority or mutable ring state.
+"""
+
+use os.kernel.boot.mmio_hardware.{
+    hardware_mmio_read8, hardware_mmio_read16, hardware_mmio_read32,
+    hardware_mmio_write8, hardware_mmio_write16, hardware_mmio_write32,
+    mmio_memory_barrier
+}
+use os.kernel.boot.riscv_noalloc_pmm.{riscv_noalloc_alloc_page, riscv_noalloc_pmm_is_ready}
+use std.fs_driver.block_device.{BlockDevice, BlockDeviceDurabilityPortV1}
+use os.services.vfs.vfs_boot_state.{
+    vfs_state_reset_rootfs, vfs_state_mount, vfs_state_mark_rootfs_ready
+}
+use os.kernel.loader.authenticated_fs_exec_submission_service_v1.{
+    authenticated_fs_exec_user_install_canonical_vfs_owner_v1
+}
+use std.fs_driver.fat32_stub.{FsFat32Driver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.types.{MountOptions}
+use std.fs_driver.ops.{FsDriver}
+use std.fs_driver.capability.{Capability}
+
+val RV32_VBLK_FIRST: u64 = 0x10001000u64
+val RV32_VBLK_STRIDE: u64 = 0x1000u64
+val RV32_VBLK_SLOTS: u64 = 8u64
+val RV32_VBLK_MAGIC: u32 = 0x74726976u32
+val RV32_VBLK_DEVICE_ID: u32 = 2u32
+val RV32_VBLK_QUEUE_SIZE: u32 = 8u32
+val RV32_VBLK_AVAIL: u64 = 128u64
+val RV32_VBLK_USED: u64 = 152u64
+val RV32_VBLK_HEADER: u64 = 256u64
+val RV32_VBLK_DATA: u64 = 272u64
+val RV32_VBLK_STATUS_BYTE: u64 = 784u64
+val RV32_VBLK_SECTOR_BYTES: u32 = 512u32
+val RV32_VBLK_USED_READ_LEN: u32 = 513u32
+val RV32_VBLK_USED_WRITE_LEN: u32 = 1u32
+val RV32_VBLK_USED_FLUSH_LEN: u32 = 1u32
+val RV32_VBLK_F_RO: u32 = 1u32 << 5u32
+val RV32_VBLK_F_FLUSH: u32 = 1u32 << 9u32
+val RV32_VBLK_POLL_LIMIT: u32 = 1000000u32
+val RV32_VBLK_INIT_POLL_LIMIT: u32 = 4096u32
+val VIRTIO_STATUS_ACKNOWLEDGE: u32 = 1u32
+val VIRTIO_STATUS_DRIVER: u32 = 2u32
+val VIRTIO_STATUS_DRIVER_OK: u32 = 4u32
+val VIRTIO_STATUS_FEATURES_OK: u32 = 8u32
+val VIRTIO_STATUS_FAILED: u32 = 128u32
+
+# Opaque copyable coordinate; the registry below owns all mutable authority.
+class Rv32VirtioBlkOwner:
+    generation: u64
+
+var g_rv32_vblk_live: bool = false
+var g_rv32_vblk_quarantined: bool = false
+var g_rv32_vblk_generation: u64 = 1u64
+var g_rv32_vblk_base: u64 = 0u64
+var g_rv32_vblk_dma_page: u64 = 0u64
+var g_rv32_vblk_capacity: u64 = 0u64
+var g_rv32_vblk_read_only: bool = false
+var g_rv32_vblk_flush_supported: bool = false
+var g_rv32_vblk_avail_index: u16 = 0u16
+var g_rv32_vblk_used_index: u16 = 0u16
+var g_rv32_vblk_busy: bool = false
+
+fn _rv32_vblk_token_live(owner: Rv32VirtioBlkOwner) -> bool:
+    g_rv32_vblk_live and not g_rv32_vblk_quarantined and
+        owner.generation != 0u64 and owner.generation == g_rv32_vblk_generation
+
+fn _rv32_vblk_index_next(index: u16) -> u16:
+    # Virtqueue indices wrap modulo 2^16 by contract. Keep that behavior
+    # explicit instead of depending on target-specific integer overflow.
+    if index == 0xffffu16: return 0u16
+    index + 1u16
+
+fn _rv32_vblk_status(base: u64, value: u32):
+    hardware_mmio_write32(base + 0x70u64, value)
+    mmio_memory_barrier()
+
+fn _rv32_vblk_fail_runtime():
+    g_rv32_vblk_quarantined = true
+    g_rv32_vblk_live = false
+    g_rv32_vblk_busy = true
+    if g_rv32_vblk_generation != 0xffffffffffffffffu64:
+        g_rv32_vblk_generation = g_rv32_vblk_generation + 1u64
+    if g_rv32_vblk_base != 0u64:
+        _rv32_vblk_status(g_rv32_vblk_base, VIRTIO_STATUS_FAILED)
+
+fn _rv32_vblk_init_fail(base: u64, dma_owned: bool):
+    _rv32_vblk_status(base, VIRTIO_STATUS_FAILED)
+    g_rv32_vblk_live = false
+    g_rv32_vblk_busy = false
+    if dma_owned:
+        # The noalloc PMM is monotonic, so a page once offered to a device is
+        # permanently quarantined instead of being silently recycled.
+        g_rv32_vblk_quarantined = true
+
+fn _rv32_vblk_reset(base: u64) -> bool:
+    hardware_mmio_write32(base + 0x70u64, 0u32)
+    mmio_memory_barrier()
+    var polls: u32 = 0u32
+    while hardware_mmio_read32(base + 0x70u64) != 0u32 and polls < RV32_VBLK_INIT_POLL_LIMIT:
+        polls = polls + 1u32
+    hardware_mmio_read32(base + 0x70u64) == 0u32
+
+fn _rv32_vblk_zero_page(page: u64):
+    var offset: u64 = 0u64
+    while offset < 4096u64:
+        hardware_mmio_write32(page + offset, 0u32)
+        offset = offset + 4u64
+
+fn _rv32_vblk_write_addr(base: u64, register_low: u64, address: u64):
+    hardware_mmio_write32(base + register_low, address.to_u32())
+    hardware_mmio_write32(base + register_low + 4u64, (address >> 32u32).to_u32())
+
+fn _rv32_vblk_desc(index: u64, address: u64, length: u32, flags: u16, next: u16):
+    val descriptor = g_rv32_vblk_dma_page + index * 16u64
+    hardware_mmio_write32(descriptor, address.to_u32())
+    hardware_mmio_write32(descriptor + 4u64, (address >> 32u32).to_u32())
+    hardware_mmio_write32(descriptor + 8u64, length)
+    hardware_mmio_write16(descriptor + 12u64, flags)
+    hardware_mmio_write16(descriptor + 14u64, next)
+
+fn _rv32_vblk_probe() -> u64:
+    var slot: u64 = 0u64
+    while slot < RV32_VBLK_SLOTS:
+        val base = RV32_VBLK_FIRST + slot * RV32_VBLK_STRIDE
+        if hardware_mmio_read32(base) == RV32_VBLK_MAGIC and
+            hardware_mmio_read32(base + 8u64) == RV32_VBLK_DEVICE_ID:
+            return base
+        slot = slot + 1u64
+    0u64
+
+fn _rv32_vblk_capacity_stable(base: u64) -> u64:
+    # VirtIO 4.2.2: config_generation must match around multiword reads.
+    var attempts: u32 = 0u32
+    while attempts < 16u32:
+        val before = hardware_mmio_read32(base + 0xfcu64)
+        val low = hardware_mmio_read32(base + 0x100u64).to_u64()
+        val high = hardware_mmio_read32(base + 0x104u64).to_u64()
+        val after = hardware_mmio_read32(base + 0xfcu64)
+        if before == after:
+            return low | (high << 32u32)
+        attempts = attempts + 1u32
+    0u64
+
+fn _rv32_vblk_submit(expected_used_len: u32) -> Result<bool, text>:
+    """Publish descriptor zero and consume exactly its next used element."""
+    val expected_used = _rv32_vblk_index_next(g_rv32_vblk_used_index)
+    val avail = g_rv32_vblk_dma_page + RV32_VBLK_AVAIL
+    val ring_slot = g_rv32_vblk_avail_index.to_u64() % RV32_VBLK_QUEUE_SIZE.to_u64()
+    hardware_mmio_write16(avail + 4u64 + ring_slot * 2u64, 0u16)
+    g_rv32_vblk_avail_index = _rv32_vblk_index_next(g_rv32_vblk_avail_index)
+    mmio_memory_barrier()
+    hardware_mmio_write16(avail + 2u64, g_rv32_vblk_avail_index)
+    mmio_memory_barrier()
+    hardware_mmio_write32(g_rv32_vblk_base + 0x50u64, 0u32)
+
+    val used = g_rv32_vblk_dma_page + RV32_VBLK_USED
+    var polls: u32 = 0u32
+    var observed = hardware_mmio_read16(used + 2u64)
+    while observed == g_rv32_vblk_used_index and polls < RV32_VBLK_POLL_LIMIT:
+        observed = hardware_mmio_read16(used + 2u64)
+        polls = polls + 1u32
+    if observed != expected_used:
+        _rv32_vblk_fail_runtime()
+        return Err("rv32 virtio-blk: timeout or non-sequential used index")
+    mmio_memory_barrier()
+    val used_slot = g_rv32_vblk_used_index.to_u64() % RV32_VBLK_QUEUE_SIZE.to_u64()
+    val used_element = used + 4u64 + used_slot * 8u64
+    if hardware_mmio_read32(used_element) != 0u32 or
+        hardware_mmio_read32(used_element + 4u64) != expected_used_len:
+        _rv32_vblk_fail_runtime()
+        return Err("rv32 virtio-blk: invalid used element")
+    g_rv32_vblk_used_index = observed
+    val interrupt_status = hardware_mmio_read32(g_rv32_vblk_base + 0x60u64) & 3u32
+    if interrupt_status != 0u32:
+        hardware_mmio_write32(g_rv32_vblk_base + 0x64u64, interrupt_status)
+        mmio_memory_barrier()
+    Ok(true)
+
+fn riscv32_virtio_blk_owner_initialize() -> Result<Rv32VirtioBlkOwner, text>:
+    if g_rv32_vblk_live or g_rv32_vblk_busy:
+        return Err("rv32 virtio-blk: owner already installed")
+    if g_rv32_vblk_quarantined:
+        return Err("rv32 virtio-blk: owner registry quarantined")
+    if not riscv_noalloc_pmm_is_ready():
+        return Err("rv32 virtio-blk: noalloc PMM is not ready")
+    val base = _rv32_vblk_probe()
+    if base == 0u64:
+        return Err("rv32 virtio-blk: no block device in QEMU virt MMIO range")
+    if hardware_mmio_read32(base + 4u64) != 2u32:
+        return Err("rv32 virtio-blk: modern MMIO version 2 required")
+    if not _rv32_vblk_reset(base):
+        _rv32_vblk_init_fail(base, false)
+        return Err("rv32 virtio-blk: reset did not complete")
+
+    _rv32_vblk_status(base, VIRTIO_STATUS_ACKNOWLEDGE)
+    _rv32_vblk_status(base, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER)
+    hardware_mmio_write32(base + 0x14u64, 0u32)
+    mmio_memory_barrier()
+    val offered_low = hardware_mmio_read32(base + 0x10u64)
+    hardware_mmio_write32(base + 0x14u64, 1u32)
+    mmio_memory_barrier()
+    if (hardware_mmio_read32(base + 0x10u64) & 1u32) == 0u32:
+        _rv32_vblk_init_fail(base, false)
+        return Err("rv32 virtio-blk: VIRTIO_F_VERSION_1 unavailable")
+    hardware_mmio_write32(base + 0x24u64, 0u32)
+    # RO is a device property, not permission to ignore: retain it in the
+    # negotiated set and use it to suppress every writable publication.
+    val accepted_low = offered_low & (RV32_VBLK_F_RO | RV32_VBLK_F_FLUSH)
+    hardware_mmio_write32(base + 0x20u64, accepted_low)
+    hardware_mmio_write32(base + 0x24u64, 1u32)
+    hardware_mmio_write32(base + 0x20u64, 1u32)
+    mmio_memory_barrier()
+    val feature_status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK
+    _rv32_vblk_status(base, feature_status)
+    if (hardware_mmio_read32(base + 0x70u64) & VIRTIO_STATUS_FEATURES_OK) == 0u32:
+        _rv32_vblk_init_fail(base, false)
+        return Err("rv32 virtio-blk: feature negotiation rejected")
+
+    hardware_mmio_write32(base + 0x30u64, 0u32)
+    if hardware_mmio_read32(base + 0x44u64) != 0u32:
+        _rv32_vblk_init_fail(base, false)
+        return Err("rv32 virtio-blk: queue zero already ready")
+    if hardware_mmio_read32(base + 0x34u64) < RV32_VBLK_QUEUE_SIZE:
+        _rv32_vblk_init_fail(base, false)
+        return Err("rv32 virtio-blk: queue smaller than eight descriptors")
+
+    val page = riscv_noalloc_alloc_page()
+    val page_end = page + 4095u64
+    if page == 0u64 or page_end < page or page_end >= 0x100000000u64 or (page & 0xfffu64) != 0u64:
+        _rv32_vblk_init_fail(base, page != 0u64)
+        return Err("rv32 virtio-blk: DMA page is not one aligned RV32-addressable page")
+    _rv32_vblk_zero_page(page)
+    g_rv32_vblk_base = base
+    g_rv32_vblk_dma_page = page
+
+    hardware_mmio_write32(base + 0x38u64, RV32_VBLK_QUEUE_SIZE)
+    _rv32_vblk_write_addr(base, 0x80u64, page)
+    _rv32_vblk_write_addr(base, 0x90u64, page + RV32_VBLK_AVAIL)
+    _rv32_vblk_write_addr(base, 0xa0u64, page + RV32_VBLK_USED)
+    mmio_memory_barrier()
+    hardware_mmio_write32(base + 0x44u64, 1u32)
+    mmio_memory_barrier()
+    if hardware_mmio_read32(base + 0x44u64) != 1u32:
+        _rv32_vblk_init_fail(base, true)
+        return Err("rv32 virtio-blk: QueueReady did not latch")
+
+    _rv32_vblk_status(base, feature_status | VIRTIO_STATUS_DRIVER_OK)
+    if (hardware_mmio_read32(base + 0x70u64) & VIRTIO_STATUS_DRIVER_OK) == 0u32:
+        _rv32_vblk_init_fail(base, true)
+        return Err("rv32 virtio-blk: DRIVER_OK did not latch")
+    val capacity = _rv32_vblk_capacity_stable(base)
+    if capacity == 0u64:
+        _rv32_vblk_init_fail(base, true)
+        return Err("rv32 virtio-blk: capacity was zero or unstable")
+    if g_rv32_vblk_generation == 0xffffffffffffffffu64:
+        _rv32_vblk_init_fail(base, true)
+        return Err("rv32 virtio-blk: generation exhausted")
+
+    g_rv32_vblk_generation = g_rv32_vblk_generation + 1u64
+    g_rv32_vblk_capacity = capacity
+    g_rv32_vblk_read_only = (accepted_low & RV32_VBLK_F_RO) != 0u32
+    g_rv32_vblk_flush_supported = (accepted_low & RV32_VBLK_F_FLUSH) != 0u32
+    g_rv32_vblk_avail_index = 0u16
+    g_rv32_vblk_used_index = 0u16
+    g_rv32_vblk_busy = false
+    g_rv32_vblk_live = true
+    Ok(Rv32VirtioBlkOwner(generation: g_rv32_vblk_generation))
+
+impl Rv32VirtioBlkOwner:
+    me fn _read_one(lba: u64) -> Result<[u8], text>:
+        if not _rv32_vblk_token_live(self):
+            return Err("rv32 virtio-blk: stale or quarantined owner token")
+        if g_rv32_vblk_busy:
+            return Err("rv32 virtio-blk: concurrent owner use rejected")
+        if lba >= g_rv32_vblk_capacity:
+            return Err("rv32 virtio-blk: read beyond capacity")
+        g_rv32_vblk_busy = true
+
+        val header = g_rv32_vblk_dma_page + RV32_VBLK_HEADER
+        val data = g_rv32_vblk_dma_page + RV32_VBLK_DATA
+        val status = g_rv32_vblk_dma_page + RV32_VBLK_STATUS_BYTE
+        hardware_mmio_write32(header, 0u32)
+        hardware_mmio_write32(header + 4u64, 0u32)
+        hardware_mmio_write32(header + 8u64, lba.to_u32())
+        hardware_mmio_write32(header + 12u64, (lba >> 32u32).to_u32())
+        hardware_mmio_write8(status, 0xffu8)
+        _rv32_vblk_desc(0u64, header, 16u32, 1u16, 1u16)
+        _rv32_vblk_desc(1u64, data, RV32_VBLK_SECTOR_BYTES, 3u16, 2u16)
+        _rv32_vblk_desc(2u64, status, 1u32, 2u16, 0u16)
+
+        if _rv32_vblk_submit(RV32_VBLK_USED_READ_LEN).is_err():
+            return Err("rv32 virtio-blk: read submission failed")
+        if hardware_mmio_read8(status) != 0u8:
+            _rv32_vblk_fail_runtime()
+            return Err("rv32 virtio-blk: device rejected read")
+        var bytes: [u8] = []
+        var index: u64 = 0u64
+        while index < RV32_VBLK_SECTOR_BYTES.to_u64():
+            bytes.push(hardware_mmio_read8(data + index))
+            index = index + 1u64
+        g_rv32_vblk_busy = false
+        Ok(bytes)
+
+    me fn _write_one(lba: u64, bytes: [u8]) -> Result<bool, text>:
+        if not _rv32_vblk_token_live(self):
+            return Err("rv32 virtio-blk: stale or quarantined owner token")
+        if g_rv32_vblk_read_only:
+            return Err("rv32 virtio-blk: device is read-only")
+        if not g_rv32_vblk_flush_supported:
+            return Err("rv32 virtio-blk: durable writes unavailable without FLUSH")
+        if g_rv32_vblk_busy:
+            return Err("rv32 virtio-blk: concurrent owner use rejected")
+        if lba >= g_rv32_vblk_capacity:
+            return Err("rv32 virtio-blk: write beyond capacity")
+        if bytes.len() != RV32_VBLK_SECTOR_BYTES.to_i32():
+            return Err("rv32 virtio-blk: write requires exactly one sector")
+        g_rv32_vblk_busy = true
+        val header = g_rv32_vblk_dma_page + RV32_VBLK_HEADER
+        val data = g_rv32_vblk_dma_page + RV32_VBLK_DATA
+        val status = g_rv32_vblk_dma_page + RV32_VBLK_STATUS_BYTE
+        hardware_mmio_write32(header, 1u32)
+        hardware_mmio_write32(header + 4u64, 0u32)
+        hardware_mmio_write32(header + 8u64, lba.to_u32())
+        hardware_mmio_write32(header + 12u64, (lba >> 32u32).to_u32())
+        var index: i32 = 0
+        while index < bytes.len():
+            hardware_mmio_write8(data + index.to_u64(), bytes[index])
+            index = index + 1
+        hardware_mmio_write8(status, 0xffu8)
+        _rv32_vblk_desc(0u64, header, 16u32, 1u16, 1u16)
+        # OUT payload is device-readable: NEXT only, never WRITE.
+        _rv32_vblk_desc(1u64, data, RV32_VBLK_SECTOR_BYTES, 1u16, 2u16)
+        _rv32_vblk_desc(2u64, status, 1u32, 2u16, 0u16)
+        if _rv32_vblk_submit(RV32_VBLK_USED_WRITE_LEN).is_err():
+            return Err("rv32 virtio-blk: write submission failed")
+        if hardware_mmio_read8(status) != 0u8:
+            _rv32_vblk_fail_runtime()
+            return Err("rv32 virtio-blk: device rejected write")
+        g_rv32_vblk_busy = false
+        Ok(true)
+
+    me fn _flush_owned() -> Result<bool, text>:
+        if not _rv32_vblk_token_live(self):
+            return Err("rv32 virtio-blk: stale or quarantined owner token")
+        if not g_rv32_vblk_flush_supported:
+            return Err("rv32 virtio-blk: FLUSH was not negotiated")
+        if g_rv32_vblk_busy:
+            return Err("rv32 virtio-blk: concurrent owner use rejected")
+        g_rv32_vblk_busy = true
+        val header = g_rv32_vblk_dma_page + RV32_VBLK_HEADER
+        val status = g_rv32_vblk_dma_page + RV32_VBLK_STATUS_BYTE
+        hardware_mmio_write32(header, 4u32)
+        hardware_mmio_write32(header + 4u64, 0u32)
+        hardware_mmio_write32(header + 8u64, 0u32)
+        hardware_mmio_write32(header + 12u64, 0u32)
+        hardware_mmio_write8(status, 0xffu8)
+        _rv32_vblk_desc(0u64, header, 16u32, 1u16, 1u16)
+        _rv32_vblk_desc(1u64, status, 1u32, 2u16, 0u16)
+        if _rv32_vblk_submit(RV32_VBLK_USED_FLUSH_LEN).is_err():
+            return Err("rv32 virtio-blk: flush submission failed")
+        if hardware_mmio_read8(status) != 0u8:
+            _rv32_vblk_fail_runtime()
+            return Err("rv32 virtio-blk: device rejected flush")
+        g_rv32_vblk_busy = false
+        Ok(true)
+
+impl BlockDevice for Rv32VirtioBlkOwner:
+    me fn read_sector(lba: u64) -> Result<[u8], text>: self._read_one(lba)
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        self._write_one(lba, data)
+    me fn flush() -> Result<bool, text>: self._flush_owned()
+    me fn sector_size() -> u32: RV32_VBLK_SECTOR_BYTES
+
+impl BlockDeviceDurabilityPortV1 for Rv32VirtioBlkOwner:
+    me fn flush_ordered() -> Result<bool, text>: self._flush_owned()
+    me fn fua_ordered() -> Result<bool, text>:
+        Err("rv32 virtio-blk: FUA was not negotiated")
+
+fn riscv32_vfs_boot_mount_fat32_owner_v1() -> bool:
+    """Publish exactly one RV32-owned FAT32 root and its fs-exec owner handle."""
+    val acquired = riscv32_virtio_blk_owner_initialize()
+    if acquired.is_err(): return false
+    val owner = acquired.unwrap()
+    var driver = FsFat32Driver.new("riscv32-virtio-mmio-fat32", owner)
+    # The FAT32 mount performs the concrete flush probe. Do not decide writable
+    # publication from the feature bit alone, and never publish a token that a
+    # rejected probe quarantined.
+    if driver.mount(MountOptions.read_only()).is_err():
+        _rv32_vblk_fail_runtime()
+        return false
+    if not _rv32_vblk_token_live(owner): return false
+    val writable = not g_rv32_vblk_read_only and
+        g_rv32_vblk_flush_supported and driver.capabilities().has(
+            Capability.DurableSync)
+    val options = if writable: MountOptions.default() else: MountOptions.read_only()
+    if not vfs_state_reset_rootfs():
+        _rv32_vblk_fail_runtime()
+        return false
+    val mounted = vfs_state_mount("/", DriverInstance.Fat32(driver), options)
+    if mounted.is_err():
+        _rv32_vblk_fail_runtime()
+        return false
+    if not authenticated_fs_exec_user_install_canonical_vfs_owner_v1():
+        _rv32_vblk_fail_runtime()
+        _ = vfs_state_reset_rootfs()
+        return false
+    vfs_state_mark_rootfs_ready()
+    true
+
+export riscv32_vfs_boot_mount_fat32_owner_v1

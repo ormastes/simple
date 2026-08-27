@@ -10,11 +10,10 @@ use compiler.mir_opt.mir_opt.var_reassign_analysis.{
     var_reassign_analysis_hotspot_facts,
     var_reassign_operand_local
 }
-
-extern fn rt_env_get(key: text) -> text
+use std.io_runtime.{env_get_opt}
 
 fn ssa_debug_enabled() -> bool:
-    (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
+    (env_get_opt("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
 
 struct SsaVarTransformResult:
     applied: bool
@@ -277,13 +276,19 @@ fn ssa_max_local_from_term(current: i64, term: MirTerminator) -> i64:
             ssa_max_local_from_operand(current, cond)
         case Switch(value, _, _):
             ssa_max_local_from_operand(current, value)
-        case CallTerminator(dest, func, args, _, _):
+        case CallTerminator(dest, func, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
             var max_id = current
             if dest.?:
                 val term_dest = dest.unwrap()
                 val term_dest_id = ssa_local_id_value(term_dest)
                 if term_dest_id > max_id:
                     max_id = term_dest_id
+            if unwind_payload_dest.?:
+                val payload_id = ssa_local_id_value(unwind_payload_dest.unwrap())
+                if payload_id > max_id: max_id = payload_id
+            if unwind_type_tag_dest.?:
+                val tag_id = ssa_local_id_value(unwind_type_tag_dest.unwrap())
+                if tag_id > max_id: max_id = tag_id
             max_id = ssa_max_local_from_operand(max_id, func)
             for arg in args:
                 max_id = ssa_max_local_from_operand(max_id, arg)
@@ -316,6 +321,7 @@ fn ssa_var_transform_inst_supported(inst: MirInst) -> bool:
         # writing a module `var` — e.g. _mcp_init_tool_set — plus an if/??
         # expression got the raw invalid SSA).
         case LoadGlobal(_, _): true
+        case GlobalAddr(_, _, _): true
         case StoreGlobal(_, _): true
         case Nop: true
         case DebugValue(_, _): true
@@ -624,7 +630,7 @@ fn ssa_terminator_successors(term: MirTerminator) -> [i64]:
             for case_ in targets:
                 succs = succs.push(ssa_block_id_value(case_.target))
             succs
-        case CallTerminator(_, _, _, normal, unwind):
+        case CallTerminator(_, _, _, normal, unwind, _, _):
             var succs: [i64] = [ssa_block_id_value(normal)]
             if unwind.?:
                 succs = succs.push(ssa_block_id_value(unwind.unwrap()))
@@ -637,26 +643,42 @@ fn ssa_terminator_successors(term: MirTerminator) -> [i64]:
 # loop backedge (bug #131 generalization must never treat a loop-carried
 # reassignment as a phi merge).
 fn ssa_block_can_reach(blocks: [MirBlock], start_id: i64, target_id: i64, visited: [i64]) -> bool:
+    # Iterative worklist, NOT recursion with a per-branch `visited` copy. The
+    # recursive form threaded `seen = visited.push(start_id)` DOWN each branch,
+    # so sibling successors never saw each other's marks and every distinct
+    # path through the CFG was re-explored: O(2^branches). It still terminated
+    # in principle, which is why it read as a hang rather than a crash --
+    # `process_run_timeout_live` (94 blocks) did not finish in 3600s, while
+    # small functions were unaffected (callers gate on `blocks.len() < 4`).
+    # See doc/08_tracking/bug/native_compile_nonterminating_io_runtime_2026-08-24.md
+    #
+    # Sharing one `seen` set across the WHOLE search is exactly equivalent for a
+    # reachability predicate: a block already expanded without reaching
+    # `target_id` cannot reach it via a different path either.
     if start_id == target_id:
         return true
     if local_list_contains(visited, start_id):
         return false
-    val seen = visited.push(start_id)
-    val start_opt = ssa_block_by_id(blocks, start_id)
-    # NOTE: deliberately `if start_opt.?: ... else: false` rather than
-    # `if not start_opt.?: return false` -- negating `.?` on a MirBlock?
-    # (struct-boxed) optional mis-evaluates in the bootstrap interpreter;
-    # every existing MirBlock? check in this file already uses the
-    # positive form only.
-    if start_opt.?:
-        val start_block = start_opt.unwrap()
-        var reached = false
-        for succ_id in ssa_terminator_successors(start_block.terminator):
-            if ssa_block_can_reach(blocks, succ_id, target_id, seen):
-                reached = true
-        reached
-    else:
-        false
+    var seen = visited.push(start_id)
+    var frontier: [i64] = [start_id]
+    var i = 0
+    while i < frontier.len():
+        val cur_id = frontier[i]
+        i = i + 1
+        val cur_opt = ssa_block_by_id(blocks, cur_id)
+        # NOTE: deliberately `if cur_opt.?:` rather than `if not cur_opt.?:` --
+        # negating `.?` on a MirBlock? (struct-boxed) optional mis-evaluates in
+        # the bootstrap interpreter; every existing MirBlock? check in this
+        # file already uses the positive form only.
+        if cur_opt.?:
+            val cur_block = cur_opt.unwrap()
+            for succ_id in ssa_terminator_successors(cur_block.terminator):
+                if succ_id == target_id:
+                    return true
+                if not local_list_contains(seen, succ_id):
+                    seen = seen.push(succ_id)
+                    frontier = frontier.push(succ_id)
+    false
 
 # Every block whose terminator can transfer control directly to `join_id`,
 # regardless of terminator kind (Goto/If/Switch/CallTerminator). This is the
@@ -911,8 +933,10 @@ fn ssa_term_operand_payloads_valid(term: MirTerminator) -> bool:
             if value != nil: ssa_operand_local_payload_valid(value.unwrap()) else: true
         case If(cond, _, _): ssa_operand_local_payload_valid(cond)
         case Switch(value, _, _): ssa_operand_local_payload_valid(value)
-        case CallTerminator(_, func, args, _, _):
+        case CallTerminator(_, func, args, _, _, _, _):
             ssa_operand_local_payload_valid(func) and ssa_operand_list_payloads_valid(args)
+        case Throw(payload, type_tag) | Resume(payload, type_tag):
+            ssa_operand_local_payload_valid(payload) and ssa_operand_local_payload_valid(type_tag)
         case _: true
 
 fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
@@ -935,7 +959,26 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
                         pass_do_nothing
                     case LoadGlobal(_, _):
                         pass_do_nothing
+                    case GlobalAddr(_, _, _):
+                        pass_do_nothing
                     case StoreGlobal(_, _):
+                        pass_do_nothing
+                    # Verification-only witness for the canonical two-arm
+                    # Result match (mir_instruction_kinds.spl: "no runtime
+                    # effect. Backends may erase"). It defines nothing and
+                    # reads nothing at run time, so slotting the function
+                    # around it is sound -- but rejecting the whole function
+                    # over it left the match's own merge destination un-slotted
+                    # and multi-def, which llc rejects outright ("multiple
+                    # definition of local value named 'lN'"). That killed EVERY
+                    # `match r: case Ok(x): ... case Err(_): ...` in value
+                    # position, including std.nogc_sync_mut.io.file_ops.file_read,
+                    # and so every native-build of an io_runtime importer.
+                    # Same defect class, and the same remedy, as the
+                    # CallIndirect admission documented in this gate's
+                    # docstring (#135).
+                    # See doc/08_tracking/bug/native_compile_unresolved_option_result_io_modules_2026-08-24.md
+                    case ResultMatchSemantic(_, _, _, _, _, _, _):
                         pass_do_nothing
                     case _:
                         return false
@@ -1177,6 +1220,8 @@ fn _ssa_written_local_id(inst: MirInst) -> i64:
         # global_insts 2026-07-23). StoreGlobal writes no local -> catch-all.
         case LoadGlobal(dest, _):
             var_reassign_local_id_value(dest)
+        case GlobalAddr(dest, _, _):
+            var_reassign_local_id_value(dest)
         case _:
             -1
 
@@ -1274,10 +1319,13 @@ fn ssa_collect_term_operand_locals(locals: [i64], term: MirTerminator) -> [i64]:
             result = ssa_operand_push_local(result, cond)
         case Switch(value, _, _):
             result = ssa_operand_push_local(result, value)
-        case CallTerminator(_, func, args, _, _):
+        case CallTerminator(_, func, args, _, _, _, _):
             result = ssa_operand_push_local(result, func)
             for arg in args:
                 result = ssa_operand_push_local(result, arg)
+        case Throw(payload, type_tag) | Resume(payload, type_tag):
+            result = ssa_operand_push_local(result, payload)
+            result = ssa_operand_push_local(result, type_tag)
         case _:
             pass_do_nothing
     result
@@ -1515,6 +1563,8 @@ fn ssa_alloca_rename_dest(inst: MirInst, new_id: i64) -> MirInst:
             MirInst(kind: MirInstKind.Intrinsic(Some(ssa_local(new_id)), name, args), span: inst.span)
         case LoadGlobal(_, symbol):
             MirInst(kind: MirInstKind.LoadGlobal(ssa_local(new_id), symbol), span: inst.span)
+        case GlobalAddr(_, symbol, mutable):
+            MirInst(kind: MirInstKind.GlobalAddr(ssa_local(new_id), symbol, mutable), span: inst.span)
         case _:
             inst
 
@@ -1582,13 +1632,49 @@ fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [
         case Switch(value, targets, default):
             val r = ssa_alloca_rewrite_operand(value, slot_keys, slot_values, next_temp)
             (r[1], MirTerminator.Switch(r[0], targets, default), r[2])
-        case CallTerminator(dest, func, args, normal, unwind):
+        case CallTerminator(dest, func, args, normal, unwind, unwind_payload_dest, unwind_type_tag_dest):
             val rf = ssa_alloca_rewrite_operand(func, slot_keys, slot_values, next_temp)
             val ra = ssa_alloca_rewrite_operand_list(args, slot_keys, slot_values, rf[2])
             var prepend = rf[1]
             for p in ra[1]:
                 prepend = prepend.push(p)
-            (prepend, MirTerminator.CallTerminator(dest, rf[0], ra[0], normal, unwind), ra[2])
+            # A recoverable call defines `dest` on both its normal and unwind
+            # edges.  When that local is cross-block-live the alloca transform
+            # has already assigned it a slot; pass the slot to LLVM codegen so
+            # both edge-specific values are stored without creating duplicate
+            # SSA definitions of `%lN`.
+            var rewritten_dest = dest
+            if dest.?:
+                val dest_id = ssa_local_id_value(dest.unwrap())
+                val idx = local_count_index(slot_keys, dest_id)
+                if idx >= 0:
+                    rewritten_dest = Some(ssa_local(slot_values[idx]))
+            var rewritten_payload_dest = unwind_payload_dest
+            if unwind_payload_dest.?:
+                val payload_id = ssa_local_id_value(unwind_payload_dest.unwrap())
+                val payload_idx = local_count_index(slot_keys, payload_id)
+                if payload_idx >= 0:
+                    rewritten_payload_dest = Some(ssa_local(slot_values[payload_idx]))
+            var rewritten_type_tag_dest = unwind_type_tag_dest
+            if unwind_type_tag_dest.?:
+                val tag_id = ssa_local_id_value(unwind_type_tag_dest.unwrap())
+                val tag_idx = local_count_index(slot_keys, tag_id)
+                if tag_idx >= 0:
+                    rewritten_type_tag_dest = Some(ssa_local(slot_values[tag_idx]))
+            (prepend, MirTerminator.CallTerminator(rewritten_dest, rf[0], ra[0], normal, unwind,
+                                                   rewritten_payload_dest, rewritten_type_tag_dest), ra[2])
+        case Throw(payload, type_tag):
+            val rp = ssa_alloca_rewrite_operand(payload, slot_keys, slot_values, next_temp)
+            val rt = ssa_alloca_rewrite_operand(type_tag, slot_keys, slot_values, rp[2])
+            var prep = rp[1]
+            for p in rt[1]: prep = prep.push(p)
+            (prep, MirTerminator.Throw(rp[0], rt[0]), rt[2])
+        case Resume(payload, type_tag):
+            val rp = ssa_alloca_rewrite_operand(payload, slot_keys, slot_values, next_temp)
+            val rt = ssa_alloca_rewrite_operand(type_tag, slot_keys, slot_values, rp[2])
+            var prep = rp[1]
+            for p in rt[1]: prep = prep.push(p)
+            (prep, MirTerminator.Resume(rp[0], rt[0]), rt[2])
         case _:
             ([], term, next_temp)
 

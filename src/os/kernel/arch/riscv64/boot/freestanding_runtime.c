@@ -26,97 +26,6 @@ spl_i64 rt_riscv64_syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1,
     return (spl_i64)a0;
 }
 
-#define RV64_CSR_READ_CASE(number, name) \
-    case number: __asm__ volatile("csrr %0, " #name : "=r"(value)); break
-
-spl_u64 rt_riscv64_csr_read(spl_u32 csr)
-{
-    spl_u64 value = 0;
-    switch (csr) {
-    RV64_CSR_READ_CASE(0x100U, sstatus);
-    RV64_CSR_READ_CASE(0x104U, sie);
-    RV64_CSR_READ_CASE(0x105U, stvec);
-    RV64_CSR_READ_CASE(0x140U, sscratch);
-    RV64_CSR_READ_CASE(0x141U, sepc);
-    RV64_CSR_READ_CASE(0x142U, scause);
-    RV64_CSR_READ_CASE(0x143U, stval);
-    RV64_CSR_READ_CASE(0x144U, sip);
-    RV64_CSR_READ_CASE(0x180U, satp);
-    RV64_CSR_READ_CASE(0xC00U, cycle);
-    RV64_CSR_READ_CASE(0xC01U, time);
-    RV64_CSR_READ_CASE(0xC02U, instret);
-    default: break;
-    }
-    return value;
-}
-
-void rt_riscv64_csr_write(spl_u32 csr, spl_u64 value)
-{
-    switch (csr) {
-    case 0x100U: __asm__ volatile("csrw sstatus, %0" :: "r"(value) : "memory"); break;
-    case 0x104U: __asm__ volatile("csrw sie, %0" :: "r"(value) : "memory"); break;
-    case 0x105U: __asm__ volatile("csrw stvec, %0" :: "r"(value) : "memory"); break;
-    case 0x140U: __asm__ volatile("csrw sscratch, %0" :: "r"(value) : "memory"); break;
-    case 0x141U: __asm__ volatile("csrw sepc, %0" :: "r"(value) : "memory"); break;
-    case 0x180U: __asm__ volatile("csrw satp, %0" :: "r"(value) : "memory"); break;
-    default: break;
-    }
-}
-
-void rt_riscv64_csr_set(spl_u32 csr, spl_u64 bits)
-{
-    switch (csr) {
-    case 0x100U: __asm__ volatile("csrs sstatus, %0" :: "r"(bits) : "memory"); break;
-    case 0x104U: __asm__ volatile("csrs sie, %0" :: "r"(bits) : "memory"); break;
-    default: break;
-    }
-}
-
-void rt_riscv64_csr_clear(spl_u32 csr, spl_u64 bits)
-{
-    switch (csr) {
-    case 0x100U: __asm__ volatile("csrc sstatus, %0" :: "r"(bits) : "memory"); break;
-    case 0x104U: __asm__ volatile("csrc sie, %0" :: "r"(bits) : "memory"); break;
-    default: break;
-    }
-}
-
-void rt_riscv64_sfence_vma_addr(spl_u64 vaddr)
-{
-    __asm__ volatile("sfence.vma %0, zero" :: "r"(vaddr) : "memory");
-}
-
-void rt_riscv64_sfence_vma_asid(spl_u64 asid)
-{
-    __asm__ volatile("sfence.vma zero, %0" :: "r"(asid) : "memory");
-}
-
-spl_u64 rt_riscv64_read_tp(void)
-{
-    spl_u64 value;
-    __asm__ volatile("mv %0, tp" : "=r"(value));
-    return value;
-}
-
-void rt_riscv64_write_tp(spl_u64 value)
-{
-    __asm__ volatile("mv tp, %0" :: "r"(value) : "memory");
-}
-
-spl_u64 rt_riscv64_read_sp(void)
-{
-    spl_u64 value;
-    __asm__ volatile("mv %0, sp" : "=r"(value));
-    return value;
-}
-
-spl_u64 rt_riscv64_read_gp(void)
-{
-    spl_u64 value;
-    __asm__ volatile("mv %0, gp" : "=r"(value));
-    return value;
-}
-
 void rt_riscv64_fence_i(void) { __asm__ volatile("fence.i" ::: "memory"); }
 void rt_riscv64_cbo_clean(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.clean 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
 void rt_riscv64_cbo_inval(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.inval 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
@@ -211,8 +120,8 @@ __asm__(
 #endif
 
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
-/* Top of physical RAM, not 0x90000000: rt_riscv_qemu_ram_base() (0x80000000)
- * + rt_riscv_qemu_ram_size() (128 MiB) == 0x88000000. The previous
+/* Top of physical RAM, not 0x90000000: RISCV_QEMU_RAM_BASE (0x80000000)
+ * + RISCV_QEMU_RAM_SIZE (128 MiB) == 0x88000000. The previous
  * 0x90000000 limit reached 128 MiB past the end of QEMU virt's actual RAM,
  * so the bounds check below silently permitted allocations into memory that
  * does not exist (data lost or, worse, MMIO-region corruption on other
@@ -1763,26 +1672,6 @@ spl_u64 rt_riscv_noalloc_pmm_free_pages(void) {
 
 spl_u64 rt_riscv_noalloc_pmm_total_pages(void) {
     return g_riscv_pmm_total_pages;
-}
-
-spl_u64 rt_riscv_qemu_ram_base(void) {
-    return 0x80000000ULL;
-}
-
-spl_u64 rt_riscv_qemu_ram_size(void) {
-    return 128ULL * 1024ULL * 1024ULL;
-}
-
-spl_u64 rt_riscv_qemu_reserved_end(void) {
-    return 0x80400000ULL;
-}
-
-spl_u64 rt_riscv_qemu_heap_start(void) {
-    return 0x87000000ULL;
-}
-
-spl_u64 rt_riscv_qemu_heap_size(void) {
-    return 16ULL * 1024ULL * 1024ULL;
 }
 
 spl_i64 rt_time_now_unix_micros(void) {

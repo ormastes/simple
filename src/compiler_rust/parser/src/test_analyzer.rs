@@ -155,7 +155,7 @@ impl TestMetaAnalyzer {
             Expr::Call { callee, args } => {
                 self.analyze_call(callee, args);
             }
-            Expr::DoBlock(statements) | Expr::UnsafeBlock(statements) => {
+            Expr::DoBlock(statements) | Expr::UnsafeBlock(statements, _) => {
                 self.analyze_statements(statements);
             }
             Expr::If {
@@ -370,7 +370,7 @@ fn count_unconditional_expr(expr: &Expr, count: &mut usize) {
 /// through it part of the floor.
 fn count_group_body(expr: &Expr, count: &mut usize) {
     match expr {
-        Expr::DoBlock(statements) | Expr::UnsafeBlock(statements) => {
+            Expr::DoBlock(statements) | Expr::UnsafeBlock(statements, _) => {
             count_unconditional_statements(statements, count);
         }
         Expr::Lambda { body, .. } => count_group_body(body, count),

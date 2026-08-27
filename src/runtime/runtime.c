@@ -1467,10 +1467,63 @@ bool rt_atomic_bool_swap(int64_t handle, bool value) {
     return atomic_exchange_explicit(&atomic->value, value, memory_order_seq_cst);
 }
 
+bool rt_atomic_bool_compare_exchange(int64_t handle, bool current, bool new_value) {
+    SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
+    if (!atomic) return false;
+    return atomic_compare_exchange_strong_explicit(
+        &atomic->value,
+        &current,
+        new_value,
+        memory_order_seq_cst,
+        memory_order_seq_cst
+    );
+}
+
 void rt_atomic_bool_free(int64_t handle) {
     SplAtomicBool* atomic = spl_atomic_bool_from_handle(handle);
     if (!atomic) return;
     SPL_FREE(atomic);
+}
+
+int64_t rt_atomic_flag_new(void) {
+    SplAtomicBool* flag = (SplAtomicBool*)SPL_MALLOC(sizeof(SplAtomicBool), "atomic");
+    if (!flag) return 0;
+    atomic_init(&flag->value, false);
+    return (int64_t)(intptr_t)flag;
+}
+
+bool rt_atomic_flag_test_and_set(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return false;
+    return atomic_exchange_explicit(&flag->value, true, memory_order_seq_cst);
+}
+
+bool rt_atomic_flag_load(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return false;
+    return atomic_load_explicit(&flag->value, memory_order_seq_cst);
+}
+
+void rt_atomic_flag_clear(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return;
+    atomic_store_explicit(&flag->value, false, memory_order_seq_cst);
+}
+
+void rt_atomic_flag_free(int64_t handle) {
+    SplAtomicBool* flag = spl_atomic_bool_from_handle(handle);
+    if (!flag) return;
+    SPL_FREE(flag);
+}
+
+void rt_spin_loop_hint(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+    __asm__ __volatile__("yield");
+#else
+    atomic_signal_fence(memory_order_seq_cst);
+#endif
 }
 
 /* ================================================================
@@ -1821,7 +1874,11 @@ int         rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     fclose(out);
     return 1;
 }
-int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
+int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+    return spl_file_delete(path);
+}
 int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return -1;
@@ -2630,11 +2687,17 @@ int64_t rt_random_i64(void) {
 static const char b64url_enc_table[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+/* Returns NULL for malformed arguments, size overflow, or allocation failure. */
 const char* rt_base64url_encode(const char* input, int64_t len) {
-    if (!input || len <= 0) return SPL_STRDUP("", "str");
+    if (len < 0 || (!input && len != 0)) return NULL;
+    if (len == 0) return SPL_STRDUP("", "str");
     size_t in_len = (size_t)len;
-    size_t out_len = ((in_len + 2) / 3) * 4;
+    if (in_len > SIZE_MAX - 2) return NULL;
+    size_t groups = (in_len + 2) / 3;
+    if (groups > (SIZE_MAX - 1) / 4) return NULL;
+    size_t out_len = groups * 4;
     char* out = (char*)SPL_MALLOC(out_len + 1, "str");
+    if (!out) return NULL;
     size_t j = 0;
     for (size_t i = 0; i < in_len; ) {
         uint32_t a = (unsigned char)input[i++];
@@ -2663,22 +2726,31 @@ static int b64url_decode_char(char c) {
     return -1;
 }
 
+/* Returns NULL for invalid alphabet/length, overflow, or allocation failure. */
 const char* rt_base64url_decode(const char* input) {
-    if (!input || !*input) return SPL_STRDUP("", "str");
+    if (!input) return NULL;
+    if (!*input) return SPL_STRDUP("", "str");
     size_t in_len = strlen(input);
+    if (in_len % 4 == 1 || in_len > SIZE_MAX - 3) return NULL;
     /* Pad to multiple of 4 for decoding */
     size_t padded = in_len;
     if (padded % 4 != 0) padded += 4 - (padded % 4);
-    size_t out_max = (padded / 4) * 3;
+    size_t groups = padded / 4;
+    if (groups > (SIZE_MAX - 1) / 3) return NULL;
+    size_t out_max = groups * 3;
     char* out = (char*)SPL_MALLOC(out_max + 1, "str");
+    if (!out) return NULL;
     size_t j = 0;
     for (size_t i = 0; i < padded; i += 4) {
         int a = (i     < in_len) ? b64url_decode_char(input[i])     : 0;
         int b = (i + 1 < in_len) ? b64url_decode_char(input[i + 1]) : 0;
         int c = (i + 2 < in_len) ? b64url_decode_char(input[i + 2]) : -1;
         int d = (i + 3 < in_len) ? b64url_decode_char(input[i + 3]) : -1;
-        if (a < 0) a = 0;
-        if (b < 0) b = 0;
+        if (a < 0 || b < 0 || (i + 2 < in_len && c < 0) ||
+            (i + 3 < in_len && d < 0)) {
+            SPL_FREE(out);
+            return NULL;
+        }
         uint32_t triple = ((uint32_t)a << 18) | ((uint32_t)b << 12);
         if (c >= 0) triple |= ((uint32_t)c << 6);
         if (d >= 0) triple |= (uint32_t)d;

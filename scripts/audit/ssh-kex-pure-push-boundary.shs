@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/os/apps/sshd/ssh_session_kex.spl"
+
+if grep -q '^extern fn rt_push_byte' "$module"; then
+    echo "SSH KEX byte append regained a raw foreign provider" >&2
+    exit 1
+fi
+grep -q '^@inline$' "$module"
+grep -q '^fn rt_push_byte(arr: \[u8\], byte_val: i64) -> \[u8\]:' "$module"
+grep -q '_append_byte(arr, byte_val.to_u8())' "$module"
+
+calls=$(awk '
+    !/^[[:space:]]*fn rt_push_byte/ {
+        line = $0
+        while (match(line, /rt_push_byte[(]/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$module")
+if [ "$calls" -ne 113 ]; then
+    echo "SSH KEX Pure Simple byte-append inventory changed" >&2
+    exit 1
+fi
+
+# The compatibility helper must remain a single direct Pure Simple append;
+# admission, locking, hashing, allocation loops, and dynamic lookup do not
+# belong in the per-byte packet-building path.
+body=$(awk '/^fn rt_push_byte[(]/{inside=1; next} inside && /^[^ ]/{exit} inside{print}' "$module")
+if printf '%s\n' "$body" | grep -E '(unsafe|rt_|spl_|dlsym|mutex|sha256|while|for )' >/dev/null; then
+    echo "SSH KEX per-byte helper gained foreign or non-constant work" >&2
+    exit 1
+fi
+
+if grep -E '(serial_println|log_raw_println|_bytes_to_hex)' "$module" >/dev/null; then
+    echo "SSH KEX regained raw or secret-bearing diagnostic output" >&2
+    exit 1
+fi
+
+for provider in rt_tls13_x25519_public_key rt_tls13_x25519_shared_secret rt_tls13_sha256 rt_ssh_curve25519_exchange_hash; do
+    grep -q "extern fn $provider" "$module"
+done
+
+# Foreign digest/key outputs must make progress by returning their exact
+# fixed-width result, and the expansion request remains bounded.
+grep -q 'if out.len() != 32:' "$module"
+grep -q 'if runtime_out.len() != 32:' "$module"
+grep -q 'if k1.len() != 32:' "$module"
+grep -q 'if next.len() != 32:' "$module"
+grep -q 'needed > 64u64' "$module"
+grep -q 'if exchange_hash.len() != 32:' "$module"
+grep -q 'unsafe(capabilities: \[ffi\]):' "$module"
+
+echo "SSH KEX boundary audit: PASS (113 per-byte foreign calls removed; fixed-width outputs and bounded KDF enforced; raw diagnostics absent)"

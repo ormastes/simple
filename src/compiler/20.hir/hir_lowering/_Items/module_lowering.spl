@@ -13,7 +13,7 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_composite_arrays_aligned, module_surface_composite_index, module_surface_route_arrays_aligned, module_surface_signature_index}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_route_arrays_aligned}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -123,16 +123,20 @@ struct HirReexportSource:
     item_name: text
 
 class HirReexportWalkState:
-    """Per-root cycle state; never shared across nested re-export queries."""
-    surface_indices: [i64]
-    wanted_names: [text]
-    depths: [i64]
+    """Per-root cycle state; never shared across nested re-export queries.
+
+    Keep one owner-mutated dictionary keyed by surface and wanted name. The
+    former three-array representation performed a linear scan and three COW
+    array copies per visited node, making one re-export chase quadratic in
+    both work and transient allocation."""
+    visited_depth: {text: i64}
     complete: bool
     valid: bool
 
     static fn fresh() -> HirReexportWalkState:
+        val empty_visited: {text: i64} = {}
         HirReexportWalkState(
-            surface_indices: [], wanted_names: [], depths: [],
+            visited_depth: empty_visited,
             complete: true, valid: true)
 
 struct HirMaterializedPayloadOrigin:
@@ -160,19 +164,6 @@ fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
                 return index
             return -1
         position = position + 1
-    -1
-
-fn hir_reexport_parallel_find(
-    surface_indices: [i64],
-    wanted_items: [text],
-    surface_index: i64,
-    wanted: text
-) -> i64:
-    var index = 0
-    while index < surface_indices.len() and index < wanted_items.len():
-        if surface_indices[index] == surface_index and wanted_items[index] == wanted:
-            return index
-        index = index + 1
     -1
 
 fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:

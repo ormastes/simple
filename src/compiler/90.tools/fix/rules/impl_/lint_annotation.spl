@@ -8,19 +8,46 @@ use std.tooling.easy_fix.types.{FixConfidence, Replacement, EasyFix}
 use std.tooling.easy_fix.*
 use compiler.tools.fix.rules.helpers.*
 
-# Known decorator names (lines starting with @name)
-fn known_decorators() -> [text]:
-    ["async", "pure", "io", "net", "fs", "unsafe", "verify", "trusted",
-     "ghost", "auto_lean", "bounds", "extern", "simd", "inline", "test",
-     "property_test", "snapshot_test", "deprecated", "generated_by",
-     "Lib", "inject", "sys_inject", "naked", "noreturn", "interrupt",
-     "entry", "align", "gpu_intrinsic", "name_checked", "sffi"]
+fn _annotation_name(trimmed: text) -> text:
+    if not trimmed.starts_with("@") or trimmed.len() <= 1:
+        return ""
+    val after_at = trimmed.slice(1)
+    var end_pos = after_at.len()
+    val paren_pos = after_at.find("(")
+    val space_pos = after_at.find(" ")
+    if paren_pos >= 0 and paren_pos < end_pos:
+        end_pos = paren_pos
+    if space_pos >= 0 and space_pos < end_pos:
+        end_pos = space_pos
+    val name = after_at.slice(0, end_pos)
+    if name.starts_with("#") or name.starts_with("@"):
+        return ""
+    name
 
-# Known attribute names (lines starting with @name)
-fn known_attributes() -> [text]:
-    ["allow", "warn", "deny", "default", "concurrency_mode", "layout",
-     "pure", "snapshot", "deprecated", "bypass", "skip_todo", "generated",
-     "inline", "ignore", "name_checked"]
+fn check_unknown_annotation(source: text, file: text) -> [EasyFix]:
+    check_unknown_annotation_with_contexts(file, line_contexts(source))
+
+fn check_unknown_annotation_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for raw_ctx in contexts:
+        val ctx: LineContext = raw_ctx
+        val name = _annotation_name(ctx.trimmed)
+        if name != "" and not _is_known_decorator(name) and not _is_known_attribute(name):
+            var fix = EasyFix.create(
+                id: "L:unknown_annotation:{ctx.line_num}",
+                description: "unknown annotation '@{name}' — not in known decorator/attribute sets",
+                confidence: FixConfidence.Likely
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: ctx.byte_offset + ctx.indent,
+                end: ctx.byte_offset + ctx.line.len(),
+                line: ctx.line_num,
+                column: ctx.indent + 1,
+                new_text: ctx.line
+            ))
+            fixes.push(fix)
+    fixes
 
 # ============================================================================
 # Rule: unknown_decorator
@@ -29,8 +56,11 @@ fn known_attributes() -> [text]:
 # ============================================================================
 
 fn check_unknown_decorator(source: text, file: text) -> [EasyFix]:
+    check_unknown_decorator_with_contexts(file, line_contexts(source))
+
+fn check_unknown_decorator_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
 
         if ctx.trimmed.starts_with("@"):
@@ -67,10 +97,13 @@ fn check_unknown_decorator(source: text, file: text) -> [EasyFix]:
     fixes
 
 fn _is_known_decorator(name: text) -> bool:
-    for known in known_decorators():
-        if name == known:
-            return true
-    false
+    match name:
+        case "async" | "pure" | "io" | "net" | "fs" | "unsafe" | "verify" | "trusted": true
+        case "ghost" | "auto_lean" | "bounds" | "extern" | "simd" | "inline" | "always_inline" | "force_inline" | "test": true
+        case "property_test" | "snapshot_test" | "deprecated" | "generated_by": true
+        case "Lib" | "inject" | "sys_inject" | "naked" | "noreturn" | "interrupt": true
+        case "entry" | "align" | "gpu_intrinsic" | "name_checked" | "sffi": true
+        case _: false
 
 # ============================================================================
 # Rule: unknown_attribute
@@ -80,8 +113,11 @@ fn _is_known_decorator(name: text) -> bool:
 # ============================================================================
 
 fn check_unknown_attribute(source: text, file: text) -> [EasyFix]:
+    check_unknown_attribute_with_contexts(file, line_contexts(source))
+
+fn check_unknown_attribute_with_contexts(file: text, contexts: [LineContext]) -> [EasyFix]:
     var fixes: [EasyFix] = []
-    for raw_ctx in line_contexts(source):
+    for raw_ctx in contexts:
         val ctx: LineContext = raw_ctx
 
         # Match @name attribute lines
@@ -122,7 +158,8 @@ fn check_unknown_attribute(source: text, file: text) -> [EasyFix]:
     fixes
 
 fn _is_known_attribute(name: text) -> bool:
-    for known in known_attributes():
-        if name == known:
-            return true
-    false
+    match name:
+        case "allow" | "warn" | "deny" | "default" | "concurrency_mode" | "layout": true
+        case "pure" | "snapshot" | "deprecated" | "bypass" | "skip_todo" | "generated": true
+        case "inline" | "always_inline" | "force_inline" | "ignore" | "name_checked": true
+        case _: false

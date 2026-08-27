@@ -543,6 +543,8 @@ impl MirToC:
                 self._unsupported_c_inst("HostGpuLaneEnd", inst.span)
             case LoadGlobal(_, _):
                 self._unsupported_c_inst("LoadGlobal", inst.span)
+            case GlobalAddr(_, _, _):
+                self._unsupported_c_inst("GlobalAddr", inst.span)
             case MaskFromCmp(_, _, _, _):
                 self._unsupported_c_inst("MaskFromCmp", inst.span)
             case MaskedAdd(_, _, _, _):
@@ -598,7 +600,17 @@ impl MirToC:
             case PredicatedMul(_, _, _, _, _, _):
                 self._unsupported_c_inst("PredicatedMul", inst.span)
             case ResultMatchSemantic(_, _, _, _, _, _, _):
-                self._unsupported_c_inst("ResultMatchSemantic", inst.span)
+                # Verification WITNESS, not an executable instruction. The whole
+                # Result match -- arm blocks, payload binds, result copies, merge
+                # terminator -- is ALREADY emitted before this marker is appended
+                # into the merge block (50.mir/_MirLoweringExpr/
+                # switch_operators_calls.spl:2848). It exists only so the Lean
+                # backend can recover the match shape (lean_mir_translate.spl:280,
+                # witness_count) and for perf_facts; verification_region_effects.spl
+                # :296 already classes it with Nop. Executable backends must skip
+                # it -- rejecting it made every Result-matching module
+                # native-unbuildable (E-BACKEND-LLVM-INST-ResultMatchSemantic).
+                ()
             case ScalableVecFence(_):
                 self._unsupported_c_inst("ScalableVecFence", inst.span)
             case StoreGlobal(_, _):
@@ -653,12 +665,24 @@ impl MirToC:
             case Abort(message):
                 self.builder.emit(r"spl_panic(" + "\"" + message + "\"" + r");")
 
-            case CallTerminator(dest, func, args, normal, unwind):
+            case Throw(_, _):
+                panic("E-BACKEND-C-TERM-Throw: C++ backend cannot safely longjmp across generated aggregate locals")
+
+            case Resume(_, _):
+                panic("E-BACKEND-C-TERM-Resume: C++ backend cannot safely longjmp across generated aggregate locals")
+
+            case CallTerminator(dest, func, args, normal, unwind, _, _):
                 val func_val = self.translate_operand(func)
                 var arg_vals: [text] = []
                 for arg in args:
                     arg_vals = arg_vals.push(self.translate_operand(arg))
                 val args_str = arg_vals.join(", ")
+                if unwind.?:
+                    # Generated C++ can contain non-trivially destructible
+                    # std::tuple locals. A longjmp across those activations is
+                    # undefined behavior, so the C backend must fail closed
+                    # until it owns a destructor-safe exception mechanism.
+                    panic("E-BACKEND-C-TERM-CallTerminator-Unwind: C++ backend cannot safely longjmp across generated aggregate locals")
                 if dest.?:
                     val dest_name = self.get_local(dest.unwrap().id)
                     self.builder.emit_assign(dest_name, func_val + r"(" + args_str + r")")

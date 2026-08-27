@@ -39,3 +39,28 @@ remain enabled by default. Unverifiable in-process providers remain unsafe or
 are isolated behind a validated process/Wasm protocol.
 
 Primary references and URLs are maintained in the canonical synthesis.
+
+## Current-tree census update — 2026-08-25
+
+The canonical fail-closed census was rerun after the broad SFFI authority
+migration. It found 11,590 `rt_*` declaration rows representing 3,137 distinct
+symbols. Only 2,826 rows / 1,779 symbols carry explicit lexical FFI-unsafe
+tagging; 8,515 rows / 1,825 symbols remain wholly untouched. No complete
+evidence bundle was supplied, so evidence-verified, signature-verified, and
+verified-and-signed counts are all zero. There are 263 distinct symbols with
+multiple source-signature hashes. These are ABI-triage candidates, not 263
+proven machine-ABI conflicts: the source scanner can distinguish parameter
+spelling or nullable syntax that resolves to the same calling convention.
+
+Provider provenance is: 1,286 linked-native-language-unknown, 984 with no
+implementation observed, 623 Rust, and 244 C-or-C++ source-only symbols. The
+independent implementation scan found 2,405 C, 2,146 Rust, 687 Simple, and 219
+C++ definitions. See `doc/09_report/sffi_safety_census_2026-08-25.md` for the
+scope and interpretation.
+
+This evidence contradicts any claim that all SFFI is safe or signed. The next
+research slice must reconcile the 263 signature variants against compiler-
+resolved canonical types first, then reduce
+production untouched families (`rt_file`, `rt_process`, `rt_env`, `rt_time`,
+`rt_dir`) through canonical typed owners. Signing remains a separate exact-
+artifact admission property and must never be inferred from source annotations.

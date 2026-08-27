@@ -253,11 +253,7 @@ fn predecessors(func: &MirFunction) -> HashMap<BlockId, Vec<BlockId>> {
 }
 
 /// Blocks of the natural loop for back edge `tail -> header`.
-fn natural_loop_body(
-    header: BlockId,
-    tail: BlockId,
-    preds: &HashMap<BlockId, Vec<BlockId>>,
-) -> HashSet<BlockId> {
+fn natural_loop_body(header: BlockId, tail: BlockId, preds: &HashMap<BlockId, Vec<BlockId>>) -> HashSet<BlockId> {
     let mut body: HashSet<BlockId> = HashSet::new();
     body.insert(header);
     let mut stack = vec![tail];
@@ -616,7 +612,9 @@ fn apply_plan(func: &mut MirFunction, plan: Plan) -> StringAccumStats {
     let seed_dest = func.new_vreg();
     {
         let block = func.block_mut(plan.preheader).expect("preheader exists");
-        block.instructions.push(call_builder("rt_string_builder_new", vec![], Some(h0)));
+        block
+            .instructions
+            .push(call_builder("rt_string_builder_new", vec![], Some(h0)));
         block.instructions.push(MirInst::LocalAddr {
             dest: h_addr,
             local_index: handle_local,
@@ -635,11 +633,9 @@ fn apply_plan(func: &mut MirFunction, plan: Plan) -> StringAccumStats {
             addr: s_addr,
             ty: plan.accum_ty,
         });
-        block.instructions.push(call_builder(
-            "rt_string_builder_push",
-            vec![h0, s0],
-            Some(seed_dest),
-        ));
+        block
+            .instructions
+            .push(call_builder("rt_string_builder_push", vec![h0, s0], Some(seed_dest)));
     }
     stats.pushes_emitted += 1;
 
@@ -700,11 +696,9 @@ fn apply_plan(func: &mut MirFunction, plan: Plan) -> StringAccumStats {
                 addr: e_h_addr,
                 ty: TypeId::I64,
             });
-            block.instructions.push(call_builder(
-                "rt_string_builder_finish",
-                vec![e_h],
-                Some(finished),
-            ));
+            block
+                .instructions
+                .push(call_builder("rt_string_builder_finish", vec![e_h], Some(finished)));
             block.instructions.push(MirInst::LocalAddr {
                 dest: e_s_addr,
                 local_index: plan.accum_local,
@@ -896,15 +890,14 @@ fn build(a: str, b: str) -> str:
         let mut checked = 0;
         for block in &func.blocks {
             for (i, inst) in block.instructions.iter().enumerate() {
-                let MirInst::Call { target, args, .. } = inst else { continue };
+                let MirInst::Call { target, args, .. } = inst else {
+                    continue;
+                };
                 if target.name() != "rt_string_builder_push" {
                     continue;
                 }
                 for arg in args {
-                    let def = block
-                        .instructions
-                        .iter()
-                        .position(|d| d.dest() == Some(*arg));
+                    let def = block.instructions.iter().position(|d| d.dest() == Some(*arg));
                     if let Some(def) = def {
                         assert!(def < i, "push at {i} uses {arg:?} defined at {def}");
                         checked += 1;

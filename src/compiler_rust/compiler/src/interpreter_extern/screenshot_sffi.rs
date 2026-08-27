@@ -22,14 +22,20 @@ fn bool_arg(args: &[Value], idx: usize, func: &str) -> Result<bool, CompileError
     match args.get(idx) {
         Some(Value::Bool(b)) => Ok(*b),
         Some(Value::Int(i)) => Ok(*i != 0),
-        _ => Err(CompileError::semantic(format!("{}: expects a bool argument at position {}", func, idx))),
+        _ => Err(CompileError::semantic(format!(
+            "{}: expects a bool argument at position {}",
+            func, idx
+        ))),
     }
 }
 
 fn str_arg(args: &[Value], idx: usize, func: &str) -> Result<String, CompileError> {
     match args.get(idx) {
         Some(Value::Str(s)) => Ok(s.as_ref().clone()),
-        _ => Err(CompileError::semantic(format!("{}: expects a text argument at position {}", func, idx))),
+        _ => Err(CompileError::semantic(format!(
+            "{}: expects a text argument at position {}",
+            func, idx
+        ))),
     }
 }
 

@@ -2,10 +2,17 @@ use std.spec.*
 
 use compiler.mir.mir_data.*
 use compiler.mir.intrinsics.{BIT_BSWAP}
-use compiler.backend.native.isel_x86_64.{isel_module}
-use compiler.backend.native.mach_inst.{MachModule, MachBlock, X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_AND, X86_OP_OR, X86_OP_SUB, X86_OP_SHL, X86_OP_SHR, X86_OP_BSWAP, X86_OP_INT3, X86_OP_NOP}
+use compiler.backend.native.isel_x86_64.{isel_module, x86_static_type_supported, x86_static_alignment_valid, x86_static_write_admitted}
+use compiler.backend.native.mach_inst.{MachModule, MachBlock, DataEntry, mach_module_add_data, X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_AND, X86_OP_OR, X86_OP_SUB, X86_OP_SHL, X86_OP_SHR, X86_OP_BSWAP, X86_OP_INT3, X86_OP_NOP, X86_OP_LEA, X86_OP_MOVZX_REG_MEM8, X86_OP_MOVZX_REG_MEM16, X86_OP_MOV_REG_MEM32, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM8_REG, X86_OP_MOV_MEM16_REG, X86_OP_MOV_MEM32_REG, X86_OP_MOV_MEM_REG}
+use compiler.backend.native.mach_inst.{X86_OP_MOVSX_REG_MEM8, X86_OP_MOVSX_REG_MEM16, X86_OP_MOVSX_REG_MEM32}
+use compiler.backend.native.native_section_bytes.{solve_native_data_layout}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.backend.native.native_elf.{emit_elf_x86_64}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_symbol_binding, elf_symbol_type, elf_reloc_sym, STB_LOCAL, STB_GLOBAL, STT_OBJECT}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
+use compiler.common.dependency.visibility.{Visibility}
 
 fn build_rotate_module(name: text, intrinsic_name: text) -> MirModule:
     val i64_type = MirType(kind: MirTypeKind.I64)
@@ -265,3 +272,229 @@ describe "MirBuilder terminate_abort":
                         ()
         assert_true(saw_abort)
         assert_contains(saw_message, "must not fall through")
+
+fn global_static(symbol_id: i64, name: text, type_: MirType, value: i64, alignment: i64, visibility: Visibility) -> MirStatic:
+    val symbol = SymbolId.new(symbol_id)
+    MirStatic(
+        symbol: symbol, name: name, type_: type_,
+        init: Some(MirConstant(symbol: symbol, name: name, type_: type_, value: MirConstValue.Int(value))),
+        is_mutable: true, alignment: alignment, visibility: visibility
+    )
+
+fn build_native_global_module() -> MirModule:
+    val widths = [
+        MirType(kind: MirTypeKind.I8), MirType(kind: MirTypeKind.I16),
+        MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I64)
+    ]
+    val symbols = [SymbolId.new(40), SymbolId.new(10), SymbolId.new(30), SymbolId.new(20)]
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[symbols[0]] = global_static(40, "g8", widths[0], -1, 0, Visibility.Private)
+    statics[symbols[1]] = global_static(10, "g16", widths[1], -2, 16, Visibility.Public)
+    statics[symbols[2]] = global_static(30, "g32", widths[2], -3, 0, Visibility.Private)
+    statics[symbols[3]] = global_static(20, "g64", widths[3], -4, 0, Visibility.Public)
+    val ro_symbol = SymbolId.new(50)
+    statics[ro_symbol] = MirStatic(symbol: ro_symbol, name: "ro_guard", type_: widths[3], init: nil, is_mutable: false, alignment: 16, visibility: Visibility.Private)
+    var locals: [MirLocal] = [MirLocal(id: LocalId(id: 0), name: Some("ret"), type_: widths[3], kind: LocalKind.Return)]
+    var instructions: [MirInst] = []
+    var next_local = 1
+    for index in 0..4:
+        val ptr_type = MirType(kind: MirTypeKind.Ptr(widths[index], true))
+        locals.push(MirLocal(id: LocalId(id: next_local), name: nil, type_: ptr_type, kind: LocalKind.Temp))
+        locals.push(MirLocal(id: LocalId(id: next_local + 1), name: nil, type_: widths[index], kind: LocalKind.Temp))
+        instructions.push(MirInst(kind: MirInstKind.GlobalAddr(LocalId(id: next_local), symbols[index], true), span: nil))
+        instructions.push(MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: next_local + 1), symbols[index]), span: nil))
+        instructions.push(MirInst(kind: MirInstKind.StoreGlobal(symbols[index], MirOperand(kind: MirOperandKind.Copy(LocalId(id: next_local + 1)))), span: nil))
+        next_local = next_local + 2
+    val block = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: instructions, terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 8))))))
+    val sig = MirSignature(params: [], return_type: widths[3], is_variadic: false)
+    val func = MirFunction(symbol: SymbolId.new(1), name: "global_roundtrip", signature: sig, locals: locals, blocks: [block], entry_block: BlockId.new(0), span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [], is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(1)] = func
+    MirModule(name: "native_globals", functions: functions, statics: statics, constants: {}, types: {})
+
+fn count_opcode(block: MachBlock, opcode: i64) -> i64:
+    var count = 0
+    for inst in block.insts:
+        if inst.opcode == opcode: count = count + 1
+    count
+
+fn elf_bytes(bytes: [i64]) -> [u8]:
+    [for byte in bytes: byte as u8]
+
+describe "x86_64 native MIR static ownership":
+    it "materializes each static once with stable aligned bytes and linkage":
+        val mach = isel_module(build_native_global_module())
+        expect(mach.data_sections.len()).to_equal(5)
+        expect(mach.data_sections[0].name).to_equal("g16")
+        expect(mach.data_sections[0].is_global).to_equal(true)
+        expect(mach.data_sections[1].name).to_equal("g64")
+        expect(mach.data_sections[2].name).to_equal("g32")
+        expect(mach.data_sections[3].name).to_equal("g8")
+        expect(mach.data_sections[3].is_global).to_equal(false)
+        val layout = solve_native_data_layout(mach.data_sections, false)
+        expect(layout.max_alignment).to_equal(16)
+        expect(layout.offsets["g16"]).to_equal(0)
+        expect(layout.offsets["g64"]).to_equal(8)
+        expect(layout.offsets["g32"]).to_equal(16)
+        expect(layout.offsets["g8"]).to_equal(20)
+        expect(layout.bytes.len()).to_equal(21)
+        expect(layout.bytes[0]).to_equal(0xfe)
+        expect(layout.bytes[1]).to_equal(0xff)
+        expect(layout.bytes[8]).to_equal(0xfc)
+        expect(layout.bytes[9]).to_equal(0xff)
+        expect(layout.bytes[10]).to_equal(0xff)
+        expect(layout.bytes[11]).to_equal(0xff)
+        expect(layout.bytes[12]).to_equal(0xff)
+        expect(layout.bytes[13]).to_equal(0xff)
+        expect(layout.bytes[14]).to_equal(0xff)
+        expect(layout.bytes[15]).to_equal(0xff)
+        expect(layout.bytes[16]).to_equal(0xfd)
+        expect(layout.bytes[17]).to_equal(0xff)
+        expect(layout.bytes[18]).to_equal(0xff)
+        expect(layout.bytes[19]).to_equal(0xff)
+        expect(layout.bytes[20]).to_equal(0xff)
+        val ro_layout = solve_native_data_layout(mach.data_sections, true)
+        expect(ro_layout.max_alignment).to_equal(16)
+        expect(ro_layout.offsets["ro_guard"]).to_equal(0)
+
+    it "selects address identity and exact scalar load/store widths":
+        val mach = isel_module(build_native_global_module())
+        val block = entry_block(mach)
+        expect(count_opcode(block, X86_OP_LEA)).to_equal(4)
+        expect(count_opcode(block, X86_OP_MOVSX_REG_MEM8)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOVSX_REG_MEM16)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOVSX_REG_MEM32)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOV_REG_MEM)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOV_MEM8_REG)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOV_MEM16_REG)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOV_MEM32_REG)).to_equal(1)
+        expect(count_opcode(block, X86_OP_MOV_MEM_REG)).to_equal(1)
+
+    it "rejects immutable writes unsupported categories and invalid alignment decisions":
+        expect(x86_static_write_admitted(false, true)).to_equal(false)
+        expect(x86_static_write_admitted(false, false)).to_equal(true)
+        expect(x86_static_write_admitted(true, true)).to_equal(true)
+        expect(x86_static_type_supported(MirType(kind: MirTypeKind.I32))).to_equal(true)
+        expect(x86_static_type_supported(MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)))).to_equal(true)
+        expect(x86_static_type_supported(MirType(kind: MirTypeKind.F32))).to_equal(false)
+        expect(x86_static_type_supported(MirType(kind: MirTypeKind.Array(MirType(kind: MirTypeKind.U8), 4)))).to_equal(false)
+        expect(x86_static_alignment_valid(MirType(kind: MirTypeKind.I64), 0)).to_equal(true)
+        expect(x86_static_alignment_valid(MirType(kind: MirTypeKind.I64), 16)).to_equal(true)
+        expect(x86_static_alignment_valid(MirType(kind: MirTypeKind.I64), 4)).to_equal(false)
+        expect(x86_static_alignment_valid(MirType(kind: MirTypeKind.I64), 3)).to_equal(false)
+        expect(x86_static_alignment_valid(MirType(kind: MirTypeKind.I64), -1)).to_equal(false)
+
+    it "encodes every address use as a PC-relative relocation to the same object symbol":
+        val encoded = encode_module(regalloc_module(isel_module(build_native_global_module())))
+        expect(encoded.len()).to_equal(1)
+        expect(encoded[0].relocations.len()).to_equal(12)
+        var g8_count = 0
+        var g16_count = 0
+        var g32_count = 0
+        var g64_count = 0
+        for reloc in encoded[0].relocations:
+            expect(reloc.reloc_type).to_equal(2)
+            expect(reloc.addend).to_equal(-4)
+            if reloc.symbol_name == "g8": g8_count = g8_count + 1
+            elif reloc.symbol_name == "g16": g16_count = g16_count + 1
+            elif reloc.symbol_name == "g32": g32_count = g32_count + 1
+            elif reloc.symbol_name == "g64": g64_count = g64_count + 1
+        expect(g8_count).to_equal(3)
+        expect(g16_count).to_equal(3)
+        expect(g32_count).to_equal(3)
+        expect(g64_count).to_equal(3)
+        # Exact direct RIP-relative instruction forms at each disp32 relocation.
+        val code = encoded[0].code
+        expect(code[encoded[0].relocations[0].offset - 2]).to_equal(0x8d)
+        expect(code[encoded[0].relocations[1].offset - 3]).to_equal(0x0f)
+        expect(code[encoded[0].relocations[1].offset - 2]).to_equal(0xbe)
+        expect(code[encoded[0].relocations[2].offset - 2]).to_equal(0x88)
+        expect(code[encoded[0].relocations[4].offset - 3]).to_equal(0x0f)
+        expect(code[encoded[0].relocations[4].offset - 2]).to_equal(0xbf)
+        expect(code[encoded[0].relocations[5].offset - 4]).to_equal(0x66)
+        expect(code[encoded[0].relocations[5].offset - 2]).to_equal(0x89)
+        expect(code[encoded[0].relocations[7].offset - 2]).to_equal(0x63)
+        expect(code[encoded[0].relocations[8].offset - 2]).to_equal(0x89)
+        expect(code[encoded[0].relocations[10].offset - 2]).to_equal(0x8b)
+        expect(code[encoded[0].relocations[11].offset - 2]).to_equal(0x89)
+
+    it "emits exact ELF object linkage size and writable non-executable data ordinal":
+        val mir = build_native_global_module()
+        val mach = regalloc_module(isel_module(mir))
+        val encoded = encode_module(mach)
+        val parsed = elf_parse_object(elf_bytes(emit_elf_x86_64(encoded, mach, mir))).unwrap()
+        var objects = 0
+        for symbol in parsed.symbols:
+            if symbol.name == "g16":
+                objects = objects + 1
+                expect(elf_symbol_binding(symbol)).to_equal(STB_GLOBAL)
+                expect(elf_symbol_type(symbol)).to_equal(STT_OBJECT)
+                expect(symbol.st_shndx).to_equal(2)
+                expect(symbol.st_size).to_equal(2)
+            elif symbol.name == "g8":
+                objects = objects + 1
+                expect(elf_symbol_binding(symbol)).to_equal(STB_LOCAL)
+                expect(elf_symbol_type(symbol)).to_equal(STT_OBJECT)
+                expect(symbol.st_shndx).to_equal(2)
+                expect(symbol.st_size).to_equal(1)
+            elif symbol.name == "g32":
+                objects = objects + 1
+                expect(elf_symbol_binding(symbol)).to_equal(STB_LOCAL)
+                expect(elf_symbol_type(symbol)).to_equal(STT_OBJECT)
+                expect(symbol.st_shndx).to_equal(2)
+                expect(symbol.st_size).to_equal(4)
+            elif symbol.name == "g64":
+                objects = objects + 1
+                expect(elf_symbol_binding(symbol)).to_equal(STB_GLOBAL)
+                expect(elf_symbol_type(symbol)).to_equal(STT_OBJECT)
+                expect(symbol.st_shndx).to_equal(2)
+                expect(symbol.st_size).to_equal(8)
+            elif symbol.name == "ro_guard":
+                objects = objects + 1
+                expect(elf_symbol_binding(symbol)).to_equal(STB_LOCAL)
+                expect(elf_symbol_type(symbol)).to_equal(STT_OBJECT)
+                expect(symbol.st_shndx).to_equal(3)
+                expect(symbol.st_size).to_equal(8)
+        expect(objects).to_equal(5)
+        expect(parsed.relocations.len()).to_equal(encoded[0].relocations.len())
+        for index in 0..parsed.relocations.len():
+            expect(parsed.relocations[index].r_offset).to_equal(encoded[0].relocations[index].offset)
+            val symbol_index = elf_reloc_sym(parsed.relocations[index])
+            expect(parsed.symbols[symbol_index].name).to_equal(encoded[0].relocations[index].symbol_name)
+        # SHF_WRITE=1, SHF_ALLOC=2, and SHF_EXECINSTR=4 must be absent.
+        expect(parsed.sections[2].sh_flags).to_equal(3)
+
+    it "keeps .data at ordinal two when a rodata section is also present":
+        val mir = build_native_global_module()
+        var mach = regalloc_module(isel_module(mir))
+        mach = mach_module_add_data(mach, DataEntry(name: ".LC_ro", data: [], is_readonly: true))
+        val encoded = encode_module(mach)
+        val parsed = elf_parse_object(elf_bytes(emit_elf_x86_64(encoded, mach, mir))).unwrap()
+        var checked = false
+        for symbol in parsed.symbols:
+            if symbol.name == "g64":
+                checked = true
+                expect(symbol.st_shndx).to_equal(2)
+                expect(symbol.st_size).to_equal(8)
+        expect(checked).to_equal(true)
+        expect(parsed.sections[2].sh_flags).to_equal(3)
+        expect(parsed.sections[3].sh_flags).to_equal(2)
+
+    it "keeps .data at ordinal two when rodata is absent and ignores an empty entry":
+        val mir = build_native_global_module()
+        val full = regalloc_module(isel_module(mir))
+        var mutable_entries: [DataEntry] = []
+        for entry in full.data_sections:
+            if not entry.is_readonly: mutable_entries.push(entry)
+        mutable_entries.push(DataEntry(name: "empty_ro", data: [], is_readonly: true))
+        val mach = MachModule(name: full.name, functions: full.functions, data_sections: mutable_entries, extern_symbols: full.extern_symbols)
+        val encoded = encode_module(mach)
+        val parsed = elf_parse_object(elf_bytes(emit_elf_x86_64(encoded, mach, mir))).unwrap()
+        var checked = false
+        for symbol in parsed.symbols:
+            if symbol.name == "g64":
+                checked = true
+                expect(symbol.st_shndx).to_equal(2)
+            expect(symbol.name == "empty_ro").to_equal(false)
+        expect(checked).to_equal(true)
+        expect(parsed.sections[2].sh_flags).to_equal(3)

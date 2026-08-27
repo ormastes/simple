@@ -464,6 +464,14 @@ pub fn compile_instruction<M: Module>(
                     let val = builder.ins().iconst(types::I64, 0);
                     ctx.vreg_values.insert(*dest, val);
                 }
+            } else if let Some(&boxed_id) = ctx.func_ids.get(&crate::codegen::boxed_entry_name(global_name)) {
+                // A defined named function used as a value is represented by a
+                // zero-capture closure, never a bare code pointer.
+                let func_ref = ctx.module.declare_func_in_func(boxed_id, builder.func);
+                let addr = builder.ins().func_addr(types::I64, func_ref);
+                let count = builder.ins().iconst(types::I32, 0);
+                let closure = helpers::call_runtime_2(ctx, builder, "rt_closure_new", addr, count);
+                ctx.vreg_values.insert(*dest, closure);
             } else if let Some(&func_id) = ctx.func_ids.get(global_name) {
                 // Function reference used as a value (e.g., from MIR GlobalLoad of an
                 // imported function). Materialize it as the same heap closure shape
@@ -928,11 +936,7 @@ pub fn compile_instruction<M: Module>(
                         vtable_data_id = Some(
                             ctx.module
                                 .declare_data(symbol, Linkage::Import, false, false)
-                                .map_err(|e| {
-                                    format!(
-                                        "failed to declare imported vtable data `{symbol}`: {e}"
-                                    )
-                                })?,
+                                .map_err(|e| format!("failed to declare imported vtable data `{symbol}`: {e}"))?,
                         );
                     }
                 }
@@ -977,13 +981,7 @@ pub fn compile_instruction<M: Module>(
             // on `vtable_type_ids`); field access must apply the identical shift or
             // it reads the vtable slot as field 0 (a truncated pointer, not the
             // field). Keyed on the same authoritative set so the two never disagree.
-            let off = effective_field_offset(
-                ctx,
-                *object,
-                owner_name.as_deref(),
-                *owner_has_vtable,
-                *byte_offset,
-            );
+            let off = effective_field_offset(ctx, *object, owner_name.as_deref(), *owner_has_vtable, *byte_offset);
             compile_field_get(ctx, builder, *dest, *object, off as usize, *field_type)?;
         }
 
@@ -995,13 +993,7 @@ pub fn compile_instruction<M: Module>(
             field_type,
             value,
         } => {
-            let off = effective_field_offset(
-                ctx,
-                *object,
-                owner_name.as_deref(),
-                *owner_has_vtable,
-                *byte_offset,
-            );
+            let off = effective_field_offset(ctx, *object, owner_name.as_deref(), *owner_has_vtable, *byte_offset);
             compile_field_set(ctx, builder, *object, off as usize, *field_type, *value)?;
         }
 

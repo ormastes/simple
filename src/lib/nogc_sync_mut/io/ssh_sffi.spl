@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle}
 # Tier 1: Extern Declarations (Raw SFFI) -- UNBACKED, DO NOT CALL DIRECTLY
 # ============================================================================
 #
-# TODO(ssh-sffi-unbacked): all 30 rt_ssh_*/rt_sftp_* externs below have ZERO
+# TODO(ssh-sffi-unbacked): all 23 rt_ssh_*/rt_sftp_* externs below have ZERO
 # definitions anywhere in src/runtime/ (verified by grep, 2026-08-06). There is
 # no C symbol, no interpreter_extern registration, and no runtime_symbols.rs
 # entry for any of them. Under the JIT an unregistered extern returns nil
@@ -31,31 +31,51 @@ use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle}
 
 # --- Session Management ---
 
+@unsafe(reason: "unbacked SSH transport ABI; host-key policy and owned session handle are unknown", capabilities: [ffi])
 extern fn rt_ssh_connect(host: text, port: i64) -> i64
+@unsafe(reason: "unbacked SSH session-handle release ABI", capabilities: [ffi])
 extern fn rt_ssh_disconnect(session: i64) -> bool
+@unsafe(reason: "unbacked SSH credential ABI; authentication and secret-lifetime contracts are unknown", capabilities: [ffi])
 extern fn rt_ssh_auth_password(session: i64, username: text, password: text) -> bool
+@unsafe(reason: "unbacked SSH key credential ABI; path, passphrase, and secret-lifetime contracts are unknown", capabilities: [ffi])
 extern fn rt_ssh_auth_pubkey(session: i64, username: text, pubkey_path: text, privkey_path: text, passphrase: text) -> bool
+@unsafe(reason: "unbacked SSH agent credential ABI; authentication contract is unknown", capabilities: [ffi])
 extern fn rt_ssh_auth_agent(session: i64, username: text) -> bool
 
 # --- Remote Command Execution ---
 
+@unsafe(reason: "unbacked remote-command ABI; tuple ownership, output bounds, and transport failure are ambiguous", capabilities: [ffi])
 extern fn rt_ssh_exec(session: i64, command: text) -> (i64, text, text)  # (exit_code, stdout, stderr)
+@unsafe(reason: "unbacked SSH session-to-channel owned-handle ABI", capabilities: [ffi])
 extern fn rt_ssh_shell(session: i64) -> i64  # Returns channel handle
+@unsafe(reason: "unbacked channel read ABI; empty, EOF, failure, allocation, and output bounds are ambiguous", capabilities: [ffi])
 extern fn rt_ssh_channel_read(channel: i64) -> text
+@unsafe(reason: "unbacked channel write ABI; binary-in-text extent and partial-write contracts are unknown", capabilities: [ffi])
 extern fn rt_ssh_channel_write(channel: i64, data: text) -> i64
+@unsafe(reason: "unbacked SSH channel-handle release ABI", capabilities: [ffi])
 extern fn rt_ssh_channel_close(channel: i64) -> bool
 
 # --- SFTP File Transfer ---
 
+@unsafe(reason: "unbacked SSH session-to-SFTP owned-handle ABI", capabilities: [ffi])
 extern fn rt_sftp_init(session: i64) -> i64  # Returns SFTP handle
+@unsafe(reason: "unbacked SFTP handle release ABI", capabilities: [ffi])
 extern fn rt_sftp_shutdown(sftp: i64) -> bool
+@unsafe(reason: "unbacked SFTP transfer ABI; local/remote path and partial-transfer contracts are unknown", capabilities: [ffi])
 extern fn rt_sftp_upload(sftp: i64, local_path: text, remote_path: text) -> bool
+@unsafe(reason: "unbacked SFTP transfer ABI; remote/local path and partial-transfer contracts are unknown", capabilities: [ffi])
 extern fn rt_sftp_download(sftp: i64, remote_path: text, local_path: text) -> bool
+@unsafe(reason: "unbacked SFTP directory ABI; path and mode validation are unknown", capabilities: [ffi])
 extern fn rt_sftp_mkdir(sftp: i64, path: text, mode: i64) -> bool
+@unsafe(reason: "unbacked SFTP destructive directory ABI; remote path validation is unknown", capabilities: [ffi])
 extern fn rt_sftp_rmdir(sftp: i64, path: text) -> bool
+@unsafe(reason: "unbacked SFTP destructive file ABI; remote path validation is unknown", capabilities: [ffi])
 extern fn rt_sftp_unlink(sftp: i64, path: text) -> bool
+@unsafe(reason: "unbacked SFTP rename ABI; source and destination path validation are unknown", capabilities: [ffi])
 extern fn rt_sftp_rename(sftp: i64, src: text, dst: text) -> bool
+@unsafe(reason: "unbacked SFTP listing ABI; empty/failure and runtime-owned text are ambiguous", capabilities: [ffi])
 extern fn rt_sftp_readdir(sftp: i64, path: text) -> text  # Newline-separated
+@unsafe(reason: "unbacked SFTP metadata tuple ABI; failure and field validity are ambiguous", capabilities: [ffi])
 extern fn rt_sftp_stat(sftp: i64, path: text) -> (i64, i64, i64)  # (size, mode, mtime)
 
 # --- Port Forwarding ---
@@ -66,8 +86,11 @@ extern fn rt_sftp_stat(sftp: i64, path: text) -> (i64, i64, i64)  # (size, mode,
 
 # --- Session Info ---
 
+@unsafe(reason: "unbacked SSH banner ABI; empty/failure and runtime-owned text are ambiguous", capabilities: [ffi])
 extern fn rt_ssh_get_banner(session: i64) -> text
+@unsafe(reason: "unbacked SSH timeout ABI; range and session mutation contracts are unknown", capabilities: [ffi])
 extern fn rt_ssh_set_timeout(session: i64, timeout_ms: i64) -> bool
+@unsafe(reason: "unbacked SSH authentication-state ABI", capabilities: [ffi])
 extern fn rt_ssh_is_authenticated(session: i64) -> bool
 
 # ============================================================================
@@ -102,6 +125,7 @@ struct SftpFileInfo:
 
 # --- Session Management ---
 
+@unsafe(reason: "unbacked SSH provider and unverified session-handle contract", capabilities: [ffi])
 fn ssh_connect(host: text, port: i64) -> SshSession:
     """Connect to SSH server
 
@@ -119,6 +143,7 @@ fn ssh_connect(host: text, port: i64) -> SshSession:
     val handle = rt_ssh_connect(host, port)
     SshSession(handle: handle, host: host, port: port, is_valid: is_valid_handle(handle))
 
+@unsafe(reason: "unbacked SSH provider and session lifecycle", capabilities: [ffi])
 fn ssh_disconnect(session: SshSession) -> bool:
     """Disconnect from SSH server"""
     if is_invalid_handle(session.handle):
@@ -126,6 +151,7 @@ fn ssh_disconnect(session: SshSession) -> bool:
 
     rt_ssh_disconnect(session.handle)
 
+@unsafe(reason: "unbacked SSH provider and credential ABI", capabilities: [ffi])
 fn ssh_auth_password(session: SshSession, username: text, password: text) -> bool:
     """Authenticate with username/password
 
@@ -144,6 +170,7 @@ fn ssh_auth_password(session: SshSession, username: text, password: text) -> boo
 
     rt_ssh_auth_password(session.handle, username, password)
 
+@unsafe(reason: "unbacked SSH provider and key credential ABI", capabilities: [ffi])
 fn ssh_auth_pubkey(session: SshSession, username: text, pubkey_path: text, privkey_path: text, passphrase: text) -> bool:
     """Authenticate with public key
 
@@ -164,6 +191,7 @@ fn ssh_auth_pubkey(session: SshSession, username: text, pubkey_path: text, privk
 
     rt_ssh_auth_pubkey(session.handle, username, pubkey_path, privkey_path, passphrase)
 
+@unsafe(reason: "unbacked SSH provider and agent credential ABI", capabilities: [ffi])
 fn ssh_auth_agent(session: SshSession, username: text) -> bool:
     """Authenticate using SSH agent
 
@@ -179,6 +207,7 @@ fn ssh_auth_agent(session: SshSession, username: text) -> bool:
 
 # --- Remote Command Execution ---
 
+@unsafe(reason: "unbacked SSH provider with unbounded ambiguous command output", capabilities: [ffi])
 fn ssh_exec(session: SshSession, command: text) -> SshExecResult:
     """Execute command on remote server
 
@@ -198,6 +227,7 @@ fn ssh_exec(session: SshSession, command: text) -> SshExecResult:
     val result_tuple = rt_ssh_exec(session.handle, command)
     SshExecResult(exit_code: result_tuple.0, stdout: result_tuple.1, stderr: result_tuple.2)
 
+@unsafe(reason: "unbacked SSH provider and channel ownership", capabilities: [ffi])
 fn ssh_shell(session: SshSession) -> SshChannel:
     """Open interactive shell channel
 
@@ -209,6 +239,7 @@ fn ssh_shell(session: SshSession) -> SshChannel:
     val handle = rt_ssh_shell(session.handle)
     SshChannel(handle: handle, is_valid: is_valid_handle(handle))
 
+@unsafe(reason: "unbacked SSH provider with ambiguous read result", capabilities: [ffi])
 fn ssh_channel_read(channel: SshChannel) -> text:
     """Read data from channel"""
     if is_invalid_handle(channel.handle):
@@ -216,6 +247,7 @@ fn ssh_channel_read(channel: SshChannel) -> text:
 
     rt_ssh_channel_read(channel.handle)
 
+@unsafe(reason: "unbacked SSH provider with unknown partial-write contract", capabilities: [ffi])
 fn ssh_channel_write(channel: SshChannel, data: text) -> i64:
     """Write data to channel
 
@@ -226,6 +258,7 @@ fn ssh_channel_write(channel: SshChannel, data: text) -> i64:
 
     rt_ssh_channel_write(channel.handle, data)
 
+@unsafe(reason: "unbacked SSH provider and channel lifecycle", capabilities: [ffi])
 fn ssh_channel_close(channel: SshChannel) -> bool:
     """Close channel"""
     if is_invalid_handle(channel.handle):
@@ -235,6 +268,7 @@ fn ssh_channel_close(channel: SshChannel) -> bool:
 
 # --- SFTP File Transfer ---
 
+@unsafe(reason: "unbacked SFTP provider and session ownership", capabilities: [ffi])
 fn sftp_init(session: SshSession) -> SftpSession:
     """Initialize SFTP subsystem
 
@@ -254,6 +288,7 @@ fn sftp_init(session: SshSession) -> SftpSession:
     val handle = rt_sftp_init(session.handle)
     SftpSession(handle: handle, is_valid: is_valid_handle(handle))
 
+@unsafe(reason: "unbacked SFTP provider and session lifecycle", capabilities: [ffi])
 fn sftp_shutdown(sftp: SftpSession) -> bool:
     """Shutdown SFTP subsystem"""
     if is_invalid_handle(sftp.handle):
@@ -261,6 +296,7 @@ fn sftp_shutdown(sftp: SftpSession) -> bool:
 
     rt_sftp_shutdown(sftp.handle)
 
+@unsafe(reason: "unbacked SFTP provider and transfer contract", capabilities: [ffi])
 fn sftp_upload(sftp: SftpSession, local_path: text, remote_path: text) -> bool:
     """Upload file to remote server
 
@@ -279,6 +315,7 @@ fn sftp_upload(sftp: SftpSession, local_path: text, remote_path: text) -> bool:
 
     rt_sftp_upload(sftp.handle, local_path, remote_path)
 
+@unsafe(reason: "unbacked SFTP provider and transfer contract", capabilities: [ffi])
 fn sftp_download(sftp: SftpSession, remote_path: text, local_path: text) -> bool:
     """Download file from remote server
 
@@ -293,6 +330,7 @@ fn sftp_download(sftp: SftpSession, remote_path: text, local_path: text) -> bool
 
     rt_sftp_download(sftp.handle, remote_path, local_path)
 
+@unsafe(reason: "unbacked SFTP provider and remote path/mode ABI", capabilities: [ffi])
 fn sftp_mkdir(sftp: SftpSession, path: text, mode: i64) -> bool:
     """Create directory on remote server
 
@@ -307,6 +345,7 @@ fn sftp_mkdir(sftp: SftpSession, path: text, mode: i64) -> bool:
 
     rt_sftp_mkdir(sftp.handle, path, mode)
 
+@unsafe(reason: "unbacked SFTP provider and destructive remote path ABI", capabilities: [ffi])
 fn sftp_rmdir(sftp: SftpSession, path: text) -> bool:
     """Remove directory on remote server"""
     if is_invalid_handle(sftp.handle):
@@ -314,6 +353,7 @@ fn sftp_rmdir(sftp: SftpSession, path: text) -> bool:
 
     rt_sftp_rmdir(sftp.handle, path)
 
+@unsafe(reason: "unbacked SFTP provider and destructive remote path ABI", capabilities: [ffi])
 fn sftp_delete(sftp: SftpSession, path: text) -> bool:
     """Delete file on remote server"""
     if is_invalid_handle(sftp.handle):
@@ -321,6 +361,7 @@ fn sftp_delete(sftp: SftpSession, path: text) -> bool:
 
     rt_sftp_unlink(sftp.handle, path)
 
+@unsafe(reason: "unbacked SFTP provider and remote rename ABI", capabilities: [ffi])
 fn sftp_rename(sftp: SftpSession, src: text, dst: text) -> bool:
     """Rename/move file on remote server"""
     if is_invalid_handle(sftp.handle):
@@ -328,6 +369,7 @@ fn sftp_rename(sftp: SftpSession, src: text, dst: text) -> bool:
 
     rt_sftp_rename(sftp.handle, src, dst)
 
+@unsafe(reason: "unbacked SFTP provider with ambiguous empty listing", capabilities: [ffi])
 fn sftp_list(sftp: SftpSession, path: text) -> [text]:
     """List files in remote directory
 
@@ -350,6 +392,7 @@ fn sftp_list(sftp: SftpSession, path: text) -> [text]:
 
     result.split("\n")
 
+@unsafe(reason: "unbacked SFTP provider with ambiguous metadata tuple", capabilities: [ffi])
 fn sftp_stat(sftp: SftpSession, path: text) -> SftpFileInfo:
     """Get file information
 
@@ -366,6 +409,7 @@ fn sftp_stat(sftp: SftpSession, path: text) -> SftpFileInfo:
 
 # --- Utilities ---
 
+@unsafe(reason: "unbacked SSH provider and authentication-state ABI", capabilities: [ffi])
 fn ssh_is_authenticated(session: SshSession) -> bool:
     """Check if session is authenticated"""
     if is_invalid_handle(session.handle):
@@ -373,6 +417,7 @@ fn ssh_is_authenticated(session: SshSession) -> bool:
 
     rt_ssh_is_authenticated(session.handle)
 
+@unsafe(reason: "unbacked SSH provider with ambiguous empty banner", capabilities: [ffi])
 fn ssh_get_banner(session: SshSession) -> text:
     """Get SSH server banner"""
     if is_invalid_handle(session.handle):
@@ -380,6 +425,7 @@ fn ssh_get_banner(session: SshSession) -> text:
 
     rt_ssh_get_banner(session.handle)
 
+@unsafe(reason: "unbacked SSH provider and timeout mutation ABI", capabilities: [ffi])
 fn ssh_set_timeout(session: SshSession, timeout_ms: i64) -> bool:
     """Set session timeout in milliseconds"""
     if is_invalid_handle(session.handle):
@@ -390,4 +436,3 @@ fn ssh_set_timeout(session: SshSession, timeout_ms: i64) -> bool:
 # ============================================================================
 # Export Functions
 # ============================================================================
-

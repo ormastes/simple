@@ -3,7 +3,6 @@
 
 use crate::error::CompileError;
 use crate::value::Value;
-use std::os::raw::c_char;
 
 // Import SFFI functions from runtime.
 //
@@ -30,12 +29,7 @@ extern "C" {
         dest_dir_len: usize,
     ) -> i32;
     fn rt_package_file_size(file_path: *const u8, file_path_len: usize) -> i64;
-    fn rt_package_copy_file(
-        src_path: *const u8,
-        src_path_len: usize,
-        dst_path: *const u8,
-        dst_path_len: usize,
-    ) -> i32;
+    fn rt_package_copy_file(src_path: *const u8, src_path_len: usize, dst_path: *const u8, dst_path_len: usize) -> i32;
     fn rt_package_mkdir_all(dir_path: *const u8, dir_path_len: usize) -> i32;
     fn rt_package_remove_dir_all(dir_path: *const u8, dir_path_len: usize) -> i32;
     fn rt_package_create_symlink(
@@ -47,7 +41,6 @@ extern "C" {
     fn rt_package_chmod(file_path: *const u8, file_path_len: usize, mode: u32) -> i32;
     fn rt_package_exists(path: *const u8, path_len: usize) -> i32;
     fn rt_package_is_dir(path: *const u8, path_len: usize) -> i32;
-    fn rt_package_free_string(ptr: *mut c_char);
     // Runtime string accessors, used to read the RuntimeValue text that
     // rt_package_sha256 now returns. Declared as C symbols rather than via
     // `simple_runtime::value::collections::*` because that module is private.

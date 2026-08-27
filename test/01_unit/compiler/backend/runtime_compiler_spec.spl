@@ -75,10 +75,29 @@ describe "Runtime Compiler":
         val cleanup_fn_pos = source.find("fn cleanup_runtime_objects(")
         val compile_source = source.substring(compile_pos, cleanup_fn_pos)
         expect(compile_source.split("cleanup_runtime_objects(objects)").len() - 1).to_equal(4)
-        expect(compile_source).to_contain("if not rt_file_exists(src_path):\n            cleanup_runtime_objects(objects)\n            return Err(\"Required runtime source not found")
+        expect(compile_source).to_contain("if not file_exists(src_path):\n            cleanup_runtime_objects(objects)\n            return Err(\"Required runtime source not found")
         expect(compile_source).to_contain("if comp_code != 0:\n            cleanup_runtime_objects(objects)\n            return Err(\"Failed to compile")
         expect(compile_source).to_contain("if object_count == 0:\n        cleanup_runtime_objects(objects)\n        return Err(\"No runtime source files were compiled\")")
         expect(compile_source).to_contain("if object_count < sources.len():\n        cleanup_runtime_objects(objects)\n        return Err(\"Expected ")
+
+    it "routes runtime compilation through exact canonical I/O owners":
+        step("Verify: canonical facades preserve nullable env and direct process semantics")
+        val source = read_file_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        expect(source).to_contain("use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}")
+        expect(source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.{getpid}")
+        expect(source).not.to_contain("extern fn rt_env_get")
+        expect(source).not.to_contain("extern fn rt_file_exists")
+        expect(source).not.to_contain("extern fn rt_file_delete")
+        expect(source).not.to_contain("extern fn rt_process_run")
+        expect(source).not.to_contain("extern fn rt_getpid")
+        expect(source.split("env_get_nullable(").len() - 1).to_equal(14)
+        expect(source.split("file_exists(").len() - 1).to_equal(7)
+        expect(source.split("process_run(cc, comp_args)").len() - 1).to_equal(1)
+        expect(source.split("getpid()").len() - 1).to_equal(1)
+        # rt_path_absolute remains direct until a nullable facade preserves its
+        # failure sentinel instead of narrowing it to non-nullable text.
+        expect(source.split("extern fn rt_path_absolute(path: text) -> text?").len() - 1).to_equal(1)
+        expect(source.split("file_delete(obj)").len() - 1).to_equal(1)
 
     it "includes the contract ABI owner in every fresh hosted runtime bundle":
         step("Verify: includes the contract ABI owner in every fresh hosted runtime bundle")

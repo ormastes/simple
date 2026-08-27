@@ -116,6 +116,14 @@ queued double emission, or `event_queue_full`.
 
 - Mutations: `RefactorPlan`, `TransactionReceipt`, `RebalanceProposal`, `PromotionCandidate`. `RefactorPlan` is the only mutation-plan contract name.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
+- URI admission: `AuthorizationPortV1`, `CanonicalReadReceiptV1`, and
+  `CursorReceiptV1`. Both receipt contracts bind authority key/epoch,
+  workspace, project-or-null, snapshot, revision, view, normalized path and
+  selector/filter digest, effective scope, ordering version, and page limit.
+  The composition root alone creates the branded signed verifier and opaque
+  verified grants; handlers may not use structural verifier objects, remap a
+  selector, default a workspace, or authorize one workspace with another's
+  receipt. `spipe://workspace/{workspace}/` is the sole workspace-root grammar.
 - Phase exchange: the task/research/architecture/spec/implement/refactor/verify/ship UID input/output records used by Wave 7. Their contracts freeze in Wave 0; harness generation remains a separate Wave 9 deliverable.
 - Manual flow helpers: `step("Index canonical knowledge artifacts")`, `step("Browse virtual knowledge views")`, `step("Search and trace artifacts")`, `step("Apply a transactional refactor")`, and `step("Audit tree balance and promotion candidates")`.
 - Setup/checkers: `setup_spipe_knowledge_fixture`, `check_spipe_knowledge_compiler`, `check_spipe_provider_parity`, `check_spipe_refactor_recovery`, `check_spipe_virtual_view_safety`.
@@ -293,7 +301,7 @@ violates this evidence boundary.
 
 **Depends on:** Waves 3–4. **Owners:** D.  
 **Deliverables:** authoritative `spipe://` resolver; lifecycle/feature/component/layer/matrix/trace/project/status/diagnostic projections; bounded MCP list/read/search/resolve/trace/diagnostic tools and resources; legacy stdio plus a stateless MCP 2026 HTTP implementation held disabled until its Wave 0 transport/auth/cache threat gates pass; deterministic pagination/cache hints; `.spipe/view/` materializer; editor-provider skeleton.  
-**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to the immutable snapshot UID and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing.
+**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to the immutable snapshot UID and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing. A cursor must be a signed receipt whose authority/snapshot/revision/view/selector/scope/page-limit bindings match the independently authorized request exactly; legacy aliases cannot remap foreign workspaces; every verifier is an admitted branded `AuthorizationPortV1`; and the positive plus hostile URI/receipt/cursor/public-error matrix in the system-test plan must pass.
 
 ### Wave 6 — Transactional refactoring and repair
 
@@ -606,3 +614,610 @@ Do not expand its claim: it advances only the raw-fusion portion of
 REQ-SPKC-012/013. AC-4 still requires exact identity dominance, accepted graph
 candidate production/proximity, bounded adjustments, and integrated
 stale/deprecated explanations.
+
+### 10.8 Authority-bound RRF reranker admission
+
+The dependency-free page-local reranker is accepted and pushed as
+`44e65a6713`. It binds raw-fusion and evidence digests to one verified receipt,
+validates the raw page defensively, preserves raw explanations, and applies the
+fixed integer adjustment policy. Evidence is syntax `PASS`, focused `13/13`,
+full SPipe suite `PASS`, and independent pre-runtime/final high reviews `PASS`.
+
+The next owner must not call this global top-k evidence. Integrated search must
+produce the full authorized candidate pool, apply upstream exact identity
+dominance and graph candidate construction, rerank the attested page, and only
+then apply the user result limit. AC-4 remains open until that pipeline and its
+explanations are verified end to end.
+
+### 10.9 Complete-pool RRF v2 admission
+
+The additive v2 fusion/rerank prerequisite is accepted and pushed as
+`32574ab884`. It preserves v1, requires complete source/count/digest envelopes,
+returns the declared complete, digest-bound union up to 3,000, reranks the complete pool, and
+only then applies the public 1,000-hit cap. Syntax, focused 38/38, full package,
+and independent highest-capability gates passed; the rank-1,001 promotion oracle
+proves premature truncation is removed.
+
+The identity/graph orchestration owner may now depend on v2, but must bind each
+source completeness digest into the search receipt, perform exact identity
+dominance before fusion, fail closed on incomplete accepted-edge traversal, and
+apply the user limit last. This checkpoint alone does not close AC-4.
+
+### 10.10 Authority-bound exact identity admission
+
+The standalone exact resolver is accepted and pushed as `d1b601697f`. It reads
+one receipt-bound authorized identity projection, performs byte-exact canonical
+UID lookup or unioned key/active-alias lookup, fails closed on corrupt bindings,
+and prevents unauthorized identities from affecting cardinality or explanations.
+Syntax, focused 8/8, full package/performance, and final highest-capability gates
+passed.
+
+The integrated search owner must consume this resolver without re-resolving or
+weakening its bindings: a resolved identity is pinned ahead of retrieval and
+removed from every ranked source; ambiguity is reported without a pin; not-found
+continues normally. Graph/provider/RRF orchestration and AC-4 remain open.
+
+### 10.11 Accepted graph candidate contract and evidence prerequisite
+
+The graph candidate boundary is frozen but not implemented. It consumes one
+authorization-filtered digest-bound graph snapshot, performs a fixed-count
+node-authorization recheck, admits only receipt-verified accepted
+explicit/generated schema-v2 edges, and runs deterministic bounded
+both-direction depth-three BFS. Partial work returns only a single-use
+factory-local opaque cursor; only exhaustive completion may emit an RRF-v2 graph
+source and evidence digest.
+
+The exact implementation gate enforces depth 3, sourceK 1..1000 default 1000,
+page work 1..50,000 default 50,000, configurable total work 1..500,000,
+20,000 nodes, 50,000 edges, 1001 roots, and
+512-byte IDs. Paths repeat no node/edge; improved same-distance tuples re-expand;
+the full tuple and final Artifact UID order are tested before top-K truncation.
+Default and minimum/maximum boundary oracles cover sourceK/page/total work;
+root-precedence oracles bind exact to `(tier=0,rank=0)` and lexical to
+`(tier=1,rank=sourceRank)`.
+Node authorization runs exactly once per declared node without early exit or
+metadata disclosure. Cursor tests cover null-prototype/no-enumerable state,
+atomic consumption, cross-factory/copy/replay rejection, partial-data absence,
+hard-cap destruction, bounded state, and GC eligibility.
+
+The lossless authority prerequisite is accepted as reranker v3 commit
+`f89b120be7`: ordered `{edgeUid,authorityReceiptUid}` pairs permit one receipt to
+cover multiple edges, while display arrays are derived only. Static, syntax,
+focused 26/26, full package, and final highest-capability gates passed.
+
+The graph generator is now unblocked. Do not fabricate per-edge receipts, drop
+edges, or replace ordered pairs with the derived unique arrays. Graph boost and
+AC-4 remain open until the standalone graph oracle and integrated search pass.
+
+### 10.12 Authority-bound lexical source admission and exact next ownership
+
+The lexical source product/oracle pair is accepted at `9eb667e23b`:
+
+- `examples/05_stdlib/spipe/src/search/lexical_source.js`
+- `examples/05_stdlib/spipe/test/unit/search_lexical_source_test.js`
+
+It captures exactly `verifySearchReceipt`, `readLexicalProviderPage`,
+`authorizeArtifactCandidate`, and `verifyLexicalEvidence`; validates the full
+cursor/page/receipt chain; authorizes every candidate exactly once; and verifies
+the complete page-set plus ordered-rank evidence once. Its restricted
+`spipe-canonical-json-v1` evidence uses NFC, unsigned UTF-8 key order, and long
+lowercase C0 escapes including U+0009 as `\u0009`.
+
+The accepted design delta is mandatory: a provider removes
+`excludedDocumentUid` before ranking and pagination and its page/aggregate
+receipts attest that choice. Client post-filter is not conforming because a
+provider-capped 1,000-row page cannot still prove 1,000 remaining lexical rows.
+The provider adapter/protocol ownership and filenames remain unfrozen; freeze
+them and the independent conformance oracle before implementation. Require
+`spipe-search-provider/1.0`, analyzer/score identity, exclusion, cursor, page,
+and receipt parity.
+
+Evidence is focused `16/16`; full `158/158` unit, Wave 2 `9/9`, Wave 3 `25/25`,
+Wave 4 `9/9`, legacy, security, workflows, and performance `PASS`; independent
+highest-capability review `PASS`.
+
+Do not admit `/tmp/spkc-graph-candidates-4OKnKd`. It stopped at cycle cap with
+focused `13/14` because its cyclic-graph `workUnits <= 9` expectation is not a
+contracted oracle. All seven reported static defects were patched, but no full
+suite or final highest-capability review followed. There is no commit and no AC
+claim.
+
+Remaining work uses these exact, non-overlapping pairs in order:
+
+1. graph: `examples/05_stdlib/spipe/src/search/graph_candidates.js` and
+   `examples/05_stdlib/spipe/test/unit/search_graph_candidates_test.js`;
+2. provider adapter/protocol: merge owner first freezes interfaces, filenames,
+   ownership, and a separate conformance oracle; no implementation starts from
+   guessed filenames;
+3. rerank evidence: `examples/05_stdlib/spipe/src/search/rerank_evidence.js` and
+   `examples/05_stdlib/spipe/test/unit/search_rerank_evidence_test.js`;
+4. pipeline: `examples/05_stdlib/spipe/src/search/pipeline.js` and
+   `examples/05_stdlib/spipe/test/unit/search_pipeline_test.js`.
+
+The rerank-evidence pair is a standalone prerequisite, not pipeline-owned test
+scaffolding. The pipeline integrates only accepted exact identity, lexical and
+graph sources, complete RRF-v2, rerank evidence, and pair-based reranker in that
+order, with user limit last. Merge owner remains `/root`; final reviewer is the
+best available normal/highest-capability model. AC-4 stays open.
+
+### 10.13 Graph admission, provider contract freeze, and active next lane
+
+The fresh graph admission supersedes the rejected attempt's status but not its
+record. Commit `626b3e0797` contains only:
+
+- `examples/05_stdlib/spipe/src/search/graph_candidates.js`;
+- `examples/05_stdlib/spipe/test/unit/search_graph_candidates_test.js`.
+
+Admission evidence is focused `16/16`; full unit `174/174`; Wave 2 `9/9`, Wave
+3 `25/25`, Wave 4 `9/9`; legacy integration and performance `PASS`; pre-runtime
+and final highest-capability review `PASS`. The cyclic oracle is exactly
+`workUnits == 10`. The suite also proves hostile caps, opaque single-use cursor
+lifecycle, exact continuation equivalence, total-limit destruction, exact
+tuple ordering, literal digest goldens, both-direction traversal, later-better
+re-expansion, and ordered edge/receipt evidence when receipts are shared.
+
+Provider adapter ownership is now frozen. The JavaScript implementation lane
+owns these exact changes:
+
+- modify `examples/05_stdlib/spipe/src/index/contracts.js` and
+  `src/index/logical_index.js`;
+- modify `examples/05_stdlib/spipe/src/provider/protocol.js`, `adapter.js`,
+  `js_fixed_point.js`, and `index.js`;
+- add `examples/05_stdlib/spipe/src/provider/lexical_page.js`;
+- add `examples/05_stdlib/spipe/test/unit/search_lexical_provider_page_test.js`;
+- add
+  `examples/05_stdlib/spipe/test/fixture/wave4_search/authorized_lexical_provider_page_vectors.json`.
+
+The Simple-native mapping uses only existing owners
+`src/app/spipe_knowledge_provider/{lexical,wire_query,wire_core,protocol,service}.spl`.
+No new native scorer or guessed Node process adapter is authorized.
+
+The design gate is wire 1.1 `lexical_page` plus
+`authorized_lexical_page:true`, while provider/analyzer/scorer identities remain
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, and `bm25-fixed-v1`.
+Require pre-ranking exact exclusion, unchanged corpus statistics, page schema
+`spipe-authorized-lexical-provider-page-v1`, adapter identity
+`spipe-authorized-lexical-provider-adapter-v1`, and a cursor that binds stable
+provider/query/snapshot/exclusion/rank identity but not per-page `qr-*` or
+`requestedLimit`.
+
+The conformance oracle must distinguish transport `qr-*` receipts from signed
+authority `D-*` lexical-page receipts. The adapter returns a page containing
+the admitted nine-field projection only after the full signed `D-*` record is
+stored and re-resolved; the projection is not authority. The aggregate verifier
+resolves all full authority receipts and binds page/rank/exclusion/policy/root
+evidence. Protocol 1.0 is legacy-only for this path.
+
+Execution order and ownership:
+
+1. **Provider JS/in-process lane:** implement the frozen files and independent
+   vector oracle. Do not claim native process parity.
+2. **Async-boundary design lane:** decide asynchronous lexical-source v2 versus
+   asynchronous collection plus immutable synchronous replay before any native
+   process adapter is named.
+3. **Rerank-evidence lane:** currently active; preserve its standalone product/
+   oracle ownership and require a separate admission review.
+4. **Pipeline lane:** begin only after provider and rerank-evidence admission;
+   integrate exact pin -> excluded lexical -> graph -> complete-pool RRF v2 ->
+   evidence -> pair rerank/explanation -> user limit.
+
+Candidate NFR gates are lazy startup, no hot process spawn/tree scan/retry
+sleep, startup P95 at most 250 ms, warm 50,000-artifact lexical P95 below 100
+ms, and qualified maximum-RSS evidence with a configured cap. Numeric RSS is
+blocked pending Wave 0 measurement. There is no current provider conformance or
+pipeline-integration claim. Merge owner remains `/root`; final acceptance owner
+is the best available normal/highest-capability reviewer. AC-4 remains open.
+
+### 10.14 Corrected provider-authority implementation lane
+
+The nine-field-only adapter described in the preceding freeze is rejected as a
+pre-authority alternative. The provider lane must implement the full
+synchronous in-process ABI in detail design Section 17.7 without narrowing its
+claims. The interface names are frozen before implementation fan-out:
+
+```text
+createAuthorizedLexicalProviderPageBridgeV1
+  config: {providerSession,issueTransportQueryReceiptV1,
+           verifyTransportQueryReceiptV1,executeLexicalPageV11,
+           lexicalEvidenceAuthority,lexicalEvidenceStore,clockNowMs}
+  output: {readLexicalProviderPage,verifyLexicalEvidence}
+
+createBoundedLexicalEvidenceStoreV1
+  output: {reserveOperationV1,commitReceiptV1,resolveReceiptV1,
+           tombstoneOperationV1}
+
+createInProcessLexicalPageExecutorV11
+  config: {provider,providerSession,verifyTransportQueryReceiptV1,
+           lexicalCursorAuthority,clockNowMs}
+  output: frozen executeLexicalPageV11(envelope) -> response
+```
+
+All calls are direct synchronous calls; Promises/thenables, filesystem work,
+process spawning, polling, and retry sleeps are out of scope. Semantic provider
+identity stays `spipe-search-provider/1.0`; wire 1.1 adds only
+`authorized_lexical_page:true` and `lexical_page`.
+Initialization must preserve the exact legacy 1.0 closed capability result and
+add only the final capability for an exact 1.1 request; no silent minor
+selection is allowed. Canonical UIDs retain both admitted 32-hex and
+26-Crockford payload spellings, and `qr-*` remains `qr-<64 lowercase hex>`.
+
+#### Product ownership
+
+| Lane | Exact files | Deliverable |
+|---|---|---|
+| Contract/index | `src/index/contracts.js`, `src/index/logical_index.js` | 1.1 capability and exact pre-ranking exclusion without corpus-stat mutation |
+| Wire/session | `src/provider/protocol.js`, `src/provider/adapter.js` | closed 1.1 envelopes, full `qr-*` records, validated frozen session |
+| Provider | `src/provider/js_fixed_point.js` | synchronous page execution and provider-side `qr-*` verification |
+| Authority bridge | new `src/provider/lexical_page.js` | full page/aggregate records, signatures, resolution, projections |
+| Evidence store | new `src/provider/lexical_evidence_store.js` | bounded atomic receipt/replay store |
+| Export | `src/provider/index.js` | public factory/constants only |
+| Oracle | new `test/unit/search_lexical_provider_page_test.js` | independent authority/wire/store/lifecycle tests |
+| Vectors | new `test/fixture/wave4_search/authorized_lexical_provider_page_vectors.json` | literal domain/preimage/UID/signature/store goldens |
+
+All `src/` and `test/` paths in this table are relative to
+`examples/05_stdlib/spipe/`. Do not edit `provider/durable_lifecycle.js`: its
+async mutation lifecycle is a different owner. Do not edit Simple-native files
+or introduce a Node process adapter in this lane.
+
+#### Required implementation sequence
+
+1. Freeze constants, closed record validators, restricted canonical encoder,
+   exact digest preimages, authenticated cursor schema, deterministic
+   `lpo-/lao-/req-lp-` mappings, and independent literal vectors.
+2. Add protocol 1.1 negotiation and provider/session validation while retaining
+   all 1.0 semantic identities and legacy behavior.
+3. Implement provider-owned exclusion before scoring/top-k/pagination; keep
+   snapshot `N`, `df`, and average document length unchanged.
+4. Implement and test full `spipe-query-receipt-v1` issue, provider-side check,
+   exact echo, and independent bridge verification for `lexical_page`.
+5. Implement the bounded store and its atomic reserve/commit/exact-replay/
+   conflict/tombstone
+   behavior; operation keys are exact `lpo-<64 lowercase hex>` or
+   `lao-<64 lowercase hex>` values, `inputDigest` is the corresponding full
+   operation digest, kinds are `lexical_page|lexical_aggregate`, and tombstone
+   reasons use the seven-value enum frozen in design Section 17.7. Pre-charge
+   2,048 bytes of tombstone headroom per reservation so commit-capacity failure
+   cannot block cleanup.
+6. Implement page operation hashing, full page `D-*` sign/self-verify/commit/
+   re-resolve, then derive the existing nine-field page projection.
+7. Implement aggregate resolution of every page `D-*`, re-verify every embedded
+   `qr-*`, rebuild cursor/rank continuity and all digests, then sign/commit/
+   re-resolve the aggregate `D-*`.
+8. Prove start/end bridge and start/end provider-executor clock observations,
+   canonical-byte equality of the
+   complete echoed `qr-*`, expiry, authority/key/policy/revocation/root/scope/provider-generation
+   drift fail closed and never trigger per-page fallback.
+9. Run the focused oracle once, the full SPipe package once after focus passes,
+   and the existing Wave 4/legacy/performance gates once. Stop after at most
+   three verify/fix cycles.
+10. Require pre-runtime and final highest-capability review before merge.
+
+#### Admission evidence
+
+The oracle must cover every exact input/output record and domain from design
+Section 17.7, including two-sided `qr-*` verification, `qr-*`/`D-*`
+non-substitutability, full stored record resolution, write/read witnesses,
+aggregate reconstruction, replay/conflict/expiry/revocation, proof that replay
+does not issue, execute, sign, or commit, hostile
+canonicality and cap inputs, provider identity stability, no mid-stream
+fallback, and literal signature/UID/digest goldens. It must also prove direct
+non-thenable operation and the fixed 4,096-record/64-MiB store envelope.
+
+Candidate performance receipts are bridge construction P95 under 5 ms,
+authority/store overhead P95 under 10 ms per 1,000-hit page excluding scoring,
+warm lexical P95 under 100 ms for 50,000 artifacts, startup P95 under 250 ms,
+and no process/file-scan/retry activity on the hot path. No provider conformance
+or AC-4 completion is claimed until product, oracle, package checks, performance
+receipts, and highest-capability review all pass.
+
+The store bound counts every reservation, active/replay row, tombstone,
+operation key, and signed record inside one 4,096-entry/64-MiB generation
+envelope, including each reservation's fixed 2,048-byte worst-case tombstone
+headroom. Active replay tombstoning uses a null token plus the exact stored
+UID/digest; reserved tombstoning uses the single-use token. Tests must cover
+work crossing receipt expiry and post-commit resolve corruption.
+
+Sidecar lanes: lower-model implementation assistance is limited to the fixed
+file ownership above; no sidecar may change schemas/domains. Merge owner is
+`/root`; final reviewer is the best available normal/highest-capability model.
+
+### 10.15 Corrected handoff ledger and resume order (2026-08-26)
+
+1. **Provider authority — contract only.** Commit `47a922eec6` passed the
+   highest-capability contract review for the complete ABI in Section 10.14 and
+   detail design Section 17.7. The implementation attempt in
+   `/tmp/spkc-lexical-provider-z15Uhp/repo` stopped at the pre-runtime review
+   cap and made no in-scope product/oracle edit. Resume in a fresh session from
+   the full final ABI; do not implement the rejected minimal projection
+   adapter.
+2. **Rerank evidence — candidate only.** The exact untracked pair in
+   `/tmp/spkc-rerank-evidence4-aIcFIZ/repo` is
+   `examples/05_stdlib/spipe/src/search/rerank_evidence.js` and
+   `examples/05_stdlib/spipe/test/unit/search_rerank_evidence_test.js`. It has
+   no commit and is not admitted. Focused `16/16`, full unit `190/190`, Wave 2
+   `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy, security, workflow, and
+   performance gates passed, but final highest-capability review after cycle
+   three found unresolved `limit_exceeded` precedence for oversized derived
+   evidence arrays and an unresolved semantic-contract-string binding. Start a
+   fresh exact two-file fix/review lane; do not rerun unchanged green commands.
+3. **Pipeline — waiting.** Begin only after provider implementation admission
+   and rerank-evidence admission. Preserve the frozen order: exact resolution,
+   excluded complete lexical collection, graph generation, complete-pool RRF
+   v2, authority-bound evidence, pair rerank/explanation, then user limit.
+
+Merge owner remains `/root`; the final reviewer remains the best available
+normal/highest-capability model. AC-4 remains open.
+
+### 11.1 Wave 5a seal and alias repair (2026-08-26)
+
+W5A-A owns a non-cyclic seal: `TargetInventoryManifestV1` binds the existing
+base snapshot UID, and a separate content-addressed `AuthorityManifestV1`
+authority snapshot UID commits the base UID plus inventory root. Receipts bind
+the authority snapshot. The sealed inventory owns normalized legacy alias
+mappings, so the frozen authority API includes
+`resolveCanonicalAlias(view, alias) -> CanonicalTargetCandidateV1`, followed
+by `resolveCanonicalTarget` proof before receipt verification; external
+registry/path alias lookup is not admissible. W5A evidence must inject cyclic,
+tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
+
+### 10.16 Superseding admission ledger and provider blocker handoff (2026-08-26)
+
+1. **Rerank evidence — admitted.** Commit `4455b760da` admits the exact
+   `src/search/rerank_evidence.js` and
+   `test/unit/search_rerank_evidence_test.js` pair. Syntax passed; focused
+   `18/18`, unit `192/192`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`, and
+   legacy, security, workflow, and performance gates passed. Final independent
+   xhigh review passed in cycle 2 of 3. Do not repeat these unchanged green
+   gates.
+2. **Provider authority ABI — stopped, not landed.** The repair lane exhausted
+   the mandatory three review/fix cycles and remains `FAIL` on exactly four
+   blockers: collision-result signaling, executor error classification,
+   cursor error precedence, and canonical-byte accounting versus heap/RSS
+   limits. It made no product edit, ran no product test, and produced no
+   repository-history commit. Object `3827a1099e` in
+   `/tmp/spkc-provider-abi-repair2-clean` is a failed immutable draft for
+   forensic comparison only; do not copy its contract text into implementation
+   or authoritative documentation.
+3. **Pipeline — waiting on provider.** Keep its frozen integration order, but
+   do not start it until a fresh provider ABI repair and provider implementation
+   are independently admitted. Wave 4 and AC-4 remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.
+
+## 11. Wave 5a snapshot-authority prerequisite and ownership (2026-08-26)
+
+The current URI lane is **non-admitted**. `ImmutableSnapshotStore` lacks a
+target inventory and workspace/worktree-bound authority view, so a direct URI
+resolver cannot prove that a receipt's target kind/UID belongs to its pinned
+snapshot. Do not start/reuse a URI implementation candidate until this port
+slice is accepted.
+
+| Lane | Exclusive ownership | Published boundary | Gate before downstream work |
+|---|---|---|---|
+| W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/snapshot/revision and digest checks plus target membership |
+| W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming only authority views and canonical targets | no raw store, path inference, scan, or refresh request path |
+| W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-14 oracle evidence | independent highest-capability PASS |
+| W5-D URI/MCP/materializer | `src/view`, `mcp` | resolver/resources/tools adapters | waits for all W5A gates; a sealed alias yields only a candidate, authority proves its canonical target, then receipt authorization occurs |
+
+The integration owner freezes these exact methods before sidecars work:
+`openBoundSnapshot(binding)`, `resolveCanonicalTarget(view, target)`,
+`resolveCanonicalAlias(view, alias)`, `listDirectoryTarget(view, selector)`,
+`ProjectionPortV1.list(...)`, and
+`ProjectionPortV1.render(...)`. The binding is exactly `{workspaceUid,
+projectUidOrNull, worktreeUid, snapshotUid, revisionId}`. The final reviewer
+must reject structural substitutes, project-only snapshot reads, missing
+manifest target inventory, and any URI rendering before target proof. This is
+a read-only prerequisite and does not authorize an HTTP or write feature.
+
+W5A-A additionally owns sealed `TargetInventoryManifestV1` roots. It must
+define project versus `workspace_aggregate` scope. The aggregate's required,
+canonical `contributingProjectRoots` field is the full ordered manifest of
+`{projectUid, baseSnapshotUid, authoritySnapshotUid, targetInventoryRoot}`;
+it is committed by both inventory and authority manifests, forbidden for a
+project scope, and permits an explicit empty aggregate only. Resolver adapters
+first open and verify the receipt-named snapshot only as an untrusted
+candidate; a legacy alias yields only a canonical candidate, which must pass
+sealed `resolveCanonicalTarget` membership proof; only then verify the receipt
+against a binding derived from that proof. `worktreeUid` stays out
+of the frozen receipt ABI and is proved through the authority view's verified
+workspace/worktree/snapshot/revision tuple. Evidence must include tampered
+root, project mismatch, aggregate positives, and cross-instance genuine-brand
+mixing before W5-D begins.
+
+### 10.23 Wave 5 URI-foundation non-admission and fresh lane (2026-08-26)
+
+1. **Attempt closed.** The Wave 5 URI-foundation candidate exhausted three
+   independent review/fix cycles. It is uncommitted and not admitted; do not
+   reuse its code. Wave 5 URI execution remains pending.
+2. **Canonical alias gate.** The fresh owner resolves every legacy alias,
+   including `spipe://skill`, only to a canonical candidate and proves its
+   sealed target membership before issuing or accepting a receipt using the one
+   exact v2 ABI frozen below. Verify the signed `D-` receipt through `AuthorizationPort`
+   (supported version/key, canonical `spipe-uri-read-v1\0` payload, allow
+   decision, live window, revocation epoch) before every call compares all
+   fields against its direct proven target or reauthorizes/fails closed.
+   Freeze exactly `CanonicalReadReceiptV1{receiptVersion, authorityKeyId,
+   authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+   projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+   normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+   pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+   issuerKeyId, revocationEpoch, signature}` and `CursorReceiptV1` with the
+   same binding plus `lastSortKey`.
+3. **Snapshot gate.** Directly validate immutable snapshot existence,
+   workspace/project ownership, revision, and target membership; URI/query text
+   is never authority.
+4. **Evidence gate.** Table-drive workspace-root/view, artifact, section,
+   trace, diagnostics, and legacy-alias URI families (search is a tool input)
+   through malformed/overlong or unsupported URI; fragment/empty identity,
+   query, percent/decode, traversal/slash/backslash/encoded separator/dot,
+   drive/UNC/Windows-device/reparse/ADS/trailing-dot-space,
+   Unicode-control/NFC-NFD-collision/mixed-case, cursor, forged/expired/
+   signature-invalid/revoked or mismatched receipt, and hidden/absent matrices. Require
+   bounded redacted failure evidence and independent highest-capability review
+   before commit.
+5. **Positive gate.** Assert canonical list/read/render success for workspace
+   root/view, artifact, section, trace, diagnostics, legacy alias after
+   canonical reauthorization, and `spipe_search`; alias success must return the
+   authorized canonical target, not an alias-only echo.
+6. **Fresh-v2 correction.** Before the new implementation starts, extend the
+   frozen receipt tuple to include authority key/epoch, view, normalized
+   selector/filter digest, ordering version, and page limit. Cursor receipts
+   use the same tuple plus page position and cannot be replayed against any
+   selector, including a foreign workspace. The composition root must reject
+   structural/duck-typed “verifiers”; only an opaque branded real signed
+   `AuthorizationPortV1` creates verified grants. The workspace-root success
+   case is exactly `spipe://workspace/{workspace}/`; its un-slashed form is a
+   hostile malformed case. Record one public `not_found_or_unauthorized`
+   response class for all read-admission denials, with private reason codes
+   only in telemetry. These are acceptance blockers, not optional hardening.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.
+
+### 10.22 Wave 5 virtual-view implementation-readiness lane (2026-08-26)
+
+**Scope and non-overlap.** This lane owns read-only virtual MCP resources,
+equivalent model tools, and optional safe materialization. It must not modify
+the capped cursor/provider ABI or claim Wave 4/provider admission. It begins
+from the normative `spipe_knowledge_compiler_mcp_views.md` contract and appends
+only compatible evidence to the five knowledge-compiler companion documents.
+
+1. **Primary owner — core/read adapters.** Define `WorkspaceRegistry`,
+   `ResourceResolver`, `ProjectionPort`, snapshot-carrying resource/tool
+   envelopes, and legacy transcript fixtures. Freeze URI, pagination, error,
+   authorization, and cache interfaces before parallel work.
+2. **Sidecar A — projection safety (N/A until interfaces freeze).** Independently
+   review URI normalization, virtual-path collisions, UID/projection-UID
+   distinction, deterministic ordering, visibility/cache partitioning, and
+   bounded request behavior. It may add only tests after the frozen names land.
+3. **Sidecar B — materializer safety (N/A until port interfaces freeze).** Build
+   `MaterializerSafeFilesystemPort` provider evidence and race/fault fixtures;
+   it may not add a raw Node mutation fallback or touch refactor ownership.
+4. **Integration owner.** Assemble in the fixed order: resolver/projection;
+   legacy stdio resources/tools; materializer; optional HTTP 2026 only after its
+   separate authorization/invalidation evidence. Rebase exact-scope changes
+   onto current main and preserve six legacy tools plus `spipe://skill`.
+5. **Evidence and review.** Run each focused fixture once, inspect generated
+   MCP manual quality, and obtain independent normal/highest-capability review
+   of authority, cache, cursor, and filesystem claims. Required acceptance is
+   the explicit Wave 5 evidence set in detail design §18; failures fail closed,
+   with no widened scope.
+
+Merge owner remains `/root`; final reviewer is an independent
+normal/highest-capability agent. Notifications, subscriptions, editor VFS,
+FUSE/ProjFS, and provider-backed semantics are explicitly `N/A` for first-slice
+admission.
+
+### 10.20 Fresh three-blocker ABI repair lane (2026-08-26)
+
+**Scope:** exactly the five canonical knowledge-compiler documents; no product
+code or tests. **Merge owner:** `/root`. **Final reviewer:** an independent
+highest-capability reviewer after a separate implementation-readiness review.
+
+1. Freeze the executor result union so generic `{code}` excludes
+   `unauthorized`; require the sole unauthorized arm to carry a private exact
+   seven-enum tombstone reason, persist it in the bridge, and redact it from
+   every public result.
+2. Freeze the sole page/replay order: request structural/type/cap checks;
+   reservation; cursor identity/decode/verify/binding/liveness; replay or fresh
+   work. The bridge alone tombstones every post-reservation cursor failure using
+   the existing ordered reason table; no executor/store double ownership.
+3. State the exact required `requestedLimit`/`requested_limit` range as positive
+   safe integer `1..1000` in all session, request, wire, executor, result,
+   evidence, and cap maps. Require oracle cases for 0/1/1000/1001/noninteger
+   and reserve-before-cursor call traces.
+
+**Exit gate:** static scope/contradiction checks plus both reviews PASS. This is
+not product readiness: provider implementation/admission, Wave 4, AC-4, and
+the integrated pipeline stay open.
+
+### 10.17 Cursor-authority mapping and provider handoff (2026-08-26)
+
+1. **Representation decision — frozen.** After reservation, an unclassified
+   trusted cursor-authority `identity`, `sign`, or `verify` malfunction first
+   stores legal tombstone reason `interrupted`, then returns public
+   `internal_error`. Do not add `internal_error` to the tombstone enum.
+   Specific already-established expiry, revocation, binding,
+   authority-generation, policy, or record-corruption classifications retain
+   precedence.
+2. **Next implementation session.** Implement the frozen mapping and oracle
+   cases without broadening either closed vocabulary. Prove tombstone-before-
+   return ordering, identical-retry fail-closed behavior, and the precedence
+   cases.
+3. **Downstream lanes — waiting.** Provider admission, Wave 4, AC-4, and the
+   integrated pipeline remain open.
+
+Merge owner remains `/root`; independent normal/highest-capability review is
+still required for the next frozen contract and implementation.
+
+### 10.18 Full ABI consolidation stop and next owner (2026-08-26)
+
+1. **Consolidation attempt — `FAIL`.** The eleven-item ABI consolidation
+   exhausted the mandatory three review/fix cycles. It made no product edit,
+   ran no product test, admitted no contract, and pushed nothing. Retain
+   `e5c556de59d` at `/tmp/spkc-provider-abi-full-uWb9kD/repo` as immutable
+   forensic evidence only; do not copy its rejected contract text.
+2. **Review split.** Implementation-readiness review passed. Independent
+   highest-capability review failed because Section 17.11 excludes Section
+   17.7.1 but depends on its exact `providerSession`, authority, and executor
+   schemas, and excludes Section 17.7.9 without restating the complete public
+   error record/field shapes and exhaustive precedence.
+3. **Fresh-session task.** Restate both definition families completely inside
+   Section 17.11. Do not inherit excluded control prose or claim readiness
+   until a new independent highest-capability review passes.
+4. **Downstream lanes — waiting.** Provider readiness and admission, Wave 4,
+   AC-4, and the integrated pipeline remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.
+
+### 10.19 Self-containment repair stop and next owner (2026-08-26)
+
+1. **Repair attempt — `FAIL`.** The self-containment repair exhausted the
+   mandatory three review/fix cycles. It made no authoritative contract or
+   product edit, ran no product test, and pushed nothing. Retain
+   `e77cb713d5703d864f32d16ab3abab0afb5d3215` at
+   `/tmp/spkc-provider-self-contained-JdUR6t/repo` as immutable forensic
+   evidence only; do not copy its rejected clauses.
+2. **Review split.** Implementation-readiness review passed. Independent
+   highest-capability review failed on three exact blockers: the generic
+   code-only unauthorized arm overlaps the provenance arm; pre-reserve
+   binding/cursor prose conflicts with traces reserving before
+   `Cidentity`/`Cverify`; and `requestedLimit` lacks its exact range despite the
+   candidate cap.
+3. **Fresh-session task.** Make the executor-error union structurally disjoint,
+   freeze one reserve/cursor order and tombstone owner, and specify
+   `requestedLimit` as `1..1000`. Require fresh static checks and independent
+   highest-capability admission before implementation.
+4. **Downstream lanes — waiting.** Provider readiness/implementation/admission,
+   Wave 4, AC-4, and the integrated pipeline remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.
+
+### 10.21 Provider implementation non-admission and fresh-design gate (2026-08-26)
+
+1. **Attempt closed before runtime.** The provider implementation candidate at
+   `/tmp/spkc-provider-admission4-kVaqO2/repo`, based on
+   `f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`, stopped after two immutable xhigh
+   pre-runtime `FAIL` reviews. The final review attempt added no edit to its
+   exact ten-file scope and ran no runtime test, commit, or push. The forensic
+   candidate itself has an existing dirty diff; treat its code and contract
+   prose as forensic material only.
+2. **Decisive blocker.** Section 17.14.3 assigns post-reservation cursor
+   identity/decode/verify to the bridge, but the frozen seven-field bridge
+   factory configuration has no cursor-authority port. This is a configuration
+   ABI contradiction, not an implementation choice.
+3. **Non-admitted behavior.** Mandatory tombstones, the exact executor-error
+   union, full replay verification, cursor digest, store
+   accounting/idempotency, closed-object accessors, and oracle vectors remain
+   unimplemented and are not evidence.
+4. **Fresh-session task.** A new design owner must resolve the factory/config
+   ABI before assigning any implementation work. Then require fresh
+   implementation-readiness and independent highest-capability review.
+5. **Downstream lanes — waiting.** Provider admission, Wave 4, AC-4, and the
+   integrated pipeline remain open.
+
+Merge owner remains `/root`; final acceptance remains owned by an independent
+normal/highest-capability reviewer.

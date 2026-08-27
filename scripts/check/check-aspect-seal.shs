@@ -58,8 +58,19 @@ set -u
 # changes the verdict or the exit status). See scripts/check/lib/emit_receipt.shs.
 . "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/lib/emit_receipt.shs"
 
+# die_error <verdict-line> — print an ERROR verdict, REVOKE this gate's evidence
+# receipt, and exit 2. Every ERROR path goes through here: a gate that exits 2
+# has checked nothing, and leaving its previous PASS receipt on disk let a dead
+# gate keep testifying to check-critical-release-seal.shs. See receipt_error()
+# in lib/emit_receipt.shs.
+die_error() {
+    echo "$1"
+    receipt_error "check-aspect-seal" "$1" || true
+    exit 2
+}
+
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-cd "$REPO_ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+cd "$REPO_ROOT" || { die_error "ERROR — nothing was checked (cannot cd to repo root)"; }
 
 SIMPLE_BIN="bin/simple"
 DRIVER="src/app/check/aspect_seal_census.spl"
@@ -73,21 +84,19 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) MODE="selftest"; shift ;;
         --aspect) ASPECTS="$ASPECTS ${2:-}"; shift 2 ;;
-        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+        *) die_error "ERROR — nothing was checked (unknown argument: $1)" ;;
     esac
 done
 [ -n "$ASPECTS" ] || ASPECTS="$DEFAULT_ASPECTS"
 
 if [ ! -x "$SIMPLE_BIN" ]; then
-    echo "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
-    exit 2
+    die_error "ERROR — nothing was checked (no executable $SIMPLE_BIN; absence of a compiler is absence of evidence)"
 fi
 if [ ! -f "$DRIVER" ]; then
-    echo "ERROR — nothing was checked (no driver at $DRIVER)"
-    exit 2
+    die_error "ERROR — nothing was checked (no driver at $DRIVER)"
 fi
 
-TMPDIR_RUN=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+TMPDIR_RUN=$(mktemp -d) || { die_error "ERROR — nothing was checked (mktemp failed)"; }
 trap 'rm -rf "$TMPDIR_RUN"' EXIT
 
 # ---------------------------------------------------------------------------
@@ -159,8 +168,7 @@ selftest() {
         || FAILURES="$FAILURES unverified-signature-not-detected"
 
     if [ -n "$FAILURES" ]; then
-        echo "ERROR — nothing was checked (selftest failed:$FAILURES)"
-        exit 2
+        die_error "ERROR — nothing was checked (selftest failed:$FAILURES)"
     fi
 }
 
@@ -176,9 +184,8 @@ fi
 run_census "$TMPDIR_RUN/scan.txt" "$ASPECTS"
 SUMMARY=$(grep '^SUMMARY ' "$TMPDIR_RUN/scan.txt" | tail -1)
 if [ -z "$SUMMARY" ]; then
-    echo "ERROR — nothing was checked (driver produced no SUMMARY record)"
     sed -n '1,10p' "$TMPDIR_RUN/scan.txt.err"
-    exit 2
+    die_error "ERROR — nothing was checked (driver produced no SUMMARY record)"
 fi
 
 ASPECT_N=$(field "$SUMMARY" aspects)
@@ -195,17 +202,14 @@ STABLE=$(field "$SUMMARY" recheck_stable)
 PARSEFAIL=$(field "$SUMMARY" parse_fail)
 
 if [ -z "$ASPECT_N" ] || [ "$ASPECT_N" -eq 0 ]; then
-    echo "ERROR — nothing was checked (0 aspects; absence of analysis is absence of evidence)"
-    exit 2
+    die_error "ERROR — nothing was checked (0 aspects; absence of analysis is absence of evidence)"
 fi
 if [ "$PARSEFAIL" -ne 0 ]; then
-    echo "ERROR — nothing was checked ($PARSEFAIL document(s) failed to parse; the selection is incomplete)"
     grep '^PARSE-FAIL ' "$TMPDIR_RUN/scan.txt"
-    exit 2
+    die_error "ERROR — nothing was checked ($PARSEFAIL document(s) failed to parse; the selection is incomplete)"
 fi
 if [ -z "$OBLIGATIONS" ] || [ "$OBLIGATIONS" -eq 0 ]; then
-    echo "ERROR — nothing was checked (0 required-facet obligations examined; a vacuous seal is not a pass)"
-    exit 2
+    die_error "ERROR — nothing was checked (0 required-facet obligations examined; a vacuous seal is not a pass)"
 fi
 
 if [ "$UNBOUND" -ne 0 ] || [ "$DUP" -ne 0 ] || [ "$LATE" -ne 0 ] || [ "$UNVERIFIED" -ne 0 ] \

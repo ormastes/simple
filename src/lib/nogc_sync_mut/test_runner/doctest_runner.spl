@@ -6,7 +6,7 @@
 use std.io.{file_read, file_exists}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
-use std.io_runtime.{dir_walk}
+use std.io_runtime.{dir_walk, dir_create_all}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.test_runner.test_runner_types.{TestFileResult, TEST_OUTPUT_CAPTURE_BYTES}
 # PERF (2026-08-17): import find_simple_binary from its DEFINING module
@@ -16,6 +16,7 @@ use std.test_runner.test_runner_types.{TestFileResult, TEST_OUTPUT_CAPTURE_BYTES
 # process that only needed this one path helper. Same function either way —
 # test_runner_execute merely re-imports it from test_executor_parsing.
 use std.test_runner.test_executor_parsing.{find_simple_binary}
+use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.sdoctest.types.{SdoctestFileResult, SdoctestRunResult, SdoctestBlock, BlockResult, BlockStatus}
 use std.io.{env_get}
 
@@ -140,12 +141,20 @@ fn extract_doctests(file_path: text) -> [Doctest]:
 
         # Detect doc comments
         if trimmed.starts_with("///") or trimmed.starts_with("#"):
-            val doc_content = if trimmed.starts_with("///"):
-                trimmed[3:].trim()
+            val doc_marker_len = if trimmed.starts_with("///"):
+                3
             elif trimmed.starts_with("##"):
-                trimmed[2:].trim()
+                2
             else:
-                trimmed[1:].trim()
+                1
+            # Fence/marker detection wants the trimmed text, but the BODY must
+            # keep its indentation: `.trim()`ing it flattened every indented
+            # line inside a `#` doctest (lambda bodies, if/for/while blocks,
+            # nested calls), so the harness compiled mangled code and reported
+            # a parse error the documented example never had. Strip the marker
+            # and at most ONE following space, matching sdoctest/extractor.spl.
+            val doc_body = _dt_strip_doc_marker(trimmed, doc_marker_len)
+            val doc_content = doc_body.trim()
 
             if doc_content.starts_with("```simple") or doc_content.starts_with("```spl") or doc_content.starts_with("```sdoctest"):
                 in_code_block = true
@@ -163,7 +172,7 @@ fn extract_doctests(file_path: text) -> [Doctest]:
                         should_fail: should_fail
                     ))
             elif in_code_block:
-                code_lines.push(doc_content)
+                code_lines.push(doc_body)
 
         else:
             if in_code_block:
@@ -349,6 +358,85 @@ fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
 # SPL Same-File Doctest Support
 # =========================================================================
 
+# Pick the first stderr line that actually says why a doctest block failed.
+#
+# The seed binary unconditionally prints a two-line "bootstrap seed only"
+# banner on stderr, and the compiler emits `warning:` / `[WARN]` /
+# `[gc-warning]` / `[INFO]` diagnostics ahead of any real error. Naively
+# reporting stderr line 1 therefore labelled EVERY non-zero-exit block with
+# the banner: in the 2026-08-24 whole-suite baseline, 216 of 226 reported
+# failure reasons were that banner, so the run's 215 doctest failures had no
+# usable diagnosis at all. This does not change any verdict — only the text
+# shown for an already-failing block.
+fn _dt_failure_reason(stderr: text) -> text:
+    var fallback = ""
+    for raw in stderr.split("\n"):
+        # The seed colourises `warning:` with ANSI codes, so the marker is not
+        # at the start of the raw line; classify on the stripped text.
+        val line = strip_ansi(raw).trim()
+        if line == "":
+            continue
+        if fallback == "":
+            fallback = line
+        if line.starts_with("WARNING: this Rust-built Simple binary"):
+            continue
+        if line.starts_with("Build and use the pure-Simple"):
+            continue
+        if line.starts_with("warning:") or line.starts_with("[WARN]"):
+            continue
+        if line.starts_with("[gc-warning]") or line.starts_with("[INFO]"):
+            continue
+        if line.starts_with("[use-warning]"):
+            continue
+        return line
+    if fallback != "":
+        return fallback
+    "Exit code non-zero"
+
+fn _dt_strip_doc_marker(trimmed: text, marker_len: i64) -> text:
+    var r = trimmed[marker_len:]
+    if r.starts_with(" "):
+        r = r[1:]
+    r
+
+# Where the same-file doctest composite is written.
+#
+# It MUST live INSIDE the repository under test. The seed resolves `use std.*`
+# by walking UP from the source file's directory looking for a stdlib root, and
+# only if that walk finds nothing does it fall back to a repo root baked in at
+# BUILD time (`env!("CARGO_MANIFEST_DIR")` in
+# `src/compiler_rust/compiler/src/pipeline/module_loader.rs`, tried BEFORE the
+# process cwd). Writing the composite to `$TMPDIR` (`/tmp`, `/mnt/data/tmp`)
+# gives the walk-up nothing to find, so every doctest block silently compiled
+# the stdlib of whatever worktree the seed binary happened to be BUILT in --
+# a different tree than the one under test. Measured 2026-08-24 by strace: a
+# composite under /mnt/data/tmp opened
+# `/mnt/data/worktrees/seed-deploy-1/src/lib/nogc_sync_mut/spec/decorators.spl`
+# while the repo under test was a different worktree entirely, so stdlib fixes
+# made in the tree under test were invisible and stale defects in the unrelated
+# build tree were reported as failures of this tree's examples.
+#
+# `.simple/` is already gitignored, so the composite is inside the repo (the
+# walk-up finds this tree's `src/lib`) without polluting `src/` -- a stray
+# composite left under `src/` by a killed run would be picked up as a source
+# file by the next doctest discovery sweep.
+fn _dt_composite_dir() -> text:
+    val dir = ".simple/doctest"
+    dir_create_all(dir)
+    dir
+
+# Composite basenames must be unique per SOURCE FILE, not just per line number.
+# Two different sources with a doctest on the same line ran concurrently would
+# otherwise write and delete the same path underneath each other.
+fn _dt_composite_slug(file_path: text) -> text:
+    var slug = ""
+    for ch in file_path:
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9"):
+            slug = slug + ch
+        else:
+            slug = slug + "_"
+    slug
+
 fn build_spl_doctest_code(source_content: text, dt: Doctest) -> text:
     source_content + "\n\n# --- doctest from line {dt.line_number} ---\nuse std.spec.*\n" + dt.code
 
@@ -386,7 +474,7 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
     for dt in doctests:
         # Build composite file: source + doctest code
         val composite_code = build_spl_doctest_code(source_content, dt)
-        val temp_path = "{_dt_get_temp_dir()}/spl_doctest_{dt.line_number}.spl"
+        val temp_path = "{_dt_composite_dir()}/spl_doctest_{_dt_composite_slug(file_path)}_{dt.line_number}.spl"
         file_atomic_write(temp_path, composite_code)
 
         val start = time_now_unix_micros()
@@ -441,7 +529,7 @@ fn run_spl_doctests_same_file(file_path: text, timeout_ms: i64) -> SdoctestFileR
                 ))
             else:
                 failed = failed + 1
-                val error_msg = if stderr != "": stderr.split("\n")[0] else: "Exit code non-zero"
+                val error_msg = _dt_failure_reason(stderr)
                 block_results.push(BlockResult(
                     block: block, status: BlockStatus.Failed,
                     duration_ms: duration_ms, stdout: stdout, stderr: stderr,

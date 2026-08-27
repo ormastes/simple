@@ -173,14 +173,7 @@ fn native_btreemap_ordering() {
     p.btreemap_insert(h, "a".into(), Value::Int(1)).unwrap();
     p.btreemap_insert(h, "b".into(), Value::Int(2)).unwrap();
     let keys = p.btreemap_keys(h).unwrap();
-    assert_eq!(
-        keys,
-        vec![
-            Value::text("a"),
-            Value::text("b"),
-            Value::text("c")
-        ]
-    );
+    assert_eq!(keys, vec![Value::text("a"), Value::text("b"), Value::text("c")]);
     assert_eq!(p.btreemap_first_key(h).unwrap(), Value::text("a"));
     assert_eq!(p.btreemap_last_key(h).unwrap(), Value::text("c"));
 }

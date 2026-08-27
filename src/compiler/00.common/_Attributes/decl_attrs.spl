@@ -688,6 +688,12 @@ struct FunctionAttr:
     unroll_factor: i64      # @unroll(n) — structural unroll factor; 0 = no unroll
     pipeline_ii: i64        # @pipeline(n) / @pipeline(ii=n) — initiation interval; 0 = no pipeline
     memory_banks: i64       # @memory(n) / @memory(banks=n) — array port banking; 0 = no banking
+    # @rt(hal[, c][, rust]) — Pure Simple remains the mandatory owner.
+    # These trailing fields are stable HIR metadata; no source-text scan is used.
+    is_rt_hal: bool
+    rt_hal_compare_c: bool
+    rt_hal_compare_rust: bool
+    rt_hal_error: text
 
 impl FunctionAttr:
     static fn default() -> FunctionAttr:
@@ -712,7 +718,11 @@ impl FunctionAttr:
             optimization_req: OptimizationReq(level: OptimizationReqLevel.None_, backend: OptimizationBackend.Unknown),
             unroll_factor: 0,
             pipeline_ii: 0,
-            memory_banks: 0
+            memory_banks: 0,
+            is_rt_hal: false,
+            rt_hal_compare_c: false,
+            rt_hal_compare_rust: false,
+            rt_hal_error: ""
         )
 
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
@@ -737,6 +747,10 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var unroll_factor: i64 = 0
     var pipeline_ii: i64 = 0
     var memory_banks: i64 = 0
+    var is_rt_hal = false
+    var rt_hal_compare_c = false
+    var rt_hal_compare_rust = false
+    var rt_hal_error = ""
 
     for attr in attrs:
         if attr.name == "entry":
@@ -796,6 +810,23 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
                         simd_disable = true
                     elif simd_arg == "prefer_scalable":
                         simd_prefer_scalable = true
+        elif attr.name == "rt":
+            # Other @rt profiles (critical, realtime, etc.) are owned by the
+            # criticality validator. This lane claims only the `hal` profile.
+            if attr.args.len() > 0 and extract_text_arg(attr.args[0]) == "hal":
+                is_rt_hal = true
+                var rt_arg_index = 1
+                while rt_arg_index < attr.args.len():
+                    val provider = extract_text_arg(attr.args[rt_arg_index]).lower()
+                    if provider == "c":
+                        rt_hal_compare_c = true
+                    elif provider == "rust":
+                        rt_hal_compare_rust = true
+                    elif provider == "pure" or provider == "pure-simple":
+                        pass
+                    else:
+                        rt_hal_error = "E-RT-HAL-PROVIDER: expected pure, c, or rust"
+                    rt_arg_index = rt_arg_index + 1
 
     # Parse optimization requirements (@must, @prefer, @error_not, @warn_not)
     val optimization_req = parse_optimization_req_attrs(attrs)
@@ -820,7 +851,11 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         optimization_req: optimization_req,
         unroll_factor: unroll_factor,
         pipeline_ii: pipeline_ii,
-        memory_banks: memory_banks
+        memory_banks: memory_banks,
+        is_rt_hal: is_rt_hal,
+        rt_hal_compare_c: rt_hal_compare_c,
+        rt_hal_compare_rust: rt_hal_compare_rust,
+        rt_hal_error: rt_hal_error
     )
 
 struct GpuFunctionAttrArgs:

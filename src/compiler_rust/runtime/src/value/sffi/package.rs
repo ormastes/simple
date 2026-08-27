@@ -4,10 +4,8 @@
 use crate::value::collections::rt_string_new;
 use crate::value::RuntimeValue;
 use sha2::{Digest, Sha256};
-use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::os::raw::c_char;
 use std::path::Path;
 
 /// Decode a Simple `text` argument passed as an explicit `(ptr, len)` pair.
@@ -50,9 +48,8 @@ unsafe fn text_arg<'a>(ptr: *const u8, len: usize) -> Option<&'a str> {
 ///
 /// This also dissolves, rather than manages, the ownership question: the result
 /// is owned by the runtime like any other Simple string, so
-/// `rt_package_free_string` must never be applied to it. With this change that
-/// symbol has no producer left anywhere in the tree, so it can neither leak nor
-/// double-free.
+/// The retired manual C-string free operation must never be applied to it.
+/// This result has no foreign allocation to leak or double-free.
 ///
 /// # Safety
 /// - `file_path`/`file_path_len` must describe a valid UTF-8 byte range
@@ -421,17 +418,6 @@ pub unsafe extern "C" fn rt_package_is_dir(path: *const u8, path_len: usize) -> 
         1
     } else {
         0
-    }
-}
-
-/// Free a C string allocated by this module
-///
-/// # Safety
-/// - `ptr` must be a pointer returned by one of the rt_package_* functions
-#[no_mangle]
-pub unsafe extern "C" fn rt_package_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        let _ = CString::from_raw(ptr);
     }
 }
 

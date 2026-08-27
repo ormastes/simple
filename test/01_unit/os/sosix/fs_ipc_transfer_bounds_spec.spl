@@ -1,0 +1,43 @@
+# @cover src/os/sosix/fs/ipc_codec_v1.spl 80%
+"""SOSIX filesystem requests share one exact 16 MiB transfer ceiling."""
+
+use std.spec.*
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT}
+use os.sosix.fs.ipc_codec_v1.*
+
+fn _request_with_length(length: u64) -> SosixFsIpcRequestV1:
+    SosixFsIpcRequestV1(
+        api_id: SOSIX_FS_READ_AT,
+        flags: SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER,
+        operation_slot: 2,
+        operation_generation: 3,
+        reply_endpoint: 4,
+        request_token: 5,
+        deadline_ns: 6,
+        capability: SosixCapabilityRef(slot: 7, generation: 8),
+        resource_offset: 0,
+        length: length,
+        buffer: SosixBufferRef(slot: 9, generation: 10),
+        buffer_offset: 0)
+
+describe "SOSIX filesystem IPC transfer bounds":
+    it "encodes a transfer exactly at the shared 16 MiB ceiling":
+        step("Encode a registered-buffer request at the maximum length")
+        val encoded = sosix_fs_ipc_encode_request_v1(
+            _request_with_length(SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1))
+
+        expect(SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1).to_equal(
+            16u64 * 1024u64 * 1024u64)
+        expect(encoded.accepted).to_be(true)
+        expect(encoded.reason).to_equal("accepted")
+        expect(encoded.bytes.len() as u64).to_equal(SOSIX_FS_IPC_REQUEST_SIZE_V1)
+
+    it "rejects a transfer one byte beyond the shared 16 MiB ceiling":
+        step("Encode a registered-buffer request beyond the maximum length")
+        val encoded = sosix_fs_ipc_encode_request_v1(_request_with_length(
+            SOSIX_FS_IPC_MAX_REGISTERED_BUFFER_BYTES_V1 + 1u64))
+
+        expect(encoded.accepted).to_be(false)
+        expect(encoded.reason).to_equal("transfer-too-large")
+        expect(encoded.bytes.len()).to_equal(0)

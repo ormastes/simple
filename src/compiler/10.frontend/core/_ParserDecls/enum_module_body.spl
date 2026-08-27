@@ -6,6 +6,7 @@ use compiler.frontend.core.parser_decls.*
 # Use/export/binding/impl declarations extracted to parser_decls_use.spl.
 
 use compiler.core.ast.{expr_ident, expr_call, expr_unit, expr_block, expr_binary, expr_field_access}
+use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 use compiler.core.ast.{expr_method_call, expr_bool_lit, expr_string_lit, expr_int_lit}
 use compiler.core.ast.{stmt_expr_stmt}
 use compiler.core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
@@ -19,7 +20,7 @@ use compiler.core.ast.{decl_set_hardware, decl_set_clocked_args, decl_set_vhdl_g
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
-use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text}
+use compiler.core.ast.{decl_set_gpu_target_text, decl_set_gpu_target_arg_name_text, decl_set_gpu_backends_text, decl_set_rt_hal_flags}
 use compiler.core.ast.{decl_set_unroll_factor, decl_set_pipeline_ii, decl_set_memory_banks}
 use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_derives}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_field_bits, decl_get_derives, decl_set_derives}
@@ -66,12 +67,11 @@ use compiler.frontend.aspect_registry.{aspect_pending_kind_get, aspect_pending_s
 use compiler.frontend.aspect_registry.{aspect_pending_mode_get, aspect_pending_readonly_get}
 use compiler.frontend.aspect_registry.{aspect_pending_noalloc_get, aspect_pending_bounded_time_get}
 use compiler.frontend.aspect_registry.{aspect_pending_saw_advice_get, aspect_pending_reset}
-extern fn rt_env_get(key: text) -> text
-
+use compiler.common.rt_profile_policy.{rt_implicit_profile_is_error}
 # ===== Helper Functions =====
 
 fn parser_module_trace_enabled() -> bool:
-    (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
+    frontend_compiler_trace_enabled()
 
 # Soft-keyword lookahead for `layer NAME` / `layer NAME uses A, B` (M0 of
 # doc/03_plan/compiler/forwarding/zero_cost_layers_c0_c5_staged_implementation_plan_2026-08-07.md).
@@ -1304,6 +1304,47 @@ fn parse_module_body():
                     # how C4 would go back to being "annotated but unchecked".
                     effect_pending_reset()
                     parser_error("`@copy_budget(N)` / `@bounded_loop` must decorate a function declaration")
+            elif decorator_name == "rt":
+                # Compiler-recognized RT declaration. `@rt` is the staged
+                # legacy spelling; `@rt(critical)` is explicit. The inert
+                # marker is consumed before HIR and therefore has zero runtime
+                # representation.
+                val rt_is_fn: bool = par_kind_get() == 20 or par_kind_get() == 34
+                if rt_is_fn:
+                    val rt_parts = attr_raw_args.split(",")
+                    val is_hal_tag = rt_parts.len() > 0 and rt_parts[0] == "hal"
+                    if attr_raw_args == "":
+                        if rt_implicit_profile_is_error():
+                            parser_error("E-RT-PROFILE-001: implicit @rt defaults to critical; write @rt(critical)")
+                        else:
+                            parser_warn("W-RT-PROFILE-001: implicit @rt defaults to critical; write @rt(critical)")
+                    val rt_d = parse_fn_decl(0)
+                    if is_hal_tag:
+                        var rt_hal_flags = 1
+                        var rt_hal_index = 1
+                        while rt_hal_index < rt_parts.len():
+                            val rt_provider = rt_parts[rt_hal_index].lower()
+                            if rt_provider == "c":
+                                rt_hal_flags = rt_hal_flags | 2
+                            elif rt_provider == "rust":
+                                rt_hal_flags = rt_hal_flags | 4
+                            elif rt_provider != "pure" and rt_provider != "pure-simple":
+                                rt_hal_flags = rt_hal_flags | 8
+                            rt_hal_index = rt_hal_index + 1
+                        decl_set_rt_hal_flags(rt_d, rt_hal_flags)
+                    module_add_decl(rt_d)
+                    # HAL declarations are RT declarations too. Register them
+                    # as explicit critical so transitive RT/noalloc validation
+                    # cannot be bypassed by selecting the HAL profile.
+                    val rt_helper = expr_ident("__rt_criticality_decl", 0)
+                    var rt_args: [i64] = []
+                    rt_args.push(expr_string_lit(decl_get_name(rt_d), 0))
+                    rt_args.push(expr_string_lit(if is_hal_tag: "critical" else: attr_raw_args, 0))
+                    val rt_marker = expr_call(rt_helper, rt_args, 0)
+                    module_add_decl(decl_val_binding("_expr_rt_criticality_" + int_to_str(i), -1, rt_marker, -1))
+                    parser_reset_pending_vhdl_decorators()
+                else:
+                    parser_error("`@rt` must decorate a function declaration")
             elif decorator_name == "advice" or decorator_name == "readonly" or decorator_name == "noalloc" or decorator_name == "bounded_time":
                 # C3 `@advice(KIND, SELECTOR[, MODE])` + the three advice
                 # obligations `@readonly` / `@noalloc` / `@bounded_time`

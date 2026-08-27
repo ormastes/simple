@@ -30,6 +30,8 @@ pub const KNOWN_ATTRIBUTE_NAMES: &[&str] = &[
     "mode_failure_strategy",
     // Module/compiler directives
     "inline",
+    "always_inline",
+    "force_inline",
     "gc",
     "bypass",
     "no_gc",

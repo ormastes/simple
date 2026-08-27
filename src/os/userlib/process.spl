@@ -3,7 +3,9 @@
 use os.userlib.syscall_raw
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use os.kernel.types.syscall_types(SignalKind)
-use os.kernel.types.syscall_types.{new_task_info_buf}
+use os.kernel.types.syscall_types.{
+    new_task_info_buf, SYSCALL13_AUTHENTICATED_RUN_ABI_V1
+}
 use os.sosix.process.{sosix_marshal_string_vector, sosix_string_vector_table_offset}
 
 class ProcessEntry:
@@ -155,6 +157,45 @@ fn spawn_path(path: text, argv: [text], envp: [text]) -> Result<u32, i32>:
         return Err(result as i32)
     Ok(result as u32)
 
+fn run_path_authenticated_v1(
+    path: text,
+    argv: [text],
+    recipe: i64
+) -> Result<i64, i32>:
+    """Submit a pre-admitted path+argv launch to the loader-owned broker.
+
+    This is intentionally named `run`, not `spawn`: syscall 13's tagged v1
+    result is the program's real synchronous execution result.  Userland sends
+    no token, registry, mount handle, caller id, entry point, or environment.
+    The kernel derives caller identity and the loader consumes an exact
+    caller/path/recipe one-shot admission.  Missing admission fails EACCES.
+    """
+    if path.len() == 0 or recipe <= 0:
+        return Err(22)
+    var effective_argv: [text] = []
+    if argv.len() == 0:
+        effective_argv.push(path)
+    else:
+        var i: u64 = 0
+        while i < argv.len().to_u64():
+            effective_argv.push(argv[i])
+            i = i + 1
+    if effective_argv[0] != path:
+        return Err(22)
+    val argv_buf = sosix_marshal_string_vector(effective_argv)
+    val argv_table = sosix_string_vector_table_offset(effective_argv)
+    val result = syscall(
+        13,
+        rt_string_data(path) as u64,
+        path.len() as u64,
+        argv_buf.ptr() as u64,
+        recipe as u64,
+        argv_table,
+        SYSCALL13_AUTHENTICATED_RUN_ABI_V1)
+    if result < 0:
+        return Err(result as i32)
+    Ok(result)
+
 # Narrow process-monitoring facade. Other syscall wrappers remain private to
 # their existing package consumers.
-export ProcessEntry, list_tasks
+export ProcessEntry, yield_, list_tasks, run_path_authenticated_v1

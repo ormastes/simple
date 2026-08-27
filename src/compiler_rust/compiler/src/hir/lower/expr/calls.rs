@@ -76,9 +76,10 @@ impl Lowerer {
             // bogus one-field struct typed STRING which rt_string_concat
             // rejected (len=-1 → NIL), dropping `"x=" + str(5)` to empty (#66).
             // Skip primitives here so lower_utility_builtin lowers them as Cast.
-            let ctor_ty = self.module.types.lookup(name).filter(|ty_id| {
-                !matches!(
-                    self.module.types.get(*ty_id),
+            let bare_ctor_ty = self.module.types.lookup(name);
+            let bare_is_primitive = bare_ctor_ty.is_some_and(|ty_id| {
+                matches!(
+                    self.module.types.get(ty_id),
                     Some(
                         HirType::Void
                             | HirType::Bool
@@ -91,6 +92,13 @@ impl Lowerer {
                     )
                 )
             });
+            let canonical_ctor_ty = if bare_is_primitive {
+                None
+            } else {
+                self.global_struct_key_for_name(name)
+                    .and_then(|key| self.module.types.lookup(&key))
+            };
+            let ctor_ty = canonical_ctor_ty.or(if bare_is_primitive { None } else { bare_ctor_ty });
             if let Some(struct_ty) = ctor_ty {
                 if matches!(self.module.types.get(struct_ty), Some(HirType::Bitfield { .. })) {
                     return self.lower_bitfield_constructor(struct_ty, args, ctx);
@@ -105,8 +113,7 @@ impl Lowerer {
                 // reorders named args to their declared slot and fills any
                 // field the call site omits (relying on a class-level
                 // default) with `nil` instead of leaving it unset.
-                let provided: Vec<(Option<&str>, &Expr)> =
-                    args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+                let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
                 let fields_hir = self.lower_struct_init_fields(name, struct_ty, &provided, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {
@@ -126,8 +133,7 @@ impl Lowerer {
                 // lower_struct_init_fields falls back to source-order lowering
                 // (its "unresolvable struct" branch) — same effective
                 // behavior as before, just centralized through one helper.
-                let provided: Vec<(Option<&str>, &Expr)> =
-                    args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
+                let provided: Vec<(Option<&str>, &Expr)> = args.iter().map(|a| (a.name.as_deref(), &a.value)).collect();
                 let fields_hir = self.lower_struct_init_fields(name, TypeId::ANY, &provided, ctx)?;
                 return Ok(HirExpr {
                     kind: HirExprKind::StructInit {

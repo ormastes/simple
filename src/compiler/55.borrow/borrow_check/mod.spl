@@ -156,7 +156,7 @@ class BorrowChecker:
                 val typed_then: BlockId = then_br
                 val typed_else: BlockId = else_br
                 Terminator.SwitchInt([typed_then.id], typed_else.id)
-            case CallTerminator(_, _, _, normal, unwind):
+            case CallTerminator(_, _, _, normal, unwind, _, _):
                 val typed_normal: BlockId = normal
                 val target = typed_normal.id
                 val unwind_id: i64? = if unwind.?:
@@ -203,7 +203,12 @@ class BorrowChecker:
                     BorrowKind.Shared
                 else:
                     BorrowKind.Mutable
-                nll.record_borrow(point, mir_place, kind)
+                # `dest` is the reference temp this borrow lands in. It used
+                # to be dropped here, which left the Return check with no way
+                # to distinguish an escaping borrow from one that dies in the
+                # body.
+                val ref_dest: LocalId = dest
+                nll.record_borrow(point, mir_place, kind, ref_dest.id)
 
             case Copy(dest, src):
                 # Copy uses the source and (re)initializes the destination
@@ -300,6 +305,10 @@ class BorrowChecker:
                 if val dest_local = dest:
                     nll.record_assign(point, Place.local(dest_local.id))
 
+            case Throw(payload, type_tag) | Resume(payload, type_tag):
+                self.record_operand_use(payload, nll, point)
+                self.record_operand_use(type_tag, nll, point)
+
             case _:
                 pass_do_nothing
 
@@ -318,6 +327,16 @@ class BorrowChecker:
             case Ret(value):
                 if val v = value:
                     self.record_operand_use(v, nll, point)
+                    # The returned operand is the only escape route a `Ref`
+                    # temp has; record it so the Return borrow check can tell
+                    # an escaping borrow from a body-local one.
+                    match v.kind:
+                        case Copy(ret_local):
+                            nll.record_returned_local(ret_local.id)
+                        case Move(ret_local):
+                            nll.record_returned_local(ret_local.id)
+                        case _:
+                            pass_do_nothing("a constant return operand names no local")
 
             case If(cond, _, _):
                 self.record_operand_use(cond, nll, point)
@@ -325,12 +344,19 @@ class BorrowChecker:
             case Switch(value, _, _):
                 self.record_operand_use(value, nll, point)
 
-            case CallTerminator(dest, func, args, _, _):
+            case CallTerminator(dest, func, args, _, _, unwind_payload_dest, unwind_type_tag_dest):
                 self.record_operand_use(func, nll, point)
                 for arg in args:
                     self.record_operand_use(arg, nll, point)
                 if val dest_local = dest:
                     nll.record_assign(point, Place.local(dest_local.id))
+                # The runtime initializes these destinations only on the
+                # exceptional edge, but they are definitions from the NLL
+                # transfer perspective just like the normal destination.
+                if val payload_local = unwind_payload_dest:
+                    nll.record_assign(point, Place.local(payload_local.id))
+                if val tag_local = unwind_type_tag_dest:
+                    nll.record_assign(point, Place.local(tag_local.id))
 
             case Goto(_):
                 pass_do_nothing("unconditional jump names no operand")

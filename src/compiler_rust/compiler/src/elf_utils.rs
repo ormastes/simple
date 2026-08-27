@@ -558,11 +558,17 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_process_execute" => value::rt_process_execute as *const () as usize,
         "rt_exec" => value::rt_exec as *const () as usize,
         "spl_dlopen" => value::spl_dlopen as *const () as usize,
+        "spl_dlopen_checked" => value::spl_dlopen_checked as *const () as usize,
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
+        "spl_dlsym_checked" => value::spl_dlsym_checked as *const () as usize,
+        "spl_dlsym_process_checked" => value::spl_dlsym_process_checked as *const () as usize,
         "spl_dlclose" => value::spl_dlclose as *const () as usize,
         "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
+        "spl_wffi_call_bool0_checked" => value::spl_wffi_call_bool0_checked as *const () as usize,
+        "spl_wffi_call_bool1_checked" => value::spl_wffi_call_bool1_checked as *const () as usize,
         "spl_wffi_call_f64_checked" => value::spl_wffi_call_f64_checked as *const () as usize,
         "spl_wffi_call_i64_checked" => value::spl_wffi_call_i64_checked as *const () as usize,
+        "spl_wffi_try_call_i64_out" => value::spl_wffi_try_call_i64_out as *const () as usize,
         "spl_wffi_call_i64_with_bytes" => value::spl_wffi_call_i64_with_bytes as *const () as usize,
         "spl_wffi_call_i64_with_bytes_checked" => value::spl_wffi_call_i64_with_bytes_checked as *const () as usize,
         "spl_fonts_call_init_blob" => value::spl_fonts_call_init_blob as *const () as usize,
@@ -892,6 +898,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_declare_global_data" => {
             crate::codegen::cranelift_sffi::rt_cranelift_declare_global_data as *const () as usize
         }
+        "rt_cranelift_declare_global_data_v2" => {
+            crate::codegen::cranelift_sffi::rt_cranelift_declare_global_data_v2 as *const () as usize
+        }
         "rt_cranelift_data_addr_in_func" => {
             crate::codegen::cranelift_sffi::rt_cranelift_data_addr_in_func as *const () as usize
         }
@@ -967,7 +976,13 @@ mod tests {
             "spl_wffi_call_i64_with_bytes",
             "spl_wffi_call_i64_with_bytes_checked",
             "spl_wffi_call_i64_checked",
+            "spl_wffi_try_call_i64_out",
+            "spl_wffi_call_bool0_checked",
+            "spl_wffi_call_bool1_checked",
             "spl_wffi_call_f64_checked",
+            "spl_dlopen_checked",
+            "spl_dlsym_checked",
+            "spl_dlsym_process_checked",
         ] {
             assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
         }

@@ -1,9 +1,7 @@
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, cwd}
-use app.io.process_ops.{process_run_timeout, process_run_timeout_live}
-extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
-extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists}
@@ -191,6 +189,20 @@ fn output_path_arg(args: [text]) -> text:
         i = i + 1
     ""
 
+# Keep the front-end cache beside the explicitly selected native-build cache.
+# Parse shards inherit this environment, so an isolated bootstrap worktree can
+# reuse its warmed parser entries across parent/child processes.
+fn native_build_frontend_cache_dir_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--cache-dir" and i + 1 < args.len():
+            return "{args[i + 1]}/default/frontend"
+        elif a.starts_with("--cache-dir=") and a.len() > 12:
+            return "{a.substring(12)}/default/frontend"
+        i = i + 1
+    ""
+
 fn native_build_line_is_diagnostic(line: text) -> bool:
     """True for lines a caller greps for when deciding why native-build failed.
 
@@ -302,7 +314,23 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
         return 0
     if native_build_streaming_surfaces(args):
         return 0      # streaming parse has no front-end parse cache to warm
-    native_build_shard_threads(args)
+    val requested = native_build_shard_threads(args)
+    if requested <= 0:
+        return 0
+    # A parse shard is a process, not a lightweight task: the seed interpreter
+    # eagerly loads its transitive front-end graph before the shard can claim
+    # one source file.  Fan-out equal to --threads therefore turns an innocent
+    # `--threads 8` into eight multi-GiB resident heaps.  Keep the default
+    # within the one-process allocation budget for interpreter-mode bootstrap;
+    # a measured host may raise it explicitly.  On the QEMU/container capture
+    # hosts, two otherwise healthy parse children reached roughly 1.86 GiB
+    # each and were OOM-killed together before completing their cache warm-up.
+    # One child keeps the cache process-isolated while leaving enough headroom
+    # for the supervising native-build process and the later renderer capture.
+    val configured_cap = (env_get("SIMPLE_PARSE_SHARD_MAX") ?? "").to_i64() ?? 0
+    val default_cap = if (env_get("SIMPLE_EXECUTION_MODE") ?? "") == "interpret": 1 else: requested
+    val cap = if configured_cap > 0: configured_cap else: default_cap
+    if requested > cap: cap else: requested
 
 # The driver selects the streaming-surfaces parse/lower path under exactly
 # this env + flag combination (driver_streaming_surface_enabled).
@@ -357,14 +385,14 @@ fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text
     for i in indices:
         var shard_args = base
         shard_args = shard_args.push("--parse-shard={i}/{count}")
-        val pid = rt_process_spawn_async(simple_bin, shard_args)
+        val pid = process_spawn_async(simple_bin, shard_args)
         pids = pids.push(pid)
     var failed: [i64] = []
     var k = 0
     while k < pids.len():
         val i = indices[k]
         val pid = pids[k]
-        val code = if pid > 0: rt_process_wait(pid, timeout_ms) else: -1
+        val code = if pid > 0: process_wait(pid, timeout_ms) else: -1
         if code != 0:
             eprint "[parse-shard] shard={i}/{count} pid={pid} FAILED {parse_shard_exit_label(code)}"
             failed = failed.push(i)
@@ -374,9 +402,18 @@ fn spawn_parse_shards(base: [text], indices: [i64], count: i64, simple_bin: text
     failed
 
 fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
-    var base = ["run", "src/app/cli/native_build_worker.spl"]
+    # Parse warming only needs source discovery and the front-end parser.  Do
+    # not route it through native_build_worker: importing that full CLI pulls
+    # the complete compiler/JIT prelude into every shard before its first line
+    # runs.  parse_shard_main owns the deliberately slim equivalent path.
+    var base = ["run", "src/app/cli/parse_shard_main.spl"]
     for arg in args:
         base = base.push(arg)
+    # The interpreted parser retains a large front-end graph.  Keep the
+    # cache warmer below constrained container/QEMU host limits; the shard is
+    # best-effort and its only output is content-addressed parser cache files.
+    if (env_get("SIMPLE_EXECUTION_MODE") ?? "") == "interpret" and not base.contains("--low-memory"):
+        base = base.push("--low-memory")
     val queue_dir = parse_shard_queue_dir()
     val old_queue = env_get("SIMPLE_PARSE_SHARD_QUEUE") ?? ""
     if queue_dir != "":
@@ -454,13 +491,13 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     while i < count:
         var shard_args = base
         shard_args = shard_args.push("--hir-shard={i}/{count}")
-        val pid = rt_process_spawn_async(simple_bin, shard_args)
+        val pid = process_spawn_async(simple_bin, shard_args)
         if pid > 0:
             pids = pids.push(pid)
         i = i + 1
     var done = 0
     for pid in pids:
-        val code = rt_process_wait(pid, timeout_ms)
+        val code = process_wait(pid, timeout_ms)
         if code == 0:
             done = done + 1
     if queue_dir != "":
@@ -481,6 +518,9 @@ fn run_native_build_worker(args: [text]) -> i64:
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
     # an empty one.
     env_set("SIMPLE_BINARY", simple_bin)
+    val frontend_cache_dir = native_build_frontend_cache_dir_arg(args)
+    if frontend_cache_dir != "":
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", frontend_cache_dir)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
     # process_run_timeout_live relays the worker's stdout/stderr to ours AS
@@ -494,7 +534,7 @@ fn run_native_build_worker(args: [text]) -> i64:
     # its parse phase is all hits. SIMPLE_NATIVE_BUILD_WORKER is already 1
     # here, so the shard children pass the worker entrypoint guard.
     val shard_count = native_build_parse_shard_count(args)
-    if shard_count > 1:
+    if shard_count > 0:
         run_parse_shards(args, shard_count, simple_bin, native_build_timeout_ms(args))
     # Then fill the HIR cache the same way, so the real build's HIR phase is
     # all hits too. Runs AFTER the parse shards: each HIR child's own parse

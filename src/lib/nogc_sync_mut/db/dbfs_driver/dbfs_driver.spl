@@ -27,10 +27,12 @@ use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
     DbfsNamespaceEntry,
     dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes,
     dbfs_device_serialization_blocker, dbfs_device_serialization_ready,
+    dbfs_device_instance_registered,
     dbfs_device_append_unbound,
     dbfs_owner_transaction_begin, dbfs_owner_transaction_end,
     dbfs_device_register_locked, dbfs_device_unregister_locked,
     dbfs_device_data_capacity_locked, dbfs_device_blob_binding_locked,
+    dbfs_device_mount_seal_epoch_locked,
     dbfs_device_restore_blob_locked, dbfs_device_commit_blob_locked,
     dbfs_device_append_unbound_locked, dbfs_device_read_bytes_locked,
     dbfs_device_recover_locked, dbfs_device_persist_namespace_locked,
@@ -51,6 +53,7 @@ enum DbFsKind:
 struct DbFsInode:
     inst_id:  i64
     id:       u64
+    content_generation: u64
     kind:     DbFsKind
     name:     text
     content:  text
@@ -68,6 +71,31 @@ struct DbFsFd:
     is_dir:     bool
     closed:     bool
 
+fn _dbfs_file_stat_for_inode(inode: DbFsInode) -> FileStat:
+    """Build honest metadata for one canonical DBFS inode.
+
+    Mutable ownership, permission, and timestamp metadata is not persisted by
+    DBFS yet, so those fields retain explicit backend defaults.  Identity,
+    type, size, and allocation always describe the supplied live inode.
+    """
+    val is_dir = inode.kind == DbFsKind.Dir
+    val type_mode: u32 = if is_dir: 0o040000 else: 0o100000
+    val permission_mode: u32 = if is_dir: 0o755 else: 0o644
+    FileStat(
+        inode: inode.id,
+        size: inode.size as u64,
+        blocks: ((inode.size as u64) + 4095u64) / 4096u64,
+        block_size: 4096,
+        mode: type_mode | permission_mode,
+        uid: 0,
+        gid: 0,
+        nlinks: 1,
+        atime_ns: 0u64,
+        mtime_ns: 0u64,
+        ctime_ns: 0u64,
+        birth_time_ns: 0u64
+    )
+
 # --- Canonical namespace state ---
 # Keyed by inst_id so multiple driver instances are isolated. These arrays are
 # private state of device_commit_owner's transaction domain; helpers carrying
@@ -76,6 +104,10 @@ struct DbFsFd:
 var _dbfs_inodes: [DbFsInode] = []
 var _dbfs_fds:    [DbFsFd] = []
 var _dbfs_next_inst: i64 = 1
+val _DBFS_MAX_INST_ID: i64 = 0x7fffffffffffffff
+var _dbfs_next_mount_seal_nonce: u64 = 1u64
+var _dbfs_closed_device_ids: [i64] = []
+val _DBFS_CLOSED_DEVICE_RECEIPT_CAPACITY: i32 = 256
 # --- DbFsDriver struct ---
 
 struct DbFsDriver:
@@ -148,6 +180,8 @@ fn _fd_inode_idx_locked(inst_id: i64, handle_id: u64) -> i32:
 
 fn _alloc_inst_id_locked() -> i64:
     """Allocate a fresh instance id and advance the counter."""
+    if _dbfs_next_inst <= 0 or _dbfs_next_inst == _DBFS_MAX_INST_ID:
+        return 0
     val id = _dbfs_next_inst
     _dbfs_next_inst = _dbfs_next_inst + 1
     id
@@ -183,6 +217,7 @@ fn _dbfs_namespace_entries_locked(inst_id: i64) -> Result<[DbfsNamespaceEntry], 
                 return Err(FsError.Corrupt)
             entries.push(DbfsNamespaceEntry(
                 inode_id: inode.id,
+                content_generation: inode.content_generation,
                 is_dir: is_dir,
                 size: inode.size,
                 blob_offset: blob_offset,
@@ -212,6 +247,7 @@ fn _dbfs_replay_namespace_locked(inst_id: i64, base_block: i64, block_count: i64
         _dbfs_inodes.push(DbFsInode(
             inst_id: inst_id,
             id: entry.inode_id,
+            content_generation: entry.content_generation,
             kind: if entry.is_dir: DbFsKind.Dir else: DbFsKind.File,
             name: entry.path,
             content: "",
@@ -231,6 +267,64 @@ fn _dbfs_finish_result<T>(result: Result<T, FsError>) -> Result<T, FsError>:
     Err(FsError.IoError(code: 0u32))
 
 impl DbFsDriver:
+    pub fn device_instance_id() -> i64: self.inst_id
+
+    pub fn device_backing_close_preflight(expected_inst_id: i64) -> Result<bool, FsError>:
+        """Prove exact device teardown is currently non-busy without mutation."""
+        if expected_inst_id <= 0 or self.inst_id != expected_inst_id or self.arena_base < 0:
+            return Err(FsError.StaleHandle)
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Transient(code: 0u32))
+        if dbfs_device_mount_seal_epoch_locked(
+                expected_inst_id, self.arena_block_count).is_err():
+            return _dbfs_finish_result(Err(FsError.StaleHandle))
+        var fd_index: i32 = 0
+        while fd_index < _dbfs_fds.len() as i32:
+            if _dbfs_fds[fd_index].inst_id == expected_inst_id and not _dbfs_fds[fd_index].closed:
+                return _dbfs_finish_result(Err(FsError.Busy))
+            fd_index = fd_index + 1
+        _dbfs_finish_result(Ok(true))
+
+    pub fn close_device_backing(expected_inst_id: i64) -> Result<bool, FsError>:
+        """Close one exact device-backed instance; true only on first release.
+
+        The canonical DBFS transaction owns the busy check, unregister, cache
+        reclamation, and bounded replay receipt. A copied or field-mutated
+        driver cannot redirect cleanup to another instance.
+        """
+        if expected_inst_id <= 0 or self.inst_id != expected_inst_id or self.arena_base < 0:
+            return Err(FsError.StaleHandle)
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Transient(code: 0u32))
+        var terminal_index: i32 = 0
+        while terminal_index < _dbfs_closed_device_ids.len() as i32:
+            if _dbfs_closed_device_ids[terminal_index] == expected_inst_id:
+                return _dbfs_finish_result(Ok(false))
+            terminal_index = terminal_index + 1
+        if dbfs_device_mount_seal_epoch_locked(
+                expected_inst_id, self.arena_block_count).is_err():
+            return _dbfs_finish_result(Err(FsError.StaleHandle))
+        var fd_index: i32 = 0
+        while fd_index < _dbfs_fds.len() as i32:
+            if _dbfs_fds[fd_index].inst_id == expected_inst_id and not _dbfs_fds[fd_index].closed:
+                return _dbfs_finish_result(Err(FsError.Busy))
+            fd_index = fd_index + 1
+        val unregistered = dbfs_device_unregister_locked(expected_inst_id)
+        if unregistered.is_err() or not unregistered.unwrap():
+            return _dbfs_finish_result(Err(
+                if unregistered.is_err(): unregistered.unwrap_err() else: FsError.IoError(code: 0u32)))
+        var inode_index = _dbfs_inodes.len() as i32 - 1
+        while inode_index >= 0:
+            if _dbfs_inodes[inode_index].inst_id == expected_inst_id:
+                _dbfs_inodes.remove(inode_index)
+            inode_index = inode_index - 1
+        var closed_fd_index = _dbfs_fds.len() as i32 - 1
+        while closed_fd_index >= 0:
+            if _dbfs_fds[closed_fd_index].inst_id == expected_inst_id:
+                _dbfs_fds.remove(closed_fd_index)
+            closed_fd_index = closed_fd_index - 1
+        if _dbfs_closed_device_ids.len() >= _DBFS_CLOSED_DEVICE_RECEIPT_CAPACITY:
+            _dbfs_closed_device_ids.remove(0)
+        _dbfs_closed_device_ids.push(expected_inst_id)
+        _dbfs_finish_result(Ok(true))
     static fn device_durability_blocker() -> text:
         """Machine-readable provider admission result for device-backed DBFS."""
         dbfs_device_serialization_blocker()
@@ -240,21 +334,7 @@ impl DbFsDriver:
         if inode_idx < 0:
             return Err(FsError.StaleHandle)
         val inode = _dbfs_inodes[inode_idx]
-        Ok(FileStat(
-            inode: inode.id,
-            size: inode.size as u64,
-            blocks: ((inode.size as u64) + 4095u64) / 4096u64,
-            block_size: 4096,
-            mode: (if inode.kind == DbFsKind.Dir: 0o755 else 0o644) |
-                (if inode.kind == DbFsKind.Dir: 0o040000 else 0),
-            uid: 0,
-            gid: 0,
-            nlinks: 1,
-            atime_ns: 0u64,
-            mtime_ns: 0u64,
-            ctime_ns: 0u64,
-            birth_time_ns: 0u64
-        ))
+        Ok(_dbfs_file_stat_for_inode(inode))
 
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
@@ -272,10 +352,19 @@ impl DbFsDriver:
                 batch_bytes: 4096, trim_supported: false,
                 write_zeroes_supported: false, direct_io: None)
         val iid = _alloc_inst_id_locked()
+        if iid <= 0:
+            val _ = dbfs_owner_transaction_end()
+            return DbFsDriver(
+                name: "DbFsDriverUnavailable", inst_id: -1, next_id: 0,
+                next_fd: 0, wal: SharedWal.new(), flush_count: 0,
+                arena_base: -1, arena_block_count: 0, io_unit_bytes: 512,
+                batch_bytes: 4096, trim_supported: false,
+                write_zeroes_supported: false, direct_io: None)
         # Install root inode
         _dbfs_inodes.push(DbFsInode(
             inst_id:  iid,
             id:       1,
+            content_generation: 1u64,
             kind:     DbFsKind.Dir,
             name:     "/",
             content:  "",
@@ -316,6 +405,8 @@ impl DbFsDriver:
             return Err(FsError.InvalidArg)
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         val iid = _alloc_inst_id_locked()
+        if iid <= 0:
+            return _dbfs_finish_driver_result(Err(FsError.TooLarge))
         val registered = dbfs_device_register_locked(iid, dev)
         if registered.is_err() or not registered.unwrap():
             return _dbfs_finish_driver_result(Err(
@@ -324,6 +415,7 @@ impl DbFsDriver:
         _dbfs_inodes.push(DbFsInode(
             inst_id:  iid,
             id:       1,
+            content_generation: 1u64,
             kind:     DbFsKind.Dir,
             name:     "/",
             content:  "",
@@ -403,11 +495,47 @@ impl DbFsDriver:
         self.write_zeroes_supported
 
     fn durability_serialization_ready() -> bool:
-        self.arena_base >= 0 and dbfs_device_serialization_ready()
+        self.arena_base >= 0 and dbfs_device_serialization_ready() and
+            dbfs_device_instance_registered(self.inst_id)
 
     fn durability_serialization_blocker() -> text:
         if self.arena_base < 0: return "not-device-backed"
         dbfs_device_serialization_blocker()
+
+    fn transactional_replace_ready() -> bool:
+        """DBFS rename commits one replacement checkpoint under this owner."""
+        self.arena_base >= 0 and self.arena_block_count >= 4 and
+            dbfs_device_instance_registered(self.inst_id)
+
+    fn issue_server_data_root_mount_identity() -> Result<(i64, u64, u64), FsError>:
+        """Issue DBFS identity plus a process-lifetime unique mount-seal nonce.
+
+        DBFS namespace rename is serialized by the same transaction owner that
+        persists namespace checkpoints.  A hosted instance, quarantined
+        instance, or unavailable device owner therefore cannot be represented
+        as a durable transactional-replace root by a mount-table caller.
+        """
+        if self.inst_id <= 0 or self.arena_base < 0 or self.arena_block_count < 4:
+            return Err(FsError.Unsupported)
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        val mutation_epoch = dbfs_device_mount_seal_epoch_locked(
+            self.inst_id, self.arena_block_count)
+        if mutation_epoch.is_err():
+            return _dbfs_finish_result(Err(mutation_epoch.unwrap_err()))
+        if _dbfs_next_mount_seal_nonce == 0xFFFFFFFFFFFFFFFFu64:
+            return _dbfs_finish_result(Err(FsError.TooLarge))
+        val nonce = _dbfs_next_mount_seal_nonce
+        _dbfs_next_mount_seal_nonce = _dbfs_next_mount_seal_nonce + 1u64
+        _dbfs_finish_result(Ok((self.inst_id, nonce, mutation_epoch.unwrap())))
+
+    fn server_data_root_instance_identity() -> Result<(i64, u64), FsError>:
+        """Observe the admitted identity without minting another seal nonce."""
+        if self.inst_id <= 0 or self.arena_base < 0 or self.arena_block_count < 4:
+            return Err(FsError.Unsupported)
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        val epoch = dbfs_device_mount_seal_epoch_locked(self.inst_id, self.arena_block_count)
+        if epoch.is_err(): return _dbfs_finish_result(Err(epoch.unwrap_err()))
+        _dbfs_finish_result(Ok((self.inst_id, epoch.unwrap())))
 
     fn _direct_io_extent_for_consumer_locked(handle: FileHandle, file_offset: i64, byte_len: u64, consumer: text) -> Result<DirectIoExtent, FsError>:
         """Map a file-relative direct-I/O range onto the DBFS data region."""

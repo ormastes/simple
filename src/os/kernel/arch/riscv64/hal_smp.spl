@@ -23,6 +23,11 @@
 
 use os.kernel.arch.riscv64.sbi.{sbi_hart_start, SBI_SUCCESS}
 use std.nogc_async_mut_noalloc.baremetal.riscv.{sbi_probe_then_send_ipi}
+use os.kernel.boot.riscv_noalloc_dtb_capability.{
+    riscv_noalloc_dtb_hart_count,
+    riscv_noalloc_dtb_hart_id,
+    riscv_noalloc_dtb_logical_valid
+}
 
 # ============================================================================
 # Constants
@@ -37,6 +42,14 @@ val MAX_HARTS: u32 = 8u32
 class ApBootArgs:
     stack: u64
     arg: u64
+
+fn hal_smp_ipi_window(hart_id: u64) -> (u64, u64):
+    val base = hart_id & 0xffffffffffffffc0
+    (1u64 << (hart_id - base), base)
+
+fn hal_smp_hsm_target(ap_id: u32) -> (bool, u64):
+    if not riscv_noalloc_dtb_logical_valid(ap_id) or ap_id >= MAX_HARTS: return (false, 0u64)
+    (true, riscv_noalloc_dtb_hart_id(ap_id))
 
 # ============================================================================
 # Module-level state
@@ -90,7 +103,11 @@ fn hal_smp_set_pending_count(count: u32):
 # ============================================================================
 
 fn hal_smp_cpu_count() -> u32:
-    """Return cached CPU count from last hal_smp_init_from_bytes call."""
+    """Return the boot-owned DTB capability's enabled-hart count."""
+    riscv_noalloc_dtb_hart_count()
+
+fn hal_smp_test_cpu_count() -> u32:
+    """Test-seam census; never consulted by a production HAL operation."""
     HAL_SMP_CPU_COUNT_STATE
 
 fn hal_smp_get_boot_args(ap_id: u32) -> ApBootArgs:
@@ -155,28 +172,43 @@ fn hal_smp_ipi_broadcast_with_mock(mock: SbiMockSmp, vector: u32):
 
 fn hal_smp_cpu_start(ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
     """Start AP hart via SBI HSM. Populates boot args slot before calling SBI."""
-    if ap_id < MAX_HARTS:
-        HAL_SMP_BOOT_ARGS[ap_id] = ApBootArgs(stack: stack, arg: arg)
-    val ret = sbi_hart_start(ap_id as u64, entry, ap_id as u64)
+    val target = hal_smp_hsm_target(ap_id)
+    if not target.0: return false
+    HAL_SMP_BOOT_ARGS[ap_id] = ApBootArgs(stack: stack, arg: arg)
+    val ret = sbi_hart_start(target.1, entry, ap_id as u64)
     ret.error == SBI_SUCCESS
 
 fn hal_smp_ipi_send(target: u32, vector: u32):
     """Send IPI to target hart: write vector to PENDING_IPI slot then call sbi_probe_then_send_ipi."""
-    if target < MAX_HARTS:
-        HAL_SMP_PENDING_IPI[target] = vector
-    val hart_mask = 1u64 << target as u64
-    sbi_probe_then_send_ipi(hart_mask, 0u64)
+    if not riscv_noalloc_dtb_logical_valid(target) or target >= MAX_HARTS:
+        return
+    val hart_id = riscv_noalloc_dtb_hart_id(target)
+    HAL_SMP_PENDING_IPI[target] = vector
+    val window = hal_smp_ipi_window(hart_id)
+    sbi_probe_then_send_ipi(window.0, window.1)
 
 fn hal_smp_ipi_broadcast(vector: u32):
     """Broadcast IPI to all non-self harts (self = hart 0) via sbi_probe_then_send_ipi."""
     val self_id = 0u32
-    val count = HAL_SMP_CPU_COUNT_STATE
+    val count = riscv_noalloc_dtb_hart_count()
     var i: u32 = 0u32
-    var mask: u64 = 0u64
-    while i < count:
-        if i != self_id:
-            HAL_SMP_PENDING_IPI[i] = vector
-            mask = mask | (1u64 << i as u64)
+    while i < count and i < MAX_HARTS:
+        val hart_id = riscv_noalloc_dtb_hart_id(i)
+        val window = hal_smp_ipi_window(hart_id)
+        var earlier_window = false
+        var prior: u32 = 0u32
+        while prior < i:
+            val prior_window = hal_smp_ipi_window(riscv_noalloc_dtb_hart_id(prior))
+            if prior_window.1 == window.1: earlier_window = true
+            prior = prior + 1u32
+        if not earlier_window:
+            var mask: u64 = 0u64
+            var member: u32 = 0u32
+            while member < count and member < MAX_HARTS:
+                val member_window = hal_smp_ipi_window(riscv_noalloc_dtb_hart_id(member))
+                if member != self_id and member_window.1 == window.1:
+                    HAL_SMP_PENDING_IPI[member] = vector
+                    mask = mask | member_window.0
+                member = member + 1u32
+            if mask != 0u64: sbi_probe_then_send_ipi(mask, window.1)
         i = i + 1u32
-    if mask != 0u64:
-        sbi_probe_then_send_ipi(mask, 0u64)

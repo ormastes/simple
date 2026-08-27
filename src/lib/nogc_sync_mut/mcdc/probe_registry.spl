@@ -1,0 +1,164 @@
+# codex-impl
+# Fixed-capacity owner-to-capsule registry. Installation/removal is a cold
+# quiescent-barrier operation; hot lookup is expected O(1) with no allocation.
+
+use std.nogc_sync_mut.mcdc.dynamic_aspect.{McdcDynamicAspect}
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
+
+extern fn rt_current_task_id() -> i64
+extern fn spl_thread_current_id() -> i64
+
+# Conservative fixed hash-table accounting charged once per admitted owner.
+pub val MCDC_PROBE_REGISTRY_BYTES_PER_OWNER = 64
+
+pub fn mcdc_probe_current_owner_id() -> i64:
+    val task_id = rt_current_task_id()
+    if task_id > 0: return task_id
+    val thread_id = spl_thread_current_id()
+    if thread_id > 0: return thread_id
+    1
+
+pub class McdcProbeRegistry:
+    capacity: i64
+    owner_limit: i64
+    count: i64
+    owner_ids: [i64]
+    states: [i64]
+    aspects: [McdcDynamicAspect?]
+    # Stable for the registry lifetime. A reader pins the slot before reading
+    # its capsule, so cold removal cannot overtake an epoch reader handshake.
+    reader_pins: [AtomicI64]
+
+impl McdcProbeRegistry:
+    static fn create(global_bytes: i64, owner_bytes: i64) -> McdcProbeRegistry:
+        var owner_capacity = if owner_bytes > 0: global_bytes / owner_bytes else: 1
+        if owner_capacity < 1: owner_capacity = 1
+        if owner_capacity > 4096: owner_capacity = 4096
+        var capacity = 2
+        while capacity < owner_capacity * 2: capacity = capacity * 2
+        var owner_ids: [i64] = []
+        var states: [i64] = []
+        var aspects: [McdcDynamicAspect?] = []
+        var reader_pins: [AtomicI64] = []
+        var index = 0
+        while index < capacity:
+            owner_ids.push(0); states.push(0); aspects.push(nil)
+            reader_pins.push(atomic_i64_new(0))
+            index = index + 1
+        McdcProbeRegistry(
+            capacity: capacity, owner_limit: owner_capacity,
+            count: 0, owner_ids: owner_ids,
+            states: states, aspects: aspects, reader_pins: reader_pins
+        )
+
+    fn start_slot(owner_id: i64) -> i64:
+        val mixed = (owner_id ^ (owner_id >> 33)) & 9223372036854775807
+        mixed % self.capacity
+
+    fn sorted_owner_ids() -> [i64]:
+        """Cold reporting path; hot probes never allocate or sort."""
+        var result: [i64] = []
+        var slot = 0
+        while slot < self.capacity:
+            if self.states[slot] == 1: result.push(self.owner_ids[slot])
+            slot = slot + 1
+        result.sort()
+        result
+
+    fn all_quiescent() -> bool:
+        var slot = 0
+        while slot < self.capacity:
+            if self.states[slot] == 1:
+                if self.aspects[slot] == nil: return false
+                if self.aspects[slot].?.active_regions != 0: return false
+            slot = slot + 1
+        true
+
+    fn all_reader_pins_zero() -> bool:
+        var slot = 0
+        while slot < self.capacity:
+            if self.states[slot] == 1:
+                if self.reader_pins[slot].load(MemoryOrdering.Acquire) != 0:
+                    return false
+            slot = slot + 1
+        true
+
+    fn slot_of(owner_id: i64) -> i64:
+        var slot = self.start_slot(owner_id)
+        var probes = 0
+        while probes < self.capacity:
+            if self.states[slot] == 0: return -1
+            if self.states[slot] == 1 and self.owner_ids[slot] == owner_id:
+                return slot
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        -1
+
+    fn aspect_at(slot: i64) -> McdcDynamicAspect?:
+        if slot < 0 or slot >= self.capacity: return nil
+        if self.states[slot] != 1: return nil
+        self.aspects[slot]
+
+    fn reader_pin_acquire_at(slot: i64) -> bool:
+        if slot < 0 or slot >= self.capacity: return false
+        val prior = self.reader_pins[slot].fetch_add(1, MemoryOrdering.AcqRel)
+        if prior < 0 or prior >= 0x7ffffffffffffffe:
+            self.reader_pins[slot].fetch_sub(1, MemoryOrdering.AcqRel)
+            return false
+        true
+
+    fn reader_pin_release_at(slot: i64):
+        if slot < 0 or slot >= self.capacity: return
+        self.reader_pins[slot].fetch_sub(1, MemoryOrdering.Release)
+
+    me install(aspect: McdcDynamicAspect) -> bool:
+        val owner_id = aspect.owner_id
+        var slot = self.start_slot(owner_id)
+        var first_tombstone = -1
+        var probes = 0
+        while probes < self.capacity:
+            if self.states[slot] == 1 and self.owner_ids[slot] == owner_id:
+                self.aspects[slot] = Some(aspect)
+                return true
+            if self.states[slot] == 2 and first_tombstone < 0:
+                first_tombstone = slot
+            if self.states[slot] == 0:
+                if self.count >= self.owner_limit: return false
+                val target = if first_tombstone >= 0: first_tombstone else: slot
+                self.owner_ids[target] = owner_id
+                self.states[target] = 1
+                self.aspects[target] = Some(aspect)
+                self.count = self.count + 1
+                return true
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        false
+
+    me remove(owner_id: i64) -> bool:
+        var slot = self.start_slot(owner_id)
+        var probes = 0
+        while probes < self.capacity:
+            if self.states[slot] == 0: return false
+            if self.states[slot] == 1 and self.owner_ids[slot] == owner_id:
+                self.states[slot] = 2
+                self.aspects[slot] = nil
+                self.count = self.count - 1
+                return true
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        false
+
+    fn find(owner_id: i64) -> McdcDynamicAspect?:
+        var slot = self.start_slot(owner_id)
+        var probes = 0
+        while probes < self.capacity:
+            if self.states[slot] == 0: return nil
+            if self.states[slot] == 1 and self.owner_ids[slot] == owner_id:
+                return self.aspects[slot]
+            slot = slot + 1
+            if slot >= self.capacity: slot = 0
+            probes = probes + 1
+        nil

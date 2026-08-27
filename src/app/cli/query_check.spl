@@ -9,8 +9,14 @@ use std.io_runtime.{file_exists}
 use std.io_runtime.{dir_list}
 
 use app.cli.query_sanitize.{sanitize_path}
-use app.cli.query_helpers.{_extract_flag}
-use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _find_in_line, _is_return_statement, _find_next_statement_in_block, _check_closure_capture_text, _check_ignored_return_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use app.cli.query_helpers.{_extract_flag, _count_indent}
+use app.cli.query_error_codes.{query_extract_error_code}
+use app.cli.query_rich_common.{query_emit_mcp_diagnostics_wrapper, _parse_error_location, query_split_structured_error}
+use app.cli.query_lint.{_emit_source_lint_diagnostics, _diag_emit_or_collect, _DIAG_COLLECT_MODE, _DIAG_COLLECTED, _find_in_line, _check_closure_capture_text, _check_multiline_bool_text, _check_safety_text, _check_visibility_text}
+use app.cli.query_lint_checks.{_query_indent_successor_index}
+use app.cli.query_lint_checks.{_check_ignored_return_text_indexed}
+use app.cli.query_lint_scan.{deprecated_new_columns}
+use app.cli.query_source_mask.{deprecated_dunder_facts}
 use compiler.driver.driver.{check_file}
 use compiler.driver.driver_types.{CompileResult}
 use std.report.emitter.lsp.{LspEmitter}
@@ -30,77 +36,62 @@ fn query_check(file: text, cmd_args: [text]) -> i64:
                 if source != "":
                     _emit_source_lint_diagnostics(file, source, format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 0
         case CompileResult.TypeError(errors):
             _emit_check_errors(file, errors, "TypeError", format)
             _emit_lint_if_readable(file, format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.ParseError(errors):
             _emit_check_errors(file, errors, "ParseError", format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.BlockError(errors):
             _emit_check_errors(file, errors, "BlockError", format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.ResolveError(errors):
             _emit_check_errors(file, errors, "ResolveError", format)
             _emit_lint_if_readable(file, format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.BorrowError(errors):
             _emit_check_errors(file, errors, "BorrowError", format)
             _emit_lint_if_readable(file, format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.CodegenError(msg):
             _emit_check_errors(file, [msg], "CodegenError", format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case CompileResult.RuntimeError(msg):
             _emit_check_errors(file, [msg], "RuntimeError", format)
             if format == "json":
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             return 1
         case _:
             if format == "json":
                 _DIAG_COLLECTED.push("{\"severity\":1,\"code\":\"E0000\",\"message\":\"check failed\",\"line\":1,\"col\":1,\"end_line\":1,\"end_col\":1,\"tags\":[],\"source\":\"simple\"}")
-                _emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
+                query_emit_mcp_diagnostics_wrapper(_DIAG_COLLECTED)
                 _DIAG_COLLECT_MODE = false
             else:
                 print "{file}:1:1: error: check failed"
             return 1
-
-fn _emit_mcp_diagnostics_wrapper(diagnostics: [text]):
-    """Wrap collected diagnostics in MCP-compatible structured content format."""
-    val count = diagnostics.len()
-    val diags_array = "[" + diagnostics.join(",") + "]"
-    val summary = str(count) + " diagnostics found"
-    # Build MCP-compatible output:
-    # {"content":[{"type":"text","text":"N diagnostics found"}],
-    #  "structuredContent":{"diagnostics":[...],"count":N},
-    #  "isError":false}
-    var parts: [text] = []
-    parts.push("{\"content\":[{\"type\":\"text\",\"text\":\"" + summary + "\"}]")
-    parts.push(",\"structuredContent\":{\"diagnostics\":" + diags_array + ",\"count\":" + str(count) + "}")
-    parts.push(",\"isError\":false}")
-    print parts.join("")
 
 fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text):
     """Emit compiler errors in text or JSON format.
@@ -113,7 +104,7 @@ fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text
         val emitter = LspEmitter.default_emitter()
         for err in errors:
             # Split structured metadata from the core error
-            val structured = _split_structured_error(err)
+            val structured = query_split_structured_error(err)
             val core_err = structured.0
             val related_items = structured.1
             val help_text = structured.2
@@ -151,7 +142,7 @@ fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text
     else:
         for err in errors:
             # Strip structured metadata for text format
-            val structured = _split_structured_error(err)
+            val structured = query_split_structured_error(err)
             val core_err = structured.0
             val help_text = structured.2
             if help_text != "":
@@ -160,316 +151,8 @@ fn _emit_check_errors(file: text, errors: [text], error_kind: text, format: text
             else:
                 print "{file}:{core_err}"
 
-fn _parse_error_location(err: text) -> (i64, i64, text):
-    """Parse line:col:message from an error string. Returns (line, col, message)."""
-    var colon1 = -1
-    var colon2 = -1
-    var ci = 0
-    while ci < err.len():
-        if err.substring(ci, ci + 1) == ":":
-            if colon1 == -1:
-                colon1 = ci
-            elif colon2 == -1:
-                colon2 = ci
-                break
-        ci = ci + 1
-    if colon1 > 0 and colon2 > colon1:
-        val line_str = err.substring(0, colon1)
-        val col_str = err.substring(colon1 + 1, colon2)
-        val msg = err.substring(colon2 + 1).trim()
-        val line = line_str.to_int()
-        val col = col_str.to_int()
-        if line > 0:
-            return (line, if col > 0: col else: 1, msg)
-    (1, 1, err)
-
-fn _split_structured_error(err: text) -> (text, [text], text):
-    """Split a structured error string into (core_error, related_items, help_text).
-
-    Structured error format uses '|||' as segment separator:
-    - "core_error|||RELATED:line:col:message|||HELP:message"
-    - Multiple RELATED segments are allowed
-    - HELP segment is optional
-
-    Returns (core_error, [related_items as "line:col:message"], help_text).
-    """
-    var core = err
-    var related: [text] = []
-    var help = ""
-
-    # Check for structured metadata
-    val sep = "|||"
-    val sep_idx = _find_in_line_from(err, sep, 0)
-    if sep_idx < 0:
-        return (err, related, help)
-
-    # Split on the first ||| to get core error
-    core = err.substring(0, sep_idx)
-    val rest = err.substring(sep_idx)
-
-    # Parse remaining segments
-    val segments = rest.split(sep)
-    for segment in segments:
-        val trimmed = segment.trim()
-        if trimmed == "":
-            continue
-        if trimmed.starts_with("RELATED:"):
-            val rel_content = trimmed.substring(8)
-            related = related.push(rel_content)
-        elif trimmed.starts_with("HELP:"):
-            help = trimmed.substring(5)
-
-    (core, related, help)
-
 fn _extract_error_code(msg: text, error_kind: text) -> text:
-    """Extract an E-code from an error message or infer one from the error kind.
-
-    Strategy:
-    1. Check if the message already contains an explicit error code (e.g. error[E1001])
-    2. Pattern-match common error message phrases to known E-codes
-    3. Fall back to a generic code based on error_kind
-    """
-    # --- Strategy 1: explicit error code in message ---
-    # Look for pattern: error[Exxxx] or [Exxxx] or just Exxxx at start
-    # Use _find_in_line_from (returns -1 on miss) instead of _find_in_line (returns 0)
-    val bracket_idx = _find_in_line_from(msg, "[E", 0)
-    if bracket_idx >= 0:
-        # Extract code between [ and ]
-        val close_idx = _find_in_line_from(msg, "]", bracket_idx)
-        if close_idx > bracket_idx + 1:
-            return msg.substring(bracket_idx + 1, close_idx)
-
-    # Check for "Exxxx:" at the start of the message
-    if msg.len() >= 5 and msg.substring(0, 1) == "E":
-        val maybe_code = msg.substring(0, 5)
-        if _is_error_code(maybe_code):
-            return maybe_code
-
-    # --- Strategy 2: pattern-match message content to known E-codes ---
-    # Semantic errors (E10xx)
-    if (msg.contains("not found in this scope") or msg.contains("not defined")) and msg.contains("variable"):
-        return "E1001"
-    if (msg.contains("not found") or msg.contains("cannot find")) and msg.contains("function"):
-        return "E1002"
-    if msg.contains("expected type") and msg.contains("found"):
-        return "E1003"
-    if msg.contains("type mismatch") or msg.contains("incompatible type"):
-        return "E1003"
-    if msg.contains("cannot assign") or msg.contains("invalid assignment"):
-        return "E1004"
-    if msg.contains("cannot apply operator"):
-        return "E1005"
-    if msg.contains("invalid pattern"):
-        return "E1006"
-    if msg.contains("missing field") or msg.contains("missing required field"):
-        return "E1007"
-    if msg.contains("duplicate definition") or msg.contains("already defined"):
-        return "E1008"
-    if msg.contains("circular dependency") or msg.contains("circular import"):
-        return "E1009"
-    if msg.contains("module") and msg.contains("not found"):
-        return "E1010"
-    if msg.contains("type") and msg.contains("not found") and not msg.contains("function"):
-        return "E1011"
-    if msg.contains("no field named"):
-        return "E1012"
-    if msg.contains("no method named"):
-        return "E1013"
-    if msg.contains("unknown class"):
-        return "E1014"
-    if msg.contains("unknown enum"):
-        return "E1015"
-    if msg.contains("expected") and msg.contains("argument"):
-        return "E1020"
-    if msg.contains("missing") and msg.contains("struct field"):
-        return "E1021"
-    if msg.contains("duplicate") and msg.contains("method"):
-        return "E1025"
-    if msg.contains("missing") and msg.contains("trait") and msg.contains("method"):
-        return "E1031"
-    if msg.contains("self") and msg.contains("static"):
-        return "E1032"
-    if msg.contains("unresolved import"):
-        return "E1034"
-    if msg.contains("private") and msg.contains("field"):
-        return "E1046"
-    if msg.contains("not callable") or msg.contains("is not callable"):
-        return "E1048"
-    if msg.contains("inconsistent bindings"):
-        return "E1068"
-
-    # Control flow errors (E11xx / E1057)
-    if msg.contains("break") and msg.contains("outside") and msg.contains("loop"):
-        return "E1101"
-    if msg.contains("continue") and msg.contains("outside") and msg.contains("loop"):
-        return "E1102"
-    if msg.contains("return") and msg.contains("outside") and msg.contains("function"):
-        return "E1103"
-    if msg.contains("return") and msg.contains("closure"):
-        return "E1104"
-    if msg.contains("yield") and msg.contains("outside") and msg.contains("generator"):
-        return "E1057"
-    if msg.contains("await") and msg.contains("outside") and msg.contains("async"):
-        return "E1105"
-
-    # Actor/concurrency errors (E12xx)
-    if msg.contains("actor") and msg.contains("send"):
-        return "E1201"
-    if msg.contains("actor") and msg.contains("recv"):
-        return "E1202"
-    if msg.contains("channel closed"):
-        return "E1203"
-    if msg.contains("deadlock"):
-        return "E1204"
-
-    # Capability errors (E13xx)
-    if msg.contains("capability") and msg.contains("violation"):
-        return "E1301"
-    if msg.contains("isolation") and msg.contains("violation"):
-        return "E1302"
-    if msg.contains("borrow") and msg.contains("violation"):
-        return "E1303"
-
-    # Macro errors (E14xx)
-    if msg.contains("unknown macro"):
-        return "E1401"
-    if msg.contains("macro") and msg.contains("before definition"):
-        return "E1402"
-    if msg.contains("macro") and msg.contains("invocation failed"):
-        return "E1401"
-
-    # AOP errors (E15xx)
-    if msg.contains("pointcut") and msg.contains("syntax"):
-        return "E1501"
-    if msg.contains("joinpoint") and msg.contains("undefined"):
-        return "E1502"
-    if msg.contains("advice") and msg.contains("invalid"):
-        return "E1503"
-    if msg.contains("weaving") and msg.contains("target"):
-        return "E1505"
-    if msg.contains("aspect") and msg.contains("circular"):
-        return "E1506"
-
-    # Mixin errors (E17xx)
-    if msg.contains("mixin") and msg.contains("not found"):
-        return "E1701"
-    if msg.contains("mixin") and msg.contains("conflict"):
-        return "E1702"
-
-    # Codegen errors (E20xx)
-    if msg.contains("unsupported feature"):
-        return "E2001"
-    if msg.contains("FFI error"):
-        return "E2002"
-
-    # Runtime errors (E30xx)
-    if msg.contains("division by zero"):
-        return "E3001"
-    if msg.contains("index") and msg.contains("out of bounds"):
-        return "E3002"
-    if msg.contains("stack overflow"):
-        return "E3003"
-    if msg.contains("assertion failed"):
-        return "E3004"
-
-    # Method resolution special case
-    if msg.contains("Method resolution"):
-        return "E1013"
-
-    # Type inference errors
-    if msg.contains("infinite type") or msg.contains("occurs in"):
-        return "E0391"
-    if msg.contains("trait not implemented") or msg.contains("does not implement"):
-        return "E0277"
-
-    # Dimension constraint errors (E05xx from dim_constraints_types)
-    if msg.contains("dimension mismatch"):
-        return "E0501"
-    if msg.contains("layer dimension mismatch"):
-        return "E0502"
-    if msg.contains("tensor rank mismatch"):
-        return "E0503"
-    if msg.contains("matrix multiplication dimension"):
-        return "E0504"
-    if msg.contains("shapes cannot be broadcast"):
-        return "E0505"
-    if msg.contains("batch dimension mismatch"):
-        return "E0506"
-    if msg.contains("channel dimension mismatch"):
-        return "E0507"
-    if msg.contains("sequence length mismatch"):
-        return "E0508"
-
-    # Borrow checking errors
-    if msg.contains("cannot borrow") or msg.contains("also borrowed"):
-        return "E0502"
-    if msg.contains("cannot use") and msg.contains("mutably borrowed"):
-        return "E0503"
-    if msg.contains("cannot move") and msg.contains("borrowed"):
-        return "E0505"
-    if msg.contains("borrow") and msg.contains("still be active at return"):
-        return "E0515"
-
-    # Trait coherence errors
-    if msg.contains("foreign trait") and msg.contains("foreign type"):
-        return "E0117"
-    if msg.contains("Overlapping implementations"):
-        return "E0119"
-    if msg.contains("Blanket implementation") and msg.contains("conflicts"):
-        return "E0119"
-    if msg.contains("Conflicting associated type"):
-        return "E0271"
-
-    # Trait validation errors
-    if msg.contains("ambiguous trait impl"):
-        return "E0283"
-    if msg.contains("overlapping impls"):
-        return "E0119"
-    if msg.contains("missing method") and msg.contains("impl"):
-        return "E0046"
-    if msg.contains("cyclic trait bound"):
-        return "E0275"
-    if msg.contains("undefined trait"):
-        return "E0405"
-    if msg.contains("missing associated type"):
-        return "E0191"
-    if msg.contains("associated type mismatch"):
-        return "E0271"
-
-    # --- Strategy 3: fall back to generic code based on error_kind ---
-    match error_kind:
-        "TypeError": "E1003"
-        "ParseError": "E0001"
-        "BlockError": "E1601"
-        "ResolveError": "E1013"
-        "BorrowError": "E1303"
-        "CodegenError": "E2001"
-        "RuntimeError": "E3001"
-        _: "E0000"
-
-fn _is_error_code(s: text) -> bool:
-    """Check if a string looks like an error code (E followed by 4 digits)."""
-    if s.len() < 5:
-        return false
-    if s.substring(0, 1) != "E":
-        return false
-    var i = 1
-    while i < 5:
-        val ch = s.substring(i, i + 1)
-        if ch < "0" or ch > "9":
-            return false
-        i = i + 1
-    true
-
-fn _find_in_line_from(line: text, needle: text, start: i64) -> i64:
-    """Find needle in line starting from a given position. Returns -1 if not found."""
-    var i = start
-    val nlen = needle.len()
-    while i <= line.len() - nlen:
-        if line.substring(i, i + nlen) == needle:
-            return i
-        i = i + 1
-    -1
+    query_extract_error_code(msg, error_kind, "FFI error")
 
 fn _compile_result_error_kind(result: CompileResult) -> text:
     """Extract the error kind name from a CompileResult variant."""
@@ -540,7 +223,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                     var diag_parts: [text] = []
                     for err in errors:
                         # Parse structured error metadata
-                        val structured = _split_structured_error(err)
+                        val structured = query_split_structured_error(err)
                         val core_err = structured.0
                         val related_items = structured.1
                         val help_text = structured.2
@@ -578,7 +261,7 @@ fn query_workspace_diagnostics(dir_path: text, cmd_args: [text]) -> i64:
                     json_file_entries.push("{\"file\":{emitter.encode_string(spl_file)},\"diagnostics\":[{diag_parts.join(\",\")}]}")
                 else:
                     for err in errors:
-                        val structured = _split_structured_error(err)
+                        val structured = query_split_structured_error(err)
                         val core_err = structured.0
                         val help_text = structured.2
                         if help_text != "":
@@ -642,7 +325,10 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     val lines = source.split("\n")
     var count = 0
     var parts: [text] = []
-    val emitter = LspEmitter.default_emitter()
+    val indent_successors = _query_indent_successor_index(lines)
+    val deprecated_columns = deprecated_new_columns(lines)
+    val deprecated_dunders = deprecated_dunder_facts(lines)
+    var deprecated_dunder_i = 0
 
     var li = 0
     while li < lines.len():
@@ -650,9 +336,17 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
         val trimmed = line.trim()
         val line_num = li + 1
 
+        # DEPR001: deprecated Type__method() calls from shared lexical facts.
+        while (deprecated_dunder_i < deprecated_dunders.len() and
+            deprecated_dunders[deprecated_dunder_i].line == line_num):
+            val fact = deprecated_dunders[deprecated_dunder_i]
+            parts.push("{\"severity\":2,\"code\":\"DEPR001\",\"message\":\"'{fact.name}()' uses deprecated Type__method() syntax\",\"line\":{line_num},\"col\":{fact.start_column},\"end_line\":{line_num},\"end_col\":{fact.end_column},\"tags\":[2],\"source\":\"simple-lint\"}")
+            count = count + 1
+            deprecated_dunder_i = deprecated_dunder_i + 1
+
         # DEPR002: .new() calls
-        if trimmed.contains(".new("):
-            val col = _find_in_line(trimmed, ".new(") + 1
+        val col = deprecated_columns[li]
+        if col > 0:
             parts.push("{\"severity\":2,\"code\":\"DEPR002\",\"message\":\"'.new()' constructor is deprecated\",\"line\":{line_num},\"col\":{col},\"end_line\":{line_num},\"end_col\":{col + 5},\"tags\":[2],\"source\":\"simple-lint\"}")
             count = count + 1
 
@@ -663,10 +357,14 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
                 count = count + 1
 
         # UNREACH: After return
-        if _is_return_statement(trimmed):
-            val next_unreachable = _find_next_statement_in_block(lines, li)
-            if next_unreachable > 0:
-                parts.push("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":1,\"end_line\":{next_unreachable},\"end_col\":1,\"tags\":[1],\"source\":\"simple-lint\"}")
+        if indent_successors.is_return_statement[li]:
+            val successor = indent_successors.next_same_or_shallower[li]
+            if (successor >= 0 and
+                _count_indent(lines[successor]) == _count_indent(lines[li])):
+                val next_unreachable = successor + 1
+                val successor_col = indent_successors.first_executable_column[successor]
+                val successor_end_col = indent_successors.first_token_end_column[successor]
+                parts.push("{\"severity\":2,\"code\":\"UNREACH001\",\"message\":\"unreachable code after return\",\"line\":{next_unreachable},\"col\":{successor_col},\"end_line\":{next_unreachable},\"end_col\":{successor_end_col},\"tags\":[1],\"source\":\"simple-lint\"}")
                 count = count + 1
 
         li = li + 1
@@ -678,11 +376,12 @@ fn _collect_lint_diagnostics_json(file: text, source: text) -> (i64, text):
     val prev_collected = _DIAG_COLLECTED
     _DIAG_COLLECTED = []
 
-    val clos_count = _check_closure_capture_text(lines, file, "json", emitter)
-    val ret_count = _check_ignored_return_text(lines, file, "json", emitter)
-    val bool_count = _check_multiline_bool_text(lines, file, "json", emitter)
-    val safe_count = _check_safety_text(lines, file, "json", emitter)
-    val vis_count = _check_visibility_text(lines, file, "json", emitter)
+    val clos_count = _check_closure_capture_text(lines, file, "json")
+    val ret_count = _check_ignored_return_text_indexed(
+        lines, file, "json", indent_successors)
+    val bool_count = _check_multiline_bool_text(lines, file, "json")
+    val safe_count = _check_safety_text(lines, file, "json")
+    val vis_count = _check_visibility_text(lines, file, "json")
 
     for d in _DIAG_COLLECTED:
         parts.push(d)

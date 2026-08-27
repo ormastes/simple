@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/10.frontend/parser_types_expr.spl"
+registry="$root/src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+llvm_attrs="$root/src/compiler_rust/compiler/src/codegen/llvm/backend_core.rs"
+selfhost_inline="$root/src/compiler/60.mir_opt/mir_opt/_Inline/policy.spl"
+
+for raw in rt_enum_payload rt_enum_discriminant rt_tuple_get rt_println rt_env_get; do
+    [ "$(grep -Ec "^extern fn ${raw}\\(" "$module")" -eq 1 ]
+    [ "$(grep -Ec "^[[:space:]]+${raw}\\(" "$module")" -eq 1 ]
+done
+grep -q '^extern fn rt_env_get(key: text) -> text?$' "$module"
+
+[ "$(grep -c '^@unsafe(' "$module")" -eq 5 ]
+[ "$(grep -c '^@always_inline$' "$module")" -eq 5 ]
+[ "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 5 ]
+for expected in _sffi_enum_payload:11 _sffi_enum_discriminant:35 \
+    _sffi_tuple_get:14 _sffi_println:3 _sffi_env_get:2; do
+    owner=${expected%%:*}
+    count=${expected##*:}
+    [ "$(grep -o "${owner}(" "$module" | wc -l)" -eq "$count" ]
+done
+
+for raw in rt_enum_payload rt_enum_discriminant rt_tuple_get rt_env_get; do
+    grep -q "RuntimeFuncSpec::new(\"$raw\"" "$registry"
+done
+grep -q 'attr == "inline" || attr == "always_inline"' "$llvm_attrs"
+grep -q 'func.name.contains("@always_inline")' "$selfhost_inline"
+
+echo "parser-types expression SFFI authority audit: PASS (all raw calls confined; optional env contract truthful; probe count unchanged)"

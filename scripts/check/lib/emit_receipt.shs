@@ -116,3 +116,41 @@ emit_receipt() {
     mv -f "$_rc_out.tmp" "$_rc_out" 2>/dev/null || return 1
     return 0
 }
+
+# receipt_error <check_id> <error_verdict_line>
+#
+# ERROR-path counterpart of emit_receipt, and the fix for a false-green that is
+# structural rather than specific to any one gate: a gate that exits 2 has
+# proven NOTHING, but until now it exited without touching build/evidence, so
+# its PREVIOUS `PASS` receipt stayed on disk — still bound to the same artifact
+# and seal hash, still inside the freshness window — and
+# check-critical-release-seal.shs went on counting it. That is a dead gate
+# laundering into release evidence: measured 2026-08-24, check-aspect-seal.shs
+# printed `ERROR — nothing was checked (...)` and exited 2 while its receipt
+# still read `verdict_line=PASS — 1 aspect(s) checked, ...`.
+#
+# Two outcomes, both honest, both failing the seal:
+#   1. The ERROR verdict is recorded. `receipt_verdict_is_pass()` in
+#      src/compiler/00.common/assurance/evidence_receipt.spl is
+#      `starts_with("PASS")`, so the census classifies it `verdict-not-pass`.
+#   2. The receipt cannot be written at all — which is not hypothetical: one
+#      ERROR path IS a missing `bin/simple`, the very artifact emit_receipt
+#      must hash. Then any stale receipt is DELETED and the census reports
+#      `missing`.
+# Never leaves a stale PASS standing. Always returns 0: like emit_receipt, this
+# must never change the caller's exit status, which is already 2.
+receipt_error() {
+    _re_id="${1:-}"
+    [ -n "$_re_id" ] || return 0
+    emit_receipt "$_re_id" "${2:-ERROR — nothing was checked}" && return 0
+
+    # emit_receipt normalizes EVIDENCE_DIR only once it gets past its own
+    # early returns, so resolve the same path independently here.
+    _re_root=$(CDPATH= cd -- "$(dirname -- "${0:-.}")/../.." 2>/dev/null && pwd) || _re_root="."
+    case "${EVIDENCE_DIR:-build/evidence}" in
+        /*) _re_dir="$EVIDENCE_DIR" ;;
+        *)  _re_dir="$_re_root/${EVIDENCE_DIR:-build/evidence}" ;;
+    esac
+    rm -f "$_re_dir/$_re_id.receipt" 2>/dev/null
+    return 0
+}

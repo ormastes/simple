@@ -1,0 +1,126 @@
+# Bounded literal-line search for the filesystem-launched SimpleOS simplebox.
+
+use os.userlib.fs.{file_open_direct, file_read_direct, file_close_direct}
+use os.tools.simplebox.simplebox_fs_applets.{
+    SIMPLEBOX_FILE_LIMIT, SIMPLEBOX_FILE_BYTES_LIMIT,
+    SIMPLEBOX_READ_CHUNK_BYTES, SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT
+}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+
+extern fn stdout_write(data: text)
+
+pub const SIMPLEBOX_GREP_PATTERN_BYTES_LIMIT: u64 = 4096u64
+pub const SIMPLEBOX_GREP_OUTPUT_BYTES_LIMIT: u64 = 67108864u64
+
+struct SimpleboxGrepScanState:
+    line: [u8]
+    line_number: u64
+    emitted: u64
+    found: bool
+    failure: text
+
+fn _grep_emit_line(
+    path: text, pattern: text, state: SimpleboxGrepScanState
+) -> SimpleboxGrepScanState:
+    var line = state.line
+    if line.len() > 0u64 and line[line.len() - 1u64] == 13u8:
+        line = line.slice(0u64, line.len() - 1u64)
+    val content = bytes_to_string(line)
+    if not content.contains(pattern):
+        return SimpleboxGrepScanState(
+            line: [], line_number: state.line_number + 1u64,
+            emitted: state.emitted, found: state.found, failure: "")
+    val prefix = path + ":" + state.line_number.to_text() + ":"
+    val output_bytes = prefix.len() + content.len() + 1u64
+    if output_bytes > SIMPLEBOX_GREP_OUTPUT_BYTES_LIMIT - state.emitted:
+        return SimpleboxGrepScanState(
+            line: [], line_number: state.line_number,
+            emitted: state.emitted, found: state.found,
+            failure: "output exceeds simplebox byte limit")
+    stdout_write(prefix + content + "\n")
+    SimpleboxGrepScanState(
+        line: [], line_number: state.line_number + 1u64,
+        emitted: state.emitted + output_bytes, found: true, failure: "")
+
+fn _grep_scan_file(
+    path: text, pattern: text, prior_emitted: u64
+) -> SimpleboxGrepScanState:
+    val opened = file_open_direct(path, 0u32)
+    match opened:
+        case Err(reason):
+            return SimpleboxGrepScanState(
+                line: [], line_number: 1u64, emitted: prior_emitted,
+                found: false, failure: reason)
+        case Ok(fd):
+            var state = SimpleboxGrepScanState(
+                line: [], line_number: 1u64, emitted: prior_emitted,
+                found: false, failure: "")
+            var consumed: u64 = 0u64
+            var complete = false
+            while not complete and state.failure == "":
+                match file_read_direct(fd, SIMPLEBOX_READ_CHUNK_BYTES):
+                    case Err(reason): state.failure = reason
+                    case Ok(chunk):
+                        if chunk.len() == 0u64:
+                            complete = true
+                        elif chunk.len() > SIMPLEBOX_FILE_BYTES_LIMIT - consumed:
+                            state.failure = "file exceeds simplebox byte limit"
+                        else:
+                            consumed = consumed + chunk.len()
+                            var chunk_index: u64 = 0u64
+                            while chunk_index < chunk.len() and state.failure == "":
+                                val byte = chunk[chunk_index]
+                                if byte == 10u8:
+                                    state = _grep_emit_line(path, pattern, state)
+                                else:
+                                    state.line.push(byte)
+                                chunk_index = chunk_index + 1u64
+            if state.failure == "" and state.line.len() > 0u64:
+                state = _grep_emit_line(path, pattern, state)
+            if not file_close_direct(fd) and state.failure == "":
+                state.failure = "close failed"
+            state
+
+pub fn simplebox_grep(args: [text]) -> i32:
+    """Search bounded files for a literal pattern.
+
+    The safe primary form is `grep [--] PATTERN FILE...`. Options, stdin,
+    recursive traversal, regex expansion, and unbounded operands are rejected.
+    Exit status follows grep convention: 0 match, 1 no match, 2 error.
+    """
+    var pattern_index: u64 = 0u64
+    if args.len() > 0u64 and args[0] == "--":
+        pattern_index = 1u64
+    elif args.len() > 0u64 and args[0].starts_with("-"):
+        stdout_write("grep: unsupported option: " + args[0] + "\n")
+        return 2
+    if pattern_index + 1u64 >= args.len():
+        stdout_write("grep: missing PATTERN or FILE operand\n")
+        return 2
+    val pattern = args[pattern_index]
+    if pattern.len() > SIMPLEBOX_GREP_PATTERN_BYTES_LIMIT:
+        stdout_write("grep: pattern exceeds simplebox byte limit\n")
+        return 2
+    val file_count = args.len() - pattern_index - 1u64
+    if file_count > SIMPLEBOX_FILE_LIMIT.to_u64():
+        stdout_write("grep: too many file operands\n")
+        return 2
+
+    var emitted: u64 = 0u64
+    var found = false
+    var index = pattern_index + 1u64
+    while index < args.len():
+        val path = args[index]
+        if (path.len() == 0u64 or
+            path.len() > SIMPLEBOX_PATH_OPERAND_BYTES_LIMIT):
+            stdout_write("grep: invalid path length\n")
+            return 2
+        val scanned = _grep_scan_file(path, pattern, emitted)
+        if scanned.failure != "":
+            stdout_write("grep: " + path + ": " + scanned.failure + "\n")
+            return 2
+        emitted = scanned.emitted
+        if scanned.found:
+            found = true
+        index = index + 1u64
+    if found: 0 else: 1

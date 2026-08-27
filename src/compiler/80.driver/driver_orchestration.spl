@@ -21,10 +21,10 @@ use compiler.common.attributes.{
 }
 use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
-use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit}
+use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit, compiler_mcdc_obligation_manifest_emit}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
-extern fn rt_env_get(key: text) -> text
 pub use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
 
 impl CompilerDriver:
@@ -77,11 +77,15 @@ impl CompilerDriver:
                             0
                     ))
         self.ctx.vhdl_hardware_metadata_rows = metadata_rows
-        if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
+        if env_get("SIMPLE_COMPILER_TRACE") == "1":
             eprint("[vhdl-driver] captured-metadata={metadata_rows.len()}")
 
     me compile() -> CompileResult:
         val log = self.ctx.logger
+        if self.ctx.config.contains_key("mcdc_config_error"):
+            val mcdc_config_error = self.ctx.config["mcdc_config_error"] ?? "invalid MC/DC configuration"
+            self.ctx.add_error(mcdc_config_error)
+            return CompileResult.CodegenError(mcdc_config_error)
         var compile_mode_text = self.ctx.options.mode.to_text()
         if self.ctx.options.cli_mode_text != "":
             compile_mode_text = self.ctx.options.cli_mode_text
@@ -113,7 +117,12 @@ impl CompilerDriver:
 
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
-        compiler_coverage_inventory_reset(self.ctx.config.contains_key("coverage"))
+        val mcdc_mode_text = self.ctx.config["mcdc_mode"] ?? "off"
+        val mcdc_enabled = mcdc_mode_text == "on" or mcdc_mode_text == "dynamic"
+        compiler_coverage_inventory_reset(
+            self.ctx.config.contains_key("coverage") or mcdc_enabled,
+            self.ctx.config["mcdc_include"] ?? "",
+            self.ctx.config["mcdc_exclude"] ?? "")
         val parse_ok = self.parse_all_committing_impl()
         if not parse_ok:
             # Name the recorded diagnostics. A phase-2 verdict of false with an
@@ -130,16 +139,34 @@ impl CompilerDriver:
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
                 "failed", 1, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
-        if self.ctx.config.contains_key("coverage"):
+        if self.ctx.config.contains_key("coverage") or mcdc_enabled:
             if not compiler_coverage_inventory_valid():
                 self.ctx.add_error(compiler_coverage_inventory_error())
                 return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.config.contains_key("coverage"):
             compiler_coverage_inventory_emit()
+        if mcdc_enabled:
+            compiler_mcdc_obligation_manifest_emit()
         if self.ctx.options.backend == "vhdl":
             self.capture_vhdl_metadata()
         log_debug("phase 2 done")
+        # On the streaming path the SURFACES are the module set -- phase 2
+        # empties ctx.modules by design -- so reporting ctx.modules there
+        # prints a bare `n_modules=0` on a fully successful 692-module parse.
+        # That line cost a whole investigation (it reads as catastrophic loss).
+        # Name the carrier that is actually authoritative for the mode.
+        # NAME the carrier only -- do NOT dereference the retained surface
+        # owner here. An earlier version of this line unwrapped
+        # `streaming_module_surfaces_owner` to print a surface count and
+        # SEGV'd at exactly this point (the log then ended at
+        # `surface:file:released seq=692` with no `parse:done` line at all):
+        # the Option compares non-nil while its payload is not safely
+        # dereferenceable at this boundary. A diagnostic must never be able to
+        # crash the compile it is describing.
+        val parse_streaming_carrier = driver_streaming_surface_enabled(self.ctx)
         val parsed_module_count = self.ctx.modules.keys().len()
-        log_phase("phase2:parse:done n_modules={parsed_module_count}")
+        val parsed_module_carrier = if parse_streaming_carrier: "surfaces" else: "modules"
+        log_phase("phase2:parse:done n_modules={parsed_module_count} carrier={parsed_module_carrier}")
         log_build_progress("parse", "modules", parsed_module_count,
             parsed_module_count, "complete", 2, 6, 0, 0, "running")
 
@@ -171,7 +198,7 @@ impl CompilerDriver:
         log_trace("AFTER phase 3")
         if not analyze_ok:
             log_error("phase 3 FAILED")
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1":
+            if env_get("SIMPLE_BOOTSTRAP_DEBUG") == "1":
                 val phase3_error_count = self.ctx.errors.len()
                 eprint("[bootstrap-phase3-errors] count={phase3_error_count}")
                 var phase3_error_index = 0

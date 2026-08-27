@@ -290,6 +290,54 @@ records. SPipe implements identity dominance followed by fusion of lexical and
 graph inputs in Wave 4; identity is not an RRF source. Optional semantics and
 server integration only add a declared candidate source.
 
+#### 3.5.1 Complete-pool, graph evidence, and cursor contracts
+
+The admitted complete-pool v2 fusion contract accepts declared complete,
+counted, digest-bound source lists and returns the entire unique internal pool
+up to 3,000. Reranking processes that pool before applying the public 1,000-hit
+limit. Source digests prove structural agreement with the declared list; the
+search receipt remains responsible for producer authority and completeness.
+
+The graph source is built from an authorization-filtered pinned snapshot. All
+declared canonical nodes receive exactly one UID/kind-only authorization recheck
+in UID order before any edge is inspected; failures are accumulated through the
+fixed call count and collapse to `snapshot_unavailable`. Strict accepted edges
+are receipt-verified against the exact snapshot/root/scope/search receipt and
+policy. The generator performs both-direction BFS with depth exactly 3;
+`sourceK` 1..1000 default 1000; page work 1..50,000 default 50,000;
+configurable total work 1..500,000; at most 20,000 nodes, 50,000 edges, and
+1001 roots; and 512-byte document IDs. Exact root precedence is
+`(seedTier=0,seedRank=0)`; lexical roots use
+`(seedTier=1,seedRank=sourceRank)`. Paths repeat
+neither nodes nor edges; same-distance improved tuples replace and re-expand a
+state. Candidate order is the full architecture tuple followed by artifact UID,
+and `sourceK` truncation occurs only after exhaustive bounded traversal.
+
+The continuation is a deeply frozen null-prototype handle with no enumerable
+state, branded by its factory and backed by factory-local `WeakMap` state. That
+state owns the normalized binding, exact snapshot/digest, frontier, best paths,
+counters, and consumed bit. Continuation consumes the old state atomically
+before work. Partial output contains only status/version/cursor/counters; total
+hard-cap failure destroys state. It is single-use and cannot be serialized,
+copied, resumed after restart, or transferred between factories. Bounded state
+is GC-eligible when the handle is abandoned. This pure layer has no time
+authority, so it makes no TTL claim. Transport/provider cursors remain separate
+authenticated wire objects and must not be confused with this local handle.
+
+Graph evidence carries the lossless ordered relation:
+
+```text
+accepted_edge_evidence = [
+  { edge_uid, authority_receipt_uid },
+  ...
+]
+```
+
+One receipt may authorize multiple edges. Therefore, pair-based evidence—not
+two equal-length independently unique arrays—is authoritative. A future
+additive reranker evidence contract must accept these pairs and derive display
+sets without changing multiplicity or pretending receipts are per-edge.
+
 ### 3.6 Index semantics
 
 `LexicalSearchPort` supports:

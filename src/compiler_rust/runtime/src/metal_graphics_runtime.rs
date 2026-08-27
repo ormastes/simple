@@ -444,17 +444,21 @@ mod metal_impl {
     // -------------------------------------------------------------------------
 
     pub fn compile_shader(device_handle: i64, source: i64) -> i64 {
+        let src_str = match runtime_text(source, "compile_shader source") {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(&error);
+                return 0;
+            }
+        };
+        compile_shader_text(device_handle, &src_str)
+    }
+
+    pub fn compile_shader_text(device_handle: i64, source: &str) -> i64 {
         let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
         match dev {
             Some(dev) => {
-                let src_str = match runtime_text(source, "compile_shader source") {
-                    Ok(value) => value,
-                    Err(error) => {
-                        set_last_error(&error);
-                        return 0;
-                    }
-                };
-                let ns_src = NSString::from_str(&src_str);
+                let ns_src = NSString::from_str(source);
                 match dev.newLibraryWithSource_options_error(&ns_src, None) {
                     Ok(lib) => {
                         let id = next_id();
@@ -508,18 +512,22 @@ mod metal_impl {
     }
 
     pub fn create_compute_pipeline(device_handle: i64, library_handle: i64, entry: i64) -> i64 {
+        let entry_str = match runtime_text(entry, "create_compute_pipeline entry") {
+            Ok(value) => value,
+            Err(error) => {
+                set_last_error(&error);
+                return 0;
+            }
+        };
+        create_compute_pipeline_text(device_handle, library_handle, &entry_str)
+    }
+
+    pub fn create_compute_pipeline_text(device_handle: i64, library_handle: i64, entry: &str) -> i64 {
         let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
         let lib = with_libraries(|m| m.get(&library_handle).map(|w| w.0.clone()));
         match (dev, lib) {
             (Some(dev), Some(lib)) => {
-                let entry_str = match runtime_text(entry, "create_compute_pipeline entry") {
-                    Ok(value) => value,
-                    Err(error) => {
-                        set_last_error(&error);
-                        return 0;
-                    }
-                };
-                let ns_entry = NSString::from_str(&entry_str);
+                let ns_entry = NSString::from_str(entry);
                 let func: Option<Retained<ProtocolObject<dyn MTLFunction>>> =
                     unsafe { lib.newFunctionWithName(&ns_entry) };
                 match func {
@@ -1030,6 +1038,14 @@ pub extern "C" fn rt_metal_buffer_upload(_buffer: i64, _data: i64, _size: i64) -
 }
 
 #[no_mangle]
+pub extern "C" fn rt_metal_buffer_upload_raw(buffer: i64, data: i64, size: i64) -> i64 {
+    if data == 0 || size <= 0 || size > 268_435_456 {
+        return 0;
+    }
+    rt_metal_buffer_upload(buffer, data, size)
+}
+
+#[no_mangle]
 pub extern "C" fn rt_metal_buffer_download(_data: i64, _buffer: i64, _size: i64) -> i64 {
     #[cfg(target_os = "macos")]
     {
@@ -1039,6 +1055,14 @@ pub extern "C" fn rt_metal_buffer_download(_data: i64, _buffer: i64, _size: i64)
     {
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_metal_buffer_download_raw(data: i64, buffer: i64, size: i64) -> i64 {
+    if data == 0 || size <= 0 || size > 268_435_456 {
+        return 0;
+    }
+    rt_metal_buffer_download(data, buffer, size)
 }
 
 // ============================================================================
@@ -1057,6 +1081,26 @@ pub extern "C" fn rt_metal_compile_shader(_device: i64, _source: i64) -> i64 {
     }
 }
 
+/// Provider ABI: length-delimited UTF-8 MSL. The pointer is borrowed only for
+/// this call; no Simple RuntimeValue or core heap address crosses the dylib.
+#[no_mangle]
+pub extern "C" fn rt_metal_compile_shader_raw(device: i64, source: i64, source_len: i64) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        if source == 0 || source_len <= 0 || source_len > 268_435_456 {
+            return 0;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(source as *const u8, source_len as usize) };
+        let Ok(text) = std::str::from_utf8(bytes) else { return 0 };
+        metal_impl::compile_shader_text(device, text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (device, source, source_len);
+        0
+    }
+}
+
 /// Call-scoped Metal source/library bytes. No raw address is exported.
 #[no_mangle]
 pub extern "C" fn rt_metal_load_library_array(device: i64, data: RuntimeValue) -> i64 {
@@ -1070,6 +1114,24 @@ pub extern "C" fn rt_metal_load_library_array(device: i64, data: RuntimeValue) -
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (device, bytes);
+        0
+    }
+}
+
+/// Provider ABI: call-scoped metallib bytes, independent of RuntimeValue.
+#[no_mangle]
+pub extern "C" fn rt_metal_load_library_raw(device: i64, data: i64, data_len: i64) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        if data == 0 || data_len <= 0 || data_len > 268_435_456 {
+            return 0;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, data_len as usize) };
+        metal_impl::load_library_bytes(device, bytes)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (device, data, data_len);
         0
     }
 }
@@ -1094,6 +1156,25 @@ pub extern "C" fn rt_metal_create_compute_pipeline(_device: i64, _shader: i64, _
     }
     #[cfg(not(target_os = "macos"))]
     {
+        0
+    }
+}
+
+/// Provider ABI: length-delimited UTF-8 entry point name.
+#[no_mangle]
+pub extern "C" fn rt_metal_create_compute_pipeline_raw(device: i64, shader: i64, entry: i64, entry_len: i64) -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        if entry == 0 || entry_len <= 0 || entry_len > 1_048_576 {
+            return 0;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(entry as *const u8, entry_len as usize) };
+        let Ok(text) = std::str::from_utf8(bytes) else { return 0 };
+        metal_impl::create_compute_pipeline_text(device, shader, text)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (device, shader, entry, entry_len);
         0
     }
 }
@@ -1193,6 +1274,14 @@ pub extern "C" fn rt_metal_set_bytes(_encoder: i64, _data: i64, _length: i64, _i
     {
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_metal_set_bytes_raw(encoder: i64, data: i64, length: i64, index: i64) -> i64 {
+    if data == 0 || length <= 0 || length > 268_435_456 || index < 0 {
+        return 0;
+    }
+    rt_metal_set_bytes(encoder, data, length, index)
 }
 
 #[no_mangle]

@@ -240,7 +240,7 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
                 }
             }
             Expr::Lambda { body, .. } => visit_expr(body, visitor),
-            Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => visit_ast_nodes(nodes, visitor),
+            Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes, _) => visit_ast_nodes(nodes, visitor),
             Expr::Binary { left, right, .. } => {
                 visit_expr(left, visitor);
                 visit_expr(right, visitor);
@@ -343,8 +343,11 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
             | Expr::Try(expr)
             | Expr::ForceUnwrap(expr)
             | Expr::ExistsCheck(expr)
-            | Expr::UnwrapOrReturn { expr, .. }
             | Expr::ContractOld(expr) => visit_expr(expr, visitor),
+            Expr::UnwrapOrReturn { expr, default } => {
+                visit_expr(expr, visitor);
+                visit_expr(default, visitor);
+            }
             Expr::Yield(expr) => {
                 if let Some(expr) = expr {
                     visit_expr(expr, visitor);

@@ -5,33 +5,39 @@ alwaysApply: false
 ---
 # Version Control
 
-- Use **jj** (Jujutsu) as primary VCS, colocated with git
-- **NEVER create branches** - work directly on `main`
-- Commit: `jj commit -m "message"` (auto-tracks all changes, no staging needed)
-- Push: `sh scripts/check/land.shs` — gates the rules.sdl quick-group and integrity
-  checks against COMMITTED content, THEN runs `sj bookmark set main -r @- && sj
-  git push --bookmark main`. **Do not push via raw `sj`/`jj git push` directly** —
-  `jj git push` never invokes `.git/hooks/pre-push`, so the rules.sdl gates are
-  silently skipped on that path. See
+- Use **jj** (Jujutsu) as primary VCS, colocated with git.
+- Every mutating session requires one unique work branch and one unique linked
+  worktree/workspace. The registered main worktree is read-only for authoring.
+- Commit only session-owned paths: `jj commit -m "message" <owned-paths...>`.
+- Fetch GitHub before creating the session, and fetch again before integrating.
+  Rebase only the private work branch onto the exact protected target.
+- Push only the owned work branch, then submit it to the integration authority.
+  `main`, `release/*`, `candidate/*`, and `v*` are protected and may not be
+  updated directly by an authoring session.
+- The integration authority runs the committed-content rules.sdl and integrity
+  gates and updates the target with compare-and-swap semantics. Raw `jj git
+  push` bypasses Git hooks, so it is not an integration mechanism. See
   `doc/08_tracking/bug/jj_push_bypasses_rules_sdl_gates_2026-08-11.md`.
-- Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin`
 
 ## When `jj git push` fails ("External git program failed")
 
-Origin's HTTPS token is dead. Push the rebased tip directly over SSH, then re-sync tracking:
+If HTTPS authentication fails, repair the credential path and retry the owned
+work branch. Authentication failure never authorizes bypassing protected
+integration or pushing a commit directly to `main`:
 
 ```bash
-TIP=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id')
-GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
-  git push git@github.com:ormastes/simple.git "$TIP":refs/heads/main
-GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" jj --ignore-working-copy git fetch
+env -u GITHUB_TOKEN -u GH_TOKEN gh auth setup-git
+env -u GITHUB_TOKEN -u GH_TOKEN jj git push --bookmark <work-branch>
 ```
 
 Always verify with `git ls-remote` after — a clean-looking exit is not proof the content landed.
 
 ## Rebase conflict loop (root-first)
 
-Parallel agent sessions force-push main continuously; a rebase can conflict a whole chain. Never resolve at the tip — resolve the ROOT and let descendants auto-rebase, looping until empty:
+Parallel agent sessions may advance their private branches while the integration
+authority advances `main`; protected `main` is never force-pushed. A private
+rebase can conflict a whole chain. Resolve the root and let descendants
+auto-rebase, looping until empty:
 
 ```bash
 jj --ignore-working-copy log -r 'roots((main@origin..@) & conflicts())'   # find root
@@ -63,7 +69,7 @@ A bare revision (no `..`) is rejected rather than silently reinterpreted.
 Details and the fixture-based proofs:
 `doc/08_tracking/bug/pre_push_guards_fail_open_on_cwd_2026-08-01.md`.
 
-- **No `.jjconflict-*` trees in the outgoing range — run `sh scripts/check/check-no-conflict-tree-push.shs` (exit 0 = safe).** With no argument it checks `main@origin..@-`, exactly what `jj git push --bookmark main` sends. **`jj git push` does NOT block a conflict commit**; on 2026-07-25 one was pushed and `main` carried no source files at all across two commits until it was repaired. A jj conflict commit's git tree contains *only* `.jjconflict-base-0/` and `.jjconflict-side-N/`, so a clone gets an empty repo. Symptom to recognise: `git cat-file -p <sha>:<path>` says *"exists on disk, but not in <sha>"* — that reads like one missing file but means the whole tree is gone; confirm with `git ls-tree --name-only <sha>`. Range only — never `main@{0}` (that sweeps the whole reflog).
+- **No `.jjconflict-*` trees in the outgoing range — run `sh scripts/check/check-no-conflict-tree-push.shs` (exit 0 = safe).** Supply the exact protected target SHA and owned work-branch tip used by the integration submission; the historical default `main@origin..@-` is only a compatibility range and never authorizes a direct `main` push. **`jj git push` does NOT block a conflict commit**; on 2026-07-25 one was pushed and `main` carried no source files at all across two commits until it was repaired. A jj conflict commit's git tree contains *only* `.jjconflict-base-0/` and `.jjconflict-side-N/`, so a clone gets an empty repo. Symptom to recognise: `git cat-file -p <sha>:<path>` says *"exists on disk, but not in <sha>"* — that reads like one missing file but means the whole tree is gone; confirm with `git ls-tree --name-only <sha>`. Range only — never `main@{0}` (that sweeps the whole reflog).
 - **No literal conflict-marker text in pushed file content — run `sh scripts/check/check-no-conflict-markers-push.shs` (exit 0 = safe).** Same default range as the tree guard. This catches a different failure than the one above: a `jj rebase` can inject conflict-marker text into file CONTENT (both jj's `<<<<<<< conflict N of M` / `%%%%%%%` / `>>>>>>> ... ends` style and git's classic `<<<<<<< HEAD` / `=======` / `>>>>>>>` style) without the commit being tree-conflicted, so the tree guard misses it. On 2026-07-30 exactly this happened: a rebase wrote markers into 38 tracked files, including the Rust seed `src/compiler_rust/runtime/src/value/mod.rs`, breaking every seed build. The guard flags a file only when it has a matching open+close marker pair, so prose that merely mentions marker syntax (e.g. this file, jj's own vendored docs) doesn't false-positive.
 - **No structurally wrong tree in the outgoing range — run `sh scripts/check/check-tree-size-push.shs` (exit 0 = safe).** Same default range as the two guards above. This is the gate that the other two cannot be: they only recognise `.jjconflict*` entries and literal marker text, so a tree truncated for any OTHER reason — a git index truncated by ENOSPC, an API `base_tree` landing that silently inherited an already-wiped base — passes both. `main` was wiped to near-zero files **twice in 24 hours** that way (`118c636ead8`: 109,375 files → 4) with every guard green; the only thing that ever caught it was a human counting `git ls-tree -r --name-only $C | wc -l`. Four fail-closed checks: **size band** (±0.15% of the base the push replaces, *plus* an absolute 90,000/150,000 floor and ceiling — the absolute floor is the only check that fires when the BASE is itself already wiped and the delta is therefore zero); **duplicate tree entries** (a real corruption listed `src/lib` twice at **109,815 files — higher than the healthy 109,543** — so a floor-only check is blind to it; `git fsck` is authoritative but takes >2min here, use it for investigation not gating); **`src/` entry band** 13..25 (measured 15, the corruption showed 9 — the strongest single signal); and **load-bearing path floors** (`src/runtime ≥ 150` — measured 185, corruption showed 0, a proven canary. `src/std` is NOT a canary: it holds one file, so a non-empty test on it is vacuous). A lane that legitimately moves more than the band allows states `--expect-files <n>`, which RECORDS the expected post-count in the verdict and recentres the band — every other check still applies, and there is no flag or env var that turns one off. `--selftest` runs before every scan and is fatal (14 fixtures). Proofs, including a real `git push` where the duplicate-entry fixture was blocked by this guard ALONE: `doc/08_tracking/bug/no_automated_tree_size_gate_2026-08-01.md`.
 - **No unbaselined test-tree divergence in the pushed commit — run `sh scripts/check/check-test-tree-divergence.shs --ref <NEW>` (exit 0 = safe).** `<NEW>` is the exact commit being pushed — the guard reads COMMITTED content via `git ls-tree`/`cat-file`, never the shared working copy, so it works on a plumbing-built commit that was never checked out. This is the fourth mandatory pre-push check: it fences the LIVE duplicate test trees (`test/01_unit/` vs `test/unit/`, `test/02_integration/` vs `test/integration/`) against the baseline in `scripts/check/test_tree_divergence_baseline.txt`, failing on any NEW divergence or any baselined pair that is now identical (stale baseline). Until 2026-08-10 only the git pre-push hook (`pre-push-conflict-tree-guard.shs`) ran it — every plumbing landing bypassed it, which is exactly how divergence sat RED for days with nothing acting. Same verdict convention as the other three: `PASS — <n> pairs checked, ...` with n > 0, `FAIL` exit 1, `ERROR — nothing was checked` exit 2; a run that compares 0 pairs is an ERROR, not a pass. Do not "fix" a FAIL with `--generate-baseline` without reading the diff — that flag exists only for deliberate, reviewed baseline updates.

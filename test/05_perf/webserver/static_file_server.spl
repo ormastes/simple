@@ -15,10 +15,14 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+@unsafe(reason: "raw listener descriptor; negative sentinel means bind failed", capabilities: [ffi])
 extern fn rt_io_tcp_bind(addr: text) -> i64
+@unsafe(reason: "raw accepted descriptor; negative sentinel means accept failed", capabilities: [ffi])
 extern fn rt_io_tcp_accept(fd: i64) -> i64
 extern fn rt_io_tcp_drain_line(fd: i64) -> i64
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 
 fn env_text(key: text, default_value: text) -> text:
@@ -54,7 +58,10 @@ fn build_response(status: text, mime: text, body: text) -> text:
     response + body
 
 fn write_prebuilt_response(fd: i64, response: text):
-    val _written = rt_io_tcp_write_text(fd, response)
+    val written = unsafe(capabilities: [ffi]):
+        rt_io_tcp_write_text(fd, response)
+    if written != response.len():
+        panic("short static response write")
 
 fn main():
     val addr = env_text("SIMPLE_STATIC_SERVER_ADDR", "127.0.0.1:18080")
@@ -68,7 +75,8 @@ fn main():
     val mime = content_type(path)
     val response = build_response(status, mime, body)
 
-    val listener = rt_io_tcp_bind(addr)
+    val listener = unsafe(capabilities: [ffi]):
+        rt_io_tcp_bind(addr)
     if listener < 0:
         print "[simple-static-server-error] bind {addr}"
         return
@@ -76,13 +84,16 @@ fn main():
     print "[simple-static-server-ready] addr={addr} file={path} requests={request_limit}"
     var served: i64 = 0
     while served < request_limit:
-        val fd = rt_io_tcp_accept(listener)
+        val fd = unsafe(capabilities: [ffi]):
+            rt_io_tcp_accept(listener)
         if fd >= 0:
             val request_len = rt_io_tcp_drain_line(fd)
             if request_len > 0:
                 write_prebuilt_response(fd, response)
-            val _closed = rt_io_tcp_close(fd)
+            val _closed = unsafe(capabilities: [ffi]):
+                rt_io_tcp_close(fd)
             served = served + 1
 
-    val _listener_closed = rt_io_tcp_close(listener)
+    val _listener_closed = unsafe(capabilities: [ffi]):
+        rt_io_tcp_close(listener)
     print "[simple-static-server-done] served={served}"

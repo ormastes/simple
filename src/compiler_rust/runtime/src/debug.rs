@@ -133,6 +133,13 @@ impl DebugState {
         None
     }
 
+    pub fn has_breakpoint(&self, file: &str, line: u32) -> bool {
+        let key = format!("{}:{}", file, line);
+        self.breakpoints
+            .get(&key)
+            .map_or(false, |breakpoint| breakpoint.enabled)
+    }
+
     pub fn should_stop(&mut self, file: &str, line: u32) -> bool {
         if !self.active {
             return false;
@@ -242,24 +249,60 @@ pub extern "C" fn rt_debug_is_active() -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rt_debug_add_breakpoint(file_ptr: i64, file_len: i64, line: i64) -> i64 {
+    if file_ptr == 0 || file_len < 0 || line < 0 || line > i64::from(u32::MAX) {
+        return -1;
+    }
+    let Ok(file_len) = usize::try_from(file_len) else {
+        return -1;
+    };
     let file = unsafe {
-        let slice = std::slice::from_raw_parts(file_ptr as *const u8, file_len as usize);
-        std::str::from_utf8_unchecked(slice)
+        let slice = std::slice::from_raw_parts(file_ptr as *const u8, file_len);
+        match std::str::from_utf8(slice) {
+            Ok(file) => file,
+            Err(_) => return -1,
+        }
     };
     debug_state().add_breakpoint(file, line as u32, None) as i64
 }
 
 #[no_mangle]
 pub extern "C" fn rt_debug_remove_breakpoint(file_ptr: i64, file_len: i64, line: i64) -> i64 {
+    if file_ptr == 0 || file_len < 0 || line < 0 || line > i64::from(u32::MAX) {
+        return -1;
+    }
+    let Ok(file_len) = usize::try_from(file_len) else {
+        return -1;
+    };
     let file = unsafe {
-        let slice = std::slice::from_raw_parts(file_ptr as *const u8, file_len as usize);
-        std::str::from_utf8_unchecked(slice)
+        let slice = std::slice::from_raw_parts(file_ptr as *const u8, file_len);
+        match std::str::from_utf8(slice) {
+            Ok(file) => file,
+            Err(_) => return -1,
+        }
     };
     if debug_state().remove_breakpoint(file, line as u32) {
         1
     } else {
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_debug_has_breakpoint(file_ptr: i64, file_len: i64, line: i64) -> i64 {
+    if file_ptr == 0 || file_len < 0 || line < 0 || line > i64::from(u32::MAX) {
+        return -1;
+    }
+    let Ok(file_len) = usize::try_from(file_len) else {
+        return -1;
+    };
+    let file = unsafe {
+        let slice = std::slice::from_raw_parts(file_ptr as *const u8, file_len);
+        match std::str::from_utf8(slice) {
+            Ok(file) => file,
+            Err(_) => return -1,
+        }
+    };
+    i64::from(debug_state().has_breakpoint(file, line as u32))
 }
 
 #[no_mangle]
@@ -364,6 +407,27 @@ mod tests {
         assert!(ds.check_breakpoint("test.spl", 10).is_some());
         assert!(ds.remove_breakpoint("test.spl", 10));
         assert!(!ds.file_has_breakpoints("test.spl"));
+    }
+
+    #[test]
+    fn sffi_breakpoint_contract_checks_text_and_status() {
+        rt_debug_remove_all_breakpoints();
+        let file = b"sffi_contract.spl";
+        let id = rt_debug_add_breakpoint(file.as_ptr() as i64, file.len() as i64, 17);
+        assert!(id > 0);
+        assert_eq!(rt_debug_has_breakpoint(file.as_ptr() as i64, file.len() as i64, 17), 1);
+        assert_eq!(
+            rt_debug_remove_breakpoint(file.as_ptr() as i64, file.len() as i64, 17),
+            1
+        );
+        assert_eq!(rt_debug_has_breakpoint(file.as_ptr() as i64, file.len() as i64, 17), 0);
+
+        let invalid_utf8 = [0xff_u8];
+        assert_eq!(rt_debug_add_breakpoint(0, 1, 17), -1);
+        assert_eq!(
+            rt_debug_add_breakpoint(invalid_utf8.as_ptr() as i64, invalid_utf8.len() as i64, 17),
+            -1
+        );
     }
 
     #[test]

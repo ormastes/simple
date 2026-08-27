@@ -98,6 +98,19 @@ before durable read, write, and ordered flush submission.
 
 Kernel targets and SimpleOS userland triples are separate catalog fields. Canonical userland targets are selected once; every builder, manifest, sysroot path, and receipt derives from the catalog. RISC-V feature/ABI spelling is frozen before implementation and must match actual hardware/toolchain support.
 
+The filesystem-resident toolchain admission vocabulary covers exactly the six
+canonical userland triples: x86_64/i686, AArch64/ARMv7, and RV64GC/RV32IMAC.
+Admission maps those triples to the matching kernel `Architecture` value, but
+does not promote structural candidates to runtime PASS. The 32-bit bootstrap
+guest tuple uses the same `*-unknown-simpleos` identity and catalog-selected
+QEMU binary as its target profile; bare-metal `*-unknown-none*` spellings are
+not interchangeable with userland artifact identity.
+Scheduler terminal evidence retains the loader-authenticated manifest target
+OS, architecture, and ABI from each adopted executable image. The LLVM hello
+authority requires all three compiler/linker/output-image observations to match
+the requested canonical triple, preventing a six-target whitelist from
+relabeling evidence produced by a different architecture.
+
 ### Role construction
 
 Per-target isolated workspaces produce separate compiler, interpreter, loader, and dispatcher artifacts. Aliases may share bytes only through explicit manifest `alias_of`. A pure-Simple admitted compiler receipt is required; Rust seed or unsupported Stage 2/3 commands fail closed.
@@ -109,6 +122,9 @@ Build/install guest-native `clang`, `clang++`, `ld.lld`, selected LLVM tools, he
 ### Tool inventory
 
 Generate one manifest from declared tool descriptors, never a source scan at runtime. A supported tool record includes implementation owner, artifact digest, capabilities, targets, filesystems, representative command, expected output/exit, error command, and evidence IDs. Partial/unavailable/blocked records are visible and cannot launch as supported.
+The full profile requires all six canonical target bindings. Manifest rows may
+remain blocked while payload or execution evidence is absent; expanding target
+identity never fabricates an artifact digest or evidence receipt.
 
 ## Server design
 
@@ -120,6 +136,13 @@ Production owners are explicit:
 - SSHD: `src/os/apps/sshd/`.
 
 `src/lib/nogc_sync_mut/http_server/` supplies hardened policy and becomes a compatibility adapter to the async production owner. During the freestanding DBFS migration, `src/os/apps/dbd/dbd.spl::DbdServer` is the single temporary owner of its listener FD, `ServerLifecycleV1`, engine, and bounded WAL state; one `DbdLiveClientSessionV1` owns each accepted connection's TLS fixed-ring stream, `DbdMutableAuthRequestOwnerV1`, session budgets, and `DbdAuthenticatedRespIngressV1`. The production hot path and focused tests mutate that live owner directly; no by-value DBD TLS ingest wrapper is exported. Auth ingress accepts only bounded RESP `AUTH principal credential` array framing after TLS authentication, keeps the credential in mutable byte storage, performs digest-only identity admission through its owned `DbdAuthSession`, and wipes auth storage on all exits. The authenticated command owner keeps incomplete RESP in a fixed mutable byte ring, advances its framing state once per byte, classifies repeated AUTH before conversion, and copies only a complete non-credential frame once into the canonical text parser. Taking or closing wipes owned ring bytes. Rejection is encrypted and consumes the existing four-attempt lockout budget. Durable mutations use bounded `ChecksummedBase64V1` journal records: canonical base64 preserves empty, whitespace, control-bearing, Unicode RESP values without line injection, and SHA-256 binds the exact encoded argument sequence before replay applies any command. Production replay admits J1 records only; unsigned pre-J1 scalar records fail closed. A future legacy importer must be an offline, one-shot migration owner that rewrites and verifies the complete journal before production replay. It cannot become Ready while DBFS, a boot mutable-credential source, and certificate/private-key/typed-entropy TLS owners are unavailable. The final migration moves this state behind the canonical DB service facade before `src/os/apps/dbd/` becomes a stateless adapter; the two owners must never be live concurrently.
+
+Mutation admission follows the canonical Redis engine rather than the narrower
+journal encoder. `SET`, `DEL`, `INCR`, `EXPIRE`, and `FLUSHALL` are all treated
+as mutations. Only `SET` and single-key `DEL` currently have exact J1 restart
+semantics; the other three fail before dispatch with `durable command
+unsupported`, preventing an acknowledged memory-only state change. Their
+time/order/destructive replay semantics must be designed before admission.
 
 ### Lifecycle
 

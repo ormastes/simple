@@ -1696,6 +1696,50 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
 
         let compiler_rt_builtins = find_compiler_rt_builtins(triple);
         let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
+        // `--runtime-bundle` used to be honored only by the hosted linker.
+        // Bare-metal SimpleOS kernels use an `*-unknown-none` target, so they
+        // do not satisfy `simpleos_user_runtime_paths()` even when the caller
+        // explicitly selected an ABI-complete target simple-core archive.
+        // The result was especially misleading: native-build admitted the
+        // archive during configuration, compiled the entire closure, and then
+        // omitted that archive from the final ld.lld command. Keep the
+        // SimpleOS sysroot tuple authoritative when present, but otherwise put
+        // the selected runtime bundle on the freestanding link line too.
+        let selected_freestanding_runtime = if simpleos_user_runtime.is_none() {
+            self.selected_runtime_library(temp_dir)?
+        } else {
+            None
+        };
+        self.reject_unexpected_native_all(selected_freestanding_runtime.as_ref())?;
+        // Fail closed: a SimpleOS user target whose crt0/libc/runtime could not be
+        // resolved must NOT silently link with none of them -- that is exactly the
+        // defect tracked in
+        // `doc/08_tracking/bug/simpleos_target_build_link_omits_simple_core_archive_2026-08-24.md`,
+        // where the archive was resolved and echoed and then never reached the link
+        // line, and the only symptom was ~1000 undefined `rt_*` references.
+        if simpleos_user_runtime.is_none()
+            && cross_target.os == simple_common::target::TargetOS::SimpleOS
+            && matches!(
+                cross_target.arch,
+                simple_common::target::TargetArch::X86_64
+                    | simple_common::target::TargetArch::Aarch64
+                    | simple_common::target::TargetArch::Riscv64
+            )
+        {
+            let sysroot = Self::simpleos_sysroot_dir(cross_target.arch);
+            return Err(format!(
+                "SimpleOS target {:?} link inputs are incomplete: need {}/lib/crt0.o, \
+                 {}/lib/libsimpleos_all.a (or libsimpleos_c.a), and a simple-core runtime \
+                 archive via SIMPLE_SIMPLE_CORE_PATH (file or directory) or \
+                 {}/lib/libsimple_runtime.a. Build them with \
+                 scripts/os/simpleos-core-archive.shs --target <triple> --backend cranelift \
+                 and scripts/os/simpleos-sysroot-<arch>.shs. Refusing to link without a runtime.",
+                cross_target.arch,
+                sysroot.display(),
+                sysroot.display(),
+                sysroot.display(),
+            ));
+        }
         let effective_linker_script = Self::resolve_freestanding_linker_script(
             self.config.linker_script.as_deref(),
             cross_target,
@@ -2087,6 +2131,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             if let Some((_, ref runtime, ref libc)) = simpleos_user_runtime {
                 c.arg(runtime);
                 c.arg(libc);
+            } else if let Some((ref runtime, _)) = selected_freestanding_runtime {
+                c.arg(runtime);
             }
             c
         } else {
@@ -2133,6 +2179,8 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             if let Some((_, ref runtime, ref libc)) = simpleos_user_runtime {
                 c.arg(runtime);
                 c.arg(libc);
+            } else if let Some((ref runtime, _)) = selected_freestanding_runtime {
+                c.arg(runtime);
             }
             c
         };

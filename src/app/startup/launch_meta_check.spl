@@ -28,9 +28,7 @@ use os.kernel.loader.artifact_manifest.{
     manifest_verify_content_hash
 }
 
-use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_read_bytes(path: text) -> [u8]?
+use std.io_runtime.{file_exists, read_file_text_result, file_read_bytes_result}
 
 fn _print_help():
     print "Usage: simple launch-meta check [--simpleos-host|--simpleos-baremetal] [--metadata <path>] [--verify-hash <hex>] <path>"
@@ -58,24 +56,29 @@ fn _check_host_dependency_files(deps: [text], kind: text) -> i64:
             missing = missing + 1
     missing
 
-fn _metadata_for_check(path: text, target: text, metadata_path: text) -> LaunchMetadata:
+fn _metadata_for_check(path: text, target: text, metadata_path: text) -> Result<LaunchMetadata, text>:
     val simpleos_baremetal = target == "simpleos-baremetal"
     val fallback_kind = startup_detect_launch_kind(path)
     if metadata_path != "":
-        val content = rt_file_read_text(metadata_path)
-        return parse_launch_metadata_sidecar(content, fallback_kind)
+        match read_file_text_result(metadata_path):
+            case Ok(content): return Ok(parse_launch_metadata_sidecar(content, fallback_kind))
+            case Err(error): return Err(error)
     if not simpleos_baremetal and fallback_kind == "native":
-        val bytes = rt_file_read_bytes(path) ?? []
-        if has_native_launch_metadata_trailer(bytes):
-            return parse_launch_metadata_from_native_bytes(bytes, fallback_kind)
+        match file_read_bytes_result(path):
+            case Ok(bytes):
+                if has_native_launch_metadata_trailer(bytes):
+                    return Ok(parse_launch_metadata_from_native_bytes(bytes, fallback_kind))
+            case Err(error): return Err(error)
     val default_sidecar = launch_metadata_sidecar_path(path)
     if not simpleos_baremetal and file_exists(default_sidecar):
-        return parse_launch_metadata_sidecar(rt_file_read_text(default_sidecar), fallback_kind)
+        match read_file_text_result(default_sidecar):
+            case Ok(content): return Ok(parse_launch_metadata_sidecar(content, fallback_kind))
+            case Err(error): return Err(error)
     if simpleos_baremetal:
-        return launch_metadata_for_simpleos_baremetal_path(path)
+        return Ok(launch_metadata_for_simpleos_baremetal_path(path))
     if target == "simpleos-host":
-        return launch_metadata_for_simpleos_path(path)
-    launch_metadata_for_path(path)
+        return Ok(launch_metadata_for_simpleos_path(path))
+    Ok(launch_metadata_for_path(path))
 
 fn _verify_content_hash(path: text, expect_hash_hex: text) -> i64:
     """WP-19 real production caller: build a minimal SimpleArtifactManifest
@@ -83,7 +86,11 @@ fn _verify_content_hash(path: text, expect_hash_hex: text) -> i64:
     bytes off disk, and run `manifest_verify_content_hash` for real — not a
     presence check, an actual SHA-256 comparison against real bytes. Fail
     closed on a read failure, a missing declared hash, or a digest mismatch."""
-    val bytes = rt_file_read_bytes(path) ?? []
+    val bytes = match file_read_bytes_result(path):
+        case Ok(content): content
+        case Err(error):
+            print "launch-meta: content-hash verify: {error}"
+            return 2
     if bytes.len() == 0u64:
         print "launch-meta: content-hash verify: could not read {path}"
         return 2
@@ -119,7 +126,11 @@ fn _check_path(path: text, target: text, metadata_path: text, expect_hash_hex: t
         val hash_rc = _verify_content_hash(path, expect_hash_hex)
         if hash_rc != 0:
             return hash_rc
-    val metadata = _metadata_for_check(path, target, metadata_path)
+    val metadata = match _metadata_for_check(path, target, metadata_path):
+        case Ok(value): value
+        case Err(error):
+            print "launch-meta: metadata read failed: {error}"
+            return 2
     if simpleos_target and metadata.target_os != "simpleos":
         print "launch-meta: metadata target_os must be simpleos for --simpleos"
         return 2

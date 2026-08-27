@@ -3,16 +3,27 @@ Raw TCP static file benchmark. Pre-caches a file from disk then serves it.
 Compare with nginx: nginx -c $(pwd)/test/perf/bench/http_server/nginx_bench.conf
 """
 
+@unsafe(reason: "raw socket descriptor; family is 0 for IPv4 or 1 for IPv6; negative means failure", capabilities: [ffi])
 extern fn rt_io_tcp_socket_create(family: i64) -> i64
+@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_reuseaddr(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_reuseport(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw descriptor mode status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nonblocking(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw descriptor option status; false means mutation failed", capabilities: [ffi])
 extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw descriptor bind status; false means bind failed", capabilities: [ffi])
 extern fn rt_io_tcp_bind_fd(fd: i64, addr: text) -> bool
+@unsafe(reason: "raw descriptor listen status; false means listen failed", capabilities: [ffi])
 extern fn rt_io_tcp_listen(fd: i64, backlog: i64) -> bool
+@unsafe(reason: "raw accepted descriptor; negative sentinel means accept failed", capabilities: [ffi])
 extern fn rt_io_tcp_accept(fd: i64) -> i64
-extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+@unsafe(reason: "raw nullable TCP bytes; nil is read failure and empty is EOF", capabilities: [ffi])
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]?
+@unsafe(reason: "raw TCP text-write count; negative sentinel or short count means failure", capabilities: [ffi])
 extern fn rt_io_tcp_write_text(fd: i64, data: text) -> i64
+@unsafe(reason: "raw descriptor close consumes one live descriptor; false means close failed", capabilities: [ffi])
 extern fn rt_io_tcp_close(fd: i64) -> bool
 extern fn rt_event_loop_create() -> i64
 extern fn rt_event_loop_register(epfd: i64, fd: i64, mode: i64) -> i64
@@ -41,20 +52,26 @@ fn main():
     print "  Response size: {resp_len} bytes (header + body)"
 
     print "  Creating socket..."
-    val fd = rt_io_tcp_socket_create(4)
+    val fd = unsafe(capabilities: [ffi]):
+        rt_io_tcp_socket_create(0)
     print "  Socket fd: {fd}"
 
-    val r1 = rt_io_tcp_set_reuseaddr(fd, true)
+    val r1 = unsafe(capabilities: [ffi]):
+        rt_io_tcp_set_reuseaddr(fd, true)
     print "  SO_REUSEADDR: {r1}"
-    val r2 = rt_io_tcp_set_reuseport(fd, true)
+    val r2 = unsafe(capabilities: [ffi]):
+        rt_io_tcp_set_reuseport(fd, true)
     print "  SO_REUSEPORT: {r2}"
 
-    val r3 = rt_io_tcp_bind_fd(fd, "0.0.0.0:9090")
+    val r3 = unsafe(capabilities: [ffi]):
+        rt_io_tcp_bind_fd(fd, "0.0.0.0:9090")
     print "  Bind: {r3}"
 
-    rt_io_tcp_set_nonblocking(fd, true)
+    unsafe(capabilities: [ffi]):
+        rt_io_tcp_set_nonblocking(fd, true)
 
-    val r4 = rt_io_tcp_listen(fd, 1024)
+    val r4 = unsafe(capabilities: [ffi]):
+        rt_io_tcp_listen(fd, 1024)
     print "  Listen: {r4}"
 
     print "  Creating epoll..."
@@ -83,19 +100,29 @@ fn main():
             if efd == fd:
                 var j = 0
                 while j < 64:
-                    val cfd = rt_io_tcp_accept(fd)
+                    val cfd = unsafe(capabilities: [ffi]):
+                        rt_io_tcp_accept(fd)
                     if cfd < 0:
                         j = 64
                     else:
-                        rt_io_tcp_set_nonblocking(cfd, true)
-                        rt_io_tcp_set_nodelay(cfd, true)
+                        unsafe(capabilities: [ffi]):
+                            rt_io_tcp_set_nonblocking(cfd, true)
+                        unsafe(capabilities: [ffi]):
+                            rt_io_tcp_set_nodelay(cfd, true)
                         rt_event_loop_register(epfd, cfd, 0)
                     j = j + 1
             else:
-                val data = rt_io_tcp_read(efd, 4096)
-                if data.len() > 0:
-                    rt_io_tcp_write_text(efd, resp)
-                    count = count + 1
+                val data = unsafe(capabilities: [ffi]):
+                    rt_io_tcp_read(efd, 4096)
+                if data != nil and data!.len() > 0:
+                    val written = unsafe(capabilities: [ffi]):
+                        rt_io_tcp_write_text(efd, resp)
+                    if written == resp.len():
+                        count = count + 1
+                    else:
+                        unsafe(capabilities: [ffi]):
+                            rt_io_tcp_close(efd)
                 else:
-                    rt_io_tcp_close(efd)
+                    unsafe(capabilities: [ffi]):
+                        rt_io_tcp_close(efd)
             i = i + 1

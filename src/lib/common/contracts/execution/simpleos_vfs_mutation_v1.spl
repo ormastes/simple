@@ -1,0 +1,261 @@
+"""Bounded frozen-value contracts for SimpleOS VFS mutation evidence.
+
+Text digests are validated immutable value copies, not raw pointers. These
+records describe one backend mutation, not toolchain causality or path proof.
+"""
+use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
+
+pub enum VfsMutationKindV1:
+    Create
+    Write
+    Truncate
+    Rename
+    Fsync
+    Close
+
+pub struct TaskExecutionInstanceV1:
+    task_id: u64
+    lifecycle_generation: u64
+    exec_generation: u64
+
+pub struct VfsObjectIdentityV1:
+    filesystem_instance_id: u64
+    mount_id: u64
+    mount_generation: u64
+    object_id: u64
+    object_generation: u64
+
+pub struct VfsOpenFileDescriptionIdentityV1:
+    slot: u32
+    generation: u32
+
+pub struct VfsMutationIntentV1:
+    kind: VfsMutationKindV1
+    actor: TaskExecutionInstanceV1
+    ofd: VfsOpenFileDescriptionIdentityV1
+    subject: VfsObjectIdentityV1
+    container: VfsObjectIdentityV1
+    peer_container: VfsObjectIdentityV1
+    replaced_subject: VfsObjectIdentityV1
+    byte_offset: u64
+    byte_length: u64
+    subject_sequence_before: u64
+    container_sequence_before: u64
+    peer_container_sequence_before: u64
+    replaced_subject_sequence_before: u64
+    old_name_sha256: text
+    new_name_sha256: text
+
+pub struct VfsMutationBackendAckV1:
+    resolved_intent: VfsMutationIntentV1
+    subject_sequence_after: u64
+    container_sequence_after: u64
+    peer_container_sequence_after: u64
+    replaced_subject_sequence_after: u64
+    committed_byte_count: u64
+    durable: bool
+    backend_closed: bool
+
+pub fn task_execution_instance_valid_v1(value: TaskExecutionInstanceV1) -> bool:
+    value.task_id != 0u64 and value.lifecycle_generation != 0u64 and
+        value.exec_generation != 0u64
+
+pub fn task_execution_instance_equal_v1(
+    left: TaskExecutionInstanceV1, right: TaskExecutionInstanceV1
+) -> bool:
+    left.task_id == right.task_id and
+        left.lifecycle_generation == right.lifecycle_generation and
+        left.exec_generation == right.exec_generation
+
+pub fn vfs_object_identity_valid_v1(value: VfsObjectIdentityV1) -> bool:
+    value.filesystem_instance_id != 0u64 and value.mount_id != 0u64 and
+        value.mount_generation != 0u64 and value.object_id != 0u64 and
+        value.object_generation != 0u64
+
+pub fn vfs_object_identity_equal_v1(
+    left: VfsObjectIdentityV1, right: VfsObjectIdentityV1
+) -> bool:
+    left.filesystem_instance_id == right.filesystem_instance_id and
+        left.mount_id == right.mount_id and
+        left.mount_generation == right.mount_generation and
+        left.object_id == right.object_id and
+        left.object_generation == right.object_generation
+
+pub fn vfs_ofd_identity_valid_v1(value: VfsOpenFileDescriptionIdentityV1) -> bool:
+    value.generation != 0u32
+
+fn _zero_object_v1(value: VfsObjectIdentityV1) -> bool:
+    value.filesystem_instance_id == 0u64 and value.mount_id == 0u64 and
+        value.mount_generation == 0u64 and value.object_id == 0u64 and
+        value.object_generation == 0u64
+
+fn _name_digest_valid_v1(value: text) -> bool:
+    hash256_hex_valid(value) and not hash256_is_zero(value)
+
+fn _incrementable_v1(value: u64) -> bool:
+    value != 0u64 and value != 0xffffffffffffffffu64
+
+fn _same_mount_domain_v1(left: VfsObjectIdentityV1, right: VfsObjectIdentityV1) -> bool:
+    left.filesystem_instance_id == right.filesystem_instance_id and
+        left.mount_id == right.mount_id and
+        left.mount_generation == right.mount_generation
+
+pub fn vfs_mutation_intent_equal_v1(
+    left: VfsMutationIntentV1, right: VfsMutationIntentV1
+) -> bool:
+    left.kind == right.kind and
+        task_execution_instance_equal_v1(left.actor, right.actor) and
+        left.ofd.slot == right.ofd.slot and left.ofd.generation == right.ofd.generation and
+        vfs_object_identity_equal_v1(left.subject, right.subject) and
+        vfs_object_identity_equal_v1(left.container, right.container) and
+        vfs_object_identity_equal_v1(left.peer_container, right.peer_container) and
+        vfs_object_identity_equal_v1(left.replaced_subject, right.replaced_subject) and
+        left.byte_offset == right.byte_offset and left.byte_length == right.byte_length and
+        left.subject_sequence_before == right.subject_sequence_before and
+        left.container_sequence_before == right.container_sequence_before and
+        left.peer_container_sequence_before == right.peer_container_sequence_before and
+        left.replaced_subject_sequence_before == right.replaced_subject_sequence_before and
+        left.old_name_sha256 == right.old_name_sha256 and
+        left.new_name_sha256 == right.new_name_sha256
+
+pub fn vfs_mutation_intent_valid_v1(intent: VfsMutationIntentV1) -> bool:
+    if not task_execution_instance_valid_v1(intent.actor) or
+        not vfs_ofd_identity_valid_v1(intent.ofd) or
+        not vfs_object_identity_valid_v1(intent.subject): return false
+    val no_container = _zero_object_v1(intent.container)
+    val no_peer = _zero_object_v1(intent.peer_container)
+    val no_replaced = _zero_object_v1(intent.replaced_subject)
+    match intent.kind:
+        case VfsMutationKindV1.Create:
+            (vfs_object_identity_valid_v1(intent.container) and no_peer and no_replaced and
+                not vfs_object_identity_equal_v1(intent.subject, intent.container) and
+                _same_mount_domain_v1(intent.subject, intent.container) and
+                intent.subject_sequence_before == 0u64 and
+                _incrementable_v1(intent.container_sequence_before) and
+                intent.peer_container_sequence_before == 0u64 and
+                intent.replaced_subject_sequence_before == 0u64 and
+                intent.byte_offset == 0u64 and intent.byte_length == 0u64 and
+                intent.old_name_sha256 == "" and _name_digest_valid_v1(intent.new_name_sha256))
+        case VfsMutationKindV1.Write:
+            (no_container and no_peer and no_replaced and
+                _incrementable_v1(intent.subject_sequence_before) and
+                intent.container_sequence_before == 0u64 and
+                intent.peer_container_sequence_before == 0u64 and
+                intent.replaced_subject_sequence_before == 0u64 and
+                intent.byte_length != 0u64 and
+                intent.byte_offset <= 0xffffffffffffffffu64 - intent.byte_length and
+                intent.old_name_sha256 == "" and intent.new_name_sha256 == "")
+        case VfsMutationKindV1.Truncate:
+            (no_container and no_peer and no_replaced and
+                _incrementable_v1(intent.subject_sequence_before) and
+                intent.container_sequence_before == 0u64 and
+                intent.peer_container_sequence_before == 0u64 and
+                intent.replaced_subject_sequence_before == 0u64 and
+                intent.byte_length == 0u64 and intent.old_name_sha256 == "" and
+                intent.new_name_sha256 == "")
+        case VfsMutationKindV1.Rename:
+            (vfs_object_identity_valid_v1(intent.container) and
+                vfs_object_identity_valid_v1(intent.peer_container) and
+                not vfs_object_identity_equal_v1(intent.subject, intent.container) and
+                not vfs_object_identity_equal_v1(intent.subject, intent.peer_container) and
+                _same_mount_domain_v1(intent.subject, intent.container) and
+                _same_mount_domain_v1(intent.subject, intent.peer_container) and
+                _incrementable_v1(intent.subject_sequence_before) and
+                _incrementable_v1(intent.container_sequence_before) and
+                _incrementable_v1(intent.peer_container_sequence_before) and
+                ((no_replaced and intent.replaced_subject_sequence_before == 0u64) or
+                 (vfs_object_identity_valid_v1(intent.replaced_subject) and
+                    not vfs_object_identity_equal_v1(
+                        intent.replaced_subject, intent.subject) and
+                    not vfs_object_identity_equal_v1(
+                        intent.replaced_subject, intent.container) and
+                    not vfs_object_identity_equal_v1(
+                        intent.replaced_subject, intent.peer_container) and
+                    _same_mount_domain_v1(intent.subject, intent.replaced_subject) and
+                    _incrementable_v1(intent.replaced_subject_sequence_before))) and
+                ((not vfs_object_identity_equal_v1(
+                    intent.container, intent.peer_container)) or
+                 (intent.container_sequence_before ==
+                    intent.peer_container_sequence_before and
+                    intent.old_name_sha256 != intent.new_name_sha256)) and
+                intent.byte_offset == 0u64 and intent.byte_length == 0u64 and
+                _name_digest_valid_v1(intent.old_name_sha256) and
+                _name_digest_valid_v1(intent.new_name_sha256))
+        case VfsMutationKindV1.Fsync:
+            (no_container and no_peer and no_replaced and
+                intent.subject_sequence_before != 0u64 and
+                intent.container_sequence_before == 0u64 and
+                intent.peer_container_sequence_before == 0u64 and
+                intent.replaced_subject_sequence_before == 0u64 and
+                intent.byte_offset == 0u64 and intent.byte_length == 0u64 and
+                intent.old_name_sha256 == "" and intent.new_name_sha256 == "")
+        case VfsMutationKindV1.Close:
+            (no_container and no_peer and no_replaced and
+                intent.subject_sequence_before != 0u64 and
+                intent.container_sequence_before == 0u64 and
+                intent.peer_container_sequence_before == 0u64 and
+                intent.replaced_subject_sequence_before == 0u64 and
+                intent.byte_offset == 0u64 and intent.byte_length == 0u64 and
+                intent.old_name_sha256 == "" and intent.new_name_sha256 == "")
+
+pub fn vfs_mutation_ack_matches_v1(
+    intent: VfsMutationIntentV1, ack: VfsMutationBackendAckV1
+) -> bool:
+    if not vfs_mutation_intent_valid_v1(intent) or
+        not vfs_mutation_intent_equal_v1(intent, ack.resolved_intent): return false
+    match intent.kind:
+        case VfsMutationKindV1.Create:
+            ack.subject_sequence_after == 1u64 and
+                ack.container_sequence_after == intent.container_sequence_before + 1u64 and
+                ack.peer_container_sequence_after == 0u64 and
+                ack.replaced_subject_sequence_after == 0u64 and
+                ack.committed_byte_count == 0u64 and not ack.durable and not ack.backend_closed
+        case VfsMutationKindV1.Write:
+            ack.subject_sequence_after == intent.subject_sequence_before + 1u64 and
+                ack.container_sequence_after == 0u64 and
+                ack.peer_container_sequence_after == 0u64 and
+                ack.replaced_subject_sequence_after == 0u64 and
+                ack.committed_byte_count == intent.byte_length and
+                not ack.durable and not ack.backend_closed
+        case VfsMutationKindV1.Truncate:
+            ack.subject_sequence_after == intent.subject_sequence_before + 1u64 and
+                ack.container_sequence_after == 0u64 and
+                ack.peer_container_sequence_after == 0u64 and
+                ack.replaced_subject_sequence_after == 0u64 and
+                ack.committed_byte_count == 0u64 and not ack.durable and not ack.backend_closed
+        case VfsMutationKindV1.Rename:
+            (ack.subject_sequence_after == intent.subject_sequence_before + 1u64 and
+                ack.container_sequence_after == intent.container_sequence_before + 1u64 and
+                ack.peer_container_sequence_after ==
+                    intent.peer_container_sequence_before + 1u64 and
+                ((intent.replaced_subject_sequence_before == 0u64 and
+                    ack.replaced_subject_sequence_after == 0u64) or
+                 (intent.replaced_subject_sequence_before != 0u64 and
+                    ack.replaced_subject_sequence_after ==
+                        intent.replaced_subject_sequence_before + 1u64)) and
+                ack.committed_byte_count == 0u64 and not ack.durable and not ack.backend_closed)
+        case VfsMutationKindV1.Fsync:
+            ack.subject_sequence_after == intent.subject_sequence_before and
+                ack.container_sequence_after == 0u64 and
+                ack.peer_container_sequence_after == 0u64 and
+                ack.replaced_subject_sequence_after == 0u64 and
+                ack.committed_byte_count == 0u64 and ack.durable and not ack.backend_closed
+        case VfsMutationKindV1.Close:
+            ack.subject_sequence_after == intent.subject_sequence_before and
+                ack.container_sequence_after == 0u64 and
+                ack.peer_container_sequence_after == 0u64 and
+                ack.replaced_subject_sequence_after == 0u64 and
+                ack.committed_byte_count == 0u64 and not ack.durable and ack.backend_closed
+
+pub fn vfs_mutation_alias_actor_may_use_v1(
+    grant_actor: TaskExecutionInstanceV1, grant_ofd: VfsOpenFileDescriptionIdentityV1,
+    caller_actor: TaskExecutionInstanceV1, caller_ofd: VfsOpenFileDescriptionIdentityV1
+) -> bool:
+    task_execution_instance_equal_v1(grant_actor, caller_actor) and
+        grant_ofd.slot == caller_ofd.slot and grant_ofd.generation == caller_ofd.generation
+
+pub fn vfs_mutation_grant_survives_fork_v1() -> bool: false
+
+pub fn vfs_mutation_owner_is_sequence_authority_v1() -> bool:
+    # The backend must atomically compare-and-advance the retained epochs.
+    false

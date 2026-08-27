@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+# Native QUIC is unavailable until authenticated QUIC-TLS and an exact typed
+# provider are admitted. Keep the compatibility facade pure Simple and prevent
+# providerless raw handles or test-local extern shadows from returning.
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+quic_root="$root/src/lib/nogc_async_mut/quic"
+
+[ ! -e "$quic_root/quic_sffi.spl" ]
+
+if rg -n --glob '*.spl' --glob '!**/vendor/**' \
+    'extern fn rt_quic_|quic_sffi' "$quic_root" \
+    "$root/test/01_unit/lib/nogc_async_mut/quic" \
+    "$root/test/unit/lib/nogc_async_mut/quic" >/dev/null; then
+    echo 'providerless QUIC raw ABI returned' >&2
+    exit 1
+fi
+
+connection="$quic_root/quic_connection.spl"
+provider="$quic_root/quic_provider.spl"
+rg -q '^fn quic_provider_check\(\) -> QuicProvider:' "$provider"
+rg -A12 '^fn quic_provider_check\(\) -> QuicProvider:' "$provider" \
+    | rg -q 'QuicProvider\.Unavailable'
+rg -q '^pub fn quic_connection_is_usable\(' "$connection"
+
+echo 'QUIC provider authority: PASS (unadmitted native ABI absent; pure-Simple closed-state facade retained)'

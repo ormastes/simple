@@ -9,6 +9,7 @@ use os.kernel.arch.riscv64.hal_cache.{
     hal_cache_init_with_isa,
     portable_numeric_capabilities_has_riscv_zicbom,
     portable_numeric_capabilities_has_riscv_zicbom_default,
+    hal_cache_range_is_valid,
     hal_cache_sync_icache_with_log,
     hal_cache_clean_dcache_with_log,
     hal_cache_invalidate_dcache_with_log
@@ -24,7 +25,7 @@ use os.kernel.arch.riscv64.hal_cache.{
 #
 # Production module: src/os/kernel/arch/riscv64/hal_cache.spl
 # The spec imports CmoCapSnapshot, CacheOpLog, make_empty_log, the probe helpers,
-# hal_cache_init_with_isa, and the _with_log test-seam functions from the module.
+# stateless ISA probe and the _with_log test-seam functions from the module.
 #
 # NOTE on negative-path tests: No to_raise is available. For illegal-instruction-probe
 # tests, the impl returns a result sentinel (CmoCapSnapshot). Tests assert on the
@@ -75,6 +76,21 @@ describe "HalCache":
             val log = hal_cache_clean_dcache_with_log(caps, 0x80400000u64, 256u64, 128u32)
             expect(log.cbo_clean_count).to_equal(2u32)
 
+        it "AC-2: zero stride fails closed without looping":
+            val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
+            val log = hal_cache_clean_dcache_with_log(caps, 0x80400000u64, 256u64, 0u32)
+            expect(log.cbo_clean_count).to_equal(0u32)
+
+        it "AC-2: empty range emits no cache-line operation":
+            val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
+            val log = hal_cache_clean_dcache_with_log(caps, 0x80400000u64, 0u64, 64u32)
+            expect(log.cbo_clean_count).to_equal(0u32)
+
+        it "AC-2: unrepresentable line count saturates instead of wrapping":
+            val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
+            val log = hal_cache_clean_dcache_with_log(caps, 0u64, 0xFFFFFFFFFFFFFFFFu64, 1u32)
+            expect(log.cbo_clean_count).to_equal(0xFFFFFFFFu32)
+
     describe "hal_cache_invalidate_dcache — cbo.inval per-line when Zicbom available":
         it "AC-2: emits cbo.inval for each cacheline when Zicbom=true":
             val caps = CmoCapSnapshot(has_zicbom: true, has_zicboz: false, has_zicbop: false)
@@ -105,14 +121,25 @@ describe "HalCache":
             expect(caps.has_zicbom).to_equal(false)
 
     describe "PortableNumericCapabilities handshake (AC-3, cross-feature)":
-        it "AC-3: after hal_cache_init, has_riscv_zicbom is true on probe-positive path":
-            # NOTE: PortableNumericCapabilities.has_riscv_zicbom does not exist yet.
-            # This test FAILS TO LOAD until Feature A Phase 3 adds the field.
-            # That is intentional TDD red. Phase 5 wires both together.
+        it "AC-3: compatibility init returns a stateless probe snapshot":
+            val caps = hal_cache_init_with_isa("rv64gc_zicbom")
+            expect(caps.has_zicbom).to_equal(true)
+
+        it "AC-3: compatibility getter reads only the boot-owned authority":
+            val before = portable_numeric_capabilities_has_riscv_zicbom()
             hal_cache_init_with_isa("rv64gc_zicbom")
-            val cap_value = portable_numeric_capabilities_has_riscv_zicbom()
-            expect(cap_value).to_equal(true)
+            expect(portable_numeric_capabilities_has_riscv_zicbom()).to_equal(before)
 
         it "AC-3: before any hal_cache_init, has_riscv_zicbom defaults to false":
             val cap_value = portable_numeric_capabilities_has_riscv_zicbom_default()
             expect(cap_value).to_equal(false)
+
+    describe "production cache range admission":
+        it "accepts an empty range at the maximum address":
+            expect(hal_cache_range_is_valid(0xffffffffffffffffu64, 0u64)).to_equal(true)
+
+        it "rejects addr plus len overflow":
+            expect(hal_cache_range_is_valid(0xfffffffffffffff0u64, 32u64)).to_equal(false)
+
+        it "accepts a non-overflowing non-empty range":
+            expect(hal_cache_range_is_valid(0xfffffffffffffff0u64, 15u64)).to_equal(true)

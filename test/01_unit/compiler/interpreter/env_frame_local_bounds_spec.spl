@@ -1,0 +1,37 @@
+# Regression coverage for reused interpreter frame storage.
+#
+# A reused frame may retain physical capacity from an earlier, larger frame,
+# but fast-local access must be bounded by the newly pushed frame's logical
+# local count. Negative slots are invalid regardless of retained capacity.
+#
+# @cover src/compiler/10.frontend/core/interpreter/env.spl
+
+use std.spec.*
+use compiler.frontend.core.interpreter.hashmap.*
+use compiler.frontend.core.interpreter.env.{
+    env_init, env_push_frame, env_pop_frame, env_get_local, env_set_local
+}
+
+describe "interpreter frame local bounds":
+    it "rejects a stale slot when smaller frame storage is reused":
+        env_init()
+        env_push_frame(2)
+        env_set_local(1, 41)
+        expect(env_get_local(1)).to_equal(41)
+        env_pop_frame()
+
+        env_push_frame(1)
+        expect(env_get_local(1)).to_equal(-1)
+        env_set_local(1, 99)
+        expect(env_get_local(1)).to_equal(-1)
+        env_pop_frame()
+
+    it "rejects negative slots without disturbing an in-range local":
+        env_init()
+        env_push_frame(1)
+        env_set_local(0, 17)
+
+        expect(env_get_local(-1)).to_equal(-1)
+        env_set_local(-1, 99)
+        expect(env_get_local(0)).to_equal(17)
+        env_pop_frame()

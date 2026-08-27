@@ -131,7 +131,12 @@ Report documentation coverage:
 simple doc-coverage                 # Terminal report
 simple doc-coverage --format=md     # Markdown report
 simple doc-coverage --missing       # Show undocumented items
+simple doc-coverage "path with spaces" # One literal source root
 ```
+
+Normal reports treat a user path as one literal root. Shell quoting syntax and
+glob expansion are not part of the path language; the built-in default is the
+only multi-root request.
 
 ### Other Commands
 

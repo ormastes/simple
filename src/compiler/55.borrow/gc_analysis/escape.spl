@@ -27,10 +27,9 @@ enum EscapeState:
     fn rank() -> i64:
         """Lattice rank of this state; higher means "escapes more widely".
 
-        Unknown is the bottom element, not the top: a freshly recorded
-        allocation starts Unknown, and merging it with any concrete state must
-        yield that concrete state. finalize() demotes any state still Unknown
-        at the end of the analysis to NoEscape.
+        Unknown is the initial, conservative state: a freshly recorded
+        allocation stays Unknown until a complete proof establishes a concrete
+        outcome. Finalization must never turn missing evidence into NoEscape.
         """
         if self == EscapeState.Unknown: return 0
         if self == EscapeState.NoEscape: return 1
@@ -187,6 +186,20 @@ class EscapeAnalysis:
 
         id
 
+    me record_allocation_size(alloc_id: i64, size_bytes: i64):
+        """Attach a proven non-negative allocation size to an existing site."""
+        if size_bytes < 0 or not self.allocations.contains_key(alloc_id):
+            return
+        val site = self.allocations[alloc_id]
+        self.allocations[alloc_id] = AllocationSite(
+            id: site.id,
+            program_point: site.program_point,
+            type_id: site.type_id,
+            has_size_bytes: true,
+            size_bytes: size_bytes,
+            escape_state: site.escape_state
+        )
+
     fn points_to_at(local: i64) -> PointsToSet:
         """Points-to set for a local, or an empty set if it has none yet.
 
@@ -268,21 +281,9 @@ class EscapeAnalysis:
 
     me finalize():
         """Finalize analysis and compute statistics."""
-        # Mark unknown as NoEscape (conservative for unanalyzed)
-        for _for_item_0 in self.allocations:
-            val id = _for_item_0[0]
-            val site = _for_item_0[1]
-            if site.escape_state == EscapeState.Unknown:
-                self.allocations[id] = AllocationSite(
-                    id: site.id,
-                    program_point: site.program_point,
-                    type_id: site.type_id,
-                    has_size_bytes: site.has_size_bytes,
-                    size_bytes: site.size_bytes,
-                    escape_state: EscapeState.NoEscape
-                )
-
-        # Count stack-eligible allocations
+        # Unknown remains escaping. This analysis does not yet have complete
+        # return/aggregate/capture/indirect-call flow, so absence of a recorded
+        # escape is not a proof of locality.
         self.stack_eligible = 0
         for _for_item_1 in self.allocations:
             val _unused_1 = _for_item_1[0]
@@ -330,4 +331,3 @@ class EscapeAnalysis:
 # ============================================================================
 # Exports
 # ============================================================================
-

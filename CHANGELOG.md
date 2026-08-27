@@ -5,6 +5,13 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Self-attested GitHub policy live apply** (2026-08-27) — allow the repository
+  policy owner to apply the explicitly accepted generic-Actions self-review
+  projection: read-only workflow defaults, a protected-branch-only admission
+  environment, and zero-approval `main`/`release/*` rulesets requiring the exact
+  `SPipe Self Review Admission` check. Unconfigured signed-broker mode remains
+  fail-closed, and every apply ends with live readback verification and a
+  normalized projection digest.
 - **LLM Caret agent workspaces + `workspace` dev CLI** (2026-08-25) — give each agent
   one detached `git worktree` (never a branch) plus one tmux window on a PRIVATE tmux
   socket (`tmux -L caret_ws_<id>`), so the operator's own tmux server is never touched;

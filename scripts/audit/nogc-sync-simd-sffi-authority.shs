@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+owner="$root/src/lib/nogc_sync_mut/simd.spl"
+
+calls=$(awk '
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / {
+        line = $0
+        while (match(line, /rt_simd_[A-Za-z0-9_]+\(/)) {
+            calls += 1
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }
+    END { print calls + 0 }
+' "$owner")
+if [ "$calls" -ne 48 ]; then
+    echo "synchronous SIMD raw-call inventory changed without review" >&2
+    exit 1
+fi
+
+scopes=$(grep -c '^[[:space:]]*unsafe(capabilities: \[ffi\]):$' "$owner")
+if [ "$scopes" -ne 48 ]; then
+    echo "synchronous SIMD lexical authority inventory changed without review" >&2
+    exit 1
+fi
+
+grep -q 'case _: panic("invalid rt_simd_detect_profile discriminant")' "$owner"
+if grep -q 'case _: SimdTier.scalar' "$owner"; then
+    echo "unknown SIMD profile discriminant is fabricated as scalar" >&2
+    exit 1
+fi
+
+awk '
+    function indent(line, copy) {
+        copy = line
+        sub(/[^ ].*$/, "", copy)
+        return length(copy)
+    }
+    NF && unsafe_indent >= 0 &&
+    $0 !~ /^[[:space:]]*unsafe\(capabilities: \[ffi\]\):$/ &&
+    indent($0) <= unsafe_indent {
+        unsafe_indent = -1
+    }
+    /^[[:space:]]*unsafe\(capabilities: \[ffi\]\):$/ {
+        unsafe_indent = indent($0)
+        next
+    }
+    !/^[[:space:]]*#/ && !/^[[:space:]]*extern fn / && /rt_simd_[A-Za-z0-9_]+\(/ {
+        if (unsafe_indent < 0 || indent($0) <= unsafe_indent) {
+            print "raw SIMD call lacks lexical FFI authority: " NR ":" $0 > "/dev/stderr"
+            failed = 1
+        }
+    }
+    BEGIN { unsafe_indent = -1 }
+    END { if (failed) exit 1 }
+' "$owner"
+
+# These wrappers are instruction-level hot paths. Authority markers must stay
+# compile-time-only: admission, lookup, locks, and generic dispatch belong at
+# provider activation, never in an intrinsic call.
+if grep -E '^[[:space:]]*(sha256|verify_signature|dlsym|registry_lookup|mutex_lock|ffi_call)\(' "$owner" >/dev/null; then
+    echo "synchronous SIMD wrapper gained per-call admission or dispatch work" >&2
+    exit 1
+fi
+
+echo "synchronous SIMD SFFI authority audit: PASS (48 direct raw calls in 48 minimal lexical scopes; unknown profile fails closed; instruction hot paths preserved)"

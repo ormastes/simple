@@ -131,6 +131,7 @@ int main(int argc, char **argv)
     struct bytes crt0_payload = read_file(getenv("SIMPLEOS_CRT0_OBJECT"));
     struct bytes runtime_payload = read_file(getenv("SIMPLEOS_RUNTIME_ARCHIVE"));
     struct bytes libc_payload = read_file(getenv("SIMPLEOS_LIBC_ARCHIVE"));
+    struct bytes libm_payload = read_file(getenv("SIMPLEOS_LIBM_ARCHIVE"));
     struct bytes linker_script_payload = read_file(getenv("SIMPLEOS_LINKER_SCRIPT"));
     struct bytes simple_entry_payload = read_file(getenv("SIMPLEOS_SIMPLE_ENTRY_OBJECT"));
     struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
@@ -148,6 +149,25 @@ int main(int argc, char **argv)
         fprintf(stderr, "AUTHHELLO.ELF requires manifest, admission, proof, and trust-root sidecars\n");
         return 1;
     }
+    const char *simplebox_path = getenv("SIMPLEOS_SIMPLEBOX_BINARY");
+    const char *simplebox_scr1_path = getenv("SIMPLEOS_SIMPLEBOX_SCR1");
+    const char *simplebox_trust_path = getenv("SIMPLEOS_SIMPLEBOX_TRUST");
+    bool simplebox_requested =
+        (simplebox_path && simplebox_path[0]) ||
+        (simplebox_scr1_path && simplebox_scr1_path[0]) ||
+        (simplebox_trust_path && simplebox_trust_path[0]);
+    bool simplebox_complete =
+        simplebox_path && simplebox_path[0] &&
+        simplebox_scr1_path && simplebox_scr1_path[0] &&
+        simplebox_trust_path && simplebox_trust_path[0];
+    if (simplebox_requested && !simplebox_complete)
+        die("signed Simplebox media requires payload, SCR1, and trust inputs");
+    struct bytes simplebox_payload = read_bounded_public_file(simplebox_path, 67108864U);
+    struct bytes simplebox_scr1 = read_bounded_public_file(simplebox_scr1_path, 262144U);
+    struct bytes simplebox_trust = read_bounded_public_file(simplebox_trust_path, 16384U);
+    if (simplebox_complete &&
+        (!simplebox_payload.len || !simplebox_scr1.len || !simplebox_trust.len))
+        die("signed Simplebox inputs must be non-empty bounded regular files");
     struct bytes servers_payload = read_file(getenv("SIMPLEOS_SERVERS_BINARY"));
     struct bytes servers_manifest = read_file(getenv("SIMPLEOS_SERVERS_MANIFEST"));
     struct bytes servers_admission = read_file(getenv("SIMPLEOS_SERVERS_ADMISSION"));
@@ -226,6 +246,9 @@ int main(int argc, char **argv)
     }
     int efi_cluster = alloc_directory();
     int boot_cluster = alloc_directory();
+    int canonical_boot_cluster = simplebox_complete ? alloc_directory() : 0;
+    int canonical_boot_bin_cluster = simplebox_complete ? alloc_directory() : 0;
+    int canonical_boot_catalog_cluster = simplebox_complete ? alloc_directory() : 0;
     int sys_cluster = alloc_directory();
     int fonts_cluster = alloc_directory();
     int apps_cluster = alloc_directory();
@@ -233,6 +256,8 @@ int main(int argc, char **argv)
     int usr_cluster = alloc_directory();
     int usr_bin_cluster = alloc_directory();
     int usr_lib_cluster = alloc_directory();
+    int usr_share_cluster = alloc_directory();
+    int usr_share_simpleos_cluster = alloc_directory();
     int bin_cluster = alloc_directory();
     int sysrt_cluster = alloc_directory();
     int tmp_cluster = alloc_directory();
@@ -390,8 +415,11 @@ int main(int argc, char **argv)
     int llvm_ar_bin_cluster = llvm_ar_payload.len ? alloc_clusters(llvm_ar_payload.data, llvm_ar_payload.len) : 0;
     int crt0_cluster = crt0_payload.len ? alloc_clusters(crt0_payload.data, crt0_payload.len) : 0;
     int runtime_cluster = runtime_payload.len ? alloc_clusters(runtime_payload.data, runtime_payload.len) : 0;
+    int runtime_canonical_cluster = runtime_payload.len ? alloc_clusters(runtime_payload.data, runtime_payload.len) : 0;
     int libc_cluster = libc_payload.len ? alloc_clusters(libc_payload.data, libc_payload.len) : 0;
+    int libm_cluster = libm_payload.len ? alloc_clusters(libm_payload.data, libm_payload.len) : 0;
     int linker_script_cluster = linker_script_payload.len ? alloc_clusters(linker_script_payload.data, linker_script_payload.len) : 0;
+    int linker_script_canonical_cluster = linker_script_payload.len ? alloc_clusters(linker_script_payload.data, linker_script_payload.len) : 0;
     int simple_entry_cluster = simple_entry_payload.len ? alloc_clusters(simple_entry_payload.data, simple_entry_payload.len) : 0;
     int hello_object_cluster = hello_object_payload.len ? alloc_clusters(hello_object_payload.data, hello_object_payload.len) : 0;
     int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
@@ -401,6 +429,20 @@ int main(int argc, char **argv)
     int authhello_admission_cluster = authhello_admission.len ? alloc_clusters(authhello_admission.data, authhello_admission.len) : 0;
     int authhello_proof_cluster = authhello_proof.len ? alloc_clusters(authhello_proof.data, authhello_proof.len) : 0;
     int authhello_trust_root_cluster = authhello_trust_root.len ? alloc_clusters(authhello_trust_root.data, authhello_trust_root.len) : 0;
+    /* Each signed-media member owns an independent FAT chain.  Sharing a
+     * first cluster would make replacement or corruption of one member alias
+     * the other two and invalidate the all-or-nothing admission boundary. */
+    int simplebox_payload_cluster = simplebox_complete ? alloc_clusters(simplebox_payload.data, simplebox_payload.len) : 0;
+    int simplebox_scr1_cluster = simplebox_complete ? alloc_clusters(simplebox_scr1.data, simplebox_scr1.len) : 0;
+    int simplebox_trust_cluster = simplebox_complete ? alloc_clusters(simplebox_trust.data, simplebox_trust.len) : 0;
+    if (simplebox_complete) {
+        require_cluster_bytes(simplebox_payload_cluster, simplebox_payload,
+                              "simplebox payload staging verification failed");
+        require_cluster_bytes(simplebox_scr1_cluster, simplebox_scr1,
+                              "simplebox SCR1 staging verification failed");
+        require_cluster_bytes(simplebox_trust_cluster, simplebox_trust,
+                              "simplebox trust staging verification failed");
+    }
     int servers_cluster = servers_payload.len ? alloc_clusters(servers_payload.data, servers_payload.len) : 0;
     int servers_manifest_cluster = servers_manifest.len ? alloc_clusters(servers_manifest.data, servers_manifest.len) : 0;
     int servers_admission_cluster = servers_admission.len ? alloc_clusters(servers_admission.data, servers_admission.len) : 0;
@@ -434,6 +476,9 @@ int main(int argc, char **argv)
      * write_directory() call at the end — TMP was the sole gap. */
     unsigned char root[DIRECTORY_BYTES] = {0}, efi[DIRECTORY_BYTES] = {0};
     unsigned char boot[DIRECTORY_BYTES] = {0}, sys[DIRECTORY_BYTES] = {0};
+    unsigned char canonical_boot[DIRECTORY_BYTES] = {0};
+    unsigned char canonical_boot_bin[DIRECTORY_BYTES] = {0};
+    unsigned char canonical_boot_catalog[DIRECTORY_BYTES] = {0};
     unsigned char fonts[DIRECTORY_BYTES] = {0}, apps[DIRECTORY_BYTES] = {0};
     unsigned char perf[DIRECTORY_BYTES] = {0}, usr[DIRECTORY_BYTES] = {0};
     unsigned char usr_bin[DIRECTORY_BYTES] = {0}, usr_lib[DIRECTORY_BYTES] = {0};
@@ -444,6 +489,7 @@ int main(int argc, char **argv)
     int apps_n = 0, perf_n = 0, usr_n = 0, usr_bin_n = 0, usr_lib_n = 0;
     int bin_n = 0, sysrt_n = 0, tmp_n = 0;
     int work_n = 0;
+    int canonical_boot_n = 0, canonical_boot_bin_n = 0, canonical_boot_catalog_n = 0;
     put_dir_entry(root, &root_n, "SIMPLEOS   ", 0, 0, 0x08);
     put_dir_entry(root, &root_n, "EFI        ", efi_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
@@ -452,6 +498,9 @@ int main(int argc, char **argv)
     put_dir_entry(root, &root_n, "SYSRT      ", sysrt_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "TMP        ", tmp_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "WORK       ", work_cluster, 0, 0x10);
+    if (simplebox_complete)
+        put_named_dir_entry(root, &root_n, "BOOT       ", "boot",
+                            canonical_boot_cluster, 0, 0x10);
     if (theme_cluster)
         put_dir_entry(root, &root_n, "THEME   CSS", theme_cluster, theme_payload.len, 0x20);
     /* Lane BA: root-level staging of the cross-built interpreter so the arm64
@@ -494,6 +543,26 @@ int main(int argc, char **argv)
     }
     put_dot_entries(efi, &efi_n, efi_cluster, 0);
     put_dot_entries(boot, &boot_n, boot_cluster, efi_cluster);
+    if (simplebox_complete) {
+        put_dot_entries(canonical_boot, &canonical_boot_n, canonical_boot_cluster, 0);
+        put_dot_entries(canonical_boot_bin, &canonical_boot_bin_n,
+                        canonical_boot_bin_cluster, canonical_boot_cluster);
+        put_dot_entries(canonical_boot_catalog, &canonical_boot_catalog_n,
+                        canonical_boot_catalog_cluster, canonical_boot_cluster);
+        put_named_dir_entry(canonical_boot, &canonical_boot_n, "BIN        ", "bin",
+                            canonical_boot_bin_cluster, 0, 0x10);
+        put_named_dir_entry(canonical_boot, &canonical_boot_n, "CATALOG    ", "catalog",
+                            canonical_boot_catalog_cluster, 0, 0x10);
+        put_named_dir_entry(canonical_boot_bin, &canonical_boot_bin_n,
+                            "SIMPLEBOX  ", "simplebox", simplebox_payload_cluster,
+                            simplebox_payload.len, 0x20);
+        put_named_dir_entry(canonical_boot_catalog, &canonical_boot_catalog_n,
+                            "SIMPLESCR1 ", "simplebox.scr1", simplebox_scr1_cluster,
+                            simplebox_scr1.len, 0x20);
+        put_named_dir_entry(canonical_boot_catalog, &canonical_boot_catalog_n,
+                            "SIMPLETRUST", "simplebox.trust", simplebox_trust_cluster,
+                            simplebox_trust.len, 0x20);
+    }
     put_dot_entries(sys, &sys_n, sys_cluster, 0);
     put_dot_entries(fonts, &fonts_n, fonts_cluster, sys_cluster);
     put_dot_entries(apps, &apps_n, apps_cluster, sys_cluster);
@@ -503,6 +572,11 @@ int main(int argc, char **argv)
     put_dot_entries(usr, &usr_n, usr_cluster, 0);
     put_dot_entries(usr_bin, &usr_bin_n, usr_bin_cluster, usr_cluster);
     put_dot_entries(usr_lib, &usr_lib_n, usr_lib_cluster, usr_cluster);
+    unsigned char usr_share[DIR_SIZE] = {0}; size_t usr_share_n = 0;
+    unsigned char usr_share_simpleos[DIR_SIZE] = {0}; size_t usr_share_simpleos_n = 0;
+    put_dot_entries(usr_share, &usr_share_n, usr_share_cluster, usr_cluster);
+    put_dot_entries(usr_share_simpleos, &usr_share_simpleos_n,
+                    usr_share_simpleos_cluster, usr_share_cluster);
     put_dot_entries(bin, &bin_n, bin_cluster, 0);
     put_dot_entries(sysrt, &sysrt_n, sysrt_cluster, 0);
     put_dot_entries(tmp, &tmp_n, tmp_cluster, 0);
@@ -569,6 +643,9 @@ int main(int argc, char **argv)
     put_named_dir_entry(apps, &apps_n, "SIMPLSTCSMF", "simple.smf", simple_cluster, simple_cli.len, 0x20);
     put_dir_entry(usr, &usr_n, "BIN        ", usr_bin_cluster, 0, 0x10);
     put_dir_entry(usr, &usr_n, "LIB        ", usr_lib_cluster, 0, 0x10);
+    put_dir_entry(usr, &usr_n, "SHARE      ", usr_share_cluster, 0, 0x10);
+    put_named_dir_entry(usr_share, &usr_share_n, "SIMPLEOS   ", "simpleos",
+                        usr_share_simpleos_cluster, 0, 0x10);
     if (simple_usr_cluster) {
         put_dir_entry(usr_bin, &usr_bin_n, "SIMPLE     ", simple_usr_cluster, simple_payload.len, 0x20);
         put_named_dir_entry(usr_bin, &usr_bin_n, "SIMPLE  SMF", "simple.smf", simple_usr_smf_cluster, simple_cli.len, 0x20);
@@ -593,12 +670,21 @@ int main(int argc, char **argv)
         put_named_dir_entry(usr_lib, &usr_lib_n, "CRT0    O  ", "crt0.o", crt0_cluster, crt0_payload.len, 0x20);
     if (runtime_cluster)
         put_named_dir_entry(usr_lib, &usr_lib_n, "SIMPRT  A  ", "libsimpleos_runtime.a", runtime_cluster, runtime_payload.len, 0x20);
+    if (runtime_canonical_cluster)
+        put_named_dir_entry(usr_lib, &usr_lib_n, "SIMRUN  A  ", "libsimple_runtime.a", runtime_canonical_cluster, runtime_payload.len, 0x20);
     if (libc_cluster)
         put_named_dir_entry(usr_lib, &usr_lib_n, "SOSLIB  A  ", "libsimpleos_c.a", libc_cluster, libc_payload.len, 0x20);
+    if (libm_cluster)
+        put_named_dir_entry(usr_lib, &usr_lib_n, "LIBM    A  ", "libm.a", libm_cluster, libm_payload.len, 0x20);
     if (simple_entry_cluster)
         put_dir_entry(usr_lib, &usr_lib_n, "SIMAIN  O  ", simple_entry_cluster, simple_entry_payload.len, 0x20);
     if (linker_script_cluster)
         put_named_dir_entry(sysrt, &sysrt_n, "SIMPLEOSLD ", "simpleos.ld", linker_script_cluster, linker_script_payload.len, 0x20);
+    if (linker_script_canonical_cluster)
+        put_named_dir_entry(usr_share_simpleos, &usr_share_simpleos_n,
+                            "SIMPLEOSLD ", "simpleos.ld",
+                            linker_script_canonical_cluster,
+                            linker_script_payload.len, 0x20);
     put_dir_entry(apps, &apps_n, "LLVMSMF SMF", llvm_cluster, llvm_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "CLANGSMFSMF", clang_cluster, clang_app.len, 0x20);
     put_dir_entry(apps, &apps_n, "RUSTSMF SMF", rust_cluster, rust_app.len, 0x20);
@@ -610,6 +696,12 @@ int main(int argc, char **argv)
     write_directory(ROOT_CLUSTER, root, root_n);
     write_directory(efi_cluster, efi, efi_n);
     write_directory(boot_cluster, boot, boot_n);
+    if (simplebox_complete) {
+        write_directory(canonical_boot_cluster, canonical_boot, canonical_boot_n);
+        write_directory(canonical_boot_bin_cluster, canonical_boot_bin, canonical_boot_bin_n);
+        write_directory(canonical_boot_catalog_cluster, canonical_boot_catalog,
+                        canonical_boot_catalog_n);
+    }
     write_directory(sys_cluster, sys, sys_n);
     write_directory(fonts_cluster, fonts, fonts_n);
     write_directory(apps_cluster, apps, apps_n);
@@ -617,6 +709,9 @@ int main(int argc, char **argv)
     write_directory(usr_cluster, usr, usr_n);
     write_directory(usr_bin_cluster, usr_bin, usr_bin_n);
     write_directory(usr_lib_cluster, usr_lib, usr_lib_n);
+    write_directory(usr_share_cluster, usr_share, usr_share_n);
+    write_directory(usr_share_simpleos_cluster, usr_share_simpleos,
+                    usr_share_simpleos_n);
     write_directory(bin_cluster, bin, bin_n);
     write_directory(sysrt_cluster, sysrt, sysrt_n);
     write_directory(tmp_cluster, tmp, tmp_n);

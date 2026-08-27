@@ -1,0 +1,114 @@
+# @cover src/lib/nogc_sync_mut/rt_hal/process_task_arena.spl 80%
+use std.spec
+use std.common.env_access.model.{EnvToolIdentity}
+use std.common.rt_hal.model.{RtHalOperationKind}
+use std.nogc_sync_mut.rt_hal.process_task_arena.*
+use std.nogc_sync_mut.rt_hal.tagged.{RtHalTagPolicy, rt_hal_execute_registered_exact}
+use std.nogc_sync_mut.rt_hal.exact_boundary.{
+    RtHalDigest256, RtHalExactRequest, RtHalCanonicalReceipt, RtHalExactJoin,
+    RtHalExactStatus
+}
+
+var fake_owner = 41
+var fake_next_handle = 100
+
+fn host_owner() -> i64: fake_owner
+fn host_bind(handle: i64, provider: text, kind: text, tool_id: text, path: text, hash: text, schema: text) -> bool:
+    handle > 0 and provider != "" and kind != "" and tool_id != "" and path.starts_with("/") and hash.starts_with("sha256:") and schema == "rthal-scalar-v1"
+fn host_cancel(handle: i64, deadline: i64) -> bool: true
+fn host_close(handle: i64) -> bool: true
+fn host_shutdown() -> bool: true
+fn host_exact_spawn(handle: i64, request: RtHalExactRequest, receipt: RtHalCanonicalReceipt) -> i64:
+    fake_next_handle = fake_next_handle + 1
+    fake_next_handle
+fn digest(word: i64) -> RtHalDigest256:
+    RtHalDigest256(word0: word, word1: word + 1, word2: word + 2, word3: word + 3)
+fn host_exact_join(handle: i64, deadline: i64) -> RtHalExactJoin:
+    RtHalExactJoin(completed: true, outcome_digest: digest(10), error_digest: digest(20), trace_digest: digest(30))
+
+fn secure_host() -> RtHalIsolatedHostPort:
+    RtHalIsolatedHostPort(
+        capabilities: RtHalIsolatedHostCapabilities(
+            available: true, canonical_executable_identity: true,
+            static_executable_closure: true,
+            fixed_scalar_argv: true, private_ipc: true,
+            no_symlink_path_transport: true, process_tree_containment: true,
+            bounded_timed_join: true, cancellation_and_reap: true,
+            portable_host_contract: true
+        ), current_owner_fn: host_owner, bind_adapter_fn: host_bind,
+        cancel_and_reap_fn: host_cancel,
+        close_fn: host_close,
+        spawn_compare_exact_fn: host_exact_spawn,
+        spawn_replay_exact_fn: host_exact_spawn,
+        join_exact_until_fn: host_exact_join,
+        shutdown_fn: host_shutdown
+    )
+
+fn tool(name: text) -> EnvToolIdentity:
+    EnvToolIdentity(
+        tool_id: name, canonical_path: "/opt/simple/{name}",
+        identity_hash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    )
+
+describe "secure bounded RT/HAL isolated task arena":
+    it "fails closed when any isolation capability is absent":
+        expect(rt_hal_process_arena_shutdown()).to_equal("")
+        expect(rt_hal_process_host_install(rt_hal_unavailable_isolated_host(), 2)).to_equal("RTHAL-W-PARALLEL-UNSUPPORTED")
+        expect(rt_hal_process_exact_arena().capabilities.available).to_equal(false)
+
+    it "rejects unpinned and noncanonical executable identities":
+        val invalid = rt_hal_c_process_adapter(2, EnvToolIdentity(
+            tool_id: "c", canonical_path: "c-worker", identity_hash: "latest"
+        ))
+        expect(rt_hal_process_adapter_error(invalid)).to_equal("RTHAL-E-PROVIDER-ID")
+
+    it "separates installer and cold controller ownership":
+        fake_owner = 41
+        expect(rt_hal_process_host_install(secure_host(), 1)).to_equal("")
+        expect(rt_hal_process_adapter_register(rt_hal_c_process_adapter(1, tool("c")))).to_equal("")
+        val request = RtHalExactRequest(
+            case_id: 7, operation: RtHalOperationKind.Query,
+            operation_digest: digest(1), input_digest: digest(2)
+        )
+        val receipt = RtHalCanonicalReceipt(
+            case_id: 7, outcome_digest: digest(10), error_digest: digest(20),
+            trace_digest: digest(30), observed_once: true
+        )
+        val port = rt_hal_process_exact_arena()
+        expect(port.spawn_compare_fn(1, request, receipt)).to_equal(-1)
+        fake_owner = 42
+        expect(rt_hal_process_controller_claim()).to_equal("")
+        val handle = port.spawn_compare_fn(1, request, receipt)
+        expect(handle > 0).to_equal(true)
+        fake_owner = 41
+        expect(port.join_until_fn(handle, 10).completed).to_equal(false)
+        fake_owner = 42
+        expect(port.join_until_fn(handle, 10).completed).to_equal(true)
+        expect(rt_hal_process_arena_shutdown()).to_equal("")
+
+    it "compares foreign exact digests without re-executing Pure":
+        fake_owner = 41
+        expect(rt_hal_process_host_install(secure_host(), 1)).to_equal("")
+        expect(rt_hal_process_adapter_register(rt_hal_c_process_adapter(21, tool("c")))).to_equal("")
+        val policy = RtHalTagPolicy(
+            compare_c: true, compare_rust: false,
+            worker_count: 1, queue_capacity: 2,
+            timeout_ticks: 10, max_output_bytes: 1024,
+            require_all: true)
+        val request = RtHalExactRequest(
+            case_id: 9, operation: RtHalOperationKind.Query,
+            operation_digest: digest(1), input_digest: digest(2)
+        )
+        val receipt = RtHalCanonicalReceipt(
+            case_id: 9, outcome_digest: digest(10), error_digest: digest(20),
+            trace_digest: digest(30), observed_once: true
+        )
+        val report = rt_hal_execute_registered_exact(policy, [request], [receipt])
+        expect(report.error).to_equal("")
+        expect(report.results.len()).to_equal(1)
+        expect(report.submitted_tasks).to_equal(1)
+        expect(report.completed_tasks).to_equal(1)
+        expect(report.results[0].status).to_equal(RtHalExactStatus.Match)
+        expect(report.results[0].provider_id).to_equal("c-comparator")
+        expect(report.actual_parallel).to_equal(false)
+        expect(rt_hal_process_arena_shutdown()).to_equal("")

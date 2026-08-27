@@ -58,6 +58,7 @@ use std.spec.step
 use std.spec.*
 use std.io_runtime.{process_run}
 use app.io.mod.{file_read_text}
+use os.kernel.arch.arm32.cosmos.cosmos_fsbl_decision.cosmos_fsbl_handoff_valid_registers
 
 val BUILD: text = "src/os/kernel/arch/arm32/cosmos/build.shs"
 val PACKAGE: text = "src/os/kernel/arch/arm32/cosmos/package_boot.shs"
@@ -92,6 +93,16 @@ val SILICON_ELF: text = "build/os/simpleos_cosmos_openssd_silicon.elf"
 val PROFILE: text = "openssd2-8ch8way-v3.0.0"
 val PROFILE_SYMBOL: text = "cosmos_profile_cosmos_plus_openssd2_8ch8way_v300"
 
+struct FsblVector:
+    locksta: u32
+    arm_clk: u32
+    ddr_clk: u32
+    pss_rst: u32
+    a9_rst: u32
+    devcfg_int_sts: u32
+    expected: bool
+val FSBL_VECTORS: text = "test/fixtures/os/cosmos/fsbl_handoff_vectors.tsv"
+
 fn _run(cmd: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", cmd])
 
@@ -104,6 +115,42 @@ fn _expect_absent(output: text, marker: text, label: text):
         fail(label + " emitted forbidden marker: " + marker)
 
 describe "Cosmos+ OpenSSD production HAL":
+    it "keeps the Pure-Simple FSBL decision core in MC/DC parity with C":
+        step("Load the canonical decimal TSV shared by the C and Simple lanes")
+        var vectors: [FsblVector] = []
+        for line in file_read_text(FSBL_VECTORS).split("\n"):
+            if line.len() > 0:
+                val fields = line.split("\t")
+                if fields.len() != 7:
+                    fail("malformed Cosmos FSBL vector row")
+                val expected_value = fields[6].parse_i64()
+                if expected_value != 0 and expected_value != 1:
+                    fail("invalid Cosmos FSBL expected value")
+                vectors = vectors.push(FsblVector(
+                    locksta: fields[0].parse_i64().to_u32(),
+                    arm_clk: fields[1].parse_i64().to_u32(),
+                    ddr_clk: fields[2].parse_i64().to_u32(),
+                    pss_rst: fields[3].parse_i64().to_u32(),
+                    a9_rst: fields[4].parse_i64().to_u32(),
+                    devcfg_int_sts: fields[5].parse_i64().to_u32(),
+                    expected: expected_value == 1
+                ))
+        expect(vectors.len()).to_equal(7)
+
+        step("Evaluate every isolated fail-closed condition from the shared table")
+        for vector in vectors:
+            val actual = cosmos_fsbl_handoff_valid_registers(
+                vector.locksta,
+                vector.arm_clk,
+                vector.ddr_clk,
+                vector.pss_rst,
+                vector.a9_rst,
+                vector.devcfg_int_sts
+            )
+            expect(actual).to_equal(vector.expected)
+        print "STATUS: PASS cosmos-fsbl-simple-decision-parity"
+
+    # REQ-001..004, REQ-008, REQ-011; NFR-001..004, NFR-009..010, NFR-012.
     # @manual scenario evidence
     # REQ-SSPEC-SYSTEM, REQ-SSPEC-SYSTEM, REQ-SSPEC-SYSTEM; NFR-001..004, NFR-009..010, NFR-012.
     it "should execute the host FSBL, NFC, and PCIe MMIO state machines":

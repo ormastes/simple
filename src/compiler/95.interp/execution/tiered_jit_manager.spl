@@ -11,18 +11,52 @@ use compiler.mir_opt.mir_opt.pattern.rule_engine.{get_eligible_rules_for_functio
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
 extern fn rt_jit_create() -> i64
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
-extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text?
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
 extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
 extern fn rt_jit_call_void(handle: i64, name: text) -> i64
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
-extern fn rt_jit_call_i64_i64(handle: i64, name: text, arg0: i64, arg1: i64) -> i64
-@unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
 extern fn rt_jit_has_function(handle: i64, name: text) -> bool
 @unsafe(reason: "raw native JIT provider boundary", capabilities: [ffi])
 extern fn rt_jit_cleanup(handle: i64) -> i64
+@unsafe(reason: "raw wall clock for JIT diagnostics; provider is unsigned", capabilities: [ffi])
 extern fn rt_time_now_seconds() -> f64
+
+@always_inline
+fn _tiered_jit_create_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_create()
+
+@always_inline
+fn _tiered_jit_compile_source_raw(handle: i64, source: text) -> text?:
+    unsafe(capabilities: [ffi]):
+        rt_jit_compile_source(handle, source)
+
+@always_inline
+fn _tiered_jit_call_i64_raw(handle: i64, name: text, arg: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_call_i64(handle, name, arg)
+
+@always_inline
+fn _tiered_jit_call_void_raw(handle: i64, name: text) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_call_void(handle, name)
+
+@always_inline
+fn _tiered_jit_has_function_raw(handle: i64, name: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_jit_has_function(handle, name)
+
+@always_inline
+fn _tiered_jit_cleanup_raw(handle: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_jit_cleanup(handle)
+
+@always_inline
+fn _tiered_jit_time_now_seconds_raw() -> f64:
+    unsafe(capabilities: [ffi]):
+        rt_time_now_seconds()
 
 # ============================================================================
 # TieredJitManager
@@ -53,7 +87,7 @@ class TieredJitManager:
 
     me _ensure_jit() -> i64:
         if self.jit_handle == 0:
-            self.jit_handle = rt_jit_create()
+            self.jit_handle = _tiered_jit_create_raw()
             self.jit_creations = self.jit_creations + 1
         self.jit_handle
 
@@ -122,9 +156,10 @@ class TieredJitManager:
         if source == "":
             return 0.0
         var handle = self._ensure_jit()
-        var t0 = rt_time_now_seconds()
-        var err = rt_jit_compile_source(handle, source)
-        var t1 = rt_time_now_seconds()
+        var t0 = _tiered_jit_time_now_seconds_raw()
+        val raw_err = _tiered_jit_compile_source_raw(handle, source)
+        var err = raw_err ?? "E-SFFI-017: JIT compile provider returned null"
+        var t1 = _tiered_jit_time_now_seconds_raw()
         var ms = (t1 - t0) * 1000.0
         self.total_compile_time_ms = self.total_compile_time_ms + ms
         if err != "":
@@ -137,13 +172,13 @@ class TieredJitManager:
 
     fn call_i64(name: text, arg: i64) -> i64:
         if self.is_native(name):
-            rt_jit_call_i64(self.jit_handle, name, arg)
+            _tiered_jit_call_i64_raw(self.jit_handle, name, arg)
         else:
             -1
 
     fn call_void(name: text) -> i64:
         if self.is_native(name):
-            rt_jit_call_void(self.jit_handle, name)
+            _tiered_jit_call_void_raw(self.jit_handle, name)
         else:
             -1
 
@@ -151,7 +186,7 @@ class TieredJitManager:
         if self.jit_handle == 0:
             false
         else:
-            rt_jit_has_function(self.jit_handle, name)
+            _tiered_jit_has_function_raw(self.jit_handle, name)
 
     fn get_tier(name: text) -> JitTier:
         if self.profiles.has(name):
@@ -243,5 +278,5 @@ class TieredJitManager:
 
     me cleanup():
         if self.jit_handle != 0:
-            rt_jit_cleanup(self.jit_handle)
+            _tiered_jit_cleanup_raw(self.jit_handle)
             self.jit_handle = 0

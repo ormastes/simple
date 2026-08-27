@@ -91,6 +91,28 @@ ports or parent-applied deltas.
 | `MaterializerSafeFilesystemPort` | Descriptor-relative generated-view mutations and durability |
 | `ClockPort` | Injectable time for TTL, staleness, and deterministic tests |
 
+`AuthorizationPort` is an authenticating composition-root service, not a
+shape-compatible object accepted from a handler. The composition root creates a
+branded `AuthorizationPortV1` only after loading its signature verifier,
+issuer/algorithm/key allowlist, and key/revocation epoch. It alone exposes:
+
+```text
+verifyCanonicalReadReceiptV1(receipt, expected_binding, clock_now_ms)
+  -> Result<VerifiedReadGrantV1, AdmissionFailure>
+signCursorReceiptV1(binding, page_position, expiry) -> CursorReceiptV1
+verifyCursorReceiptV1(receipt, expected_binding, clock_now_ms)
+  -> Result<VerifiedCursorGrantV1, AdmissionFailure>
+```
+
+`expected_binding` is a closed tuple of authority key/epoch, workspace UID,
+project UID-or-null, snapshot ID, revision ID, view kind, normalized logical
+path, normalized selector/filter digest, effective scope digest, ordering
+version, and page limit. A parser/projection module receives only verified
+grants; it cannot create a receipt, widen a selector, or choose a replacement
+workspace/snapshot. The root URI grammar is likewise closed: only
+`spipe://workspace/{workspace}/` denotes a workspace directory; the un-slashed
+form is malformed rather than normalized.
+
 Ports return typed capability or error results. No fallback may claim a
 capability it cannot provide exactly.
 
@@ -575,6 +597,74 @@ owns the byte-stream, diagnostic, deadline, and commit-admission mechanics;
 durable provider transactions remain the semantic mutation linearization
 authority.
 
+### 8.2 Accepted graph-candidate authority and continuation
+
+Graph search consumes an already authorization-filtered, digest-bound graph
+snapshot. A fixed-count metadata-free node-authorization pass rechecks every
+declared node under the current receipt before traversal; it is a TOCTOU guard,
+not a filter, and any denial invalidates the snapshot without identifying the
+node. Only schema-v2 accepted explicit/generated edges with matching provenance,
+policy, authority kind, decision receipt, and verified receipt may contribute.
+Proposed, inferred, structural, stale, rejected, superseded, legacy, malformed,
+or unverifiable edges never become search evidence.
+
+The standalone traversal is deterministic both-direction BFS with these exact
+v1 limits: depth `3`; `sourceK` `1..1000` (default `1000`); page work
+`1..50,000` (default `50,000`); configurable total work `1..500,000`;
+authorized nodes `20,000`; authorized edges `50,000`; roots `1001`
+(one exact plus 1,000 lexical); and document IDs at most 512 UTF-8 bytes. No
+path repeats a node or edge. Cycles are legal. The generator keeps the best path
+per `(nodeUid, distance)` and replaces/re-expands a same-distance state when its
+tuple improves. The exact ascending comparison tuple is:
+
+```text
+distance,
+seedTier,                 # exact=0, lexical=1
+seedRank,                 # exact=0, lexical=sourceRank
+generatedEdgeCount,
+-bottleneckConfidenceMilli,
+edgeUidSequence unsigned-UTF-8 lexicographic,
+directionSequence,       # out < in
+nodeUidSequence unsigned-UTF-8 lexicographic
+```
+
+Final candidates sort by that tuple and then artifact UID by unsigned UTF-8.
+Only authorized Artifact nodes are emitted, roots are excluded, and `sourceK`
+is applied only after exhaustive bounded traversal. Hitting a hard bound fails
+closed rather than returning a partial source.
+
+Budget continuation uses a single-use, factory-branded, deeply frozen,
+null-prototype in-process object with no enumerable state. A factory-local
+`WeakMap` binds the normalized request (excluding budget/cursor), exact immutable
+snapshot and digest, frontier, best-path tables, counters, and consumed bit.
+Continuation atomically consumes the old state before work and emits a new
+handle only if still partial. It never reopens the snapshot or repeats authority
+calls. A copied, reconstructed, cross-factory, serialized, or replayed cursor is
+invalid. Partial success is exactly `{status:'partial', contractVersion, cursor,
+counters}` with no candidates/source/evidence/digests. Total-cap failure destroys
+the state. Only frontier exhaustion yields a complete digest-bound graph source.
+All retained collections are bounded by the limits above; abandoned cursor keys
+and their WeakMap state are garbage-collection eligible. The handle has no clock,
+randomness, MAC, expiry, cross-process portability, or restart guarantee.
+
+The authorized snapshot is already filtered before it crosses the port, so
+hidden nodes/edges cannot affect counts, caps, work, ordering, errors, cursor
+state, or digests. The current-operation recheck calls `authorizeNode` exactly
+once for every declared canonical node, in canonical UID order, with only
+`{pin,nodeUid,nodeKind}`. It records all failures and completes the fixed call
+count rather than exiting early; any denial, malformed decision, or exception
+collapses to generic `snapshot_unavailable`. Edge receipt verification binds
+edge UID/type/endpoints/origin, receipt/authority kind, graph snapshot/root,
+scope, search receipt, and exact policy hash/version. No port error exposes a
+UID, count, position, or hidden existence.
+
+Accepted-edge evidence is losslessly represented as ordered
+`{edgeUid, authorityReceiptUid}` pairs. Independently unique edge and receipt
+arrays are derived views, because one decision receipt may authorize multiple
+edges. A reranker contract that assumes an injective edge-to-receipt mapping
+cannot consume the general graph source; pair-based reranker evidence is a
+prerequisite for integrated graph boosting.
+
 ## 9. Rebalancing and Promotion Boundaries
 
 Rebalancing consumes a snapshot and returns a deterministic proposal. Fixed
@@ -734,3 +824,602 @@ journal/recovery machinery, parity fixtures, and careful provider/version
 governance. Those costs are accepted because path-based identity, writable
 views, and provider-dependent truth would make refactors and strict evidence
 unsafe.
+
+## 16. Authority-Bound Lexical Source Checkpoint
+
+Commit `9eb667e23b` admits the dependency-free lexical-source capsule. Its only
+public operation is built from exactly four captured synchronous ports:
+
+```text
+verifySearchReceipt(binding) -> frozen exact binding echo
+readLexicalProviderPage(page_request) -> frozen provider page
+authorizeArtifactCandidate(candidate) -> frozen authorization decision
+verifyLexicalEvidence(evidence) -> frozen aggregate evidence decision
+```
+
+The capsule owns request validation, query/binding digests, page-chain
+validation, fixed-count candidate authorization, aggregate evidence, and the
+complete RRF-v2 source envelope. It does not own scoring or provider storage.
+`readLexicalProviderPage` is therefore an untrusted port: provider identity
+must remain `spipe-search-provider/1.0` with analyzer
+`spipe-unicode-lex-v1`, score contract `bm25-fixed-v1`, and one stable
+implementation digest for the entire request.
+
+### 16.1 Cursor and page authority
+
+Every non-null provider cursor hashes under
+`spipe-authorized-lexical-provider-cursor-v1\0` with the request binding digest.
+A page receipt binds the inbound cursor digest, exact requested limit, next
+cursor digest, page digest, and exact-pin exclusion. The next page must echo the
+previous next-cursor digest as its inbound digest. Rank numbering is dense and
+continuous across pages; candidates are ordered by descending non-negative
+fixed-point source score and then unsigned UTF-8 artifact UID. Reused cursors,
+cursor digests, receipts, artifact UIDs, rank gaps, short non-exhausted empty
+pages, or provider-identity changes fail closed.
+
+The complete page evidence list is hashed separately from the complete ordered
+candidate/rank evidence. `verifyLexicalEvidence` runs exactly once only after
+all locally provable page checks and exactly one authorization call per
+candidate. Its receipt and both digests become source identity. No partial or
+unverified page set may enter fusion.
+
+### 16.2 Canonical evidence contract
+
+Digest preimages use restricted `spipe-canonical-json-v1`: strings and record
+keys are Unicode scalar text normalized to NFC; normalized keys must be unique
+and sort by unsigned UTF-8; arrays are dense; records are closed data records;
+numbers are safe integers other than negative zero; and C0 controls are emitted
+as lowercase long escapes (`\u0009` for U+0009). Independent test
+canonicalization is required so digest parity is not self-asserted.
+
+### 16.3 Exact-pin exclusion boundary
+
+The accepted design now requires the provider to apply
+`excludedDocumentUid` before ranking and pagination. The binding, page,
+page-receipt, page-set, rank-evidence, and final evidence receipt all attest the
+same value and `exclusionApplied` decision. Client post-filtering is forbidden:
+after a provider-limited top 1,000 it can supply at most 999 remaining entries
+and cannot prove a complete `sourceK=1000` lexical pool.
+
+This changes no ownership rule: a versioned provider adapter/protocol mapping
+remains a prerequisite before the source can be wired to an implementation.
+The admitted lexical capsule cannot be treated as an adapter or an integrated
+search endpoint.
+
+### 16.4 Non-admitted graph candidate and integration order
+
+The two-file graph candidate in `/tmp/spkc-graph-candidates-4OKnKd` is rejected
+as evidence after the bounded third cycle: focused `13/14` with an uncontracted
+cyclic `workUnits <= 9` oracle. Seven static defects were patched, but the full
+suite and final highest-capability review did not run. It has no commit and
+cannot close graph boost or AC-4.
+
+Integration proceeds only through separately owned, reviewable boundaries:
+
+1. graph generator and its independent oracle;
+2. provider-adapter/protocol interface and ownership freeze, then its parity
+   implementation (filenames are not yet frozen);
+3. standalone cross-source rerank-evidence assembler/verifier;
+4. integrated pipeline consuming admitted exact, lexical, graph, RRF-v2, and
+   pair-based reranker contracts.
+
+Rerank-evidence is not folded into either graph generation or the pipeline;
+separate evidence admission prevents orchestration from manufacturing authority.
+
+## 17. Accepted Graph Capsule and Authorized Lexical Provider Boundary
+
+Section 16.4 records a real rejected attempt and remains useful provenance, but
+its non-admission status is superseded by commit `626b3e0797`. The accepted
+graph capsule is the product/oracle pair
+`src/search/graph_candidates.js` and
+`test/unit/search_graph_candidates_test.js` under
+`examples/05_stdlib/spipe/`. It passed focused `16/16`, full `174/174`, Wave 2
+`9/9`, Wave 3 `25/25`, Wave 4 `9/9`, legacy integration, performance, and both
+pre-runtime and final highest-capability review.
+
+### 17.1 Capsule authority and lifecycle
+
+`createAcceptedGraphCandidateGeneratorV1` remains a read-only child capsule of
+search orchestration. It captures exactly `readGraphSnapshot`,
+`authorizeNode`, and `verifyEdgeReceipt`; it owns deterministic bounded
+traversal and evidence construction, but it does not own snapshots, policy,
+fusion, reranking, or user-visible result limits.
+
+Its fixed resource envelope is depth 3, at most 1,000 output candidates,
+50,000 incident-edge work units per page, 500,000 total work units, 20,000
+nodes, 50,000 edges, and 1,001 roots. The accepted cyclic oracle is exactly ten
+work units. Canonical authorization runs for every declared node before edge
+verification; only accepted explicit/generated edges with exact authority
+receipts enter traversal. Opaque WeakMap continuation state is factory-local,
+single-use, and destroyed on total exhaustion. Continuations resume the exact
+edge without repeating authority ports.
+
+The path order is deterministic by distance, seed tier, seed rank, generated
+edge count, negative bottleneck confidence, unsigned-UTF-8 edge sequence,
+out-before-in direction sequence, and unsigned-UTF-8 node sequence. The source
+order adds artifact UID as its final tie-break. Ordered
+`{edgeUid,authorityReceiptUid}` pairs are authoritative; derived unique arrays
+must not erase shared-receipt multiplicity. Four independent literal digest
+goldens bind the admitted edge set, evidence records, source identity, and RRF
+candidate pool.
+
+### 17.2 Provider protocol versus semantic identity
+
+The provider adapter is a separate boundary from the lexical-source capsule:
+
+```text
+lexical_source (synchronous evidence consumer)
+        │ admitted nine-field D-* receipt projection
+        ▼
+authorized lexical-page adapter
+        │ wire 1.1 lexical_page / qr-* transport receipt
+        ▼
+JS in-process provider now; Simple process provider after async design
+```
+
+Wire `1.1` adds only the `lexical_page` operation and
+`authorized_lexical_page:true`. It does not fork the search semantics:
+`spipe-search-provider/1.0`, `spipe-unicode-lex-v1`, and `bm25-fixed-v1` remain
+the provider, analyzer, and scorer identities. The new bridge identities are
+`spipe-authorized-lexical-provider-page-v1` for page records and
+`spipe-authorized-lexical-provider-adapter-v1` for the adapter.
+
+Exact exclusion is provider-owned and happens before scoring/top-k insertion;
+corpus statistics remain snapshot-owned and unchanged. Cursor identity binds
+generation/implementation, workspace, snapshot, authorization scope, lexical
+root, binding/query digests, exclusion, and next rank. It intentionally omits
+the per-page `qr-*` receipt and requested limit, because transport receipts are
+page-local and the terminal fragmented page can request fewer candidates.
+
+The `qr-*` and `D-*` namespaces separate transport integrity from evidence
+authority. Simple wire returns a query receipt. The adapter verifies it, stores
+a signed `D-*` page receipt, and exposes the nine fields required by the
+lexical-source capsule. Aggregate authority later resolves the `D-*` receipts;
+neither the pipeline nor the provider may mint that evidence locally.
+
+### 17.3 Ownership and process boundary
+
+JavaScript protocol/schema and in-process semantics stay in
+`examples/05_stdlib/spipe/src/index/{contracts,logical_index}.js` and
+`src/provider/{protocol,adapter,js_fixed_point,index,lexical_page}.js`. The
+independent conformance owner is
+`test/unit/search_lexical_provider_page_test.js` with the fixed Wave 4 vector
+fixture. Simple-native mapping stays in
+`src/app/spipe_knowledge_provider/{lexical,wire_query,wire_core,protocol,service}.spl`;
+no parallel native scorer or lifecycle owner is introduced.
+
+The current lexical-source port is synchronous, while a long-lived Simple
+process speaks asynchronous streams. This is an unresolved architectural
+boundary, not permission to block the hot path or spawn per request. The first
+implementation slice is in-process JavaScript. Native integration requires a
+reviewed async lexical-source v2 or an async-collect/immutable-replay capsule.
+
+### 17.4 Performance, integration, and status
+
+The provider remains lazily started and must not perform process spawning,
+full-tree scans, repeated file reads, or retry sleeps on the request path.
+Candidate gates are startup P95 at most 250 ms and warm lexical P95 below
+100 ms on 50,000 artifacts. Maximum RSS needs both a qualified receipt and a
+configured process cap; the numeric budget is blocked on Wave 0 measurement.
+
+Graph admission does not imply provider conformance or integrated search.
+Rerank-evidence implementation is active as its own authority capsule. The
+only accepted integration sequence is exact identity, provider-owned lexical
+exclusion, complete lexical collection, graph generation, complete-pool RRF
+v2, rerank-evidence verification, pair-based reranking, explanation assembly,
+and user limit last. AC-4 remains open until that complete path is admitted.
+
+### 17.5 Authority bridge correction and capsule ownership
+
+The full synchronous JavaScript authority bridge is now the only accepted
+first slice. The earlier reading of `lexical_page.js` as a wire-independent
+translator that manufactures a nine-field `D-*` projection is a rejected
+pre-authority alternative. The projection is compatibility data consumed by
+`lexical_source.js`; authority comes only from a verified transport receipt
+plus a signed, stored, and re-resolvable evidence record.
+
+```text
+createAuthorizedLexicalSourceV1
+  ├─ verifySearchReceipt                    existing trusted search binding
+  ├─ authorizeArtifactCandidate             existing per-artifact decision
+  └─ createAuthorizedLexicalProviderPageBridgeV1
+       ├─ providerSession                    frozen wire/root/scope/policy pin
+       ├─ issueTransportQueryReceiptV1       qr-* issuer
+       ├─ verifyTransportQueryReceiptV1      qr-* verifier
+       ├─ executeLexicalPageV11              synchronous in-process provider
+       ├─ lexicalEvidenceAuthority           identity/sign/verify for D-*
+       ├─ lexicalEvidenceStore               reserve/commit/resolve/tombstone
+       └─ clockNowMs                         trusted expiry observation
+```
+
+The factory exposes exactly the frozen
+`{readLexicalProviderPage,verifyLexicalEvidence}` pair. It is a parent-owned
+adapter capsule: the provider owns ranking and pre-ranking exclusion; the
+authority owns signatures and current key/policy/revocation identity; the store
+owns immutable receipt objects and replay keys; the lexical source owns page
+collection and digest construction. No child may reach into a sibling's
+private state or mint another child's identity.
+
+The transport remains wire `{major:1,minor:1}`, capability
+`authorized_lexical_page:true`, and operation `lexical_page`, while provider,
+analyzer, and score identities remain `spipe-search-provider/1.0`,
+`spipe-unicode-lex-v1`, and `bm25-fixed-v1`. A successful wire response echoes
+the full verified `spipe-query-receipt-v1` (`qr-*`). The bridge signs a full
+`spipe-lexical-page-evidence-receipt-v1`, stores it atomically, resolves it
+again, and only then derives the nine-field `D-*` projection. Aggregate
+verification resolves every page `D-*` in order, re-verifies its signature,
+embedded `qr-*`, root, scope, policy, authority/revocation generation, expiry,
+cursor/rank chain, and page content, then signs/stores/re-resolves a
+`spipe-lexical-aggregate-evidence-receipt-v1`.
+
+Initialization supports exact minors 1.0 and 1.1 without silent negotiation:
+the legacy closed 1.0 capability record stays byte-compatible, while the closed
+1.1 record adds final `authorized_lexical_page:true`. The semantic identity
+arrays, limits, and empty optional-field list do not change. The bridge can be
+composed only from a validated 1.1 result.
+
+The provider-side executor is frozen separately as
+`createInProcessLexicalPageExecutorV11({provider,providerSession,
+verifyTransportQueryReceiptV1,lexicalCursorAuthority,clockNowMs})`. It verifies
+the `qr-*` before reaching the raw index. Non-null cursors are signed
+`spipe-authorized-lexical-cursor-v1` records bound to provider implementation/
+generation/session, root, scope, policy, query, exclusion, and next rank; they
+omit requested page size and page-local `qr-*` by design.
+The frozen provider session also carries the expected transport key,
+authority-generation, and revocation-generation tuple. Verifier-current
+decisions must echo it on both sides; a revocation-generation change invalidates
+the session.
+`lexicalCursorAuthority` uses the exact closed authority
+`identity/sign/verify` capability and must match that transport tuple and
+policy; the evidence signer may be distinct but cannot change policy.
+
+Authority signatures and receipt/store identities use restricted canonical
+JSON with the framed form
+`UTF8(domain + "\0") || U64BE(length) || canonicalBytes`. Existing admitted
+lexical hashes keep their unframed lowercase-domain convention. Exact domains,
+preimages, record fields, error precedence, and caps are frozen in detail
+design Section 17.7 and are not reinterpreted by adapters.
+
+The store is a bounded synchronous process-local capsule for this slice: all
+reserved, active/replay, and tombstoned operations share a 4,096-entry and
+64-MiB accounted-byte cap; page/aggregate records are limited to 1/2 MiB.
+Each reservation pre-charges exactly 2,048 bytes of worst-case tombstone
+headroom, which is retained if commit cannot fit. Entries remain until
+generation destruction. Exact live replay resolves/re-verifies and returns the
+same receipt without transport issuance, provider execution, signing, or
+commit. Operations reserve atomically before `qr-*` issuance; every
+post-reservation failure tombstones the key, so an identical retry cannot make
+a second transport/evidence chain. Conflicting, expired, revoked, wrong-root,
+wrong-policy, or wrong-generation replay fails closed. Persistence across
+restart is not claimed. Provider selection occurs before bridge construction,
+so a failed page cannot switch providers mid-collection.
+
+The public-error and storage capsules intentionally use different closed
+vocabularies. After reservation, an unclassified malfunction of trusted cursor
+authority `identity`, `sign`, or `verify` is stored as the existing legal
+`interrupted` tombstone before the bridge returns public `internal_error`.
+`internal_error` never enters the tombstone enum. A specific expiry,
+revocation, binding, authority-generation, policy, or record-corruption result
+established first retains precedence.
+
+Successful bridge and provider-executor paths both observe their trusted clock
+before work and immediately before return. The end observation rechecks expiry
+and current revocation; work that crosses expiry is tombstoned and cannot
+produce evidence.
+
+Implementation ownership adds
+`examples/05_stdlib/spipe/src/provider/lexical_evidence_store.js`; the complete
+bridge stays in `provider/lexical_page.js`, protocol validation in
+`provider/protocol.js`, translation/session state in `provider/adapter.js`, and
+provider-side receipt checking plus page execution in `provider/js_fixed_point.js`.
+`index/contracts.js`, `index/logical_index.js`, and `provider/index.js` retain
+the roles stated above. `provider/durable_lifecycle.js` is not reused: it owns
+asynchronous mutation-candidate persistence, not synchronous query evidence.
+
+This architecture deliberately makes no subprocess, async stream, native, or
+cross-restart durability claim. A later provider may implement the same
+semantics only through a separately reviewed asynchronous boundary. Until the
+full JS oracle proves both signatures and store resolution, the bridge is
+design-frozen but not conforming, and AC-4 remains open.
+
+### 17.6 Admission status and next dependency order (2026-08-26)
+
+Commit `47a922eec6` admits this provider-authority **architecture contract**
+after highest-capability review; it does not admit an implementation. The
+attempt in `/tmp/spkc-lexical-provider-z15Uhp/repo` reached its pre-runtime
+review cap without producing an in-scope product or oracle edit. The next
+provider implementation must start from the complete capsule, authority,
+store, replay, cursor, clock, and error ABI in Section 17.5/detail design
+Section 17.7. The previously rejected minimal projection adapter remains
+architecturally invalid.
+
+The candidate rerank-evidence capsule in
+`/tmp/spkc-rerank-evidence4-aIcFIZ/repo` is uncommitted and unadmitted. Its
+focused `16/16`, full unit `190/190`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4
+`9/9`, legacy, security, workflow, and performance gates are retained, but
+final highest-capability review after cycle three found two blockers:
+`limit_exceeded` must retain precedence for oversized derived evidence arrays,
+and the semantic contract string must be bound to the admitted consumer
+contract. A fresh session owns the exact source/oracle pair and its review.
+
+Dependency order is provider implementation/admission, rerank-evidence
+repair/admission, then integrated exact/lexical/graph/RRF/evidence/rerank
+orchestration. AC-4 remains open.
+
+### 17.7 Superseding capsule admission status (2026-08-26)
+
+The rerank-evidence capsule is now admitted by commit `4455b760da`. Syntax,
+focused `18/18`, unit `192/192`, Wave 2 `9/9`, Wave 3 `25/25`, Wave 4 `9/9`,
+legacy, security, workflow, and performance gates passed, followed by an
+independent xhigh `PASS` in verify/fix cycle 2 of 3. This admits the standalone
+authority-evidence boundary only; it does not admit the provider or integrated
+pipeline.
+
+The provider-authority ABI repair did not land. After the mandatory third
+cycle its status is `FAIL` because collision-result signaling, executor error
+classification, cursor error precedence, and canonical-byte accounting versus
+heap/RSS limits remain under-specified. No product edit or product test was
+performed and no draft entered repository history. Failed object
+`3827a1099e`, retained under `/tmp/spkc-provider-abi-repair2-clean`, is
+non-authoritative forensic material and must not be used to extend this
+architecture contract.
+
+The architecture dependency order is now provider-ABI repair, provider
+implementation/admission, then integrated pipeline admission. Wave 4 and AC-4
+remain open.
+
+### 17.8 Cursor-authority failure mapping (2026-08-26)
+
+The final-four representability conflict is resolved with no ABI expansion.
+For a trusted cursor-authority malfunction after reservation, storage records
+the existing legal `interrupted` tombstone and the public boundary returns
+`internal_error`, in that order. This is explicit capsule translation, not
+implicit coercion; `internal_error` remains absent from the tombstone enum.
+Specific already-established failure classifications retain precedence.
+Provider implementation and admission, Wave 4, AC-4, and pipeline admission
+remain open.
+
+### 17.9 Full ABI consolidation status (2026-08-26)
+
+The eleven-item consolidation attempt stopped `FAIL` at the mandatory
+three-cycle cap. It produced no product edit, product test, admitted contract,
+or push. Snapshot `e5c556de59d` at
+`/tmp/spkc-provider-abi-full-uWb9kD/repo` is immutable forensic evidence, not
+architecture authority.
+
+Although implementation-readiness review passed, independent
+highest-capability review found the proposed capsule non-self-contained:
+Section 17.11 excludes Section 17.7.1 while relying on its exact
+`providerSession`, authority, and executor schemas, and excludes Section 17.7.9
+without defining the complete public error record/field shapes and exhaustive
+precedence. The next fresh architecture session must restate those definitions
+inside Section 17.11 and must not inherit excluded control prose. Provider
+readiness/implementation/admission, Wave 4, AC-4, and pipeline admission remain
+open.
+
+### 17.10 Self-containment repair status (2026-08-26)
+
+The fresh repair stopped `FAIL` at the mandatory third review/fix cycle. It
+produced no authoritative contract or product edit, product test, or push.
+Snapshot `e77cb713d5703d864f32d16ab3abab0afb5d3215` at
+`/tmp/spkc-provider-self-contained-JdUR6t/repo` is immutable forensic evidence,
+not architecture authority; its rejected clauses must not be copied.
+
+Implementation-readiness review passed, while independent highest-capability
+review found three blockers: overlapping generic code-only unauthorized and
+provenance arms; contradictory reserve ordering around binding/cursor checks
+and `Cidentity`/`Cverify`; and no exact `requestedLimit` range despite the
+candidate cap. A fresh architecture session must define a structurally
+disjoint executor-error union, one reserve/cursor order with a single
+tombstone owner, and `requestedLimit` in `1..1000`. Provider readiness,
+implementation/admission, Wave 4, AC-4, and pipeline admission remain open.
+
+### 17.11 Fresh authority-bridge correction candidate (2026-08-26)
+
+The architecture now freezes three repair constraints for the synchronous
+in-process bridge. First, its executor failure algebra is structurally
+disjoint: the generic `{code}` branch excludes `unauthorized`; the only
+unauthorized branch has exact private `{code:"unauthorized",tombstoneReason}`
+data, where the reason is one of the existing seven store reasons and never
+crosses the public boundary. The bridge owns persistence/redaction; the
+executor owns no evidence-store mutation.
+
+Second, every page path performs only closed-shape/type/capability checks before
+the one atomic reservation. Cursor identity, decoding, signature verification,
+binding, generation, policy, and liveness checks are all post-reservation for
+both fresh and replay branches. The bridge maps their first established fact
+through the existing ordered tombstone table and makes exactly one tombstone
+attempt; malformed/oversized cursors remain pre-reservation errors. Third,
+`requestedLimit` is a fixed required positive safe integer `1..1000` in every
+bridge/wire/executor/page/replay contract, while cursors deliberately do not
+bind its per-page value.
+
+This candidate retains bounded-store and public-error contracts and is not
+provider implementation/admission evidence. Wave 4, AC-4, and pipeline
+admission remain open pending static and independent high-capability review.
+
+### 17.12 Provider implementation non-admission: configuration ABI conflict (2026-08-26)
+
+The provider implementation attempt at
+`/tmp/spkc-provider-admission4-kVaqO2/repo`, based on
+`f7ec2dc1b0c0de4b42bb97940b17bec9db29e5a1`, stopped before runtime work after
+two immutable xhigh pre-runtime `FAIL` reviews. The final review attempt added
+no edit to its exact ten-file scope and ran no runtime test, commit, or push.
+The forensic candidate itself has an existing dirty diff. It is forensic
+context only; do not reuse its code or contract wording.
+
+The decisive architecture contradiction is that Section 17.14.3 requires the
+bridge to own post-reservation cursor identity, decode, and verification, but
+the frozen seven-field bridge factory configuration provides no cursor-authority
+port. Therefore no implementation can conform without a fresh configuration-ABI
+decision. Mandatory tombstones, exact executor-error discrimination, full
+replay verification, cursor digest, store accounting/idempotency, closed-object
+accessors, and oracle vectors remain unimplemented. A fresh design session must
+resolve that configuration ABI before a new implementation lane begins. Provider
+admission, Wave 4, AC-4, and pipeline admission remain open.
+
+## 18. Wave 5 Read-Only Virtual-View Capsule (2026-08-26)
+
+<!-- codex-design -->
+
+Wave 5 is a separate read-only capsule and may be implemented independently of
+the provider bridge. `KnowledgeCompiler` publishes immutable snapshots;
+`WorkspaceRegistry` opens a named workspace; `ResourceResolver` turns a
+validated URI into a target; and `ProjectionPort` alone lists or renders that
+target. MCP transports and the CLI are adapters only: they cannot parse a
+repository, mutate canonical files, or cause an index/provider refresh during a
+request. A snapshot ID is carried through every page, resource, tool result,
+and cache identity.
+
+`ProjectionService` owns virtual projection and has two one-way outputs:
+protocol read adapters and the optional materializer adapter. The former emits
+the deterministic resource/tool envelope. The latter is the sole holder of
+`SafeFilesystem.Materializer`, converts it once into a projection- and
+snapshot-bound `MaterializerRootGrant`, and calls only
+`MaterializerSafeFilesystemPort`. Neither native/worker filesystem providers
+nor a trusted helper receive authorization authority. RefactorService is a
+separate writer capsule with no materializer capability.
+
+The initial composition deliberately includes legacy stdio and protocol-neutral
+resource/tool services before stateless HTTP, notifications, editor VFS, or OS
+mount adapters. A failed optional materializer admission leaves read-only MCP
+views available; a URI, snapshot, authorization, or projection ambiguity fails
+closed. Public cacheability is allowed only for wholly public snapshot output;
+private/mixed output remains private/no-store and authorization precedes any
+conditional-cache decision.
+
+The capsule is admitted only when the focused protocol, URI security,
+projection determinism, cache-visibility, and materializer fault/race evidence
+listed in the Wave 5 detail contract passes. It is not evidence that the
+unresolved provider protocol or any write/refactor capability is admitted.
+
+## 19. Wave 5 URI-foundation non-admission boundary (2026-08-26)
+
+<!-- codex-design -->
+
+The URI-foundation candidate exhausted three independent review/fix cycles and
+is uncommitted and not admitted. Wave 5 URI execution remains pending. A new
+implementation starts from this architecture, not from the rejected code.
+
+`ResourceResolver` canonicalizes a legacy alias only to a candidate, proves
+that candidate's target membership, and only then authorizes. It calls
+only `AuthorizationPort.verifyCanonicalReadReceiptV1`, which allowlists the
+version/key, verifies the signed `D-` payload (`spipe-uri-read-v1\0` plus
+canonical JSON), requires `decision=allow`, a live clock window, and the
+current revocation epoch, then compares every field with the direct resolved
+target and pinned `KnowledgeSnapshot`; any difference causes fresh
+authorization or a closed failure. Thus `spipe://skill` cannot be read under
+an alias-only grant.
+
+`CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
+authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has that same
+binding plus `lastSortKey`; both use the sole verifier method names frozen in
+§3.1 and no `verifyCanonicalTargetReceiptV1` alias exists.
+
+Before authorization and rendering, the resolver directly verifies that the
+snapshot exists, is immutable, belongs to the selected workspace/project, has
+the stated revision, and contains the canonical target kind/UID. URI components
+and query values are selectors subject to validation, never authority claims.
+
+Admission evidence must run all URI families—workspace root/view, project
+artifact/section, trace, diagnostics, and legacy alias; search is a tool
+input—through the hostile matrix: malformed/overlong and unsupported URI;
+fragment/empty identity; empty/duplicate/unknown bounded query fields;
+percent/double-decode; traversal, slash/backslash, encoded separator/dot,
+drive/UNC, Windows device/reparse, ADS colon, trailing dot/space;
+control/malformed Unicode, NFC/NFD collision, mixed-case identity; cursor
+mismatch; receipt forgery/expiry/signature/revocation failure and every alias, scope,
+policy, snapshot, revision, kind, or UID mismatch; plus indistinguishable
+hidden/absent targets. Every rejection is fail-closed and path-redacting.
+
+The same table includes a positive canonical list/read/render assertion for
+workspace root/view, artifact, section, trace, diagnostics, legacy alias after
+canonical reauthorization, and `spipe_search`. Legacy success is evidence only
+when the rendered target is the freshly authorized canonical target.
+
+## 20. SnapshotAuthority virtual capsule (2026-08-26)
+
+<!-- codex-architecture -->
+
+Wave 5 requires a new parent-owned authority capsule before a URI resolver can
+be admitted. Existing snapshot storage verifies snapshot metadata but is not a
+target-membership authority: it has no immutable target inventory and does not
+bind the workspace/worktree selection to the read. Giving URI or projection
+code raw store access would permit assertion-based target resolution.
+
+`KnowledgeCompiler` is the only writer of a manifest's target inventory. The
+new `SnapshotAuthorityService` owns snapshot admission and receives the
+registry, immutable store, and private immutable target-inventory store. It publishes
+the branded `SnapshotAuthorityPortV1`; siblings receive opaque
+`SnapshotAuthorityViewV1`, never a filesystem location or mutable manifest.
+`ProjectionService` owns the separately branded `ProjectionPortV1` and only
+renders targets returned by that view. MCP/CLI adapters consume both through
+`ResourceResolver`; they cannot query stores directly.
+
+```text
+ResourceResolver
+  -> WorkspaceRegistry.resolveExact(workspaceUid)
+  -> SnapshotAuthorityPortV1.openBoundSnapshot(binding)
+  -> SnapshotAuthorityPortV1.resolveCanonicalAlias(...) -> resolveCanonicalTarget(...)
+     (or resolveCanonicalTarget(...) directly for canonical URIs)
+  -> AuthorizationPortV1.verifyCanonicalReadReceiptV1(...)
+  -> ProjectionPortV1.render/list(authorityView, canonicalTarget)
+```
+
+The binding is exactly `{workspaceUid, projectUidOrNull, worktreeUid,
+snapshotUid, revisionId}`. `openBoundSnapshot` verifies all five fields against
+the registry and immutable manifest, validates the manifest digest, and
+returns an opaque view. `resolveCanonicalAlias` returns only an unrenderable
+canonical candidate; `resolveCanonicalTarget` then proves
+`{targetKind,targetUid}` membership in its indexed artifact/section/aggregate
+inventory. `listDirectoryTarget` proves an allowed virtual directory mapping
+from normalized view/path/selector data. Each result carries the manifest
+digest and binding for ProjectionPort's defensive equality check. A missing or
+ambiguous mapping is fail-closed; no source-tree scan, default workspace, or
+project-only lookup is permitted on the request path.
+
+This is a virtual capsule boundary: the inventory format is private to the
+authority service, while the port contracts are stable common interfaces. Its
+delivery is **Wave 5a**. Wave 5 URI/MCP/materializer code remains non-admitted
+until Wave 5a proves branded-port rejection, workspace/worktree isolation,
+revision/snapshot/manifest binding, target-kind/UID membership, and clean
+incremental-versus-rebuild inventory parity.
+
+### 20.1 Sealed inventory and pre-authorization target proof
+
+The authority view has a non-cyclic content-addressed seal.
+`TargetInventoryManifestV1` bytes bind the pre-existing `baseSnapshotUid`,
+scope, workspace/project-or-null/worktree/revision, sorted target entries,
+sealed alias index, projection root, and inventory root. A separate
+`AuthorityManifestV1` content-addressed `snapshotUid` commits the base snapshot
+UID plus inventory root and the same scope tuple. Receipts bind this authority
+snapshot UID; base snapshots remain unchanged input identity. Authority
+recomputes inventory then authority-manifest bytes/IDs before exposing a view.
+Missing, swapped, or tampered inventory is therefore a denial, not a
+recoverable index miss.
+
+Workspace aggregates are a separate manifest scope: `projectUidOrNull=null`
+is valid only for `workspace_aggregate`, which requires and seals the complete
+`contributingProjectRoots` schema field. It is a canonical project-UID-ordered
+list of `{projectUid, baseSnapshotUid, authoritySnapshotUid,
+targetInventoryRoot}` records, committed by both inventory and authority
+manifest bytes. A missing, extra, substituted, or reordered contributor changes
+the seal and denies; the field is forbidden for project scope, which requires
+its non-null project UID. This bridges existing project-owned snapshots without
+letting a URI assert a null-project read.
+
+The precise call order is: parse; exact registry workspace/worktree lookup;
+open the receipt-named authority snapshot/revision as an *untrusted candidate*
+and verify its sealed inventory; a legacy alias yields only a canonical
+candidate, then `resolveCanonicalTarget` proves that candidate wholly inside
+the view (canonical URIs prove their target directly); derive expected receipt
+binding from the proved view/target/request; verify the receipt; render through
+ProjectionPort. Thus alias lookup is neither proof nor authorization, and
+receipt verification cannot precede target proof. `worktreeUid` is intentionally not a
+receipt field: it is transitively proved by the verified snapshot/aggregate
+tuple selected by the registry. No receipt, alias, URI, or projection adapter
+can fabricate a target before that proof.

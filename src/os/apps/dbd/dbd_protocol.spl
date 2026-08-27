@@ -25,6 +25,8 @@ pub val DBD_MAX_JOURNAL_LINE_BYTES: i64 = 512
 pub val DBD_MAX_SESSION_BYTES: i64 = 65536
 pub val DBD_MAX_REQUESTS_PER_SESSION: i64 = 64
 pub val DBD_MAX_RESPONSE_BYTES_PER_SESSION: i64 = 65536
+pub val DBD_MAX_TRANSACTION_COMMANDS: i64 = 32
+pub val DBD_MAX_TRANSACTION_BYTES: i64 = 16384
 pub val DBD_MAX_PRINCIPAL_BYTES: i64 = 64
 pub val DBD_MIN_CREDENTIAL_BYTES: i64 = 32
 pub val DBD_MAX_CREDENTIAL_BYTES: i64 = 128
@@ -48,7 +50,7 @@ val DBD_DBFS_OWNER_VERIFIED: bool = false
 
 # Advertised capabilities are intentionally conservative: features without a
 # verified implementation must remain visibly blocked.
-pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=Blocked;dbfs_adapter=DiagnosticReadOnly;live_dbfs_durability=Blocked"
+pub val DBD_CAPABILITY_STATE: text = "protocol=RESP;profile=basic;limits=bounded;journal=ChecksummedBase64V1;filesystem_launch=VerifiedArtifactSecurityGatedV1;close_owner=RetryableQuarantineV1;quit=TerminalAfterReplyV1;auth=DigestVerifierImplementedUnprovisionedV1;auth_provider=ConfiguredTokenV1;auth_framing=DbdMutableAuthRequestOwnerV1;command_framing=DbdAuthenticatedRespIngressV1;tls=Blocked;tls_record_owner=AuthenticatedV1;tls_handshake_authority=BlockedCertificatePrivateKeyEntropyOwner;transactions=BoundedDbfsAtomicExecNoWatchV1;dbfs_adapter=GenerationBoundTransactionalReplaceV1;live_dbfs_durability=ProvisioningGated"
 
 pub fn dbd_production_startup_ready() -> bool:
     """True only after real auth, TLS, and DBFS owners verify admission."""
@@ -92,11 +94,12 @@ fn _dbd_ascii_match_at(message: text, start: i64, marker: text) -> bool:
 fn _dbd_diagnostic_contains_credential(message: text) -> bool:
     var i: i64 = 0
     while i < message.len():
-        if _dbd_ascii_match_at(message, i, "AUTH ") or
+        val cond_97 = _dbd_ascii_match_at(message, i, "AUTH ") or
             _dbd_ascii_match_at(message, i, "PASSWORD=") or
             _dbd_ascii_match_at(message, i, "CREDENTIAL=") or
             _dbd_ascii_match_at(message, i, "SECRET=") or
-            _dbd_ascii_match_at(message, i, "TOKEN="):
+            _dbd_ascii_match_at(message, i, "TOKEN=")
+        if cond_97:
             return true
         i = i + 1
     false
@@ -159,8 +162,9 @@ pub class DbdPersistenceBudget:
                              journal_bytes: journal_bytes)
 
     pub fn can_append(line_bytes: i64) -> bool:
-        if not self.healthy or line_bytes <= 0 or
-            self.record_count >= DBD_MAX_JOURNAL_RECORDS:
+        val cond_164 = not self.healthy or line_bytes <= 0 or
+            self.record_count >= DBD_MAX_JOURNAL_RECORDS
+        if cond_164:
             return false
         line_bytes <= DBD_MAX_JOURNAL_BYTES - self.journal_bytes
 
@@ -169,6 +173,20 @@ pub class DbdPersistenceBudget:
             return false
         self.record_count = self.record_count + 1
         self.journal_bytes = self.journal_bytes + line_bytes
+        true
+
+    pub fn can_append_batch(record_count: i64, byte_count: i64) -> bool:
+        if not self.healthy or record_count <= 0 or byte_count <= 0:
+            return false
+        if record_count > DBD_MAX_JOURNAL_RECORDS - self.record_count:
+            return false
+        byte_count <= DBD_MAX_JOURNAL_BYTES - self.journal_bytes
+
+    pub me commit_verified_batch(record_count: i64, byte_count: i64) -> bool:
+        if not self.can_append_batch(record_count, byte_count):
+            return false
+        self.record_count = self.record_count + record_count
+        self.journal_bytes = self.journal_bytes + byte_count
         true
 
     pub me mark_unhealthy():
@@ -186,8 +204,9 @@ fn _dbd_principal_valid(principal: text) -> bool:
     true
 
 fn _dbd_principal_bytes_valid(principal: [u8]) -> bool:
-    if principal.len().to_i64() <= 0 or
-        principal.len().to_i64() > DBD_MAX_PRINCIPAL_BYTES:
+    val cond_205 = principal.len().to_i64() <= 0 or
+        principal.len().to_i64() > DBD_MAX_PRINCIPAL_BYTES
+    if cond_205:
         return false
     for byte in principal:
         if byte < 33u8 or byte > 126u8:
@@ -224,9 +243,10 @@ pub class DbdCredentialProvider:
         self.principal = ""
         self.principal_digest = DBD_UNKNOWN_PRINCIPAL_DIGEST
         self.credential_digest = DBD_UNKNOWN_CREDENTIAL_DIGEST
-        if not _dbd_principal_valid(principal) or
+        val cond_243 = not _dbd_principal_valid(principal) or
             credential.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
-            credential.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+            credential.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES
+        if cond_243:
             return false
         self.principal = principal
         self.principal_digest = sha256_text(principal)
@@ -255,8 +275,9 @@ pub class DbdAuthSession:
             closed: session_id <= 0)
 
     me begin_attempt() -> bool:
-        if self.closed or self.authenticated or
-            self.attempts >= DBD_MAX_AUTH_ATTEMPTS_PER_SESSION:
+        val cond_274 = self.closed or self.authenticated or
+            self.attempts >= DBD_MAX_AUTH_ATTEMPTS_PER_SESSION
+        if cond_274:
             return false
         self.attempts = self.attempts + 1
         true
@@ -276,8 +297,9 @@ pub class DbdAuthSession:
             provider.principal_digest, supplied_principal_digest)
         val credential_matches = _dbd_digest_equal(
             provider.credential_digest, supplied_credential_digest)
-        if provider.configured and principal_valid and
-            principal_matches and credential_matches:
+        val cond_295 = provider.configured and principal_valid and
+            principal_matches and credential_matches
+        if cond_295:
             self.authenticated = true
             self.identity = provider.principal
             self.identity_generation = self.identity_generation + 1
@@ -291,8 +313,9 @@ pub class DbdAuthSession:
     ) -> bool:
         if not self.begin_attempt():
             return false
-        if candidate.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
-            candidate.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+        val cond_310 = candidate.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
+            candidate.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES
+        if cond_310:
             return self.reject_attempt()
         val principal_valid = _dbd_principal_valid(principal)
         val supplied_principal_digest = if principal_valid:
@@ -312,8 +335,9 @@ pub class DbdAuthSession:
         """Authenticate mutable wire fields without creating secret text."""
         if not self.begin_attempt():
             return false
-        if candidate.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
-            candidate.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES:
+        val cond_331 = candidate.len().to_i64() < DBD_MIN_CREDENTIAL_BYTES or
+            candidate.len().to_i64() > DBD_MAX_CREDENTIAL_BYTES
+        if cond_331:
             return self.reject_attempt()
         val principal_valid = _dbd_principal_bytes_valid(principal)
         val supplied_principal_digest = if principal_valid:
@@ -335,9 +359,139 @@ pub class DbdAuthSession:
         self.closed = true
 
 pub fn dbd_command_is_mutating(cmd: text) -> bool:
-    """A command mutates durable state (must be journaled) iff it is SET/DEL."""
+    """True for every command the canonical Redis engine can mutate with."""
+    val u = cmd.upper()
+    u == "SET" or u == "DEL" or u == "INCR" or u == "EXPIRE" or
+        u == "FLUSHALL"
+
+pub fn dbd_command_has_durable_journal_semantics(cmd: text) -> bool:
+    """True only for mutations whose exact restart semantics are implemented."""
     val u = cmd.upper()
     u == "SET" or u == "DEL"
+
+pub fn dbd_command_terminates_session(args: [text]) -> bool:
+    """Match the canonical Redis engine's terminal QUIT command.
+
+    The hosted server closes after any parsed QUIT command, including one
+    carrying extra arguments.  The SimpleOS transport must make the same
+    lifecycle decision after sending the canonical dispatch reply; otherwise
+    commands pipelined behind QUIT execute on a connection the peer was told
+    had terminated.
+    """
+    args.len() > 0 and args[0].upper() == "QUIT"
+
+pub enum DbdTransactionQueueStatusV1:
+    Queued
+    NotActive
+    InvalidControl
+    LimitExceeded
+    DurabilityUnsupported
+
+pub class DbdTransactionOwnerV1:
+    """Bounded per-session MULTI queue; the DbdServer remains commit owner."""
+    active: bool
+    failed: bool
+    queued_command_count: i64
+    queued_bytes: i64
+    commands: [[text]]
+
+    pub static fn new() -> DbdTransactionOwnerV1:
+        DbdTransactionOwnerV1(
+            active: false, failed: false, queued_command_count: 0,
+            queued_bytes: 0, commands: [])
+
+    pub me begin(args: [text]) -> bool:
+        if self.active or args.len() != 1:
+            return false
+        self.active = true
+        self.failed = false
+        self.queued_command_count = 0
+        self.queued_bytes = 0
+        self.commands = []
+        true
+
+    pub fn is_active() -> bool:
+        self.active
+
+    pub fn is_failed() -> bool:
+        self.failed
+
+    me fail_queue():
+        # Once EXEC is guaranteed to abort, queued argument payloads have no
+        # remaining consumer. Release them immediately instead of retaining
+        # attacker-controlled text until EXEC, DISCARD, or connection close.
+        # Scalar accounting remains intact so later queue-limit replies keep
+        # the same bounded protocol behavior without copying doomed payloads.
+        self.failed = true
+        self.commands = []
+
+    pub me queue(args: [text]) -> DbdTransactionQueueStatusV1:
+        if not self.active:
+            return DbdTransactionQueueStatusV1.NotActive
+        if args.len() == 0 or args.len().to_i64() > DBD_MAX_JOURNAL_ARGS:
+            self.fail_queue()
+            return DbdTransactionQueueStatusV1.LimitExceeded
+        val command = args[0].upper()
+        val cond_427 = command == "MULTI" or command == "EXEC" or command == "DISCARD" or
+            command == "WATCH" or command == "UNWATCH" or
+            command == "AUTH" or command == "QUIT"
+        if cond_427:
+            self.fail_queue()
+            return DbdTransactionQueueStatusV1.InvalidControl
+        val cond_432 = dbd_command_is_mutating(command) and
+            not dbd_command_has_durable_journal_semantics(command)
+        if cond_432:
+            self.fail_queue()
+            return DbdTransactionQueueStatusV1.DurabilityUnsupported
+        val cond_436 = dbd_command_has_durable_journal_semantics(command) and
+            not dbd_journal_args_valid(args)
+        if cond_436:
+            self.fail_queue()
+            return DbdTransactionQueueStatusV1.DurabilityUnsupported
+        var command_bytes: i64 = 8
+        for arg in args:
+            if arg.len() > DBD_MAX_TRANSACTION_BYTES - command_bytes:
+                self.fail_queue()
+                return DbdTransactionQueueStatusV1.LimitExceeded
+            command_bytes = command_bytes + arg.len()
+        val cond_446 = self.queued_command_count >= DBD_MAX_TRANSACTION_COMMANDS or
+            command_bytes > DBD_MAX_TRANSACTION_BYTES - self.queued_bytes
+        if cond_446:
+            self.fail_queue()
+            return DbdTransactionQueueStatusV1.LimitExceeded
+        # A prior error already doomed this transaction. Preserve the normal
+        # QUEUED reply and bounded scalar accounting, but do not retain another
+        # argument graph that take_for_exec() can never dispatch.
+        if not self.failed:
+            self.commands.push(args)
+        self.queued_command_count = self.queued_command_count + 1
+        self.queued_bytes = self.queued_bytes + command_bytes
+        DbdTransactionQueueStatusV1.Queued
+
+    pub me take_for_exec() -> [[text]]:
+        if not self.active or self.failed:
+            self.clear()
+            return []
+        val owned = self.commands
+        self.active = false
+        self.failed = false
+        self.queued_command_count = 0
+        self.queued_bytes = 0
+        self.commands = []
+        owned
+
+    pub me discard() -> bool:
+        if not self.active:
+            return false
+        self.clear()
+        true
+
+    pub me clear():
+        self.active = false
+        self.failed = false
+        self.queued_command_count = 0
+        self.queued_bytes = 0
+        self.commands = []
 
 fn _dbd_journal_scalar_safe(value: text) -> bool:
     if value.len() > DBD_MAX_JOURNAL_LINE_BYTES:
@@ -354,7 +508,19 @@ pub fn dbd_journal_args_valid(args: [text]) -> bool:
     if cmd == "SET":
         args.len() == 3 and args[1].len() > 0
     elif cmd == "DEL":
-        args.len() == 2 and args[1].len() > 0
+        # Match the canonical Redis owner: DEL accepts one or more keys and
+        # returns the number removed.  Retaining the complete argument vector
+        # in one integrity-bound record makes replay atomic at the command
+        # boundary instead of forcing callers to split one wire command into
+        # several independently recoverable mutations.
+        if args.len() < 2:
+            return false
+        var key_index: u64 = 1
+        while key_index < args.len():
+            if args[key_index].len() == 0:
+                return false
+            key_index = key_index + 1u64
+        true
     else:
         false
 
@@ -368,20 +534,42 @@ pub fn dbd_encode_journal_line(args: [text]) -> text:
     """
     if not dbd_journal_args_valid(args):
         return ""
-    var body = ""
+    var body_parts: [text] = []
+    var body_bytes: i64 = 0
     for arg in args:
-        body = body + " B" + base64_encode(arg)
+        val field = " B" + base64_encode(arg)
         # Reserve the fixed ``J1 `` prefix, 64-byte SHA-256, and separator.
-        if body.len() + 68 > DBD_MAX_JOURNAL_LINE_BYTES:
+        if field.len() > DBD_MAX_JOURNAL_LINE_BYTES - 68 - body_bytes:
             return ""
+        body_parts.push(field)
+        body_bytes = body_bytes + field.len()
+    # Join once.  Multi-key DEL is bounded to DBD_MAX_JOURNAL_ARGS, but
+    # repeated immutable-text concatenation would still copy earlier fields
+    # for every key on this persistence hot path.
+    val body = body_parts.join("")
     "J1 " + sha256_text(body) + body
 
 fn _dbd_decode_j1_journal_line(line: text) -> [text]:
     var rejected: [text] = []
+    # A canonical J1 record has one separator before its digest and one before
+    # each argument.  Enforce the argument ceiling before split() allocates a
+    # field array, so a malformed delimiter-dense journal line cannot retain
+    # more parser objects than the durable command format permits.
+    var separator_count: i64 = 0
+    for ch in line:
+        if ch == ' ':
+            separator_count = separator_count + 1
+            if separator_count > DBD_MAX_JOURNAL_ARGS + 1:
+                return rejected
     val fields = line.split(" ")
     if fields.len() < 4 or fields[0] != "J1" or fields[1].len() != 64:
         return rejected
-    var body = ""
+    # The integrity body is already present verbatim after the fixed ASCII
+    # ``J1 `` prefix and 64-byte hex digest.  Hash that exact suffix once
+    # instead of allocating one prefixed copy per argument and joining all of
+    # them again on journal replay.  Keeping the leading space is required:
+    # it is part of the body signed by dbd_encode_journal_line().
+    val body = line.substring(67, line.len())
     var args: [text] = []
     var i: u64 = 2
     while i < fields.len():
@@ -394,7 +582,6 @@ fn _dbd_decode_j1_journal_line(line: text) -> [text]:
         # base64 must never be normalized into a different durable command.
         if base64_encode(decoded) != encoded:
             return rejected
-        body = body + " " + field
         args.push(decoded)
         i = i + 1
     if sha256_text(body) != fields[1] or not dbd_journal_args_valid(args):
@@ -441,15 +628,37 @@ pub class DbdEngine:
             return -1
         # Validate the complete bounded journal before applying any mutation.
         # A corrupt later record must not leave a partially reconstructed DB.
+        # Scan record boundaries in place rather than split the complete log
+        # into a second retained array of line texts.  Only the current line
+        # and the decoded commands needed for the atomic validate-then-apply
+        # contract remain live.
         var commands: [[text]] = []
-        for line in log_text.split("\n"):
-            if line.len() > 0:
-                if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
-                    return -1
-                val args = dbd_decode_journal_line(line)
-                if not dbd_journal_args_valid(args):
-                    return -1
-                commands.push(args)
+        var line_start: i64 = 0
+        var cursor: i64 = 0
+        while cursor < log_text.len():
+            if log_text.char_code_at(cursor) == 10:
+                val line = log_text.substring(line_start, cursor)
+                line_start = cursor + 1
+                # Empty records, including the terminal split artifact, have
+                # always been ignored by the replay format.
+                if line.len() > 0:
+                    if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
+                        return -1
+                    val args = dbd_decode_journal_line(line)
+                    if not dbd_journal_args_valid(args):
+                        return -1
+                    commands.push(args)
+            cursor = cursor + 1
+        # split("\n") also exposed a non-empty unterminated final record.
+        # Preserve that format behavior without materializing every line.
+        if line_start < log_text.len():
+            val line = log_text.substring(line_start, log_text.len())
+            if commands.len() >= DBD_MAX_JOURNAL_RECORDS:
+                return -1
+            val args = dbd_decode_journal_line(line)
+            if not dbd_journal_args_valid(args):
+                return -1
+            commands.push(args)
         for args in commands:
             self.engine.dispatch(args)
         commands.len().to_i64()

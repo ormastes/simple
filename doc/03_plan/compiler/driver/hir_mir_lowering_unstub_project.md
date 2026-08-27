@@ -25,7 +25,9 @@ compile-time check (e.g. the optional-field nil-access rule).
 
 1. **HIR stub** — `src/compiler/80.driver/driver.spl`, `lower_and_check_impl()`:
    - `sources.len() <= 0` branch (lines ~389–411): **real** lowering
-     (`lower_module` + `resolve_methods` + `run_const_fold_pass` + `run_effect_pass`).
+     (`lower_module` + `resolve_methods` + `run_effect_pass`). Constant folding
+     is owned by the typed MIR registry; the former semantic HIR pass walked
+     and rebuilt bodies but discarded the result, so it has been removed.
    - `sources.len() > 0` branch (lines ~412+): only `_driver_is_bootstrap_entry_source`
      gets `lowering.lower_module(...)`; every other module is built as an empty
      `HirModule(functions: {}, classes: {}, ...)` (lines ~432–449).
