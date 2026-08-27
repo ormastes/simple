@@ -96,11 +96,13 @@ it. Exact scopes are `code`, `text`, `file`, `directory_files` (immediate files)
 and `directory_recursive` (descendants).
 
 After self-review with a high-capability model at `high` effort or above, Spipe
-dispatches PR number, session, model/effort, and literal `PASS:0:0`. This is
+dispatches PR number, the reviewed `expected_head_sha`, session, model/effort,
+and literal `PASS:0:0`. This is
 explicit `self_attested` evidence, not an authenticated higher-model receipt or
-independent review. The workflow accepts no caller SHA/base/diff/ruleset. From
-its trusted default-branch definition it resolves protected target/ref/ruleset,
-author, head, base, merge-base, and changed paths, then re-resolves them before
+independent review. The expected head is only a review binding: the workflow
+independently resolves the live provider head and rejects any mismatch. It
+accepts no caller base/diff/ruleset. From its trusted default-branch definition
+it resolves protected target/ref/ruleset, author, base, merge-base, and changed paths, then re-resolves them before
 publishing a ten-minute `spipe-self-review-decision/1` check. Push, retarget,
 ruleset change, diff drift, or expiry requires a new dispatch.
 

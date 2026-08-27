@@ -20,7 +20,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 # value to capture in-process, so the pure JSON-extraction helpers
 # (_gh_field/_gh_login/_default_fields) are covered directly instead.
 
-use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields, _github_author_approval_rejected, _self_review_steps}
+use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields, _github_author_approval_rejected, _self_review_steps, _github_review_selector, _github_review_repo_args}
 use std.json.{json_parse}
 
 extern fn rt_dir_create_all(path: text) -> bool
@@ -172,6 +172,20 @@ describe "itf github (fake-binary fixture)":
             expect(code).to_equal(2)
             expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json number,author")).to_equal(true)
 
+        it "finds a selector placed after the approval flag":
+            step("Verify: finds a selector placed after the approval flag")
+            val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
+            val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "--approve", "64"])
+            expect(code).to_equal(2)
+            expect(log.contains("pr view 64 --json number,author")).to_equal(true)
+
+        it "binds a leading repository flag to the same resolution query":
+            step("Verify: binds a leading repository flag to the same resolution query")
+            val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
+            val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-R", "ormastes/simple", "-a", "64"])
+            expect(code).to_equal(2)
+            expect(log.contains("pr view 64 --repo ormastes/simple --json number,author")).to_equal(true)
+
         it "prints the same workflow after GitHub rejects author approval":
             step("Verify: prints the same workflow after GitHub rejects author approval")
             val dir = install_fake_gh(FAKE_GH_AUTHOR_REJECTION)
@@ -225,10 +239,18 @@ describe "cmd_github pure JSON-extraction helpers":
             expect(steps[3]).to_contain("P0=0")
             expect(steps[5]).to_contain("pull_request_number=42")
             expect(steps[5]).to_contain("self_attestation='PASS:0:0'")
+            expect(steps[5]).to_contain("expected_head_sha=\"$HEAD_SHA\"")
             expect(steps[6]).to_contain("$HEAD_SHA")
             expect(steps[7]).to_contain("evaluate privilege first")
             expect(steps[8]).to_contain("not GitHub provider APPROVED")
             expect(steps[9]).to_contain("spipe self-review-guide")
+
+        it "parses review selectors while skipping flags and their values":
+            step("Verify: parses review selectors while skipping flags and their values")
+            expect(_github_review_selector(["--approve", "64"])).to_equal("64")
+            expect(_github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"])).to_equal("feature/head")
+            expect(_github_review_selector(["--body", "looks good", "-a"])).to_equal("")
+            expect(_github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1]).to_equal("ormastes/simple")
 
     context "_gh_field":
 

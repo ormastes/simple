@@ -194,6 +194,7 @@ positive_fixture=scripts/check/fixtures/github-policy/review-dispatch-inputs-pos
 negative_fixture=scripts/check/fixtures/github-policy/review-dispatch-inputs-negative.yml
 positive_keys=$(workflow_dispatch_input_keys "$positive_fixture")
 [ "$positive_keys" = "pull_request_number
+expected_head_sha
 session_id" ] || fail "positive dispatch-input fixture was not bounded to inputs"
 negative_keys=$(workflow_dispatch_input_keys "$negative_fixture")
 printf '%s\n' "$negative_keys" | rg -qx 'head_sha' ||
@@ -201,6 +202,8 @@ printf '%s\n' "$negative_keys" | rg -qx 'head_sha' ||
 dispatch_keys=$(workflow_dispatch_input_keys .github/workflows/review-admission.yml)
 printf '%s\n' "$dispatch_keys" | rg -qx 'pull_request_number' ||
     fail "review dispatch does not declare pull_request_number as an input"
+printf '%s\n' "$dispatch_keys" | rg -qx 'expected_head_sha' ||
+    fail "review dispatch does not bind the completed review to an expected head SHA"
 printf '%s\n' "$dispatch_keys" | rg -qx 'session_id' ||
     fail "review dispatch does not declare session_id as an input"
 for key in reviewer_model reviewer_effort self_attestation; do
@@ -208,8 +211,10 @@ for key in reviewer_model reviewer_effort self_attestation; do
         fail "review dispatch does not carry explicit self-attestation field: $key"
 done
 if printf '%s\n' "$dispatch_keys" | rg -q '^candidate_commit_sha$|^head_sha$'; then
-    fail "review dispatch must resolve the current PR head instead of accepting a caller SHA"
+    fail "review dispatch must resolve the live PR head and compare it with expected_head_sha"
 fi
+rg -Fq 'test "$head_sha" = "$EXPECTED_HEAD_SHA"' .github/workflows/review-admission.yml ||
+    fail "review dispatch does not reject a live-head mismatch"
 rg -q 'checks: write' .github/workflows/review-admission.yml ||
     fail "self-review broker cannot publish the exact-head required check"
 rg -q 'environment: self-review-admission' .github/workflows/review-admission.yml ||

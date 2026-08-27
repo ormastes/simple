@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 29 | 29 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -301,6 +301,52 @@ expect(log.contains("pr view https://github.com/ormastes/simple/pull/42 --json n
 
 </details>
 
+#### finds a selector placed after the approval flag
+
+- Verify: finds a selector placed after the approval flag
+   - Expected: code equals `2`
+   - Expected: log contains `pr view 64 --json number,author`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: finds a selector placed after the approval flag")
+val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
+val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "--approve", "64"])
+expect(code).to_equal(2)
+expect(log.contains("pr view 64 --json number,author")).to_equal(true)
+```
+
+</details>
+
+#### binds a leading repository flag to the same resolution query
+
+- Verify: binds a leading repository flag to the same resolution query
+   - Expected: code equals `2`
+   - Expected: log contains `pr view 64 --repo ormastes/simple --json number,author`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: binds a leading repository flag to the same resolution query")
+val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
+val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "-R", "ormastes/simple", "-a", "64"])
+expect(code).to_equal(2)
+expect(log.contains("pr view 64 --repo ormastes/simple --json number,author")).to_equal(true)
+```
+
+</details>
+
 #### prints the same workflow after GitHub rejects author approval
 
 - Verify: prints the same workflow after GitHub rejects author approval
@@ -458,7 +504,7 @@ expect(_github_author_approval_rejected("ordinary validation error")).to_be(fals
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -470,10 +516,36 @@ expect(steps[2]).to_contain("high/xhigh/max/ultra")
 expect(steps[3]).to_contain("P0=0")
 expect(steps[5]).to_contain("pull_request_number=42")
 expect(steps[5]).to_contain("self_attestation='PASS:0:0'")
+expect(steps[5]).to_contain("expected_head_sha=\"$HEAD_SHA\"")
 expect(steps[6]).to_contain("$HEAD_SHA")
 expect(steps[7]).to_contain("evaluate privilege first")
 expect(steps[8]).to_contain("not GitHub provider APPROVED")
 expect(steps[9]).to_contain("spipe self-review-guide")
+```
+
+</details>
+
+#### parses review selectors while skipping flags and their values
+
+- Verify: parses review selectors while skipping flags and their values
+   - Expected: _github_review_selector(["--approve", "64"]) equals `64`
+   - Expected: _github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"]) equals `feature/head`
+   - Expected: _github_review_selector(["--body", "looks good", "-a"]) equals ``
+   - Expected: _github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1] equals `ormastes/simple`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: parses review selectors while skipping flags and their values")
+expect(_github_review_selector(["--approve", "64"])).to_equal("64")
+expect(_github_review_selector(["-R", "ormastes/simple", "-a", "feature/head"])).to_equal("feature/head")
+expect(_github_review_selector(["--body", "looks good", "-a"])).to_equal("")
+expect(_github_review_repo_args(["--repo=ormastes/simple", "-a", "64"])[1]).to_equal("ormastes/simple")
 ```
 
 </details>
@@ -633,8 +705,8 @@ expect(_default_fields("issue")).to_equal("number,title,state,author,updatedAt")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 29 |
+| Active scenarios | 29 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

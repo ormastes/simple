@@ -153,6 +153,7 @@ P0/P1 findings can request the live scoped gate instead:
 HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo ormastes/simple --json headRefOid --jq .headRefOid)
 gh workflow run review-admission.yml --repo ormastes/simple --ref main \
   -f pull_request_number="$PR_NUMBER" \
+  -f expected_head_sha="$HEAD_SHA" \
   -f session_id="$SESSION_ID" \
   -f reviewer_model="$REVIEWER_MODEL" \
   -f reviewer_effort="$REVIEWER_EFFORT" \
@@ -171,7 +172,9 @@ SPipe MCP path is different: call `spipe_self_review_privilege_evaluate`, then
 call `spipe_self_review_approve` only when evaluation allows it. Do not combine
 or reorder those paths.
 
-The trusted default-branch workflow resolves the PR head, base, merge base,
+The reviewed SHA is a binding, not authority: the trusted default-branch
+workflow independently resolves the live PR head and rejects the request if it
+does not equal `expected_head_sha`. It then resolves the base, merge base,
 diff, active protected ruleset, authorized dispatcher, and external policy
 server-side. On success it emits `SPipe Self Review Admission` on that exact
 head for ten minutes. This check is explicitly self-attested: it is neither a

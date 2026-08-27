@@ -171,7 +171,7 @@ fn _self_review_steps(pr_number: text) -> [text]:
         "2. Perform a high/xhigh/max/ultra review of exactly $HEAD_SHA.",
         "3. Record session ID, reviewer model, effort, PASS verdict, P0=0, and P1=0.",
         "4. For Simple, dispatch the protected hosted workflow once (it performs internal policy evaluation):",
-        "   gh workflow run review-admission.yml --repo ormastes/simple --ref main -f pull_request_number={pr_number} -f session_id=\"$SESSION_ID\" -f reviewer_model=\"$REVIEWER_MODEL\" -f reviewer_effort=\"$REVIEWER_EFFORT\" -f self_attestation='PASS:0:0'",
+        "   gh workflow run review-admission.yml --repo ormastes/simple --ref main -f pull_request_number={pr_number} -f expected_head_sha=\"$HEAD_SHA\" -f session_id=\"$SESSION_ID\" -f reviewer_model=\"$REVIEWER_MODEL\" -f reviewer_effort=\"$REVIEWER_EFFORT\" -f self_attestation='PASS:0:0'",
         "5. Poll SPipe Self Review Admission on that exact head: gh api \"repos/ormastes/simple/commits/$HEAD_SHA/check-runs?check_name=SPipe%20Self%20Review%20Admission\" --jq \".check_runs[] | select(.head_sha == \\\"$HEAD_SHA\\\") | [.status,.conclusion] | @tsv\"",
         "Generic SPipe MCP path is separate: evaluate privilege first, then call approve only on allow; do not combine or reorder it with Simple's hosted workflow.",
         "Status meaning: required check only — not GitHub provider APPROVED and not independent review.",
@@ -184,6 +184,38 @@ fn _print_self_review_steps(pr_number: text):
         print line
 
 
+fn _github_review_selector(args: [text]) -> text:
+    """Return the optional PR number/URL/branch regardless of review flag order."""
+    var skip_value = false
+    for arg in args:
+        if skip_value:
+            skip_value = false
+        elif arg == "-b" or arg == "--body" or arg == "-F" or arg == "--body-file" or arg == "-R" or arg == "--repo":
+            skip_value = true
+        elif arg.starts_with("--body=") or arg.starts_with("--body-file=") or arg.starts_with("--repo="):
+            pass
+        elif arg.starts_with("-R") and arg.len() > 2:
+            pass
+        elif not arg.starts_with("-"):
+            return arg
+    ""
+
+
+fn _github_review_repo_args(args: [text]) -> [text]:
+    """Normalize an inherited gh -R/--repo option for the resolution query."""
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if (arg == "-R" or arg == "--repo") and i + 1 < args.len():
+            return ["--repo", args[i + 1]]
+        if arg.starts_with("--repo=") and arg.len() > 7:
+            return ["--repo", arg[7:]]
+        if arg.starts_with("-R") and arg.len() > 2:
+            return ["--repo", arg[2:]]
+        i = i + 1
+    []
+
+
 fn _github_pr_review(args: [text]) -> i64:
     """Review a PR, redirecting forbidden same-author approval to the protected SPipe status workflow."""
     if not (_has_flag(args, "--approve") or _has_flag(args, "-a")):
@@ -192,11 +224,12 @@ fn _github_pr_review(args: [text]) -> i64:
         print_error(gh_actionable_error(""))
         return 1
 
-    val selector = if args.len() > 0 and not args[0].starts_with("-"): args[0] else: ""
+    val selector = _github_review_selector(args)
+    val repo_args = _github_review_repo_args(args)
     var view_args = ["pr", "view"]
     if selector != "":
         view_args = view_args + [selector]
-    view_args = view_args + ["--json", "number,author"]
+    view_args = view_args + repo_args + ["--json", "number,author"]
     val (author_ok, author_stdout, author_stderr) = gh_run(view_args)
     val (actor_ok, actor_stdout, _actor_stderr) = gh_run(["api", "user", "--jq", ".login"])
     val pr_obj = if author_ok: json_parse(author_stdout) else: nil
