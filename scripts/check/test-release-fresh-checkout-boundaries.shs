@@ -25,6 +25,28 @@ grep -Fq -- '--stop-after-stage2' "$workflow"
 grep -Fq -- '--target=//bootstrap:stage3' "$workflow"
 grep -Fq -- '--target=//bootstrap:stage4' "$workflow"
 test "$(grep -Fc -- '--bootstrap-receipt="$receipt"' "$workflow")" -ge 2
+grep -Fq 'RECEIPT_ARTIFACT: ${{ inputs.convergence_artifact }}' "$workflow"
+if awk '
+    function finish() {
+        if (active && templated && bytes > 9000) oversized = 1
+        active = 0; bytes = 0; templated = 0
+    }
+    {
+        indent = match($0, /[^ ]/) - 1
+        if (active && $0 !~ /^[[:space:]]*$/ && indent <= start_indent) finish()
+        if ($0 ~ /^[[:space:]]+run:[[:space:]]*\|[[:space:]]*$/) {
+            finish(); active = 1; start_indent = indent; next
+        }
+        if (active) bytes += length($0) + 1
+        if (active && $0 ~ /\$\{\{/) templated = 1
+    }
+    END { finish(); exit oversized }
+' "$workflow"; then
+    :
+else
+    echo 'candidate workflow contains a provider-oversized templated run block' >&2
+    exit 1
+fi
 grep -Fq 'fetch-depth: 0' "$checkpoint_workflow"
 
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-release-fresh.XXXXXX")
