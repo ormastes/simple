@@ -1,7 +1,7 @@
 # SPipe Knowledge Compiler Operator Guide
 
-**Status:** Waves 1–3 accepted; sealed read-only projection and metadata-lexical slices admitted; Wave 4 partial; Waves 5–11 otherwise planned
-**Date:** 2026-08-26
+**Status:** Waves 1–3 accepted; sealed read-only projection and metadata-lexical slices admitted; authority service is contract-only; Wave 4 partial; Waves 5–11 otherwise planned
+**Date:** 2026-08-27
 
 ## 0. Current capability and evidence matrix
 
@@ -20,8 +20,10 @@ operator instructions.
 | Complete-pool RRF v2 | Accepted foundation | Commit `32574ab884`; up to 3,000 declared complete, digest-bound internal candidates are reranked before the 1,000-hit public cap. Producer/search receipt binding and exposed orchestration remain open. |
 | Authority-bound exact identity | Accepted foundation | Commit `d1b601697f`; canonical UID/key/active-alias resolution over a receipt-bound authorized projection. Retrieval, graph traversal, fusion orchestration, and exposed search remain open. |
 | Pair-based reranker evidence v3 | Accepted foundation | Commit `f89b120be7`; ordered accepted-edge/receipt pairs preserve shared-receipt authority losslessly. Graph candidate generation and exposed search remain open. |
-| Projection Kernel V1 | Accepted narrow slice | Commit `6b7fc8b83f6`; strict `spipe://` URI parsing plus deterministic, cursor-bound list/read over a caller-authorized immutable inventory. It is a pure library, not MCP, a read-authorizer, a materializer, or a canonical-write path. |
+| Projection Kernel V1 | Accepted narrow slice | Commit `6b7fc8b83f6`; strict `spipe://` URI parsing plus deterministic list/read over a caller-authorized immutable inventory. Its unsigned cursor is only a local continuation; it is a pure library, not MCP, a read-authorizer, a materializer, or a canonical-write path. |
 | SnapshotLexicalSearchV1 | Accepted narrow slice | Commit `6b7fc8b83f6`; fixed-point lexical discovery over sealed identifier, title, and classification metadata. Its logical root binds workspace, snapshot, authorization-scope digest, and metadata-index root; it is not full-text search or a provider bridge. |
+| Transactional AuthorityServiceV1 | Selected contract; backend deferred | Commits `a134cb516f6` and `9655bd6fa0f` freeze the sole-mutable-owner, trust/composition, response-receipt, and fail-closed-client rules. No admitted durable quorum store, authenticated service runtime, canonical publish/open, availability, durability, linearizability, RPO/RTO, or F2 backend exists. |
+| Trace kernel | Frozen, unadmitted candidate | The candidate failed duplicate-reference validation at its review cap. It is not graph/trace admission evidence and must not be resumed by copying its source. |
 | Wave 4 provider/search integration | In progress | JSON, Unicode/analyzer, provider, DBFS, and parity candidates are rejected, blocked, or unverified unless a later accepted commit says otherwise. |
 | Virtual views/MCP 2026/refactor/rebalance/promotion/skill compiler/DB adapters | Planned | Waves 5–11; the corresponding commands in this guide are unavailable. |
 | Five system SSpecs and manuals | RED design scaffolds | Their fail-fast helpers are intentional. They are not runtime or release evidence. |
@@ -38,14 +40,16 @@ The target SPipe Knowledge Compiler turns canonical project documents, source
 metadata, and tests into a stable artifact graph, searchable indexes, and
 read-only virtual documentation views. The released Waves 2–3 currently cover
 identity, parsing, immutable snapshots/overlays, typed graph publication, and
-diagnostics as JavaScript library APIs. Search and virtual views are not yet
-released. Canonical content stays single-copy and paths are not identities.
+diagnostics as JavaScript library APIs.  No operator/CLI/MCP search or virtual
+view surface is released; the two narrow read-only library kernels below are
+admitted. Canonical content stays single-copy and paths are not identities.
 
 SPipe remains usable without Simple. The target architecture requires a
-dependency-free JavaScript search provider, but today the dependency-free
-baseline is the identity/graph library only. A later configured Simple provider
-may add faster search, compiler symbols, duplication analysis, and database
-integration without changing observable contracts.
+dependency-free JavaScript search provider. Today the dependency-free baseline
+also includes the narrow metadata lexical and immutable projection kernels, but
+not full-text/provider search, persistence, or an operator surface. A later
+configured Simple provider may add faster search, compiler symbols, duplication
+analysis, and database integration without changing observable contracts.
 
 ### 1.1 Admitted read-only kernels
 
@@ -57,16 +61,20 @@ caller may see.
 - `ProjectionKernelV1` accepts a deeply frozen inventory and a fixed workspace
   plus authorization-scope hash. It parses only canonical `spipe://` URIs and
   lists lifecycle, feature, component, layer, project, and status projections.
-  Pages are deterministically ordered, bounded to 100 entries, and their cursor
-  is bound to the workspace, snapshot, scope, view, path, page limit, and last
-  key. A read returns generated Markdown identifying one canonical artifact;
-  `write()` always rejects.
+  Pages are deterministically ordered and bounded to 100 entries. Their
+  unsigned base64url local continuation carries and equality-checks workspace,
+  snapshot, scope, view, path, page limit, and last key, but callers can alter
+  `after`; signing/integrity and authorization belong to a deferred adapter. A
+  read returns generated Markdown identifying one canonical artifact; `write()`
+  always rejects.
 - `SnapshotLexicalSearchV1` accepts only frozen metadata for UID, key, aliases,
   title, kind, status, feature, component, layer, and project. It uses the
   checked fixed-point lexical index to search identifier, title, and
-  classification fields. Its returned `logical_root` binds exactly the
+  classification fields. Its returned `logical_root` incorporates exactly the
   workspace UID, snapshot UID, authorization-scope digest, contract, and
-  metadata-index root, so a result cannot be detached from the input scope.
+  metadata-index root for caller-side binding/verification. It is not an
+  authorization/authenticity receipt, and an individual hit must not be treated
+  independently as scoped proof.
 
 They do **not** provide MCP exposure, read authorization, materialization,
 full-text bodies, provider bridging, persistence or incremental indexing,
@@ -88,6 +96,26 @@ exact durable terminal and decision bytes/digests and forbids a negative proof;
 and signed immutable negative-index proof and forbids a terminal/winner. Until
 that composition and verifier are admitted, no operator may treat a transport
 result as canonical publish/open authority.
+
+### 1.2 Authority service: selected design, no released backend
+
+`AuthorityServiceV1` is the selected F1/N1 authority model.  Its eventual
+durable decision store, not a client-side current pointer, chooses the winner
+for `publish`, `resolveAccepted`, and canonical `open`.  A client invokes the
+existing P2 commit-input selection once per publish attempt, sends its exact
+replay-envelope digest, and has no local success, filesystem, lock, CAS,
+backend-selection, or retry-publish path.  A pre-admission failure is
+`ServiceTransportFailureV1` or `CapabilityDeniedV1`; a post-admission lost
+reply is client-local `IndeterminateDeliveryV1` and is resolved only by the
+same scoped key and request digest.  `NoAdmissionV1` requires a durable quorum
+watermark and signed negative-index proof.
+
+This is an architecture/contract decision only.  Until a separately reviewed
+durable store and mutually authenticated service composition are admitted,
+canonical publish/open is unavailable and normal Node fails closed before a
+mutable decision.  F2/N2 may be used only inside the service after live,
+private certification of the pinned backend tuple; it is never a Node fallback.
+Offline search remains independent of this unavailable authority service.
 
 ## 2. Audience
 

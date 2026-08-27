@@ -3495,3 +3495,31 @@ Open/recovery has no special escape: a `G>0` durable successor whose `current`
 is absent throws/rejects `HostReplaceFatalV1(SPK704
 corrupt_successor_missing_current)`, not a no-current mismatch, and does not
 repair, publish, expose, retry, or acknowledge a terminal.
+
+---
+
+## 44. Implementation-status correction (2026-08-27)
+
+This research document remains the target architecture and dependency plan; it
+does **not** describe a complete released Knowledge Compiler. The following is
+the authoritative implementation boundary as of `e9b7762902d`:
+
+| Surface | Admitted state | Explicit exclusion |
+|---|---|---|
+| Waves 1–3 | Modularization, identity/parser/workspace/snapshot/overlay, typed graph and diagnostics foundations | No complete compiler CLI or full lifecycle trace/runtime-result graph |
+| `ProjectionKernelV1` | Commit `6b7fc8b83f6`: strict `spipe://` parse plus deterministic list/read over a caller-authorized immutable inventory | Its unsigned base64url cursor is only a local continuation; no cursor integrity/signing, MCP, authorization, snapshot opening, materialization, filesystem exposure, or canonical writing |
+| `SnapshotLexicalSearchV1` | Commit `6b7fc8b83f6`: fixed-point metadata lexical discovery bound to workspace, snapshot, authorization scope, and metadata-index root | Not full-text/body search, provider/DB bridge, persistence, incremental index, or exposed search command |
+| `AuthorityServiceV1` | F1/N1 selected contract and trust/composition prerequisite, documented by `a134cb516f6` and `9655bd6fa0f` | No admitted durable quorum backend, authenticated runtime, canonical publish/open, availability/durability/linearizability/RPO/RTO proof, or F2 backend |
+| Trace kernel | Frozen unadmitted candidate | A duplicate-reference validation defect remained after the review cap; it is not traceability evidence and must not be copied forward |
+
+The selected authority direction supersedes any earlier implication that normal
+Node filesystem locking, pointer replacement, or a client-side journal can
+become publication authority. The future authority service is the sole mutable
+owner: a Node client is fail-closed and has no local success, pointer, lock,
+CAS, provider selection, or fallback. F2/N2 is optional only as a private,
+live-certified backend behind that service. A pre-admission capability or
+transport failure creates no record; a post-admission lost response is resolved
+only with the same idempotency key and request digest. No materialized views,
+MCP resources/tools, full-text/provider search, persistence, refactoring,
+rebalancing, promotion, or skill compiler is admitted by the two read-only
+kernels.

@@ -3,6 +3,27 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## SPipe Knowledge Compiler
+
+- **Admitted narrow kernels:** commit `6b7fc8b83f6` provides pure-library
+  `ProjectionKernelV1` deterministic immutable-inventory list/read and
+  `SnapshotLexicalSearchV1` fixed-point metadata lexical discovery. The
+  projection cursor is an unsigned local continuation, not an authorization or
+  integrity token.
+- **Deferred surfaces:** no MCP/tools, materialized view, full-text/provider
+  search, persistence, incremental index, canonical refactor, or service-backed
+  publish/open is released by those kernels.
+- **Authority:** F1/N1 selects `AuthorityServiceV1` as sole future mutable
+  owner; its durable backend and authenticated runtime are not admitted. Normal
+  Node fails closed and has no filesystem/CAS/fallback authority. F2/N2 is only
+  a private certified service backend.
+- **Trace:** the trace-kernel candidate is frozen and unadmitted after its
+  duplicate-reference validation defect; never treat it as trace evidence or
+  copy it forward.
+- **Pointers:** operator status is
+  `doc/07_guide/app/spipe/spipe_knowledge_compiler.md`; target architecture and
+  pending waves are `doc/04_architecture/infra/spipe/spipe_knowledge_compiler.md`.
+
 ## Parent-authoritative actor/process transport
 
 - **Canonical owner rule:** the scheduler owns actor registry/admission/replies;
