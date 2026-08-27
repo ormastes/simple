@@ -427,9 +427,9 @@ a claim that SFFI v2 is complete.
 ## Source-only SFFI inventory refresh (2026-08-27)
 
 - `SFFI_SOURCE_ONLY=1 rt-safety-census.shs` found 11,106 declaration rows and
-  2,966 distinct symbols. It classifies 3,153 rows (2,070 symbols) as tagged
-  unsafe, 935 rows as unsafe with a documented contract, and 7,713 rows
-  (1,351 symbols) as untouched.
+  2,966 distinct symbols. It classifies 3,193 rows (2,093 symbols) as tagged
+  unsafe, 935 rows as unsafe with a documented contract, and 7,673 rows
+  (1,322 symbols) as untouched.
 - Implementation definitions observed by language: C 2,378 rows/1,889 symbols
   in 91 files; C++ 219/219 in one file; Rust 2,145/2,122 in 172 files; Simple
   637/623 in 62 files. These are implementation observations, not ABI proof.
@@ -471,8 +471,8 @@ a claim that SFFI v2 is complete.
 ## Follow-up: source-only unsafe-minimization census (2026-08-27)
 
 - PASS (tooling): source-only mode now performs one linear source scan for raw
-  calls inside lexical FFI capability blocks. It reports 1,873 observed calls
-  across 1,064 symbols and labels the result
+  calls inside lexical FFI capability blocks. It reports 1,880 observed calls
+  across 1,069 symbols and labels the result
   `source_lexical_estimate_only`.
 - PASS (performance shape): the measurement is build/audit-time only; it adds
   no runtime call-path allocation, lookup, lock, copy, branch, or dispatch.
