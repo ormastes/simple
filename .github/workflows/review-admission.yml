@@ -7,6 +7,10 @@ on:
         description: Pull request number; all provider state is resolved server-side
         required: true
         type: number
+      expected_head_sha:
+        description: Exact PR head SHA that received the completed high-effort review
+        required: true
+        type: string
       session_id:
         description: Exact audited SPipe development session identifier
         required: true
@@ -156,6 +160,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pull_request_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
           SESSION_ID: ${{ inputs.session_id }}
           REVIEWER_MODEL: ${{ inputs.reviewer_model }}
           REVIEWER_EFFORT: ${{ inputs.reviewer_effort }}
@@ -197,6 +202,7 @@ jobs:
           trap finish_check EXIT
 
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$SESSION_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$ ]]
           [[ "$REVIEWER_MODEL" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]
           [[ "$REVIEWER_EFFORT" =~ ^(high|xhigh|max|ultra)$ ]]
@@ -223,6 +229,11 @@ jobs:
           resolve_pr() { gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"; }
           provider_pr=$(resolve_pr)
           head_sha=$(jq -er '.head.sha' <<<"$provider_pr")
+          failure_stage='reviewed head SHA is no longer the live PR head'
+          if [[ "$head_sha" != "$EXPECTED_HEAD_SHA" ]]; then
+            echo "self-review admission: expected reviewed head $EXPECTED_HEAD_SHA but live PR head is $head_sha; review the live head and dispatch again" >&2
+            exit 1
+          fi
           base_sha=$(jq -er '.base.sha' <<<"$provider_pr")
           base_ref_name=$(jq -er '.base.ref' <<<"$provider_pr")
           base_ref="refs/heads/$base_ref_name"
@@ -279,6 +290,7 @@ jobs:
           failure_stage='provider head/base/diff/ruleset revalidation failed'
           current_pr=$(resolve_pr)
           test "$(jq -er '.head.sha' <<<"$current_pr")" = "$head_sha"
+          test "$head_sha" = "$EXPECTED_HEAD_SHA"
           test "$(jq -er '.base.sha' <<<"$current_pr")" = "$base_sha"
           test "refs/heads/$(jq -er '.base.ref' <<<"$current_pr")" = "$base_ref"
           test "$(resolve_ruleset)" = "$target_ruleset_id"

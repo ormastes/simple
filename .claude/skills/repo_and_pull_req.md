@@ -5,6 +5,12 @@ description: GitHub and Jira/Confluence integration — setup, push, wiki, and a
 
 # Repo & Pull Request Skill — Dispatcher
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For `self approve`, `approve PR`, or a same-author GitHub rejection, run
+`spipe self-review-guide`. The supported action is `SPipe Self Review
+Admission` on the exact reviewed head, never provider `APPROVED`.
+
 Unified skill for GitHub, Bitbucket, and Jira/Confluence operations:
 setup, push, wiki, and PR review (with 3-level review state machine).
 

@@ -901,6 +901,13 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## Protected GitHub PR handoff
 
+Search aliases: `self approve`, `approve PR`, and `author cannot approve` all
+mean: run `spipe self-review-guide` (or
+`node .spipe/spipe/cli/spipe.js self-review-guide`). GitHub forbids author
+`APPROVED`; the supported action is the distinct `SPipe Self Review Admission`
+required status. The guide prints one copy/paste dispatch and the exact-head
+poll/remediation steps.
+
 When branch protection requires a pull request, push the reviewed branch and
 open or update its PR rather than pushing directly to `main`. Record whether it
 is `unverified`, `REVIEW_REQUIRED`, `awaiting-self-review-admission`,

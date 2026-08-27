@@ -26,6 +26,8 @@ Use `simple release version-check|beta-prepare|backport-check|candidate-check|pr
 
 For protected PR integration, explicitly self-attest high-capability/high-effort PASS with zero P0/P1, then dispatch `SPipe Self Review Admission`. GitHub forbids PR authors from submitting an `APPROVED` review on their own PR; this is a required status check, not provider or independent approval. Ordinary code/text is default allow absent an external operator deny/constrain, using `code`, `text`, exact `file`, immediate `directory_files`, and descendant `directory_recursive` scopes. The trusted default-branch workflow resolves/re-resolves protected target/ruleset, head, base, merge-base, and diff before a ten-minute result. If rejected or invalidated, follow the reason: state drift/expiry needs a fresh exact-head review and dispatch; deny needs policy-owner action or an eligible independent route; uncovered scope needs a smaller diff or new constraint; unsafe/secret material must be removed and any credential rotated. Never use author `APPROVED`, a stale check, or weaker candidate/release/publication authority as remediation. The generic Actions App is not an independent security boundary. Candidate admission accepts only `spipe-review-admission/1`; keep release-environment approval separate.
 
+For `self approve`, `approve PR`, or `author cannot approve`, run `spipe self-review-guide`; this is the canonical exact-head status workflow, not provider `APPROVED`.
+
 For the repository mutation boundary, use
 `scripts/release/converge-reviewed-fix.shs` with one exact commit and its bound
 `spipe-review-receipt/1`. It fetches both remote heads before creating the

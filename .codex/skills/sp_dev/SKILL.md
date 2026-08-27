@@ -62,6 +62,14 @@ first, then run focused verification evidence once.
 
 ## Protected PR self-review handoff
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+If the user or an agent says `self approve`, `approve PR`, or `author cannot
+approve`, run `spipe self-review-guide` (or
+`node .spipe/spipe/cli/spipe.js self-review-guide`) and follow its exact-head
+review, protected dispatch, and exact-head poll. This is the canonical
+discovery entry point.
+
 When a lane reaches protected PR integration, tell the operator and future LLM
 that GitHub forbids a PR author from submitting an `APPROVED` review on their
 own PR. `SPipe Self Review Admission` is a short-lived required status check,
