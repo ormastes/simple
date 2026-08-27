@@ -331,3 +331,15 @@ passing placeholder.
     dynamic operations only after provider-specific ABI/ownership contracts are
     frozen; do not bulk-tag their large surfaces or claim source census as
     signed verification.
+60. Keep all 61 calls in the dynamic Torch facade inside minimal lexical
+    `unsafe(ffi)` expressions. The availability wrapper is always-inline and
+    each typed constructor/result wrapper retains one direct provider call,
+    nonpositive-handle rejection, and no explicit allocation, copy, lookup,
+    lock, or loop. This is containment only: legacy fixed-dimension ABI,
+    ownership, provider artifact identity, and verification receipts remain
+    incomplete, so the provider remains unsafe and unsigned.
+61. The refreshed live-backing source census has 11,113 declaration rows,
+    3,123 unsafe-tagged rows, 922 unsafe rows with a documented contract, and
+    7,750 untouched rows. It has zero verified-and-signed rows. Use these
+    scoped census values for progress reporting; they are not a substitute for
+    ABI, ownership, artifact, signature, or semantic verification evidence.
