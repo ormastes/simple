@@ -1,6 +1,6 @@
-# Rule Coverage Specification
+# rule_coverage_spec
 
-> Tests covering SSpec maintenance rule coverage.
+> Purpose and audience: executable specification evidence for the sspec-maintain
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,29 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Rule Coverage Specification
+# rule_coverage_spec
+
+Purpose and audience: executable specification evidence for the sspec-maintain
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/sspec_maintain/rule_coverage_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose and audience: executable specification evidence for the sspec-maintain
+rule-catalog owners. Scope: every stable SSDOC rule must be witnessed by at
+least one executable finding here, and professional fixture pairs must stay
+free of false positives. Audience: maintainers of the sspec-maintain scorer.
+
+research: doc/01_research/domain/sspec_documentization_maintenance.md
+plan: doc/03_plan/sspec_modernization_plan.md
+architecture: doc/04_architecture/sspec_documentization_maintenance.md
+design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 
 ## Scenarios
 
@@ -124,7 +146,7 @@ expect(_rule_ids(report).contains("SSDOC-MNT-002")).to_be(false)
    - Expected: ordered.findings[0].rule_id equals `SSDOC-BEH-001`
    - Expected: ordered.findings[1].rule_id equals `SSDOC-NAR-001`
    - Expected: ordered.findings[2].line equals `3`
-   - Expected: ordered.findings[3].path equals `test/z_spec.spl`
+   - Expected: ordered.findings[3].path equals `z_spec.spl`
 
 
 <details>
@@ -149,7 +171,7 @@ val ordered = append_sspec_findings(base, [
 expect(ordered.findings[0].rule_id).to_equal("SSDOC-BEH-001")
 expect(ordered.findings[1].rule_id).to_equal("SSDOC-NAR-001")
 expect(ordered.findings[2].line).to_equal(3)
-expect(ordered.findings[3].path).to_equal("test/z_spec.spl")
+expect(ordered.findings[3].path).to_equal("z_spec.spl")
 ```
 
 </details>
@@ -181,21 +203,6 @@ expect(spaced.fingerprint).to_equal(compact.fingerprint)
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/01_unit/app/sspec_maintain/rule_coverage_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering SSpec maintenance rule coverage.
-- SSpec maintenance rule coverage
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -224,45 +231,45 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `475ed364c566ae08917955fb8a1d85f14424e57b4aadd42bff10cb326d9501bf`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `320517547b93e15d5f21cdef9d2fe5053ee6489ddec9227fe16f6f266367f375`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `475ed364c566ae08917955fb8a1d85f14424e57b4aadd42bff10cb326d9501bf`.
+Source SHA-256: `320517547b93e15d5f21cdef9d2fe5053ee6489ddec9227fe16f6f266367f375`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `475ed364c566ae08917955fb8a1d85f14424e57b4aadd42bff10cb326d9501bf`  
+Source SHA-256: `320517547b93e15d5f21cdef9d2fe5053ee6489ddec9227fe16f6f266367f375`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
 
 SSpec documentization score: 87/100
-source: test/01_unit/app/sspec_maintain/rule_coverage_spec.spl
+source: 01_unit/app/sspec_maintain/rule_coverage_spec.spl
 mirror: doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md (current)
 findings: 7 blockers: 0
   narrative=80 structure=100 oracle=80
   traceability=100 evidence=100 coverage=100 maintainability=40
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: warning SSDOC-MNT-004 [maintainability] (-10): internal execution tags can leak into reader-facing output
+  why: Reader manuals should expose outcomes, not harness routing.
+  improve: Hide harness routing metadata from the user manual.
+01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: advice SSDOC-MNT-006 [maintainability] (-10): repeated setup is not expressed through a named helper
+  why: Named setup helpers keep scenarios concise and consistent.
+  improve: Extract a domain-named setup helper shared by the scenarios.
+01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: warning SSDOC-NAR-002 [narrative] (-20): generic placeholder narrative remains
+  why: Generated filler is not specification content.
+  improve: Replace generated filler with source-evidenced prose.
+01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
 doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: warning SSDOC-MNT-004 [maintainability] (-10): internal execution tags are visible in the generated manual
   why: Reader manuals should expose outcomes, not harness routing.
   improve: Adjust docgen visibility metadata and regenerate.
 doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/01_unit/app/sspec_maintain/rule_coverage_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: warning SSDOC-MNT-004 [maintainability] (-10): internal execution tags can leak into reader-facing output
-  why: Reader manuals should expose outcomes, not harness routing.
-  improve: Hide harness routing metadata from the user manual.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: advice SSDOC-MNT-006 [maintainability] (-10): repeated setup is not expressed through a named helper
-  why: Named setup helpers keep scenarios concise and consistent.
-  improve: Extract a domain-named setup helper shared by the scenarios.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: warning SSDOC-NAR-002 [narrative] (-20): generic placeholder narrative remains
-  why: Generated filler is not specification content.
-  improve: Replace generated filler with source-evidenced prose.
-test/01_unit/app/sspec_maintain/rule_coverage_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
 <!-- sspec-maintain:scorecard:end -->
