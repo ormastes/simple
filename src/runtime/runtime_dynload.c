@@ -286,6 +286,8 @@ int64_t rt_gpu_provider_unload(int64_t backend_bit) {
     ret name(t1 a1, t2 a2) { typedef ret (*Fn)(t1,t2); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1,a2) : unavailable; }
 #define GPU_CALL3(ret, name, bit, provider_name, unavailable, t1, t2, t3) \
     ret name(t1 a1, t2 a2, t3 a3) { typedef ret (*Fn)(t1,t2,t3); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1,a2,a3) : unavailable; }
+#define GPU_CALL4(ret, name, bit, provider_name, unavailable, t1, t2, t3, t4) \
+    ret name(t1 a1, t2 a2, t3 a3, t4 a4) { typedef ret (*Fn)(t1,t2,t3,t4); Fn fn = (Fn)simple_gpu_provider_symbol(bit, provider_name); return fn ? fn(a1,a2,a3,a4) : unavailable; }
 
 GPU_CALL0(int64_t, rt_cuda_available, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_provider_available", 0)
 GPU_CALL0(int64_t, rt_cuda_device_count, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_provider_device_count", 0)
@@ -293,6 +295,41 @@ GPU_CALL0(int64_t, rt_cuda_init, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_init", 3)
 GPU_CALL1(int64_t, rt_cuda_mem_alloc, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_mem_alloc", -3, int64_t)
 GPU_CALL3(int64_t, rt_cuda_memset_d32, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memset_d32", -3, int64_t, int64_t, int64_t)
 GPU_CALL3(int64_t, rt_cuda_memcpy_dtoh, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtoh", -3, int64_t, int64_t, int64_t)
+
+/* E2 (streams/events/async copies/extended launch): forwarded to the CUDA
+ * provider by the exact same symbol names the Simple-facing externs use
+ * (`src/lib/nogc_sync_mut/cuda/sffi.spl`) and matching the Rust runtime's
+ * ABI 1:1 (`src/compiler_rust/runtime/src/cuda_runtime.rs`). Unavailable
+ * sentinels mirror the Rust `#[cfg(not(feature = "cuda"))]` twins exactly
+ * (-3 for int64_t returns, -3.0 for the f64 elapsed-time return) so a
+ * missing/incompatible provider fails the same way on both lanes instead
+ * of lying with a fabricated success value. */
+GPU_CALL1(int64_t, rt_cuda_stream_create, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_stream_create", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_stream_destroy, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_stream_destroy", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_stream_synchronize, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_stream_synchronize", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_event_create, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_event_create", -3, int64_t)
+GPU_CALL1(int64_t, rt_cuda_event_destroy, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_event_destroy", -3, int64_t)
+GPU_CALL2(int64_t, rt_cuda_event_record, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_event_record", -3, int64_t, int64_t)
+GPU_CALL1(int64_t, rt_cuda_event_synchronize, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_event_synchronize", -3, int64_t)
+GPU_CALL2(double, rt_cuda_event_elapsed_ms, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_event_elapsed_ms", -3.0, int64_t, int64_t)
+GPU_CALL4(int64_t, rt_cuda_memcpy_htod_async, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_htod_async", -3, int64_t, int64_t, int64_t, int64_t)
+GPU_CALL4(int64_t, rt_cuda_memcpy_dtoh_async, SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_memcpy_dtoh_async", -3, int64_t, int64_t, int64_t, int64_t)
+
+/* 12 C-ABI params (module, (func_name_ptr, func_name_len) for the Simple
+ * `text` arg, then grid/block/shared_bytes/stream/args_ptr) matching
+ * rt_cuda_launch_kernel_ex's Rust signature exactly — too wide for the
+ * GPU_CALLn macros above, so written out directly. */
+int64_t rt_cuda_launch_kernel_ex(int64_t module, const uint8_t *func_name_ptr, uint64_t func_name_len,
+                                  int64_t grid_x, int64_t grid_y, int64_t grid_z,
+                                  int64_t block_x, int64_t block_y, int64_t block_z,
+                                  int64_t shared_bytes, int64_t stream, int64_t args_ptr) {
+    typedef int64_t (*Fn)(int64_t, const uint8_t *, uint64_t, int64_t, int64_t, int64_t,
+                           int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    Fn fn = (Fn)simple_gpu_provider_symbol(SIMPLE_GPU_BACKEND_CUDA, "rt_cuda_launch_kernel_ex");
+    return fn ? fn(module, func_name_ptr, func_name_len, grid_x, grid_y, grid_z,
+                   block_x, block_y, block_z, shared_bytes, stream, args_ptr)
+              : -3;
+}
 
 GPU_CALL0(int64_t, rt_vulkan_is_available, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_provider_is_available", 0)
 GPU_CALL0(int64_t, rt_vulkan_device_count, SIMPLE_GPU_BACKEND_VULKAN, "rt_vulkan_provider_device_count", 0)
