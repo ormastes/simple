@@ -141,6 +141,7 @@ fn parse_child_run(args: [text]) -> ChildRun:
     var path = ""
     var timeout_secs = 120
     var list_only = false
+    var extra_paths: [text] = []
     var i = 0
     while i < args.len():
         val arg = args[i]
@@ -156,9 +157,23 @@ fn parse_child_run(args: [text]) -> ChildRun:
             list_only = true
             i = i + 1
             continue
-        if not arg.starts_with("-") and path == "":
-            path = arg
+        if not arg.starts_with("-"):
+            if path == "":
+                path = arg
+            else:
+                # BUG FIX (test_runner_single_lane_drops_extra_paths): this lane
+                # is single-file BY DESIGN, but it used to keep only the FIRST
+                # positional path and DISCARD the rest in silence. `bin/simple
+                # test --no-session-daemon a_spec.spl b_spec.spl` therefore ran
+                # only `a`, printed only `a`'s verdict, and exited 0 even when
+                # `b` was a genuinely FAILING spec (or did not exist at all) —
+                # a silent false green for every file after the first. Fail
+                # closed instead: a run that cannot execute everything it was
+                # asked to execute must never report success.
+                extra_paths.push(arg)
         i = i + 1
+    if extra_paths.len() > 0:
+        return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "single-file lane accepts exactly one test file; refusing to silently drop " + extra_paths.len().to_string() + " more (" + extra_paths.join(", ") + ") — drop --no-session-daemon to run multiple files")
     if path == "":
         return ChildRun(path: "", timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing test file")
     if not path.ends_with(".spl"):
