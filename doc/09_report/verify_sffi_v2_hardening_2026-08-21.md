@@ -613,3 +613,15 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the raw provider has no artifact-bound ABI,
   ownership, verification, or trusted-signature evidence. It remains unsafe
   until the collection API can propagate typed errors.
+
+## Follow-up: dashboard scheduler file-read migration (2026-08-27)
+
+- PASS (static/source): the scheduler no longer declares/calls raw
+  `rt_file_read_text`; its internal list operation is `Result`-typed through
+  `read_file_text_result`.
+- PASS (semantics/performance shape): cancel and tick stop without mutation or
+  task dispatch on an unreadable persisted task. Normal operation retains one
+  read per task file with no retry, extra I/O, copy, lookup, lock, or duplicate
+  task dispatch. No runtime benchmark was run.
+- FAIL (global admission): the canonical file-read provider remains outside
+  artifact-bound ABI/ownership verification and trusted-signature admission.

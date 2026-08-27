@@ -476,3 +476,7 @@ passing placeholder.
     collection results can carry typed I/O failure. Do not turn unreadable
     schedule or lock files into absent tasks; preserve two lexical direct reads
     with no retry, extra I/O, copy, lookup, lock, or task fabrication.
+89. Keep the dashboard scheduler's task-list API result-typed. An unreadable
+    persisted task must stop cancel/tick processing rather than fabricate an
+    absent task; normal scheduling preserves one read per task file and no
+    retries, extra I/O, copies, lookup, locks, or duplicate task dispatch.
