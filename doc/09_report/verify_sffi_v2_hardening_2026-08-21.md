@@ -625,3 +625,15 @@ a claim that SFFI v2 is complete.
   task dispatch. No runtime benchmark was run.
 - FAIL (global admission): the canonical file-read provider remains outside
   artifact-bound ABI/ownership verification and trusted-signature admission.
+
+## Follow-up: persisted play-session read containment (2026-08-27)
+
+- PASS (static/source): the session-store's raw text declaration and its two
+  direct reads are explicitly unsafe/lexical.
+- PASS (semantics/performance shape): no unreadable session is fabricated as
+  `None` or an empty session by this change. Existing direct calls remain with
+  no retry, extra I/O, copy, lookup, lock, or session fabrication. No runtime
+  benchmark was run.
+- FAIL (global admission): this raw text provider lacks artifact-bound ABI,
+  ownership, verification, and trusted-signature evidence. A future `Result`
+  API migration is required to distinguish I/O failure from session absence.

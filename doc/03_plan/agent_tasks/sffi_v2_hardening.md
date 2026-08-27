@@ -480,3 +480,7 @@ passing placeholder.
     persisted task must stop cancel/tick processing rather than fabricate an
     absent task; normal scheduling preserves one read per task file and no
     retries, extra I/O, copies, lookup, locks, or duplicate task dispatch.
+90. Keep persisted play-session reads explicitly unsafe while the public load
+    API returns `Option` and cannot distinguish I/O failure from absence. Do
+    not fabricate `None` or empty sessions; preserve two lexical direct reads
+    with no retry, extra I/O, copy, lookup, lock, or session fabrication.
