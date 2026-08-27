@@ -201,16 +201,23 @@ explicitly dispatch `authority_class=owner_attested_actions` from trusted
 `main`, with `NO-VERIFY:OWNER-PROOF`. The dedicated
 `owner-convergence-admission` environment requires owner ID `2378857` and has
 `prevent_self_review=false`; protected-integration, release, and npm-release
-remain unchanged. The ten-minute receipt says `verification_performed=false`
-and `github_pr_approval_claimed=false`, retains the verifier-unavailability
-proof, and binds the exact run, workflow source commit/blob, live policy,
-rulesets, environment, PR/parents, candidate, manifest, forward ports, and
-required checks. Candidate admission fetches the exact run/artifact/digest and
-verifies its GitHub attestation against the trusted main workflow/ref while
-denying self-hosted runners. Candidate content is fetched as data and never
-executed. Same author/merger is accepted only in this fallback; normal external
-broker admission retains the inequality. This is not an admin bypass,
-self-review, or permission to omit checks.
+remain unchanged. The eight-hour receipt is sized for queueing plus the full
+Stage 2/3/4 candidate qualification, says `verification_performed=false` and
+`github_pr_approval_claimed=false`, retains the verifier-unavailability proof,
+and binds the exact run, workflow source commit/blob, live policy, rulesets,
+environment, PR/parents, candidate, manifest, forward ports, and required
+checks. Candidate admission fetches the exact run/artifact/digest and verifies
+its GitHub attestation with `--signer-workflow`, signer digest, source ref, and
+self-hosted runners denied; it separately inspects the authenticated certificate
+identity fields because `--signer-workflow` and `--cert-identity` are mutually
+exclusive GitHub CLI selectors. Immediately before the pure admission decision,
+the candidate re-resolves live main, release, and candidate refs, revalidates
+the environment/ruleset/config projection and trusted workflow, and rechecks
+expiry. The longer queue allowance therefore does not survive any protected
+state drift. Candidate content is fetched as data and never executed. Same
+author/merger is accepted only in this fallback; normal external broker
+admission retains the inequality. This is not an admin bypass, self-review, or
+permission to omit checks.
 
 This candidate/release receipt is distinct from PR `SPipe Self Review
 Admission`. GitHub rulesets cannot natively express conditional model review

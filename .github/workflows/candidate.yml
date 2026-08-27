@@ -232,10 +232,17 @@ jobs:
               gh attestation verify "$subject" --repo "$GITHUB_REPOSITORY" \
                 --signer-workflow ormastes/simple/.github/workflows/pr-admission.yml \
                 --signer-digest "$run_head" --source-ref refs/heads/main \
-                --cert-identity "$cert_identity" --deny-self-hosted-runners \
+                --deny-self-hosted-runners \
                 --format json > build/convergence-receipt/attestation-verification.json
-              jq -e --arg identity "$cert_identity" \
-                'length > 0 and all(.[]; (.verificationResult.signature.certificate|tostring|contains($identity)))' \
+              jq -e --arg identity "$cert_identity" --arg digest "$run_head" \
+                'length > 0 and all(.[];
+                  .verificationResult.signature.certificate as $certificate |
+                  $certificate.subjectAlternativeName == $identity and
+                  $certificate.buildSignerURI == $identity and
+                  $certificate.buildSignerDigest == $digest and
+                  $certificate.runnerEnvironment == "github-hosted" and
+                  $certificate.sourceRepositoryURI == "https://github.com/ormastes/simple" and
+                  $certificate.sourceRepositoryRef == "refs/heads/main")' \
                 build/convergence-receipt/attestation-verification.json >/dev/null
             else
               test "$authority_class" = external_broker
@@ -420,7 +427,7 @@ jobs:
               .external_broker_available == false and
               .owner_attestation == "NO-VERIFY:OWNER-PROOF" and
               .attestor == {type:"User",id:2378857} and
-              ((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 600 and
+              ((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 28800 and
               (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
             run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
             for binding in \
@@ -460,7 +467,9 @@ jobs:
         env:
           VERSION: ${{ steps.freeze.outputs.version }}
           COMMIT: ${{ steps.freeze.outputs.commit }}
+          CANDIDATE_REF: ${{ steps.identity.outputs.candidate_ref }}
           EXPECTED_RECEIPT_SHA256: ${{ inputs.convergence_receipt_sha256 }}
+          GH_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           receipt=build/convergence-receipt/convergence-receipt.json
@@ -672,6 +681,28 @@ jobs:
           done < <(jq -cS '.[]' build/convergence-receipt/forward-port-evidence.json)
 
           csv() { jq -r "$1 | join(\",\")" "$receipt"; }
+
+          # The fallback proof may wait behind the full Stage 2/3/4 build, but
+          # it cannot survive protected-state drift. Re-resolve every mutable
+          # authority immediately before the pure admission decision.
+          live_main=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq .object.sha)
+          live_release=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${release_ref}" --jq .object.sha)
+          live_candidate=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${CANDIDATE_REF}" --jq .object.sha)
+          test "$live_main" = "$main_sha"
+          test "$live_release" = "$release_sha"
+          test "$live_candidate" = "$COMMIT"
+          scripts/release/github-policy.shs verify-live "$GITHUB_REPOSITORY"
+          authority_class=$(jq -er '.authority_class' "$receipt")
+          if test "$authority_class" = owner_attested_actions; then
+            proof=build/convergence-receipt/verifier-unavailability-proof.json
+            jq -e '((.expires_at|fromdateiso8601)-(.issued_at|fromdateiso8601)) <= 28800 and
+              (.expires_at|fromdateiso8601) > now' "$proof" >/dev/null
+            run_head=$(jq -er '.workflow.run_head_sha' build/convergence-receipt/review-evidence.json)
+            test "$run_head" = "$live_main"
+          else
+            test "$authority_class" = external_broker
+          fi
+
           runtime=bin/release/x86_64-unknown-linux-gnu/simple
           SIMPLE_LIB="$PWD/src" "$runtime" run src/app/release/main.spl \
             convergence-admission --json --graph-independent \

@@ -239,7 +239,9 @@ MOCK_ROOT="$root" policy="$root/scripts/release/github-policy.shs"
 
 issued=$(date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
 expires=$(date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
-fallback_expires=$(date -u -d '9 minutes' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_issued=$(date -u -d '20 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_expires=$(date -u -d '7 hours' '+%Y-%m-%dT%H:%M:%SZ')
+fallback_overlong_expires=$(date -u -d '8 hours 1 minute' '+%Y-%m-%dT%H:%M:%SZ')
 required='[{"context":"Code Idiom & Structural Ratchet Gates","integration_id":15368},{"context":"SPipe Self Review Admission","integration_id":15368}]'
 jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
   --argjson required "$required" '
@@ -253,7 +255,7 @@ jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$expires" \
 "$policy" verify-review "$tmp/independent.json" feature/release-hardening "$repo" \
   >"$tmp/review.out"
 
-jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$fallback_expires" \
+jq -cnS --arg repo "$repo" --arg issued "$fallback_issued" --arg expires "$fallback_expires" \
   --argjson required "$required" '
   {schema:"spipe-review-admission/1",mode:"owner_attested_fallback",
    repository:$repo,pull_request_number:28,session_id:"feature/release-hardening",
@@ -264,6 +266,10 @@ jq -cnS --arg repo "$repo" --arg issued "$issued" --arg expires "$fallback_expir
    unavailable_verifier_receipt_sha256:("d"*64)}' >"$tmp/fallback.json"
 "$policy" verify-review "$tmp/fallback.json" feature/release-hardening "$repo" \
   >"$tmp/fallback.out"
+jq --arg issued "$issued" --arg expires "$fallback_overlong_expires" \
+  '.issued_at=$issued | .expires_at=$expires' "$tmp/fallback.json" >"$tmp/overlong-fallback.json"
+expect_fail "invalid closed spipe-review-admission/1 receipt" \
+  "$policy" verify-review "$tmp/overlong-fallback.json" feature/release-hardening "$repo"
 jq '.reason="owner chose to bypass review"' "$tmp/fallback.json" >"$tmp/bad-fallback.json"
 expect_fail "invalid closed spipe-review-admission/1 receipt" \
   "$policy" verify-review "$tmp/bad-fallback.json" feature/release-hardening "$repo"

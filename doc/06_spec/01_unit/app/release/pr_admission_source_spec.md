@@ -44,7 +44,7 @@ expect(admission).to_contain("else .user.login != .merged_by.login end")
 expect(admission).to_contain("verification_performed:false")
 expect(admission).to_contain("github_pr_approval_claimed:false")
 expect(admission).to_contain("verifier-unavailability-proof.json")
-expect(admission).to_contain("expires_at=$(date -u -d '+10 minutes'")
+expect(admission).to_contain("expires_at=$(date -u -d '+8 hours'")
 expect(admission).to_contain("required_status_checks")
 expect(admission).to_contain(".name == $check.context")
 expect(admission).to_contain(".app.id == $check.integration_id")
@@ -90,7 +90,7 @@ expect(admission.contains("inputs.forward_port_receipt_sha256s")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -102,10 +102,17 @@ expect(candidate).to_contain("sha256sum build/convergence-receipt/check-evidence
 expect(candidate).to_contain("artifact-ids:")
 expect(candidate).to_contain(".digest == $digest and .expired == false")
 expect(candidate).to_contain("--signer-workflow")
+expect(candidate.contains("--cert-identity")).to_be(false)
 expect(candidate).to_contain("--signer-digest \"$run_head\"")
 expect(candidate).to_contain("--source-ref refs/heads/main")
 expect(candidate).to_contain("--deny-self-hosted-runners")
 expect(candidate).to_contain("verificationResult.signature.certificate")
+expect(candidate).to_contain("$certificate.subjectAlternativeName == $identity")
+expect(candidate).to_contain("$certificate.buildSignerURI == $identity")
+expect(candidate).to_contain("$certificate.runnerEnvironment == \"github-hosted\"")
+expect(candidate).to_contain("live_candidate=$(gh api")
+expect(candidate).to_contain("scripts/release/github-policy.shs verify-live")
+expect(candidate).to_contain("<= 28800")
 expect(candidate).to_contain(".verification_performed == false and .github_pr_approval_claimed == false")
 expect(candidate).to_contain(".user.id == 2378857 and .merged_by.id == 2378857")
 expect(candidate).to_contain("reviewed-convergence-manifest.actual")

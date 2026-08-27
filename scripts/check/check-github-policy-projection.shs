@@ -57,7 +57,7 @@ jq -e '
     environment_projection:".github/owner-convergence-admission-environment.json",
     authorized_actor:{type:"User",id:2378857},
     owner_attestation:"NO-VERIFY:OWNER-PROOF",verification_performed:false,
-    github_pr_approval_claimed:false,ttl_seconds:600,
+    github_pr_approval_claimed:false,ttl_seconds:28800,
     external_broker_must_be_unavailable:true,candidate_content_is_data_only:true} and
   .privileged_self_review.schema == "spipe-self-review-decision/1" and
   .privileged_self_review.configured == true and
@@ -274,6 +274,29 @@ for token in \
   'verificationResult.signature.certificate'; do
     rg -Fq -- "$token" "$candidate_workflow" || fail "candidate fallback consumer misses: $token"
 done
+if rg -Fq -- '--cert-identity' "$candidate_workflow"; then
+    fail "candidate combines mutually exclusive signer-workflow and cert-identity selectors"
+fi
+attestation_semantics=test/fixture/github/gh_attestation_verify_semantics.json
+jq -e '
+  .schema == "github-cli-attestation-verify-semantics/1" and
+  .mutually_exclusive_flag_group ==
+    ["cert-identity","cert-identity-regex","signer-repo","signer-workflow"]' \
+  "$attestation_semantics" >/dev/null ||
+    fail "GitHub CLI attestation selector semantic fixture is stale"
+jq -e --arg identity \
+  'https://github.com/ormastes/simple/.github/workflows/pr-admission.yml@refs/heads/main' \
+  --arg digest '0123456789abcdef0123456789abcdef01234567' '
+  .verification_output | length > 0 and all(.[];
+    .verificationResult.signature.certificate as $certificate |
+    $certificate.subjectAlternativeName == $identity and
+    $certificate.buildSignerURI == $identity and
+    $certificate.buildSignerDigest == $digest and
+    $certificate.runnerEnvironment == "github-hosted" and
+    $certificate.sourceRepositoryURI == "https://github.com/ormastes/simple" and
+    $certificate.sourceRepositoryRef == "refs/heads/main")' \
+  "$attestation_semantics" >/dev/null ||
+    fail "GitHub CLI attestation certificate identity fixture is stale"
 
 for projection in \
     spipe-vcs-v3-main.json \
