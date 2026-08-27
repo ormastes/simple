@@ -466,11 +466,12 @@ pub fn rt_ssh_aes256_gcm_decrypt_packet_v2(args: &[Value]) -> Result<Value, Comp
     let out = match ssh_aes256_gcm_decrypt_packet_outcome(&key, &iv, seq, &packet) {
         SshAesGcmDecryptOutcome::InvalidInput => vec![0x00],
         SshAesGcmDecryptOutcome::AuthenticationFailed => vec![0x01],
-        SshAesGcmDecryptOutcome::Plaintext(payload) => {
-            let mut out = Vec::with_capacity(1 + payload.len());
-            out.extend_from_slice(&payload);
-            out.push(0x02);
-            out
+        SshAesGcmDecryptOutcome::Plaintext(mut payload) => {
+            // The runtime outcome retains its decrypt allocation after
+            // compaction, so appending the v2 status needs no payload copy.
+            payload.reserve(1);
+            payload.push(0x02);
+            payload
         }
     };
     Ok(Value::byte_array(out))
