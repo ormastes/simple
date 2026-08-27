@@ -68,3 +68,33 @@ Pre-existing RED at HEAD (proven via `git show HEAD:<spec>` restore, left RED, s
 - `test/03_system/app/llm_caret/feature/llm_caret_cli_hidden_cached_spec.spl` — HEAD: `Results: 5 total, 0 passed, 5 failed`.
 - `test/03_system/app/llm_caret/feature/llm_caret_messaging_phase_cli_spec.spl` — HEAD: `Results: 3 total, 0 passed, 3 failed`.
 - `test/03_system/app/os/feature/sosix_process_sharing_spec.spl` — HEAD: `Results: 6 total, 0 passed, 6 failed`.
+
+## Batch resid6_part_03 triage (2026-08-27)
+
+Fixed this batch (score before -> after, dual-checked pass + mutation-FAIL + revert-green):
+- `test/03_system/feature/usage/actors_spec.spl` 49 -> 90 (real HandlerTable/spawn_actor oracles)
+- `test/03_system/tools/llm/claude_full/utils/agent_swarms_enabled_spec.spl` 49 -> 90 (TRC-003: misplaced `# @req` moved inside `it` body)
+- `test/03_system/tools/llm/claude_full/hooks/useTasksV2_spec.spl` 49 -> 82 (TRC-003 same fix)
+- `test/03_system/tools/llm/claude_full/components/agent_confirm_step_spec.spl` 49 -> 92 (ORA-002: source-grep replaced by behavioral ConfirmStepWrapper oracle; note the hyphenated real module path `new-agent-creation/wizard-steps/ConfirmStep.spl` is NOT importable — `use` with hyphens is a parse error — so only the underscored wrapper alias is callable)
+- `test/03_system/feature/usage/concurrency_primitives_spec.spl` and `test/feature/usage/concurrency_primitives_spec.spl` (byte-identical twins) 49 -> 93 (real mpsc/atomic-flag/once oracles)
+
+Blocked with reason (left at 49, no weakening):
+- `test/feature/usage/gc_managed_default_spec.spl`, `test/03_system/feature/usage/gc_managed_default_spec.spl` — GC type-inference semantics not observable from a spec; only raw SFFI `gc_init/gc_collect/gc_malloc` exist, no introspection API. Blocked on compiler introspection / self-hosted binary.
+- `test/feature/usage/note_sdn_feature_spec.spl` — SMF note.sdn generic-instantiation tracking (#GENERIC-002) has no implementation anywhere in `src/`; no callable oracle. Blocked on the feature itself.
+- `test/03_system/os/os_shell_spec.spl`, `os_shell_userland_tools_spec.spl`, `os_ssh_spec.spl`, `os_storage_spec.spl` — SimpleOS in-guest serial tests (`serial_println`, `ISA_DEBUG_EXIT_PORT`); need QEMU/board boot. ORA-002 is inherent: the only host-side evidence is source text.
+- `test/03_system/os/.spipe_wrapped_entry_os_crypto_spec.spl` — same SimpleOS in-guest lane (spipe-wrapped entry).
+- `test/03_system/gpu/metal_backend_mac_host_spec.spl` — needs a macOS Metal host; on Linux the spec is `pending("macOS host capability unavailable")` by design.
+- `test/03_system/check/freebsd_bootstrap_qemu_preflight_spec.spl` — needs FreeBSD QEMU lane.
+- `test/03_system/check/simpleos_arm64_evidence_tooling_spec.spl` — arm64 evidence tooling needs board artifacts.
+- `test/03_system/os/vulkan/board_vulkan_*` scored 100 this pass (not blocked; mirrors regenerated).
+- `test/03_system/compiler/vhdl_mir_backend_call_port_map_spec.spl`, `vhdl_mir_backend_multi_output_spec.spl` — `it.skip` fixtures for MIR VHDL lowering; the lowering lane needs compiler internals not exposed as importable API.
+- `test/03_system/feature/compiler/bootstrap_spec.spl` — needs a full 3-stage bootstrap run.
+- `test/03_system/feature/compiler/x86_avx2_custom_native_execution_spec.spl` — executes JIT-emitted AVX2 machine bytes; needs native execution lane + AVX2 host gating (skip_on_interpreter by design).
+- `test/03_system/feature/features/ui_ssr_hydration/ui_ssr_hydration_spec.spl`, `ui_structural_patchset/ui_structural_patchset_spec.spl` — `context ..., skip:` scaffolds; SSR/hydration and structural-patchset UI features have no importable implementation yet.
+- `test/03_system/app/tooling/feature/warning_allow_root_cause_cleanup_spec.spl` — 20-line Given/When/Then prose, no describe block; scenarios describe CI lanes (cargo strict lint, `--deny-all`) whose real oracle is multi-minute external-toolchain runs.
+- `test/03_system/tools/mcp/mcp_perf_regression_spec.spl` — ORA-002 source-text inspection of MCP server sources; perf oracle needs deployed self-hosted MCP binaries + timing harness.
+- `test/03_system/gui/wm_compare/.spipe_wrapped_entry_html_compat_geometry_probe_spec.spl` — spipe-wrapped probe entry for a QEMU GUI lane.
+- `test/03_system/os/port/rustc_static_e2e_spec.spl` — needs rustc + native link lane.
+- `test/05_perf/db/db_ram_vs_persistent_bench_spec.spl`, `.spipe_wrapped_entry_db_ram_vs_persistent_bench_spec.spl` — perf bench scaffolds needing the deployed embedded-DB timing harness.
+- `test/05_perf/rust_vs_simple_comparison_spec.spl` — needs a Rust toolchain build + timing lane.
+- Deliberate test-infra fixtures (unfixable by design, do not touch): `test/fixtures/_accept_run/{crash,pass_a,pass_b}_spec.spl`, `test/fixtures/pure_simple_tooling/sibling_describe_{green,red}_spec.spl`, `test/fixtures/test_infra/timeout_verdict_probe_spec.spl`, `test/fixtures/unstable_mode/fail_spec.spl`, `test/fixtures/visibility_test/case_spec.spl`, `test/feature/mode_filter/skip_native_spec.spl` (mode-filter probe, `@skip_mode: native`).
