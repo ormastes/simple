@@ -32,9 +32,18 @@ use os.kernel.scheduler.scheduler_types.{
     MAX_TASKS, TIME_SLICE_TICKS, sched_exec_arch,
     _address_space_can_map, _scheduler_uses_direct_load_arena, _scheduler_mapped_entry,
     _map_user_process_image, _initial_user_task_context,
-    scheduler_next_task_id_take
+    scheduler_next_task_lifecycle_identity_take_v1
 }
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
+use os.kernel.types.arm32_mapping_handle_v1.{
+    scheduler_arm32_mapping_handle_absent_v1
+}
+use os.kernel.types.riscv32_mapping_handle_v1.{
+    scheduler_riscv32_mapping_handle_absent_v1
+}
+use os.kernel.types.x86_32_mapping_handle_v1.{
+    scheduler_x86_32_mapping_handle_absent_v1
+}
 
 # ============================================================================
 # Task Creation
@@ -48,12 +57,14 @@ pub fn sched_create_task_impl(
     caps: CapabilitySet
 ) -> (TaskId, [TaskControlBlock?]):
     """Core logic for Scheduler.create_task."""
-    val next_id = scheduler_next_task_id_take()
-    val id = TaskId(id: next_id)
-
     val slot = _find_empty_slot_in(tasks)
     if slot < 0:
         return (TaskId(id: 0), tasks)
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
+        return (TaskId(id: 0u64), tasks)
+    val identity = maybe_identity.unwrap()
+    val id = TaskId(id: identity.task_id)
 
     val ctx = TaskContext(
         rax: 0, rbx: 0, rcx: 0, rdx: 0,
@@ -69,6 +80,7 @@ pub fn sched_create_task_impl(
 
     val tcb = TaskControlBlock(
         id: id,
+        lifecycle_generation: identity.lifecycle_generation,
         name: "task-{id.id}",
         state: TaskState.Ready,
         priority: priority,
@@ -85,7 +97,11 @@ pub fn sched_create_task_impl(
         isolation: default_task_isolation(0),
         assigned_cpu: 0u32,
         exit_code: 0,
-        ticks_remaining: TIME_SLICE_TICKS
+        ticks_remaining: TIME_SLICE_TICKS,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
+        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 1u64
     )
 
     var new_tasks = tasks
