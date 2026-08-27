@@ -1024,6 +1024,36 @@ W5A-65..93 one boundary at a time and retain the §21.11 queue,
 throughput, P95/P99, RPO/RTO telemetry fixture. Native lane cannot claim F2
 until its full W5A-83..93 certification vector and recertification denial pass.
 
+### 10.28 Authority-service first source slice (2026-08-27)
+
+**Scope:** a non-admitted protocol/client/router slice only. It must add closed
+Publish/Resolve/Open request/evidence codecs, real mutually authenticated IPC
+connection setup, an `AuthorityClientV1`, a routing `AuthorityServiceV1`, and a
+fail-closed `service_main`; it must not add a Node filesystem decision store,
+pointer/CAS path, public backend/store factory, test installer, ambient-secret
+selection, or fallback.
+
+1. The primary owner freezes all request fields: authenticated identity; signed
+   least-privilege capability; tenant/workspace/project-or-null/worktree/
+   revision/registry/base/snapshot; scope/key/digest; and P3 raw-byte/
+   immutable-record evidence. `ResolveAccepted` returns exact durable evidence
+   or `NoAdmissionV1` only with digest/key/quorum watermark/signed negative
+   index proof. Missing/lost resolve remains client `IndeterminateDeliveryV1`.
+2. The client calls P2 `selectCommitInputV1` exactly once per attempt and binds
+   its replay digest/scope. IPC peer/service credential acquisition is from OS
+   peer-credential or certificate facilities at a trusted composition root,
+   never env/argv/global/caller secret selection.
+3. With no admitted private durable backend, main rejects before any mutable
+   evidence and records zero positive availability. F2 stays lexical-private;
+   live tuple certification, byte parity, and commit checks precede each use.
+4. Required first-slice tests are codecs, P2 sequencing, capability/transport
+   denial, lost delivery, and fail-closed main only. W5A-65..93, performance,
+   quorum recovery, and F2 certification are future evidence and may not be
+   claimed or marked passed by this slice.
+
+Merge owner remains `/root`; an independent highest-capability review of the
+exact source diff is mandatory before commit.
+
 ### 10.22 P2.5 bridge non-admission and P3 owner boundary (2026-08-27)
 
 This section supersedes every earlier task assignment, including the following

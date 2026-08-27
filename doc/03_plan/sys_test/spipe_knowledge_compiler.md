@@ -1870,3 +1870,19 @@ all completed calls; queue rejections start at tenant=1,024/global=8,192. RPO
 starts at acknowledged-decision power cut and ends at recovered log comparison;
 RTO starts at that cut and ends at first authenticated open of the last
 acknowledged decision. Raw samples and machine/service builds are retained.
+
+### 22.10 First source-slice non-admission evidence
+
+The following are contract tests only and cannot satisfy any W5A-65..93 row or
+the service availability NFR. They use no in-process durable-store substitute.
+
+| ID | Fixture | Exact assertion |
+|---|---|---|
+| W5A-94 | canonical Publish/Resolve/Open codec vectors with an extra field, missing scope coordinate, altered P3 raw byte/digest, and altered capability binding | exact accepted vectors round trip; every malformed/noncanonical vector rejects before dispatch. |
+| W5A-95 | P2 sequence spy for one publish attempt | `selectCommitInputV1` runs exactly once before one outbound request; resulting replay digest and exact scope are bound in wire bytes. |
+| W5A-96 | invalid capability plus unavailable/failed mutually authenticated IPC handshake | capability gives non-enumerating denial; handshake gives local transport failure; neither produces request/receipt/mutation. |
+| W5A-97 | drop publish reply, then drop resolve reply or remove durable proof | client reports/retains `IndeterminateDeliveryV1`; it never fabricates `NoAdmissionV1` or local success. |
+| W5A-98 | run `service_main` without admitted private durable backend, including normal Node backend activation attempt | reject before record/audit admission/backend command/publication; report zero positive availability. |
+
+W5A-94..98 are the only first-slice acceptance evidence. W5A-65..93 remain
+unexecuted future durable-service/certification schedules.

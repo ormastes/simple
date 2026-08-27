@@ -2687,3 +2687,36 @@ warmup, 30-minute/100,000-op 70/20/10 open/publish/resolve load at 70% capacity,
 nearest-rank percentiles, and one power-cut per member. Telemetry samples queue,
 commit, fsync, replication, lease, certificate, and failover; RPO/RTO boundaries
 are §22.9's power-cut-to-log/open events.
+
+### 20.1 First source-slice implementation contract (non-admitted)
+
+The first source slice creates `authority/protocol`, `authority/client`,
+`authority/service`, `authority/records`, and `authority/service_main` only as
+closed codec/router boundaries. It is not a substitute decision store. The
+request encoders must carry the signed caller/capability identity and every
+scope coordinate (tenant, workspace, project-or-null, worktree, revision,
+registry, base, snapshot), key, digest, and P3 raw-byte evidence; open binds a
+required decision digest. Decoder validation is exact and rejects additional or
+noncanonical fields before service dispatch.
+
+`service_main` accepts only mutually authenticated framed IPC connections whose
+peer credential and capability verifier are constructed at the service
+composition root from trusted OS/certificate configuration. It must not read
+credentials from env/argv/globals or accept a caller-provided verifier. Without
+an admitted private durable backend it returns a pre-admission failure and
+creates no mutable record, audit admission, receipt, backend command, or local
+publication effect. This state claims zero positive availability.
+
+`AuthorityClientV1.publish` invokes `selectCommitInputV1` once, binds the P2
+replay digest/scope, and sends one `PublishRequestV1`. It neither constructs nor
+selects a store/backend. Reply loss returns `IndeterminateDeliveryV1`; only a
+same-scope/key/digest resolve can replace it, with exact durable terminal/winner
+evidence or quorum-signed `NoAdmissionV1`. Missing or lost resolve remains
+indeterminate. F2 is reachable only from a lexical private composition root and
+requires live certification, parity, and service commit checks; normal Node is
+denied before staging.
+
+This slice tests only canonical codecs, the exactly-once P2 call sequence,
+capability/transport denial, lost-delivery representation, and fail-closed
+service main. It explicitly does not execute or satisfy W5A-65..93, and it
+does not claim any §21.11 deployment target.

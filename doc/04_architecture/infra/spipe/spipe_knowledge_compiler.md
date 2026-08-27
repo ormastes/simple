@@ -2048,3 +2048,55 @@ certificate-revoked audit event, routing to certified service baseline (or deny
 if absent), never filesystem fallback. Any provider identity/version/build,
 protocol/schema, key ID/epoch, OS/arch/kernel/filesystem, corpus/vector, validity
 or revocation change requires a new certification before backend reactivation.
+
+### 21.12 First authority-service source slice: closed wire boundary only
+
+The first implementation slice is deliberately **non-admitted**: it establishes
+only a closed service wire boundary and a fail-closed client/process path. It
+does not provide a durable quorum store and therefore makes **zero positive
+availability, durability, linearizability, RPO/RTO, throughput, or W5A-65..93
+claim**. P3 publication and canonical authority-open remain unavailable until a
+separately admitted `DurableAuthorityStoreV1` satisfies §21.11.
+
+The closed canonical wire vocabulary is `PublishRequestV1`,
+`ResolveAcceptedRequestV1`, `OpenRequestV1`, `CapabilityDeniedV1`,
+`ServiceTransportFailureV1`, `IndeterminateDeliveryV1`, `NoAdmissionV1`, and
+the existing P3 `ReplacedV1`, `MismatchV1`, and `HostReplaceFatalV1` evidence.
+Every request carries: authenticated caller identity; a signed, short-lived,
+least-privilege capability; exact tenant/workspace/project-or-null/worktree/
+revision/registry/base/snapshot scope; idempotency key; and request digest.
+`PublishRequestV1` additionally carries the canonical raw P3 predecessor,
+next-pointer, proposal, and terminal evidence bytes/digests; `OpenRequestV1`
+binds the required decision digest. The canonical encoder rejects absent,
+extra, noncanonical, or cross-field-inconsistent values before dispatch.
+
+The service transport is a real mutually authenticated local IPC transport.
+The composition root obtains peer credentials from OS peer-credential or
+platform certificate facilities, verifies service identity and the signed
+capability against trusted configuration, and binds that verified identity to
+the framed connection. Environment variables, argv, process globals, artifact
+content, and caller-supplied secret/provider objects must not select or convey
+credentials. A pre-admission handshake/transport failure emits only local
+`ServiceTransportFailureV1`; it creates no record or receipt.
+
+`AuthorityClientV1` calls the existing P2 `selectCommitInputV1()` **exactly
+once** per publish attempt, before one service request, and binds its resulting
+replay-envelope digest and complete scope into that request. It has no local
+success path, pointer/store/backend access, filesystem authority, retry
+publication, or fallback. A reply lost after possible admission is represented
+only as client-local `IndeterminateDeliveryV1`; the client may issue a bounded
+`ResolveAcceptedRequestV1` with the same exact scope, key, and digest. Missing
+or itself-lost resolve evidence remains `IndeterminateDeliveryV1`, never a
+negative inference.
+
+Only a durable quorum-confirmed resolve may return `NoAdmissionV1`, and it must
+contain the exact scope digest, idempotency key, request digest, observed quorum
+admission watermark, and a signed negative-index proof over the immutable
+durable record index. Otherwise resolve returns the exact stored terminal/winner
+evidence. A no-backend `AuthorityServiceV1` rejects before any mutable evidence
+(Request, Decision, OpenIndex, audit admission, backend command, or receipt).
+Its private `DurableAuthorityStoreV1` and `CertifiedAuthorityBackendV1` are
+lexically composed only: no public factory, test installer, dependency injection
+slot, environment/argv/global chooser, or Node filesystem/CAS fallback exists.
+F2 remains optional; activation requires the live tuple certification, byte
+parity, and commit checks of §21.11 for every command.
