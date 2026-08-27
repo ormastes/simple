@@ -326,3 +326,8 @@ passing placeholder.
 58. Keep cache lease's eight raw contracts behind inline lexical owners.
     Unreadable existing leases fail closed for query paths and remain retained
     by reclaim; do not silently convert them to empty text or delete them.
+59. Continue from the 2026-08-27 authority census (14,064 missing, 2,298
+    lexical, 1,625 function-wide scopes). Prioritize SSH session and Torch
+    dynamic operations only after provider-specific ABI/ownership contracts are
+    frozen; do not bulk-tag their large surfaces or claim source census as
+    signed verification.
