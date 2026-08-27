@@ -17,49 +17,118 @@
 
 ### REQ-WUN-001: nominal wrappers
 
-#### parses newunit as a nominal wrapper
-### REQ-WUN-004: exact derived units
+#### a newunit declaration is recorded as a nominal 1:1 wrapper
 
-#### records km/h as exact factor
-
-- records km/h as exact factor
-   - Expected: factor equals `5/18`
+- register a newunit declaration the way the parser does
+- rebuild the compile-start registry and look the wrapper up
+   - Expected: entry.short_symbol equals `wuid`
+   - Expected: entry.full_symbol equals `WunUserId`
+   - Expected: entry.kind equals `i64`
+   - Expected: entry.klass equals `UnitClass.Count`
+   - Expected: entry.base_factor.numerator equals `1`
+   - Expected: entry.base_factor.denominator equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-SYSTEM
-step("records km/h as exact factor")
-val factor = "5/18"
-expect(factor).to_equal("5/18")
+# @req REQ-WUN-001
+step("register a newunit declaration the way the parser does")
+step("rebuild the compile-start registry and look the wrapper up")
+val idx = newunit_register("WunUserId", "wuid", TYPE_I64)
+assert_true(idx >= 0)
+val reg = unit_registry_build()
+match reg.lookup_entry("wuid"):
+    case Some(entry):
+        expect(entry.short_symbol).to_equal("wuid")
+        expect(entry.full_symbol).to_equal("WunUserId")
+        expect(entry.kind).to_equal("i64")
+        expect(entry.klass).to_equal(UnitClass.Count)
+        # nominal wrappers carry an identity base factor (1/1)
+        expect(entry.base_factor.numerator).to_equal(1)
+        expect(entry.base_factor.denominator).to_equal(1)
+    case None:
+        assert_true(false)
+```
+
+</details>
+
+### REQ-WUN-004: exact derived units
+
+#### km/h converts to m/s through the exact 5/18 factor
+
+- register m, s, scaled km and h, and the km/h composite
+- convert 18 km/h to m/s through the registry
+   - Expected: value equals `5.0`
+   - Expected: msg equals `unexpected conversion failure`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-WUN-004
+step("register m, s, scaled km and h, and the km/h composite")
+step("convert 18 km/h to m/s through the registry")
+val reg = UnitRegistry.new()
+reg.register_unit("wunm", unit_expression_from_base("wunm"))
+reg.register_unit("wuns", unit_expression_from_base("wuns"))
+val km = unit_expression_scaled(exact_ratio(1000, 1), "wunm")
+val h = unit_expression_scaled(exact_ratio(3600, 1), "wuns")
+reg.register_unit("wunkm", km)
+reg.register_unit("wunh", h)
+reg.register_composite("wunkmph", unit_expression_div(km, h))
+reg.register_composite("wunmps", unit_expression_div(
+    unit_expression_from_base("wunm"), unit_expression_from_base("wuns")))
+match reg.convert(18.0, "wunkmph", "wunmps"):
+    case Ok(value):
+        # oracle: 18 km/h = 18 * 1000/3600 m/s = 5 m/s exactly
+        expect(value).to_equal(5.0)
+    case Err(msg):
+        expect(msg).to_equal("unexpected conversion failure")
 ```
 
 </details>
 
 ### REQ-WUN-006: currency identity
 
-#### uses ISO code for dollars
+#### a currency unit keeps its ISO code as its short symbol
 
-- uses ISO code for dollars
-   - Expected: currency equals `USD`
+- register USD as a Currency-class unit
+- look it up by ISO code and check its class
+   - Expected: entry.short_symbol equals `USD`
+   - Expected: entry.klass equals `UnitClass.Currency`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-SSPEC-SYSTEM
-step("uses ISO code for dollars")
-val currency = "USD"
-expect(currency).to_equal("USD")
+# @req REQ-WUN-006
+step("register USD as a Currency-class unit")
+step("look it up by ISO code and check its class")
+val reg = UnitRegistry.new()
+reg.register_unit("USD", unit_expression_from_base("USD"))
+reg.by_short["USD"].klass = UnitClass.Currency
+match reg.lookup_entry("USD"):
+    case Some(entry):
+        expect(entry.short_symbol).to_equal("USD")
+        expect(entry.klass).to_equal(UnitClass.Currency)
+    case None:
+        assert_true(false)
 ```
 
 </details>
@@ -71,7 +140,7 @@ expect(currency).to_equal("USD")
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/compiler/feature/world_units_newunit_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -109,49 +178,45 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `4d1a0c3385bcffc4cf70920c439f30d366a9403e4cff1cbdcb0cc0f77e1fca50`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `438d22d511bb0bfb5a5814560e56f8e97d5a3ad44c21560541be9745730f5615`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `4d1a0c3385bcffc4cf70920c439f30d366a9403e4cff1cbdcb0cc0f77e1fca50`.
+Source SHA-256: `438d22d511bb0bfb5a5814560e56f8e97d5a3ad44c21560541be9745730f5615`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `4d1a0c3385bcffc4cf70920c439f30d366a9403e4cff1cbdcb0cc0f77e1fca50`  
+Source SHA-256: `438d22d511bb0bfb5a5814560e56f8e97d5a3ad44c21560541be9745730f5615`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **66/100**; effective score: **49/100**; blockers: **3**.
+Raw score: **83/100**; effective score: **83/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 83/100
 source: test/03_system/app/compiler/feature/world_units_newunit_spec.spl
 mirror: doc/06_spec/03_system/app/compiler/feature/world_units_newunit_spec.md (current)
-findings: 8 blockers: 3
-  narrative=100 structure=90 oracle=0
-  traceability=60 evidence=80 coverage=100 maintainability=70
+findings: 7 blockers: 0
+  narrative=80 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=66; blocker cap makes effective=49
 doc/06_spec/03_system/app/compiler/feature/world_units_newunit_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/03_system/app/compiler/feature/world_units_newunit_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/03_system/app/compiler/feature/world_units_newunit_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/03_system/app/compiler/feature/world_units_newunit_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario compares only locally constructed arithmetic or literals
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/03_system/app/compiler/feature/world_units_newunit_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 3 declared requirement(s) have no scenario binding
-  why: A requirement list without scenario evidence is inventory, not traceability.
-  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
-test/03_system/app/compiler/feature/world_units_newunit_spec.spl:12:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'parses newunit as a nominal wrapper' has no visible step flow
-  why: Ordered visible actions make the manual operable.
-  improve: Add ordered step("...") calls for meaningful actions.
-test/03_system/app/compiler/feature/world_units_newunit_spec.spl:23:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'records km/h as exact factor' has no retained capture or evidence
+test/03_system/app/compiler/feature/world_units_newunit_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
+test/03_system/app/compiler/feature/world_units_newunit_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/compiler/feature/world_units_newunit_spec.spl:21:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'a newunit declaration is recorded as a nominal 1:1 wrapper' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/03_system/app/compiler/feature/world_units_newunit_spec.spl:30:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'uses ISO code for dollars' has no retained capture or evidence
+test/03_system/app/compiler/feature/world_units_newunit_spec.spl:42:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'km/h converts to m/s through the exact 5/18 factor' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/compiler/feature/world_units_newunit_spec.spl:65:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'a currency unit keeps its ISO code as its short symbol' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
