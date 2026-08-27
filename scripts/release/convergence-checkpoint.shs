@@ -42,12 +42,22 @@ if ! git -C "$root" ls-remote --exit-code --heads origin "refs/heads/$release_re
     exit 0
 fi
 
-# Fetch is the sole mutation and is confined to remote-tracking refs in this
-# disposable/source checkout. No local branch, remote branch, or candidate is
-# created or updated.
-git -C "$root" fetch --no-tags --prune origin \
-    "+refs/heads/main:refs/remotes/origin/main" \
-    "+refs/heads/$release_ref:refs/remotes/origin/$release_ref"
+# Fetch is the sole mutation and is confined to the two exact remote-tracking
+# refs in this disposable/source checkout. A shallow runner must remove its
+# history boundary before inventory; otherwise commits behind depth 1 vanish.
+if test "$(git -C "$root" rev-parse --is-shallow-repository)" = true; then
+    git -C "$root" fetch --no-tags --prune --unshallow origin \
+        "+refs/heads/main:refs/remotes/origin/main" \
+        "+refs/heads/$release_ref:refs/remotes/origin/$release_ref"
+    test "$(git -C "$root" rev-parse --is-shallow-repository)" = false || {
+        echo 'release-convergence-checkpoint: checkout remained shallow after exact fetch' >&2
+        exit 1
+    }
+else
+    git -C "$root" fetch --no-tags --prune origin \
+        "+refs/heads/main:refs/remotes/origin/main" \
+        "+refs/heads/$release_ref:refs/remotes/origin/$release_ref"
+fi
 main_sha=$(git -C "$root" rev-parse refs/remotes/origin/main)
 release_sha=$(git -C "$root" rev-parse "refs/remotes/origin/$release_ref")
 

@@ -4,6 +4,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 workflow="$root/.github/workflows/candidate.yml"
+checkpoint_workflow="$root/.github/workflows/release-convergence-checkpoint.yml"
 checkpoint="$root/scripts/release/convergence-checkpoint.shs"
 
 step_line() {
@@ -24,6 +25,7 @@ grep -Fq -- '--stop-after-stage2' "$workflow"
 grep -Fq -- '--target=//bootstrap:stage3' "$workflow"
 grep -Fq -- '--target=//bootstrap:stage4' "$workflow"
 test "$(grep -Fc -- '--bootstrap-receipt="$receipt"' "$workflow")" -ge 2
+grep -Fq 'fetch-depth: 0' "$checkpoint_workflow"
 
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-release-fresh.XXXXXX")
 cleanup() { rm -r -- "$fixture"; }
@@ -41,14 +43,26 @@ git -C "$seed" commit --quiet -m root
 root_sha=$(git -C "$seed" rev-parse HEAD)
 printf 'main\n' >>"$seed/history"
 git -C "$seed" commit --quiet -am main
+main_behind_depth_one=$(git -C "$seed" rev-parse HEAD)
+printf 'main-tip\n' >>"$seed/history"
+git -C "$seed" commit --quiet -am main-tip
 git -C "$seed" remote add origin "$bare"
 git -C "$seed" push --quiet origin main
 git --git-dir="$bare" symbolic-ref HEAD refs/heads/main
 git -C "$seed" checkout --quiet -b release/1.0 "$root_sha"
 printf 'release\n' >>"$seed/history"
 git -C "$seed" commit --quiet -am release
+release_behind_depth_one=$(git -C "$seed" rev-parse HEAD)
+printf 'release-tip\n' >>"$seed/history"
+git -C "$seed" commit --quiet -am release-tip
 git -C "$seed" push --quiet origin release/1.0
-git clone --quiet "$bare" "$fresh"
+git clone --quiet --depth=1 --branch=main "file://$bare" "$fresh"
+test "$(git -C "$fresh" rev-parse --is-shallow-repository)" = true
+test "$(git -C "$fresh" rev-list --count HEAD)" -eq 1
+if git -C "$fresh" cat-file -e "$main_behind_depth_one^{commit}" 2>/dev/null; then
+    echo 'release fresh-checkout fixture unexpectedly contains history behind depth 1' >&2
+    exit 1
+fi
 test ! -e "$fresh/bin/release/x86_64-unknown-linux-gnu/simple"
 
 before=$(git --git-dir="$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads)
@@ -56,14 +70,24 @@ before=$(git --git-dir="$bare" for-each-ref --format='%(refname) %(objectname)' 
     --require-release-line --output=build/observation >/dev/null
 after=$(git --git-dir="$bare" for-each-ref --format='%(refname) %(objectname)' refs/heads)
 test "$before" = "$after"
-for result in "$fresh"/build/observation/*.json; do
-    jq -e '
+test "$(git -C "$fresh" rev-parse --is-shallow-repository)" = false
+jq -e --arg hidden "$main_behind_depth_one" '
       .schema == "simple-release-source-convergence-observation/1" and
       .status == "ok" and .boundary_kind == "source_hosted_read_only" and
       .deployed_runtime_used == false and
       .release_admission_eligible == false and .mutation == "fetch-only" and
       .main_remains_independent == true and
-      (.source_only_commit_shas | length) == 1' "$result" >/dev/null
-done
+      (.source_only_commit_shas | length) == 2 and
+      (.source_only_commit_shas | index($hidden)) != null' \
+    "$fresh/build/observation/main_to_release.json" >/dev/null
+jq -e --arg hidden "$release_behind_depth_one" '
+      .schema == "simple-release-source-convergence-observation/1" and
+      .status == "ok" and .boundary_kind == "source_hosted_read_only" and
+      .deployed_runtime_used == false and
+      .release_admission_eligible == false and .mutation == "fetch-only" and
+      .main_remains_independent == true and
+      (.source_only_commit_shas | length) == 2 and
+      (.source_only_commit_shas | index($hidden)) != null' \
+    "$fresh/build/observation/release_to_main.json" >/dev/null
 
 echo 'release-fresh-checkout-boundaries: PASS'
