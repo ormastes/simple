@@ -137,6 +137,11 @@ Requires: `gh` installed and authenticated.
 
 #### Protected PR handoff
 
+For `self approve`, `approve PR`, or `author cannot approve`, run
+`spipe self-review-guide`. The `devhub github pr review <PR> --approve` path now
+detects a same-author credential before submission and prints that canonical
+workflow; if GitHub rejects author approval, it prints the same redirect.
+
 Use `devhub github pr review <PR> --approve` only from an account that is
 eligible to review that pull request. An author (including an agent acting
 through the author's `gh` credential) must not self-approve. In this repository,

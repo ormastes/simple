@@ -90,7 +90,7 @@ fn _github_pr(args: [text]) -> i64:
         "merge":
             _github_passthrough(["pr", "merge"] + rest)
         "review":
-            _github_passthrough(["pr", "review"] + rest)
+            _github_pr_review(rest)
         "checkout":
             _github_passthrough(["pr", "checkout"] + rest)
         "-h" | "--help" | "help":
@@ -102,6 +102,7 @@ fn _github_pr(args: [text]) -> i64:
             print "  create            Create a pull request (--title T --body B --base B; --fill/--draft supported)"
             print "  merge <number>    Merge a pull request (--squash/--rebase/--merge)"
             print "  review <number>   Review a pull request (--approve/--request-changes/--comment, --body B)"
+            print "                    Same-author approve redirects to the SPipe self-review workflow"
             print "  checkout <number> Check out a pull request locally"
             0
         _:
@@ -148,6 +149,64 @@ fn _github_passthrough(gh_args: [text]) -> i64:
         print stdout
     if not ok:
         print_error(gh_actionable_error(stderr))
+        return 1
+    0
+
+
+fn _github_author_approval_rejected(stderr: text) -> bool:
+    """Recognize GitHub's same-author approval rejection without relying on one exact provider sentence."""
+    val lower = stderr.lower()
+    lower.contains("approve your own pull request") or
+        lower.contains("cannot approve your own") or
+        lower.contains("can't approve your own") or
+        lower.contains("pull request author cannot approve") or
+        lower.contains("review cannot be submitted by pull request author")
+
+
+fn _self_review_steps(pr_number: text) -> [text]:
+    """Canonical actionable redirect printed for self approve / approve PR / author cannot approve."""
+    [
+        "GitHub forbids a PR author from submitting an APPROVED review; do not retry.",
+        "1. Resolve PR #{pr_number}'s live head and perform a high/xhigh/max/ultra review of that exact SHA.",
+        "2. Record session ID, reviewer model, effort, PASS verdict, P0=0, and P1=0.",
+        "3. Dispatch the protected SPipe Self Review Admission workflow once:",
+        "   gh workflow run review-admission.yml --ref main -f pull_request_number={pr_number} -f session_id=\"$SESSION_ID\" -f reviewer_model=\"$REVIEWER_MODEL\" -f reviewer_effort=\"$REVIEWER_EFFORT\" -f self_attestation='PASS:0:0'",
+        "4. Poll SPipe Self Review Admission on that exact head; a different or stale SHA does not count.",
+        "Status meaning: required check only — not GitHub provider APPROVED and not independent review.",
+        "Canonical help: spipe self-review-guide (or node .spipe/spipe/cli/spipe.js self-review-guide)."
+    ]
+
+
+fn _print_self_review_steps(pr_number: text):
+    for line in _self_review_steps(pr_number):
+        print line
+
+
+fn _github_pr_review(args: [text]) -> i64:
+    """Review a PR, redirecting forbidden same-author approval to the protected SPipe status workflow."""
+    if not _has_flag(args, "--approve") or args.len() == 0:
+        return _github_passthrough(["pr", "review"] + args)
+    if not gh_available():
+        print_error(gh_actionable_error(""))
+        return 1
+
+    val pr_number = args[0]
+    val (author_ok, author_stdout, _author_stderr) = gh_run(["pr", "view", pr_number, "--json", "author", "--jq", ".author.login"])
+    val (actor_ok, actor_stdout, _actor_stderr) = gh_run(["api", "user", "--jq", ".login"])
+    val author = author_stdout.trim()
+    val actor = actor_stdout.trim()
+    if author_ok and actor_ok and author != "" and author == actor:
+        print_error("same-author GitHub approval is unavailable")
+        _print_self_review_steps(pr_number)
+        return 2
+
+    val (ok, stdout, stderr) = gh_run(["pr", "review"] + args)
+    if stdout.trim() != "":
+        print stdout
+    if not ok:
+        print_error(gh_actionable_error(stderr))
+        if _github_author_approval_rejected(stderr):
+            _print_self_review_steps(pr_number)
         return 1
     0
 
@@ -252,7 +311,8 @@ fn _print_github_help():
     print "  itf github pr list --state open"
     print "  itf github pr create --title T --body B --base main"
     print "  itf github pr merge 42 --squash"
-    print "  itf github pr review 42 --approve"
+    print "  itf github pr review 42 --approve  # same author gets protected SPipe steps"
+    print "  spipe self-review-guide            # canonical self approve / approve PR help"
     print "  itf github repo clone owner/name"
     print ""
     print "Requires: gh CLI installed and authenticated (gh auth login)."

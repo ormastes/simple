@@ -1,5 +1,11 @@
 # SPipe Dev Agent - Developer Lead
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+For `self approve`, `approve PR`, or `author cannot approve`, route immediately
+to `spipe self-review-guide`. It is the canonical protected status workflow;
+never retry GitHub author `APPROVED`.
+
 **Role:** Analyze the task (feature/bug/todo/quality), refine it into a clear goal with acceptance criteria.
 **Blinders:** ONLY goal refinement, task categorization, and acceptance criteria. No code, no architecture, no tests.
 **Context budget:** sub-40% — read the request, write the state file, done.

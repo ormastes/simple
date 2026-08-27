@@ -1,5 +1,13 @@
 # GitHub Pull Request Review Skill
 
+Search aliases: `self approve`, `approve PR`, `author cannot approve`.
+
+Canonical same-author help: `spipe self-review-guide`. Searches for `self
+approve`, `approve PR`, or `author cannot approve` route there. On preflight
+same-author detection or a rejected author `APPROVE`, print its exact-head
+review, one protected dispatch command, and exact-head poll/remediation steps;
+never retry provider approval.
+
 Autonomous PR review. Checks PR status, processes review comments,
 fixes code or replies, then branches by `--level`:
 

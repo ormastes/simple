@@ -20,7 +20,7 @@ Audience: compiler and tooling engineers who maintain this spec.
 # value to capture in-process, so the pure JSON-extraction helpers
 # (_gh_field/_gh_login/_default_fields) are covered directly instead.
 
-use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields}
+use app.devhub.cmd_github.{handle_github, _gh_field, _gh_login, _default_fields, _github_author_approval_rejected, _self_review_steps}
 use std.json.{json_parse}
 
 extern fn rt_dir_create_all(path: text) -> bool
@@ -68,6 +68,10 @@ val FAKE_GH_NOT_FOUND = "#!/bin/sh\nexit 127\n"
 val FAKE_GH_UNAUTHED = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\necho 'To use GitHub CLI in a script, run: gh auth login' >&2\nexit 1\n"
 
 val FAKE_GH_PASSTHROUGH_OK = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1\" in\n  --version) echo 'gh version 2.0.0 (fake)'; exit 0 ;;\nesac\necho 'ok'\nexit 0\n"
+
+val FAKE_GH_SAME_AUTHOR = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1 $2\" in\n  '--version ') echo 'gh version 2.0.0 (fake)'; exit 0 ;;\n  'pr view') echo 'alice'; exit 0 ;;\n  'api user') echo 'alice'; exit 0 ;;\nesac\nexit 1\n"
+
+val FAKE_GH_AUTHOR_REJECTION = "#!/bin/sh\necho \"$@\" >> \"{ARGV_LOG}\"\ncase \"$1 $2\" in\n  '--version ') echo 'gh version 2.0.0 (fake)'; exit 0 ;;\n  'pr view') echo 'alice'; exit 0 ;;\n  'api user') echo 'bob'; exit 0 ;;\n  'pr review') echo 'cannot approve your own pull request' >&2; exit 1 ;;\nesac\nexit 1\n"
 
 
 use std.spec.step
@@ -143,13 +147,21 @@ describe "itf github (fake-binary fixture)":
             expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirement
             expect(log.contains("pr create --title T --body B --base main")).to_equal(true)
 
-    context "pr review — passthrough":
+    context "pr review — protected self-review redirect":
 
-        it "exits 0 and forwards the number and review flag verbatim to gh":
-            step("Verify: exits 0 and forwards the number and review flag verbatim to gh")
-            val dir = install_fake_gh(FAKE_GH_PASSTHROUGH_OK)
+        it "detects the same author before provider approval and does not submit APPROVED":
+            step("Verify: detects the same author before provider approval and does not submit APPROVED")
+            val dir = install_fake_gh(FAKE_GH_SAME_AUTHOR)
             val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
-            expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirement
+            expect(code).to_equal(2)
+            expect(log.contains("pr view 42 --json author --jq .author.login")).to_equal(true)
+            expect(log.contains("pr review 42 --approve")).to_equal(false)
+
+        it "prints the same workflow after GitHub rejects author approval":
+            step("Verify: prints the same workflow after GitHub rejects author approval")
+            val dir = install_fake_gh(FAKE_GH_AUTHOR_REJECTION)
+            val (code, log) = run_github_with_fake_gh(dir, ["pr", "review", "42", "--approve"])
+            expect(code).to_equal(1)
             expect(log.contains("pr review 42 --approve")).to_equal(true)
 
     context "issue edit — gh unauthenticated":
@@ -181,6 +193,25 @@ describe "itf github (fake-binary fixture)":
 
 
 describe "cmd_github pure JSON-extraction helpers":
+
+    context "self-review discoverability":
+
+        it "recognizes provider author-approval rejection variants":
+            step("Verify: recognizes provider author-approval rejection variants")
+            expect(_github_author_approval_rejected("cannot approve your own pull request")).to_be(true)
+            expect(_github_author_approval_rejected("ordinary validation error")).to_be(false)
+
+        it "exposes exact review dispatch poll steps for common agent searches":
+            step("Verify: exposes exact review dispatch poll steps for common agent searches")
+            val steps = _self_review_steps("42")
+            expect(steps[0]).to_contain("APPROVED")
+            expect(steps[1]).to_contain("high/xhigh/max/ultra")
+            expect(steps[2]).to_contain("P0=0")
+            expect(steps[4]).to_contain("pull_request_number=42")
+            expect(steps[4]).to_contain("self_attestation='PASS:0:0'")
+            expect(steps[5]).to_contain("exact head")
+            expect(steps[6]).to_contain("not GitHub provider APPROVED")
+            expect(steps[7]).to_contain("spipe self-review-guide")
 
     context "_gh_field":
 
