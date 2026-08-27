@@ -219,6 +219,13 @@ author/merger is accepted only in this fallback; normal external broker
 admission retains the inequality. This is not an admin bypass, self-review, or
 permission to omit checks.
 
+Forward-port receipt replay branches on the convergence authority before any
+broker lookup. External mode retains the exact broker App admission check.
+Owner mode accepts both empty and non-empty forward-port sets only when every
+row carries `authority_class=owner_attested_actions`, false verification and
+GitHub-approval claims, null broker identity, and the exact configured required
+checks for the recorded PR head.
+
 This candidate/release receipt is distinct from PR `SPipe Self Review
 Admission`. GitHub rulesets cannot natively express conditional model review
 versus owner attestation, and environment required reviewers cannot represent

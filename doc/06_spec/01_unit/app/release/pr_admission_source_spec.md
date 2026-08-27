@@ -90,7 +90,7 @@ expect(admission.contains("inputs.forward_port_receipt_sha256s")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 46 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -131,6 +131,8 @@ expect(candidate).to_contain("--release-forward-port-results=")
 expect(candidate).to_contain("--release-forward-port-targets=")
 expect(candidate).to_contain("classification-evidence.json")
 expect(candidate).to_contain("forward-port-evidence.json")
+expect(candidate).to_contain("scripts/release/verify-forward-port-authority.shs")
+expect(candidate.contains("broker_app=$(jq -er 'select(")).to_be(false)
 expect(candidate).to_contain("backport-evidence.json")
 expect(candidate).to_contain("simple-release-convergence-manifest/2")
 expect(candidate).to_contain("(.main_to_release.selected_shas | sort) ==")

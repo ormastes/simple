@@ -636,11 +636,11 @@ jobs:
              .parameters.required_status_checks[] | {context,integration_id}]' \
             .github/rulesets/spipe-vcs-v3-main.json)
           test "$(jq 'length' <<<"$main_required_checks")" -gt 0
-          broker_app=$(jq -er 'select(
-            .implementation_status == "implemented_external_signed_broker" and
-            .signed_receipt_protocol == "implemented") |
-            .github_app_integration_id |
-            select(type == "number" and . > 0)' .github/review-admission-broker.json)
+          authority_class=$(jq -er '.authority_class' "$receipt")
+          scripts/release/verify-forward-port-authority.shs \
+            "$authority_class" .github/review-admission-broker.json \
+            "$main_required_checks" \
+            build/convergence-receipt/forward-port-evidence.json
           while IFS= read -r evidence; do
             source=$(jq -r '.source_commit_sha' <<<"$evidence")
             result=$(jq -r '.result_commit_sha' <<<"$evidence")
@@ -652,22 +652,6 @@ jobs:
             test "$(jq -r '.result_patch_id' <<<"$evidence")" = "$patch_id"
             test "$(jq -cS '.required_checks' <<<"$evidence")" = \
               "$(jq -cS . <<<"$main_required_checks")"
-            jq -e --arg head "$(jq -r '.pr.head_sha' <<<"$evidence")" \
-              --argjson required "$main_required_checks" --argjson broker_app "$broker_app" '
-                . as $evidence |
-                $evidence.review_admission.name == "SPipe Review Admission" and
-                $evidence.review_admission.app.id == $broker_app and
-                $evidence.review_admission.head_sha == $head and
-                $evidence.review_admission.status == "completed" and
-                $evidence.review_admission.conclusion == "success" and
-                ($evidence.successful_check_runs | length) == ($required | length) and
-                all($evidence.successful_check_runs[];
-                    .head_sha == $head and .status == "completed" and
-                    .conclusion == "success") and
-                all($required[]; . as $check |
-                    any($evidence.successful_check_runs[];
-                        .name == $check.context and
-                        .app.id == $check.integration_id))' <<<"$evidence" >/dev/null
             digest=$(printf '%s\n' "$evidence" | sha256sum | awk '{print $1}')
             git merge-base --is-ancestor "$result" "$main_sha"
             jq -e --arg source "$source" --arg result "$result" \

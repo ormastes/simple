@@ -237,6 +237,31 @@ expect_fail "broker_signed live apply requires a configured external signed brok
 
 MOCK_ROOT="$root" policy="$root/scripts/release/github-policy.shs"
 
+forward_port_verifier="$root/scripts/release/verify-forward-port-authority.shs"
+forward_port_required=$(jq -cS '
+  [.rules[] | select(.type == "required_status_checks") |
+   .parameters.required_status_checks[] | {context,integration_id}]' \
+  "$root/.github/rulesets/spipe-vcs-v3-main.json")
+"$forward_port_verifier" owner_attested_actions \
+  "$root/.github/review-admission-broker.json" "$forward_port_required" \
+  "$root/test/fixture/release/owner_forward_ports_zero.json" >"$tmp/owner-zero.out"
+"$forward_port_verifier" owner_attested_actions \
+  "$root/.github/review-admission-broker.json" "$forward_port_required" \
+  "$root/test/fixture/release/owner_forward_ports_one.json" >"$tmp/owner-one.out"
+jq '.[0].review_admission.app={id:98765,slug:"spipe-review-broker"}' \
+  "$root/test/fixture/release/owner_forward_ports_one.json" >"$tmp/owner-broker-spoof.json"
+expect_fail "owner-attested forward-port evidence is invalid" \
+  "$forward_port_verifier" owner_attested_actions \
+  "$root/.github/review-admission-broker.json" "$forward_port_required" \
+  "$tmp/owner-broker-spoof.json"
+jq '.configured=true | .apply_live=true |
+    .implementation_status="implemented_external_signed_broker" |
+    .signed_receipt_protocol="implemented" | .github_app_integration_id=98765' \
+  "$root/.github/review-admission-broker.json" >"$tmp/external-broker.json"
+"$forward_port_verifier" external_broker "$tmp/external-broker.json" \
+  "$forward_port_required" \
+  "$root/test/fixture/release/external_forward_ports_one.json" >"$tmp/external-one.out"
+
 issued=$(date -u -d '1 minute ago' '+%Y-%m-%dT%H:%M:%SZ')
 expires=$(date -u -d '1 hour' '+%Y-%m-%dT%H:%M:%SZ')
 fallback_issued=$(date -u -d '20 minutes ago' '+%Y-%m-%dT%H:%M:%SZ')
@@ -289,4 +314,4 @@ jq -e --arg ref refs/heads/candidate/v1.4.0-beta.2/a001 --arg sha "$commit" '.re
 MOCK_CANDIDATE_EXISTS=1; export MOCK_CANDIDATE_EXISTS
 expect_fail "candidate already exists; refusing update" "$candidate" --yes "$repo" candidate/v1.4.0-beta.2/a001 "$commit" release/1.4
 
-echo "test-github-policy-contracts: PASS — canonical render/apply/readback, adversarial identity and guard rejection, signed-broker fail-close, closed review receipts, target binding, and create-once"
+echo "test-github-policy-contracts: PASS — canonical render/apply/readback, authority-specific forward ports, adversarial identity and guard rejection, signed-broker fail-close, closed review receipts, target binding, and create-once"
