@@ -126,3 +126,20 @@ a claim that SFFI v2 is complete.
   one open-channel assertion. Neither is counted as a pass.
 - FAIL (global admission): channel providers remain unsigned and lack exact
   artifact/cross-lane admission evidence.
+
+## Follow-up: MIR actor and synchronization status ABI (2026-08-26)
+
+- PASS (static/source): the MIR actor bridge now declares the Rust provider's
+  actual spawn and receive signatures. Mutex unlock and rwlock store retain
+  their `i64` status returns, and all touched raw calls are lexical
+  `unsafe(ffi)`. The synchronization authority guard passes.
+- PASS (performance review): the repairs only correct existing argument and
+  status propagation. They add no loop, allocation, copy, hash, lookup,
+  generic dispatch, or per-call admission work.
+- FAIL (semantic facade): `src/lib/nogc_sync_mut/concurrent/actor_hooks.spl`
+  still exposes an incompatible actor ABI and is deliberately not classified
+  as a safe runtime wrapper. It needs a scheduler-owned pure-Simple migration
+  or generated contract, not an annotation-only workaround.
+- FAIL (global admission): no exact signed provider artifact/evidence job is
+  available. This report remains **STATUS: FAIL** for global SFFI safety and
+  verification.

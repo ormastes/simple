@@ -1,13 +1,19 @@
 # SFFI - Simple Foreign Function Interface
 
 **Version:** 0.5.0
-**Status:** Production Ready
+**Status:** Partially hardened; global verified/signed admission is not complete
 
 ---
 
 ## Overview
 
 SFFI (Simple FFI) is Simple's mechanism for calling C/C++/Rust functions. It uses a layered wrapper pattern that keeps unsafe code isolated and provides clean Simple APIs.
+
+> **Assurance boundary (2026-08-26):** A scoped raw binding is not globally
+> safe, verified, or signed merely because it has an `unsafe(ffi)` annotation.
+> That annotation records an unproven foreign boundary. A provider is admitted
+> as signed only after its exact artifact, ABI registry, build inputs, compiler,
+> and verification receipt are bound to a trusted Ed25519 key.
 
 **Key Concepts:**
 - **Raw FFI** (`extern fn rt_*`) -- Direct C function declarations
@@ -23,9 +29,13 @@ The standard pattern for wrapping runtime C functions:
 ### Tier 1: Raw FFI Declaration
 
 ```simple
-# In src/lib/ffi/mod.spl
+# In the canonical no-GC sync runtime owner.
+# Actual declarations must state their exact ABI and error contract.
+@unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_write_text(path: text, content: text) -> bool
+@unsafe(reason: "raw runtime ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
 ```
 
@@ -38,14 +48,35 @@ Naming convention: `rt_` prefix maps to C functions in `src/runtime/runtime.c`.
 use std.ffi.{rt_file_read_text, rt_file_write_text, rt_file_exists}
 
 fn file_read(path: text) -> text:
-    rt_file_read_text(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
 
 fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
+    unsafe(capabilities: [ffi]):
+        rt_file_write_text(path, content)
 
 fn file_exists(path: text) -> bool:
-    rt_file_exists(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
 ```
+
+### Boundary admission checklist
+
+Before publishing an ordinary wrapper, preserve the actual ABI result and:
+
+1. Mark the raw declaration `unsafe(ffi)` and use the smallest lexical
+   `unsafe(capabilities: [ffi])` call scope.
+2. Map a failed status, missing symbol, null/invalid handle, or malformed
+   descriptor to an explicit error—not `nil`, `0`, `false`, or empty data.
+3. Validate nullability, sentinels, pointer/length relations, UTF-8,
+   ownership/release domain, and unwind/callback policy before lifting rich
+   Simple values.
+4. Keep calls direct: no per-call hashing, signature verification, registry
+   lookup, generic all-integer marshalling, or avoidable copies.
+5. For signed admission, bind the exact provider artifact and evidence to a
+   trusted key during loading. Admission never belongs on the hot call path.
+
+If an obligation is unknown, retain an unsafe API or isolate the provider.
 
 ### Usage
 

@@ -276,3 +276,16 @@ passing placeholder.
     and scope thirteen calls lexically. Remove the redundant closed-state query
     from `try_send`, add no allocation/copy/lookup work, and keep unsigned
     channel ownership explicitly unsafe until exact artifact evidence exists.
+49. Keep the MIR actor runtime bridge ABI-exact: `rt_actor_spawn` passes its
+    required context and `rt_actor_recv` has no invented timeout parameter.
+    Keep mutex unlock and rwlock store as `i64` status contracts, with lexical
+    FFI scopes and a static synchronization authority guard. Do not extend this
+    narrow repair into `actor_hooks.spl`: its public scheduler semantics are
+    incompatible with the runtime ABI and require a pure-Simple owner migration
+    or generated contract. Signed provider admission remains zero.
+50. Before any global-safe claim, obtain an authorized Ed25519 trust anchor and
+    an exact provider job containing artifact, source, build-input, compiler,
+    ABI-registry, and verification-report identities. Until then, continue
+    ranked boundary containment but report every raw provider as unsigned and
+    not globally verified; a no-verify convenience switch must not alter this
+    classification.
