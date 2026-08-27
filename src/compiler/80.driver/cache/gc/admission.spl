@@ -8,16 +8,43 @@
 # storage-accounting decision only; it never touches identity/trust classes
 # (see cache_protocol.sdn header note on CAS/TRUST/GC_METADATA separation).
 
+@unsafe(reason: "raw cache admission file-existence ABI", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_read_text(path: text) -> text
+@unsafe(reason: "raw cache admission nullable file-size ABI", capabilities: [ffi])
 extern fn rt_file_size(path: text) -> usize?
+@unsafe(reason: "raw cache admission directory predicate ABI", capabilities: [ffi])
 extern fn rt_dir_exists(path: text) -> bool
+@unsafe(reason: "raw cache admission runtime-owned directory-walk ABI", capabilities: [ffi])
 extern fn rt_dir_walk(root: text) -> [text]
 
 use compiler.driver.cache.metadata.cache_limits.{
     CacheLimits, cache_limits_hard_limit_bytes, cache_limits_min_free_bytes,
 }
 use compiler.driver.cache.cas_store.{cas_blob_path}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+
+# One direct ABI call per helper after inlining. Pin reads use the canonical
+# nullable owner so unreadable pins remain absent rather than being forged as a
+# raw text return.
+@always_inline
+fn admission_file_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
+
+@always_inline
+fn admission_file_size_raw(path: text) -> usize?:
+    unsafe(capabilities: [ffi]):
+        rt_file_size(path)
+
+@always_inline
+fn admission_dir_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_dir_exists(path)
+
+@always_inline
+fn admission_dir_walk_raw(root: text) -> [text]:
+    unsafe(capabilities: [ffi]):
+        rt_dir_walk(root)
 
 struct AdmissionResult:
     admitted: bool
@@ -30,12 +57,12 @@ struct PinnedOverflowReport:
     suggested_action: text
 
 fn dir_total_bytes(root: text) -> i64:
-    if not rt_file_exists(root):
+    if not admission_file_exists_raw(root):
         return 0
     var total: i64 = 0
-    for path in rt_dir_walk(root):
-        if not rt_dir_exists(path):
-            match rt_file_size(path):
+    for path in admission_dir_walk_raw(root):
+        if not admission_dir_exists_raw(path):
+            match admission_file_size_raw(path):
                 case Some(sz):
                     total = total + sz.to_i64()
                 case nil:
@@ -50,9 +77,12 @@ fn cache_total_bytes(root: text) -> i64:
 # fast_gc and gc/mark_sweep can both run without depending on each other.
 fn read_pins(root: text) -> [text]:
     val path = "{root}/pins"
-    if not rt_file_exists(path):
+    if not admission_file_exists_raw(path):
         return []
-    val content = rt_file_read_text(path) ?? ""
+    val maybe_content = file_read_nullable(path)
+    if maybe_content == nil:
+        panic("E-SFFI-CACHE-PINS-READ: unreadable existing pins file: {path}")
+    val content = maybe_content.unwrap()
     var out: [text] = []
     for line in content.split("\n"):
         if line.trim() != "":
@@ -67,7 +97,7 @@ fn pinned_bytes(root: text) -> i64:
     var total: i64 = 0
     for digest in pins:
         val path = cas_blob_path(root, digest)
-        match rt_file_size(path):
+        match admission_file_size_raw(path):
             case Some(sz):
                 total = total + sz.to_i64()
             case nil:

@@ -6,6 +6,7 @@ mod c_sffi {
         pub(super) fn rt_time_now_nanos() -> i64;
         pub(super) fn rt_time_now_micros() -> i64;
         pub(super) fn rt_time_now_unix_micros() -> i64;
+        pub(super) fn rt_time_now_seconds() -> i64;
         pub(super) fn rt_time_now_seconds_f64() -> f64;
         pub(super) fn rt_timestamp_get_year(micros: i64) -> i32;
         pub(super) fn rt_timestamp_get_month(micros: i64) -> i32;
@@ -66,13 +67,21 @@ pub fn try_rt_time_now_unix_micros() -> Option<i64> {
     lift_clock_value(rt_time_now_unix_micros())
 }
 #[inline(always)]
-pub fn rt_time_now_seconds() -> f64 {
+pub fn rt_time_now_seconds() -> i64 {
+    unsafe { c_sffi::rt_time_now_seconds() }
+}
+#[inline(always)]
+pub fn rt_time_now_seconds_f64() -> f64 {
     unsafe { c_sffi::rt_time_now_seconds_f64() }
 }
 #[inline(always)]
-pub fn try_rt_time_now_seconds() -> Option<f64> {
-    let value = rt_time_now_seconds();
+pub fn try_rt_time_now_seconds_f64() -> Option<f64> {
+    let value = rt_time_now_seconds_f64();
     (value >= 0.0).then_some(value)
+}
+#[inline(always)]
+pub fn fractional_seconds_to_millis(time_seconds: f64) -> i64 {
+    (time_seconds * 1000.0) as i64
 }
 #[inline(always)]
 pub fn rt_timestamp_get_year(micros: i64) -> i32 {
@@ -149,7 +158,7 @@ pub fn rt_progress_tls_clear() { unsafe { c_sffi::rt_progress_tls_clear() } }
 
 #[cfg(test)]
 mod tests {
-    use super::{lift_clock_value, try_rt_time_now_seconds};
+    use super::{fractional_seconds_to_millis, lift_clock_value, try_rt_time_now_seconds_f64};
 
     #[test]
     fn clock_failure_sentinel_is_not_a_value() {
@@ -160,6 +169,15 @@ mod tests {
 
     #[test]
     fn seconds_clock_lifts_nonnegative_live_value() {
-        assert!(try_rt_time_now_seconds().is_some());
+        assert!(try_rt_time_now_seconds_f64().is_some());
+    }
+
+    #[test]
+    fn fractional_seconds_to_millis_preserves_subsecond_precision() {
+        assert_eq!(
+            fractional_seconds_to_millis(1_700_000_000.125),
+            1_700_000_000_125
+        );
+        assert_eq!(fractional_seconds_to_millis(12.999), 12_999);
     }
 }

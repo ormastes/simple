@@ -1,0 +1,23 @@
+#!/bin/sh
+# Mark/sweep owns seven raw runtime contracts; nullable reads use the canonical
+# I/O facade and must not silently reintroduce a duplicate raw text binding.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+module="$root/src/compiler/80.driver/cache/gc/mark_sweep.spl"
+
+test "$(grep -c '^extern fn rt_' "$module")" -eq 7
+tagged=$(awk '/^@unsafe\(.*capabilities: \[ffi\]\)$/ { tagged=1; next }
+    /^extern fn rt_/ { if (tagged) count++ }
+    { tagged=0 }
+    END { print count + 0 }' "$module")
+test "$tagged" -eq 7
+test "$(grep -c 'unsafe(capabilities: \[ffi\]):' "$module")" -eq 7
+test "$(grep -Ec '^        rt_' "$module")" -eq 7
+grep -q '^use std.nogc_sync_mut.io_runtime.{file_read_nullable}$' "$module"
+! grep -q '^extern fn rt_file_read_text' "$module"
+! grep -q 'file_read_nullable(path) ?? ""' "$module"
+grep -q 'E-SFFI-CACHE-PINS-READ' "$module"
+grep -q 'E-SFFI-CACHE-MANIFEST-READ' "$module"
+
+echo 'cache mark-sweep SFFI authority: PASS (seven inlined raw owners; nullable reads)'

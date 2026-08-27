@@ -311,6 +311,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_tls13_aes128_gcm_decrypt", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_tls13_aes256_gcm_encrypt", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_tls13_aes256_gcm_decrypt", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ssh_aes256_gcm_decrypt_packet_v2", &[I64, I64, I64, I64], &[I64]),
     // =========================================================================
     // Raw file mapping lifecycle
     // =========================================================================

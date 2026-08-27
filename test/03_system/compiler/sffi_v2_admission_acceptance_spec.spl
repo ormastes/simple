@@ -1,0 +1,122 @@
+# Purpose and audience: executable SFFI provider-admission acceptance evidence for the owning engineering team.
+# codex-system-test
+# @tag developing
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/local/sffi_v2_admission_acceptance.md ; plan: doc/03_plan/sys_test/sffi_v2_admission_acceptance.md ; architecture: doc/04_architecture/sffi_v2_admission_acceptance.md ; design: doc/05_design/sffi_v2_admission_acceptance.md
+
+"""SFFI v2 provider-admission acceptance scaffold.
+
+The repository test manifest discovers the `developing` tag from the header
+comment above. This suite calls the A2 test-time runner; it contains no local
+provider-admission implementation and never derives categories from source or
+stderr. An unavailable fixture is an `Err` and the checker fails the scenario,
+rather than skipping it or turning blocked evidence into a passing result.
+
+A real runner returns `Ok(category)` only when category is exactly one of the
+frozen fixture IDs: admitted, unsigned, artifact-mismatch, untrusted-signer,
+abi-mismatch, stale-receipt, or null-contract. Its summary is that canonical
+category unchanged, never prose. `internal-error` is not a fixture/category.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use app.test.sffi_admission_acceptance.{
+    sffi_admission_acceptance_run,
+    sffi_admission_acceptance_summary
+}
+
+val FIXTURE_ADMITTED = "admitted"
+val FIXTURE_UNSIGNED = "unsigned"
+val FIXTURE_ARTIFACT_MISMATCH = "artifact-mismatch"
+val FIXTURE_UNTRUSTED_SIGNER = "untrusted-signer"
+val FIXTURE_ABI_MISMATCH = "abi-mismatch"
+val FIXTURE_STALE_RECEIPT = "stale-receipt"
+val FIXTURE_NULL_CONTRACT = "null-contract"
+val UNSUPPORTED_FIXTURE = "unsupported-fixture"
+
+fn check_admission_category(result: Result<text, text>, expected: text):
+    match result:
+        case Ok(actual):
+            expect(sffi_admission_acceptance_summary(actual)).to_equal(expected)
+        case Err(reason):
+            fail("SFFI admission fixture blocked: " + reason)
+
+fn check_admission_blocked(result: Result<text, text>):
+    match result:
+        case Ok(actual):
+            fail("Unsupported SFFI admission fixture emitted category: " + actual)
+        case Err(reason):
+            expect(reason).to_contain("blocked:")
+
+describe "SFFI v2 provider admission acceptance":
+    # @manual scenario evidence
+    describe "REQ-SFFI-ACC-001: fixture outcomes are typed and exhaustive":
+        it "should admit the exact sealed provider fixture":
+            # @req REQ-SFFI-ACC-001
+            step("Admit fixture admitted")
+            val result = sffi_admission_acceptance_run(FIXTURE_ADMITTED)
+            check_admission_category(result, FIXTURE_ADMITTED)
+
+        it "should reject an unsigned provider fixture":
+            # @req REQ-SFFI-ACC-001
+            step("Admit fixture unsigned")
+            val result = sffi_admission_acceptance_run(FIXTURE_UNSIGNED)
+            check_admission_category(result, FIXTURE_UNSIGNED)
+
+        it "should reject an altered provider artifact":
+            # @req REQ-SFFI-ACC-001
+            step("Admit fixture artifact-mismatch")
+            val result = sffi_admission_acceptance_run(FIXTURE_ARTIFACT_MISMATCH)
+            check_admission_category(result, FIXTURE_ARTIFACT_MISMATCH)
+
+    describe "REQ-SFFI-ACC-003: admission binds trust, ABI, receipt, and contract":
+        it "should reject a signer outside the trusted provider policy":
+            # @req REQ-SFFI-ACC-003
+            step("Admit fixture untrusted-signer")
+            val result = sffi_admission_acceptance_run(FIXTURE_UNTRUSTED_SIGNER)
+            check_admission_category(result, FIXTURE_UNTRUSTED_SIGNER)
+
+        it "should reject an ABI registry mismatch before publishing a call slot":
+            # @req REQ-SFFI-ACC-003
+            step("Admit fixture abi-mismatch")
+            val result = sffi_admission_acceptance_run(FIXTURE_ABI_MISMATCH)
+            check_admission_category(result, FIXTURE_ABI_MISMATCH)
+
+        it "should reject a stale verification receipt":
+            # @req REQ-SFFI-ACC-003
+            step("Admit fixture stale-receipt")
+            val result = sffi_admission_acceptance_run(FIXTURE_STALE_RECEIPT)
+            check_admission_category(result, FIXTURE_STALE_RECEIPT)
+
+        it "should reject null on a successful non-null contract":
+            # @req REQ-SFFI-ACC-003
+            step("Admit fixture null-contract")
+            val result = sffi_admission_acceptance_run(FIXTURE_NULL_CONTRACT)
+            check_admission_category(result, FIXTURE_NULL_CONTRACT)
+
+    describe "REQ-SFFI-ACC-004 and NFR-SFFI-ACC-003: results remain fail closed":
+        it "should fail closed when the runner cannot resolve a supported fixture":
+            # @req REQ-SFFI-ACC-004
+            step("Admit fixture admitted")
+            val result = sffi_admission_acceptance_run(FIXTURE_ADMITTED)
+            check_admission_category(result, FIXTURE_ADMITTED)
+
+        it "should fail closed when the fixture is unsupported":
+            # @req NFR-SFFI-ACC-003
+            step("Admit fixture unsupported-fixture")
+            val result = sffi_admission_acceptance_run(UNSUPPORTED_FIXTURE)
+            check_admission_blocked(result)
+
+        it "should retain a canonical category without receipt prose":
+            # @req REQ-SFFI-ACC-004
+            step("Admit fixture admitted")
+            val result = sffi_admission_acceptance_run(FIXTURE_ADMITTED)
+            check_admission_category(result, FIXTURE_ADMITTED)
+
+    describe "NFR-SFFI-ACC-001: admission is not a typed-call hot-path operation":
+        it "should require a sealed admitted category before the A3 hot-path gate":
+            # @req NFR-SFFI-ACC-001
+            step("Admit fixture admitted")
+            val result = sffi_admission_acceptance_run(FIXTURE_ADMITTED)
+            check_admission_category(result, FIXTURE_ADMITTED)

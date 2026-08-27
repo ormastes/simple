@@ -10,7 +10,7 @@ use simple_runtime::value::aes::{
     aes128_decrypt_one_block, aes128_encrypt_one_block, aes128_gcm_decrypt_bytes, aes128_gcm_encrypt_bytes,
     aes256_encrypt_one_block, aes256_gcm_decrypt_bytes, aes256_gcm_encrypt_bytes, decrypt_block_with_expanded_bytes,
     encrypt_block_with_expanded_bytes, rt_aes_rcon as sffi_aes_rcon, rt_aes_sbox as sffi_aes_sbox,
-    ssh_aes256_gcm_decrypt_packet_bytes, AesGcmDecryptOutcome,
+    ssh_aes256_gcm_decrypt_packet_outcome, AesGcmDecryptOutcome, SshAesGcmDecryptOutcome,
 };
 use simple_runtime::value::simd::{
     rt_simd_detect_profile as sffi_detect_profile, rt_simd_has_avx as sffi_has_avx, rt_simd_has_avx2 as sffi_has_avx2,
@@ -442,52 +442,39 @@ pub fn rt_tls13_aes256_gcm_decrypt(args: &[Value]) -> Result<Value, CompileError
     Ok(Value::byte_array(out))
 }
 
-pub fn rt_ssh_aes256_gcm_decrypt_packet(args: &[Value]) -> Result<Value, CompileError> {
+/// Versioned SSH packet decrypt carrier.  Keep its status values identical to
+/// the native Rust export so all execution lanes preserve the same failure
+/// categories without a second decrypt or a fabricated empty payload.
+pub fn rt_ssh_aes256_gcm_decrypt_packet_v2(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 4 {
         return Err(CompileError::runtime(
-            "rt_ssh_aes256_gcm_decrypt_packet expects 4 arguments".to_string(),
+            "rt_ssh_aes256_gcm_decrypt_packet_v2 expects 4 arguments".to_string(),
         ));
     }
-    let key = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet", &args[0])?;
-    let iv = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet", &args[1])?;
+    let key = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet_v2", &args[0])?;
+    let iv = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet_v2", &args[1])?;
     let seq = match &args[2] {
         Value::Int(value) => *value,
         Value::UInt { value, .. } => *value as i64,
         _ => {
             return Err(CompileError::runtime(
-                "rt_ssh_aes256_gcm_decrypt_packet expects integer sequence".to_string(),
+                "rt_ssh_aes256_gcm_decrypt_packet_v2 expects integer sequence".to_string(),
             ))
         }
     };
-    let packet = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet", &args[3])?;
-    let payload = ssh_aes256_gcm_decrypt_packet_bytes(&key, &iv, seq, &packet).unwrap_or_default();
-    Ok(Value::array(
-        payload.into_iter().map(|b| Value::Int(b as i64)).collect(),
-    ))
-}
-
-pub fn rt_ssh_aes256_gcm_decrypt_packet_payload_len(args: &[Value]) -> Result<Value, CompileError> {
-    if args.len() != 4 {
-        return Err(CompileError::runtime(
-            "rt_ssh_aes256_gcm_decrypt_packet_payload_len expects 4 arguments".to_string(),
-        ));
-    }
-    let key = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet_payload_len", &args[0])?;
-    let iv = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet_payload_len", &args[1])?;
-    let seq = match &args[2] {
-        Value::Int(value) => *value,
-        Value::UInt { value, .. } => *value as i64,
-        _ => {
-            return Err(CompileError::runtime(
-                "rt_ssh_aes256_gcm_decrypt_packet_payload_len expects integer sequence".to_string(),
-            ))
+    let packet = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet_v2", &args[3])?;
+    let out = match ssh_aes256_gcm_decrypt_packet_outcome(&key, &iv, seq, &packet) {
+        SshAesGcmDecryptOutcome::InvalidInput => vec![0x00],
+        SshAesGcmDecryptOutcome::AuthenticationFailed => vec![0x01],
+        SshAesGcmDecryptOutcome::Plaintext(mut payload) => {
+            // The runtime outcome retains its decrypt allocation after
+            // compaction, so appending the v2 status needs no payload copy.
+            payload.reserve(1);
+            payload.push(0x02);
+            payload
         }
     };
-    let packet = expect_byte_array("rt_ssh_aes256_gcm_decrypt_packet_payload_len", &args[3])?;
-    let len = ssh_aes256_gcm_decrypt_packet_bytes(&key, &iv, seq, &packet)
-        .map(|payload| payload.len() as i64)
-        .unwrap_or(-1);
-    Ok(Value::Int(len))
+    Ok(Value::byte_array(out))
 }
 
 // ============================================================================
@@ -2283,7 +2270,7 @@ mod aes_bridge_contract_tests {
     use super::{
         expect_byte_array, rt_aes128_decrypt_block_pure, rt_aes128_encrypt_block_pure, rt_aes256_encrypt_block_pure,
         rt_tls13_aes128_gcm_decrypt, rt_tls13_aes128_gcm_encrypt, rt_tls13_aes256_gcm_decrypt,
-        rt_tls13_aes256_gcm_encrypt,
+        rt_tls13_aes256_gcm_encrypt, rt_ssh_aes256_gcm_decrypt_packet_v2,
     };
     use crate::value::Value;
 
@@ -2322,6 +2309,14 @@ mod aes_bridge_contract_tests {
         ])
         .is_err());
         assert!(rt_tls13_aes256_gcm_decrypt(&[empty.clone(), nonce, empty.clone(), empty, block]).is_err());
+    }
+
+    #[test]
+    fn ssh_gcm_v2_invalid_input_is_tagged_not_an_empty_payload() {
+        let empty = Value::byte_array(vec![]);
+        let result =
+            rt_ssh_aes256_gcm_decrypt_packet_v2(&[empty.clone(), empty.clone(), Value::Int(0), empty]).unwrap();
+        assert_eq!(expect_byte_array("ssh v2 result", &result).unwrap(), [0x00]);
     }
 }
 

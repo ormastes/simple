@@ -1,0 +1,77 @@
+#!/bin/sh
+# Enforce an exact module+symbol source contract before a reviewed rt_* edit.
+#
+# This checker never edits source. It rejects wildcard/prefix mapping and is a
+# source-shape precondition only, never provider verification or admission.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+policy=${1:?usage: rt-unsafe-autofix-contract.shs POLICY.tsv}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+
+test -f "$policy" && test ! -L "$policy" || {
+    echo 'rt unsafe autofix contract: policy must be a regular non-symlink file' >&2
+    exit 2
+}
+expected_header='module	symbol	unsafe_tag	contract	state'
+actual_header=$(head -n 1 "$policy")
+test "$actual_header" = "$(printf '%b' "$expected_header")" || {
+    echo 'rt unsafe autofix contract: unsupported policy schema' >&2
+    exit 2
+}
+
+awk -F '\t' '
+    NR == 1 { next }
+    NF != 5 || $1 !~ /^(src|test)\/[A-Za-z0-9_./-]+$/ || $1 ~ /\.\.|\*/ ||
+    $2 !~ /^rt_[A-Za-z0-9_]+$/ || $3 !~ /^(tagged|missing)$/ ||
+    $4 !~ /^(missing|documented|typed_result|sffi_metadata)$/ ||
+    $5 !~ /^(unsafe_contract_missing|unsafe_contract_declared|unsafe_tag_missing|unsafe_tag_and_contract_missing)$/ {
+        print "rt unsafe autofix contract: malformed exact policy row " NR > "/dev/stderr"; exit 1
+    }
+    {
+        seen[$1 SUBSEP $2]++
+        if (seen[$1 SUBSEP $2] != 1) {
+            print "rt unsafe autofix contract: duplicate module+symbol policy row " NR > "/dev/stderr"; exit 1
+        }
+        rows++
+    }
+    END { if (rows == 0) { print "rt unsafe autofix contract: policy has no exact rows" > "/dev/stderr"; exit 1 } }
+' "$policy"
+
+SFFI_SOURCE_ONLY=1 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+    "$work/contracts.tsv" "$work/symbols.tsv" >/dev/null 2>&1
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    FNR == 1 { next }
+    $1 ~ /^rt_/ {
+        module=$6; sub(/\.spl$/, "", module)
+        print module, $1, $8, $9, $12
+    }
+' "$work/contracts.tsv" >"$work/actual.tsv"
+
+awk -F '\t' 'BEGIN { OFS="\t" }
+    NR == FNR {
+        key=$1 SUBSEP $2
+        count[key]++
+        actual[key]=$3 SUBSEP $4 SUBSEP $5
+        next
+    }
+    FNR == 1 { next }
+    {
+        key=$1 SUBSEP $2
+        if (!(key in actual)) {
+            print "rt unsafe autofix contract: module+symbol not found: " $1 " / " $2 > "/dev/stderr"; failed=1; next
+        }
+        if (count[key] != 1) {
+            print "rt unsafe autofix contract: ambiguous module+symbol declaration: " $1 " / " $2 > "/dev/stderr"; failed=1; next
+        }
+        split(actual[key], got, SUBSEP)
+        if (got[1] != $3 || got[2] != $4 || got[3] != $5) {
+            print "rt unsafe autofix contract: exact contract mismatch for " $1 " / " $2 > "/dev/stderr"; failed=1
+        }
+    }
+    END { exit failed }
+' "$work/actual.tsv" "$policy"
+
+echo 'rt unsafe autofix contract: PASS (exact source-only module+symbol policy)'
