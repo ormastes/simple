@@ -1,6 +1,6 @@
-# Aggregator Walker Specification
+# aggregator_walker_spec
 
-> Tests covering aggregator_walker.
+> Purpose and audience: owning engineering team verifying the compositor
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,22 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Aggregator Walker Specification
+# aggregator_walker_spec
+
+Purpose and audience: owning engineering team verifying the compositor
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/unit/lib/viz/aggregator_walker_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose and audience: owning engineering team verifying the compositor
+    aggregator walker surface (walk, inline, drop, placeholder behaviors).
 
 ## Scenarios
 
@@ -37,7 +52,7 @@ val root = _empty_frame([])
 val ctx = _context_with([])
 val result = walk_referenced_surfaces(root, ctx)
 val result_len = result.len()
-result_len.to_equal(0)
+assert_equal(result_len, 0)
 ```
 
 </details>
@@ -62,10 +77,10 @@ val child_frame = _empty_frame([])
 val ctx = _context_with([_entry(child_sid, child_frame)])
 val result = walk_referenced_surfaces(root, ctx)
 val result_len = result.len()
-result_len.to_equal(1)
+assert_equal(result_len, 1)
 val found = result[0]
 val eq = found.equals(child_sid)
-eq.to_equal(true)
+assert_equal(eq, true)
 ```
 
 </details>
@@ -97,7 +112,7 @@ val ctx = _context_with([
 val result = walk_referenced_surfaces(root, ctx)
 # Should see each of sid_a, sid_b exactly once
 val result_len = result.len()
-result_len.to_equal(2)
+assert_equal(result_len, 2)
 ```
 
 </details>
@@ -122,10 +137,10 @@ val ctx = _context_with([_entry(sid, frame)])
 val maybe = find_frame_for(ctx, sid)
 if val Some(f) = maybe:
     val ref_len = f.referenced_surfaces.len()
-    ref_len.to_equal(0)
+    assert_equal(ref_len, 0)
 else:
     # force failure: should have found it
-    true.to_equal(false)
+    assert_equal(true, false)
 ```
 
 </details>
@@ -154,7 +169,7 @@ val result = walk_referenced_surfaces(root_frame, ctx)
 # walk adds unknown_sid to result (it's referenced), but since find_frame_for
 # returns None there are no children to add. Result length = 1.
 val result_len = result.len()
-result_len.to_equal(1)
+assert_equal(result_len, 1)
 ```
 
 </details>
@@ -184,7 +199,7 @@ val child_frame = _frame_with_one_pass([], 2, child_quads, child_sqs)
 val result = inline_render_pass(parent_pass, child_frame)
 # parent had 1 quad, child has 3 → merged has 4
 val merged_len = result.quads.len()
-merged_len.to_equal(4)
+assert_equal(merged_len, 4)
 ```
 
 </details>
@@ -215,7 +230,7 @@ val child_frame = _frame_with_one_pass([], 2, child_quads, child_sqs)
 val result = inline_render_pass(parent_pass, child_frame)
 # The appended (3rd) quad was child quad at sqs index 0, remapped to 0+2=2
 val merged_third_quad = result.quads[2]
-merged_third_quad.shared_quad_state_index.to_equal(2)
+assert_equal(merged_third_quad.shared_quad_state_index, 2)
 ```
 
 </details>
@@ -243,10 +258,10 @@ val render_pass = _pass_with_quads(1, [solid, rp_quad], sqs_list)
 val result = drop_missing_surface(render_pass, "42")
 # RenderPass quad with render_pass_id==42 should be dropped; solid kept
 val kept_len = result.quads.len()
-kept_len.to_equal(1)
+assert_equal(kept_len, 1)
 val kept = result.quads[0]
 val is_solid = if kept.kind == DrawQuadKind.SolidColor: true else: false
-is_solid.to_equal(true)
+assert_equal(is_solid, true)
 ```
 
 </details>
@@ -272,7 +287,7 @@ val render_pass = _pass_with_quads(1, [solid1, solid2], sqs_list)
 
 val result = drop_missing_surface(render_pass, "99")
 val unchanged_len = result.quads.len()
-unchanged_len.to_equal(2)
+assert_equal(unchanged_len, 2)
 ```
 
 </details>
@@ -298,26 +313,11 @@ val sid = _sid(5, 0)
 
 val result = placeholder_deferred_surface(render_pass, sid)
 val deferred_len = result.quads.len()
-deferred_len.to_equal(2)
-result.id.to_equal(1)
+assert_equal(deferred_len, 2)
+assert_equal(result.id, 1)
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Standard Library |
-| Status | Active |
-| Source | `test/unit/lib/viz/aggregator_walker_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering aggregator_walker.
-- aggregator_walker
 
 ## Scenario Summary
 
@@ -343,43 +343,39 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `baa66e8afbfd17d89020a0dd611d7374867754aa8c354c7f6c23e73a25e46d2a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `55b985321db5ccb8a37c9f452a852d0efd9bbd0409e7de08211bb11e2c7cf5cd`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `baa66e8afbfd17d89020a0dd611d7374867754aa8c354c7f6c23e73a25e46d2a`.
+Source SHA-256: `55b985321db5ccb8a37c9f452a852d0efd9bbd0409e7de08211bb11e2c7cf5cd`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `baa66e8afbfd17d89020a0dd611d7374867754aa8c354c7f6c23e73a25e46d2a`  
+Source SHA-256: `55b985321db5ccb8a37c9f452a852d0efd9bbd0409e7de08211bb11e2c7cf5cd`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 92/100
 source: test/unit/lib/viz/aggregator_walker_spec.spl
 mirror: doc/06_spec/unit/lib/viz/aggregator_walker_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/lib/viz/aggregator_walker_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/lib/viz/aggregator_walker_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/unit/lib/viz/aggregator_walker_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/viz/aggregator_walker_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
-test/unit/lib/viz/aggregator_walker_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walk_referenced_surfaces returns empty list when root has no referenced surfaces' has no retained capture or evidence
+test/unit/lib/viz/aggregator_walker_spec.spl:121:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walk_referenced_surfaces returns empty list when root has no referenced surfaces' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/viz/aggregator_walker_spec.spl:127:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walk_referenced_surfaces returns one id when root references one child' has no retained capture or evidence
+test/unit/lib/viz/aggregator_walker_spec.spl:131:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walk_referenced_surfaces returns one id when root references one child' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/viz/aggregator_walker_spec.spl:142:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walk_referenced_surfaces terminates and dedups on a cycle A to B to A' has no retained capture or evidence
+test/unit/lib/viz/aggregator_walker_spec.spl:146:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'walk_referenced_surfaces terminates and dedups on a cycle A to B to A' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->

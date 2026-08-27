@@ -20,7 +20,7 @@ Enhanced error messages with context, suggestions, and help text.
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/std/parser/error_recovery_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Enhanced error messages with context, suggestions, and help text.
@@ -54,10 +54,10 @@ val err = ContextualSyntaxError(
     help=Some("Use: func(a: 1, b: 2)")
 )
 
-err.context.should_equal("function arguments")
-err.message.should_equal("expected comma before argument 'b'")
-err.span.line.should_equal(5)
-err.span.column.should_equal(20)
+assert_equal(err.context, "function arguments")
+assert_equal(err.message, "expected comma before argument 'b'")
+assert_equal(err.span.line, 5)
+assert_equal(err.span.column, 20)
 err.suggestion.should_be_some()
 err.help.should_be_some()
 ```
@@ -117,13 +117,13 @@ val err = ContextualSyntaxError(
 
 val formatted = err.format(source, use_color: false)
 
-formatted.should_contain("error[E0013]")
-formatted.should_contain("function arguments")
-formatted.should_contain("expected comma before argument 'b'")
-formatted.should_contain("line 2:15")
-formatted.should_contain("func(a: 1 b: 2)")
-formatted.should_contain("Suggestion: Insert comma before 'b'")
-formatted.should_contain("Help: Use: func(a: 1, b: 2)")
+assert_contains(formatted, "error[E0013]")
+assert_contains(formatted, "function arguments")
+assert_contains(formatted, "expected comma before argument 'b'")
+assert_contains(formatted, "line 2:15")
+assert_contains(formatted, "func(a: 1 b: 2)")
+assert_contains(formatted, "Suggestion: Insert comma before 'b'")
+assert_contains(formatted, "Help: Use: func(a: 1, b: 2)")
 ```
 
 </details>
@@ -153,8 +153,8 @@ val err = ContextualSyntaxError(
 
 val formatted = err.format(source, use_color: true)
 
-formatted.should_contain("\x1b[1;31merror[E0013]:\x1b[0m")
-formatted.should_contain("\x1b[1;36mSuggestion:\x1b[0m")
+assert_contains(formatted, "\x1b[1;31merror[E0013]:\x1b[0m")
+assert_contains(formatted, "\x1b[1;36mSuggestion:\x1b[0m")
 ```
 
 </details>
@@ -178,8 +178,8 @@ step("provides message for missing comma in args")
 val mistake = CommonMistake.MissingCommaInArgs
 val msg = mistake.message()
 
-msg.should_contain("func(a: 1 b: 2)")
-msg.should_contain("func(a: 1, b: 2)")
+assert_contains(msg, "func(a: 1 b: 2)")
+assert_contains(msg, "func(a: 1, b: 2)")
 ```
 
 </details>
@@ -201,8 +201,8 @@ step("provides message for missing comma in dict")
 val mistake = CommonMistake.MissingCommaInDict
 val msg = mistake.message()
 
-msg.should_contain("{a: 1 b: 2}")
-msg.should_contain("{a: 1, b: 2}")
+assert_contains(msg, "{a: 1 b: 2}")
+assert_contains(msg, "{a: 1, b: 2}")
 ```
 
 </details>
@@ -224,8 +224,8 @@ step("provides message for missing comma in struct")
 val mistake = CommonMistake.MissingCommaInStruct
 val msg = mistake.message()
 
-msg.should_contain("Point(x: 1 y: 2)")
-msg.should_contain("Point(x: 1, y: 2)")
+assert_contains(msg, "Point(x: 1 y: 2)")
+assert_contains(msg, "Point(x: 1, y: 2)")
 ```
 
 </details>
@@ -245,13 +245,13 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("provides suggestion for each mistake")
 CommonMistake.MissingCommaInArgs.suggestion()
-    .should_equal("Insert comma between arguments")
+   assert_equal( , "Insert comma between arguments")
 
 CommonMistake.MissingCommaInDict.suggestion()
-    .should_equal("Insert comma between dict entries")
+   assert_equal( , "Insert comma between dict entries")
 
 CommonMistake.MissingCommaInStruct.suggestion()
-    .should_equal("Insert comma between struct fields")
+   assert_equal( , "Insert comma between struct fields")
 ```
 
 </details>
@@ -275,8 +275,8 @@ step("provides message for missing colon before block")
 val mistake = CommonMistake.MissingColonBeforeBlock
 val msg = mistake.message()
 
-msg.should_contain("fn foo()")
-msg.should_contain("fn foo():")
+assert_contains(msg, "fn foo()")
+assert_contains(msg, "fn foo():")
 ```
 
 </details>
@@ -298,8 +298,8 @@ step("provides message for missing colon in dict")
 val mistake = CommonMistake.MissingColonInDict
 val msg = mistake.message()
 
-msg.should_contain("{key value}")
-msg.should_contain("{key: value}")
+assert_contains(msg, "{key value}")
+assert_contains(msg, "{key: value}")
 ```
 
 </details>
@@ -323,9 +323,9 @@ step("provides message for missing indent after colon")
 val mistake = CommonMistake.MissingIndentAfterColon
 val msg = mistake.message()
 
-msg.should_contain("fn foo():")
-msg.should_contain("return 42")
-msg.should_contain("    return 42")
+assert_contains(msg, "fn foo():")
+assert_contains(msg, "return 42")
+assert_contains(msg, "    return 42")
 ```
 
 </details>
@@ -347,8 +347,8 @@ step("provides message for wrong indent level")
 val mistake = CommonMistake.WrongIndentLevel
 val msg = mistake.message()
 
-msg.should_contain("Inconsistent indentation")
-msg.should_contain("4 spaces or tabs")
+assert_contains(msg, "Inconsistent indentation")
+assert_contains(msg, "4 spaces or tabs")
 ```
 
 </details>
@@ -372,8 +372,8 @@ step("provides message for Python def")
 val mistake = CommonMistake.PythonDef
 val msg = mistake.message()
 
-msg.should_contain("def add(a, b)")
-msg.should_contain("fn add(a, b)")
+assert_contains(msg, "def add(a, b)")
+assert_contains(msg, "fn add(a, b)")
 ```
 
 </details>
@@ -395,8 +395,8 @@ step("provides message for Python None")
 val mistake = CommonMistake.PythonNone
 val msg = mistake.message()
 
-msg.should_contain("return None")
-msg.should_contain("return nil")
+assert_contains(msg, "return None")
+assert_contains(msg, "return nil")
 ```
 
 </details>
@@ -418,8 +418,8 @@ step("provides message for Rust let mut")
 val mistake = CommonMistake.RustLetMut
 val msg = mistake.message()
 
-msg.should_contain("let mut x = 5")
-msg.should_contain("var x = 5")
+assert_contains(msg, "let mut x = 5")
+assert_contains(msg, "var x = 5")
 ```
 
 </details>
@@ -441,8 +441,8 @@ step("provides message for Java new")
 val mistake = CommonMistake.JavaNew
 val msg = mistake.message()
 
-msg.should_contain("new Point(1, 2)")
-msg.should_contain("Point(x: 1, y: 2)")
+assert_contains(msg, "new Point(1, 2)")
+assert_contains(msg, "Point(x: 1, y: 2)")
 ```
 
 </details>
@@ -750,9 +750,9 @@ val fix = FixSuggestion(
     confidence: Confidence.High
 )
 
-fix.description.should_equal("Insert missing comma")
-fix.replacement.should_equal(", ")
-fix.confidence.should_equal(Confidence.High)
+assert_equal(fix.description, "Insert missing comma")
+assert_equal(fix.replacement, ", ")
+assert_equal(fix.confidence, Confidence.High)
 ```
 
 </details>
@@ -778,7 +778,7 @@ val fix = FixSuggestion(
     confidence: Confidence.Medium
 )
 
-fix.confidence.should_equal(Confidence.Medium)
+assert_equal(fix.confidence, Confidence.Medium)
 ```
 
 </details>
@@ -804,7 +804,7 @@ val fix = FixSuggestion(
     confidence: Confidence.Low
 )
 
-fix.confidence.should_equal(Confidence.Low)
+assert_equal(fix.confidence, Confidence.Low)
 ```
 
 </details>
@@ -835,10 +835,10 @@ val fix = FixSuggestion(
 
 val diff = fix.generate_diff(source)
 
-diff.should_contain("--- before")
-diff.should_contain("+++ after")
-diff.should_contain("-func(a: 1 b: 2)")
-diff.should_contain("+func(a: 1, b: 2)")
+assert_contains(diff, "--- before")
+assert_contains(diff, "+++ after")
+assert_contains(diff, "-func(a: 1 b: 2)")
+assert_contains(diff, "+func(a: 1, b: 2)")
 ```
 
 </details>
@@ -867,9 +867,9 @@ val fix = FixSuggestion(
 
 val diff = fix.generate_diff(source)
 
-diff.should_contain("@@ -2,1 +2,1 @@")
-diff.should_contain("-    func(a: 1 b: 2)")
-diff.should_contain("+    func(a: 1, b: 2)")
+assert_contains(diff, "@@ -2,1 +2,1 @@")
+assert_contains(diff, "-    func(a: 1 b: 2)")
+assert_contains(diff, "+    func(a: 1, b: 2)")
 ```
 
 </details>
@@ -919,8 +919,8 @@ val suggestions = FixSuggestions(
 
 val best = suggestions.best_fix()
 best.should_be_some()
-best.unwrap().confidence.should_equal(Confidence.High)
-best.unwrap().description.should_equal("Fix 2")
+assert_equal(best.unwrap().confidence, Confidence.High)
+assert_equal(best.unwrap().description, "Fix 2")
 ```
 
 </details>
@@ -975,10 +975,10 @@ val err = ErrorBuilder()
     .help_text("Use: func(a: 1, b: 2)")
     .build()
 
-err.context.should_equal("function arguments")
-err.message.should_equal("expected comma before argument 'b'")
-err.span.line.should_equal(5)
-err.span.column.should_equal(20)
+assert_equal(err.context, "function arguments")
+assert_equal(err.message, "expected comma before argument 'b'")
+assert_equal(err.span.line, 5)
+assert_equal(err.span.column, 20)
 err.suggestion.should_be_some()
 err.help.should_be_some()
 ```
@@ -1005,8 +1005,8 @@ val err = ErrorBuilder()
     .at_span(Span(line: 10, column: 5))
     .build()
 
-err.context.should_equal("dict literal")
-err.message.should_equal("expected colon")
+assert_equal(err.context, "dict literal")
+assert_equal(err.message, "expected colon")
 err.suggestion.should_be_none()
 err.help.should_be_none()
 ```
@@ -1033,8 +1033,8 @@ val err = ErrorBuilder()
     .context("test context")
     .build()
 
-err.context.should_equal("test context")
-err.message.should_equal("test message")
+assert_equal(err.context, "test context")
+assert_equal(err.message, "test message")
 ```
 
 </details>
@@ -1085,9 +1085,9 @@ val err = ErrorBuilder()
 
 # Verify error message
 val formatted = err.format(source, use_color: false)
-formatted.should_contain("error[E0013]")
-formatted.should_contain("function arguments")
-formatted.should_contain("expected comma before argument 'volume'")
+assert_contains(formatted, "error[E0013]")
+assert_contains(formatted, "function arguments")
+assert_contains(formatted, "expected comma before argument 'volume'")
 
 # Create fix suggestion
 val fix = FixSuggestion(
@@ -1099,8 +1099,8 @@ val fix = FixSuggestion(
 
 # Verify diff
 val diff = fix.generate_diff(source)
-diff.should_contain("AudioSource(name: 'test' volume: 1.0)")
-diff.should_contain("AudioSource(name: 'test', volume: 1.0)")
+assert_contains(diff, "AudioSource(name: 'test' volume: 1.0)")
+assert_contains(diff, "AudioSource(name: 'test', volume: 1.0)")
 ```
 
 </details>
@@ -1140,7 +1140,7 @@ val err = ErrorBuilder()
     .help_text("Dict entries must be separated by commas: {a: 1, b: 2}")
     .build()
 
-err.context.should_equal("dict literal")
+assert_equal(err.context, "dict literal")
 err.suggestion.should_be_some()
 ```
 
@@ -1181,8 +1181,8 @@ val err = ErrorBuilder()
 
 # Verify
 val formatted = err.format(source, use_color: false)
-formatted.should_contain("function definition")
-formatted.should_contain("expected colon before function body")
+assert_contains(formatted, "function definition")
+assert_contains(formatted, "expected colon before function body")
 ```
 
 </details>
@@ -1212,7 +1212,7 @@ val fix = FixSuggestion(
 )
 
 val diff = fix.generate_diff(source)
-diff.should_contain("Error: line out of bounds")
+assert_contains(diff, "Error: line out of bounds")
 ```
 
 </details>
@@ -1240,7 +1240,7 @@ val fix = FixSuggestion(
 )
 
 val diff = fix.generate_diff(source)
-diff.should_contain("+test,")
+assert_contains(diff, "+test,")
 ```
 
 </details>
@@ -1270,7 +1270,7 @@ val err = ContextualSyntaxError(
 )
 
 val formatted = err.format("", use_color: false)
-formatted.should_contain("error[E0013]")
+assert_contains(formatted, "error[E0013]")
 ```
 
 </details>
@@ -1324,27 +1324,26 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ee5b81197194833bc49f78affb52e5d63140a2ad1371d087a46bd5298483338e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `5c73d64c08d61396eb36203001071e8dfcd068eea1b21f974678aff8b6bdc53a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ee5b81197194833bc49f78affb52e5d63140a2ad1371d087a46bd5298483338e`.
+Source SHA-256: `5c73d64c08d61396eb36203001071e8dfcd068eea1b21f974678aff8b6bdc53a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ee5b81197194833bc49f78affb52e5d63140a2ad1371d087a46bd5298483338e`  
+Source SHA-256: `5c73d64c08d61396eb36203001071e8dfcd068eea1b21f974678aff8b6bdc53a`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **81/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **91/100**; effective score: **91/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 91/100
 source: test/unit/lib/std/parser/error_recovery_spec.spl
 mirror: doc/06_spec/unit/lib/std/parser/error_recovery_spec.md (current)
-findings: 7 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=55
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=81; blocker cap makes effective=49
 doc/06_spec/unit/lib/std/parser/error_recovery_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
@@ -1354,9 +1353,6 @@ doc/06_spec/unit/lib/std/parser/error_recovery_spec.md:1:1: warning SSDOC-MNT-00
 test/unit/lib/std/parser/error_recovery_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
   why: Long flat dumps obscure the primary workflow.
   improve: Group secondary detail and keep the primary workflow visible.
-test/unit/lib/std/parser/error_recovery_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
 test/unit/lib/std/parser/error_recovery_spec.spl:22:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates error with all fields' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.

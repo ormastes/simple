@@ -31,7 +31,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("creates skip decorator with all parameters")
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: [],
     runtimes: [],
     profiles: [],
@@ -66,7 +66,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("creates skip decorator with platforms only")
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: ["windows"],
     runtimes: [],
     profiles: [],
@@ -101,7 +101,7 @@ Reproduction: this block contains the complete executable scenario source.
 # @req REQ-SSPEC-UNIT
 step("skip decorator runs test when conditions don't match")
 var test_ran = false
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: ["nonexistent_os_xyz"],
     runtimes: [],
     profiles: [],
@@ -427,7 +427,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("creates platform-specific skip")
-val skip_win = skip(
+val skip_win = make_skip_decorator(
     platforms: ["windows"],
     runtimes: [],
     profiles: [],
@@ -461,7 +461,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("creates runtime-specific skip")
-val skip_interp = skip(
+val skip_interp = make_skip_decorator(
     platforms: [],
     runtimes: ["interpreter"],
     profiles: [],
@@ -495,7 +495,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("creates hardware-specific skip")
-val skip_no_gpu = skip(
+val skip_no_gpu = make_skip_decorator(
     platforms: [],
     runtimes: [],
     profiles: [],
@@ -529,7 +529,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("creates complex multi-condition skip")
-val skip_complex = skip(
+val skip_complex = make_skip_decorator(
     platforms: ["windows"],
     runtimes: ["interpreter"],
     profiles: ["debug"],
@@ -633,7 +633,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("skip represents TODO (will implement in future)")
-val skip_todo = skip(
+val skip_todo = make_skip_decorator(
     platforms: ["windows"],
     runtimes: [],
     profiles: [],
@@ -703,7 +703,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("handles empty reason")
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: ["windows"],
     runtimes: [],
     profiles: [],
@@ -737,7 +737,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("handles multiple platforms")
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: ["windows", "macos", "freebsd"],
     runtimes: [],
     profiles: [],
@@ -771,7 +771,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("handles multiple tags")
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: [],
     runtimes: [],
     profiles: [],
@@ -805,7 +805,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("handles version constraints")
-val decorator = skip(
+val decorator = make_skip_decorator(
     platforms: [],
     runtimes: [],
     profiles: [],
@@ -832,7 +832,7 @@ check(decorator != nil)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/std/spec/decorators_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -872,36 +872,35 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `ae0909954dcadaefd4042f0cf791da6de1f31446f0ba6613c50e66948716d0e5`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `377afca0a61087b44a9cf5da6692b0ac201f59ad03fe4eb78b3ddc5ff69b701d`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `ae0909954dcadaefd4042f0cf791da6de1f31446f0ba6613c50e66948716d0e5`.
+Source SHA-256: `377afca0a61087b44a9cf5da6692b0ac201f59ad03fe4eb78b3ddc5ff69b701d`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `ae0909954dcadaefd4042f0cf791da6de1f31446f0ba6613c50e66948716d0e5`  
+Source SHA-256: `377afca0a61087b44a9cf5da6692b0ac201f59ad03fe4eb78b3ddc5ff69b701d`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 89/100
 source: test/unit/lib/std/spec/decorators_spec.spl
 mirror: doc/06_spec/unit/lib/std/spec/decorators_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
+findings: 6 blockers: 0
+  narrative=80 structure=100 oracle=100
   traceability=100 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/lib/std/spec/decorators_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
 doc/06_spec/unit/lib/std/spec/decorators_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, evidence, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/std/spec/decorators_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): unconditional pending or fail-fast scaffold remains
-  why: A passing-looking document without an oracle is not conformance evidence.
-  improve: Replace placeholders with an observable production assertion.
+test/unit/lib/std/spec/decorators_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
 test/unit/lib/std/spec/decorators_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'creates skip decorator with all parameters' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.

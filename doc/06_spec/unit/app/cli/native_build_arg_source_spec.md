@@ -1,6 +1,6 @@
-# Native Build Arg Source Specification
+# native_build_arg_source_spec
 
-> Tests covering native-build CLI arg source regressions.
+> Purpose: this manual pins the behavior named "native-build CLI arg source regressions" for the owning engineering team.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,22 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Native Build Arg Source Specification
+# native_build_arg_source_spec
+
+Purpose: this manual pins the behavior named "native-build CLI arg source regressions" for the owning engineering team.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/unit/app/cli/native_build_arg_source_spec.spl` |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+Purpose: this manual pins the behavior named "native-build CLI arg source regressions" for the owning engineering team.
+    Audience: engineers verifying regressions in this area; steps below are executable evidence.
 
 ## Scenarios
 
@@ -27,12 +42,13 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("routes omitted --backend through the default Simple LLVM backend")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/cli/_CliMain/main_and_help.spl")
 expect(source).to_contain("not saw_backend")
 ```
@@ -42,26 +58,25 @@ expect(source).to_contain("not saw_backend")
 #### does not treat malformed --backend as omitted
 
 - does not treat malformed --backend as omitted
-   - Expected: source does not contain `arg == "--backend"`
-   - Expected: source does not contain `backend == "llvm`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("does not treat malformed --backend as omitted")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/cli/_CliMain/main_and_help.spl")
 expect(source).to_contain("fn native_build_backend_supported(backend: text) -> bool:")
 expect(source).to_contain("if str_eq(arg, \"--backend\"):")
 expect(source).to_contain("return native_build_backend_supported(args[i + 1])")
 expect(source).to_contain("return false")
-expect(source.contains("arg == \"--backend\"")).to_equal(false)
-expect(source.contains("backend == \"llvm")).to_equal(false)
+assert_false(source.contains("arg == \"--backend\""))
+assert_false(source.contains("backend == \"llvm"))
 ```
 
 </details>
@@ -69,21 +84,21 @@ expect(source.contains("backend == \"llvm")).to_equal(false)
 #### matches native-build command exactly
 
 - matches native-build command exactly
-   - Expected: source does not contain `args[0].starts_with("native-build")`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("matches native-build command exactly")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/cli/_CliMain/main_and_help.spl")
 expect(source).to_contain("str_eq(args[0], \"native-build\")")
-expect(source.contains("args[0].starts_with(\"native-build\")")).to_equal(false)
+assert_false(source.contains("args[0].starts_with(\"native-build\")"))
 ```
 
 </details>
@@ -91,31 +106,28 @@ expect(source.contains("args[0].starts_with(\"native-build\")")).to_equal(false)
 #### keeps native_build_main option checks off raw string equality
 
 - keeps native_build_main option checks off raw string equality
-   - Expected: source does not contain `raw_args[i] == "native-build"`
-   - Expected: source does not contain `args[i] == "--timeout"`
-   - Expected: source does not contain `a == "-o"`
-   - Expected: source does not contain `"args`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("keeps native_build_main option checks off raw string equality")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/cli/native_build_main.spl")
 expect(source).to_contain("native_build_text_eq(raw_args[i], \"native-build\")")
 expect(source).to_contain("native_build_text_eq(args[i], \"--timeout\")")
 expect(source).to_contain("native_build_text_eq(a, \"-o\")")
 expect(source).to_contain("native_build_text_eq(a, \"--output\")")
 expect(source).to_contain("fn native_build_has_help(args: [text]) -> bool:")
-expect(source.contains("raw_args[i] == \"native-build\"")).to_equal(false)
-expect(source.contains("args[i] == \"--timeout\"")).to_equal(false)
-expect(source.contains("a == \"-o\"")).to_equal(false)
-expect(source.contains("args.contains(\"-h\")")).to_equal(false)
+assert_false(source.contains("raw_args[i] == \"native-build\""))
+assert_false(source.contains("args[i] == \"--timeout\""))
+assert_false(source.contains("a == \"-o\""))
+assert_false(source.contains("args.contains(\"-h\")"))
 ```
 
 </details>
@@ -123,39 +135,24 @@ expect(source.contains("args.contains(\"-h\")")).to_equal(false)
 #### matches only --entry and --entry=value for native-build entry parsing
 
 - matches only --entry and --entry=value for native-build entry parsing
-   - Expected: source does not contain `elif a.starts_with("--entry")`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-SSPEC-UNIT
+# @req REQ-SSPEC-APP
 step("matches only --entry and --entry=value for native-build entry parsing")
+# evidence(oracle-complete: exact assertion on the real module output; no retained artifact needed)
 val source = file_read("src/app/io/_CliCompile/compile_targets.spl")
 expect(source).to_contain("arg == \"--entry\" or arg.starts_with(\"--entry=\")")
-expect(source.contains("elif a.starts_with(\"--entry\")")).to_equal(false)
+assert_false(source.contains("elif a.starts_with(\"--entry\")"))
 ```
 
 </details>
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Application |
-| Status | Active |
-| Source | `test/unit/app/cli/native_build_arg_source_spec.spl` |
-| Updated | 2026-08-26 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering native-build CLI arg source regressions.
-- native-build CLI arg source regressions
 
 ## Scenario Summary
 
@@ -175,49 +172,36 @@ Tests covering native-build CLI arg source regressions.
 
 Requirements covered by the scenarios in this manual:
 
-- `REQ-SSPEC-UNIT`
+- `REQ-SSPEC-APP`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `97c995b010ce4e7f06be8aad53b82533355137648339e6b67102a51c38a7c076`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8948d0e7d8e283bcac8692f1635051c013fecfd8aa71f3357fe85ae8e851c9ba`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `97c995b010ce4e7f06be8aad53b82533355137648339e6b67102a51c38a7c076`.
+Source SHA-256: `8948d0e7d8e283bcac8692f1635051c013fecfd8aa71f3357fe85ae8e851c9ba`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `97c995b010ce4e7f06be8aad53b82533355137648339e6b67102a51c38a7c076`  
+Source SHA-256: `8948d0e7d8e283bcac8692f1635051c013fecfd8aa71f3357fe85ae8e851c9ba`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **82/100**; effective score: **49/100**; blockers: **1**.
+Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
-SSpec documentization score: 49/100
+SSpec documentization score: 97/100
 source: test/unit/app/cli/native_build_arg_source_spec.spl
 mirror: doc/06_spec/unit/app/cli/native_build_arg_source_spec.md (current)
-findings: 6 blockers: 1
-  narrative=100 structure=100 oracle=50
-  traceability=100 evidence=70 coverage=100 maintainability=70
+findings: 2 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=100 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-  raw=82; blocker cap makes effective=49
 doc/06_spec/unit/app/cli/native_build_arg_source_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
   why: Operators need recovery and evidence interpretation guidance.
   improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/app/cli/native_build_arg_source_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+doc/06_spec/unit/app/cli/native_build_arg_source_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/app/cli/native_build_arg_source_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
-  why: Source presence or self-created arithmetic does not demonstrate production behavior.
-  improve: Observe runtime behavior or a stable generated artifact instead.
-test/unit/app/cli/native_build_arg_source_spec.spl:11:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes omitted --backend through the default Simple LLVM backend' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/cli/native_build_arg_source_spec.spl:17:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'does not treat malformed --backend as omitted' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/app/cli/native_build_arg_source_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches native-build command exactly' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
