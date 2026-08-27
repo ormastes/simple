@@ -435,3 +435,8 @@ passing placeholder.
     helper dispatch, allocation, copying, lookup, locks, retries, or additional
     provider calls. Source-shape containment is not provider verification or
     signed artifact admission.
+80. Keep GPU Engine3D color and math-hook scalar bridges explicitly unsafe.
+    Their five direct `f32`/`f64` scalar calls must keep their existing casts,
+    call count, and lexical scopes. Do not add temporary allocation, copying,
+    helper dispatch, lookup, lock, retry, or extra provider invocation; source
+    containment does not establish ABI verification or artifact signing.

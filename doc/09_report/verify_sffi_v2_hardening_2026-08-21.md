@@ -512,3 +512,13 @@ a claim that SFFI v2 is complete.
   or additional provider call was added. No runtime benchmark was run.
 - FAIL (global admission): the provider lacks artifact-bound ABI/ownership
   verification and a trusted signature. These paths remain unsafe-only.
+
+## Follow-up: GPU Engine3D scalar math containment (2026-08-27)
+
+- PASS (static/source): GPU Engine3D color and math-hook owners explicitly
+  tag five scalar declarations and scope their five existing direct calls.
+- PASS (performance shape): `f32`/`f64` casts and direct call count are
+  preserved; no allocation, copy, helper dispatch, lookup, lock, retry, or
+  additional provider call was introduced. No runtime benchmark was run.
+- FAIL (global admission): this provider has no artifact-bound ABI/ownership
+  verification receipt or trusted signature, so these paths remain unsafe-only.
