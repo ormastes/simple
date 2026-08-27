@@ -1680,3 +1680,19 @@ checks these four direct call shapes. Source check and full optimizer analysis
 pass with no reported optimization opportunity. No return type, allocation,
 copy, loop, lookup, hash, or dispatch changed; this is visibility and boundary
 containment, not signed admission.
+
+### Compiler CAS raw-owner consolidation (2026-08-27)
+
+The compiler cache CAS store had six filesystem/process/time raw declarations
+invoked from 31 source sites. They are now six private `@always_inline` helpers
+with minimal lexical FFI scopes, preserving the existing boolean, timestamp,
+and process-id contracts. Direct callers retain one ABI call after inlining;
+the change adds no retry, lock, lookup, heap allocation, copy, or dispatch.
+The new CAS authority audit and source check pass.
+
+Full optimizer analysis reports 70 opportunities in this existing cache module
+(64 MIR and six general: preallocation/length-hoisting). They are not caused by
+the wrapper consolidation, whose diff adds no collection or loop. They remain a
+separate cache-performance backlog and must be measured against a representative
+CAS workload before an optimization claim is made. This containment does not
+provide provider signing or global verification.

@@ -175,3 +175,18 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): lexical scope does not supply nullable/status-out
   ABI, artifact-bound evidence, or a provider signature. The global SFFI
   verification status remains **FAIL**.
+
+## Follow-up: compiler CAS raw-owner consolidation (2026-08-27)
+
+- PASS (static/source): six raw CAS filesystem/process/time declarations are
+  unsafe-tagged and called only by six private always-inline lexical owners;
+  the CAS authority audit and affected source check pass.
+- PASS (performance shape): callers retain their existing direct ABI calls
+  after inlining. No retry, lock, lookup, allocation, copy, loop, or dispatch
+  was added by this containment repair.
+- WARN (optimizer backlog): full analysis reports 70 opportunities in the
+  pre-existing cache module (64 MIR; six general preallocation/length-hoist
+  findings). No benchmark establishes a regression or an optimization benefit;
+  this is recorded for a dedicated CAS workload, not treated as fixed.
+- FAIL (global admission): no artifact-bound signature or semantic provider
+  evidence has been added. Global SFFI verification remains **FAIL**.
