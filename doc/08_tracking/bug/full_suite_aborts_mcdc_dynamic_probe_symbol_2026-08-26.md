@@ -1,7 +1,8 @@
 # A full-suite run aborts before executing anything: `variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found` (2026-08-26)
 
-**Status:** OPEN. Found running the full suite from a clean worktree at `b2cbf73988f` with the
-2026-08-26 01:16 deployed seed.
+**Status:** OPEN. The original operator report says this was found in a clean worktree at
+`b2cbf73988f` with the 2026-08-26 01:16 deployed seed. No binary digest or retained worktree
+transcript makes that binary provenance independently verifiable.
 
 ## Symptom
 
@@ -25,140 +26,197 @@ is a *different* failure shape from the documented preflight abort: that one pri
 dies without either a results line or an abort banner is the worst of both — it looks like a
 crash and carries no instruction.
 
-## What is ruled out
+## Early operator-reported probes
 
 - **The symbol exists.** `src/lib/nogc_sync_mut/mcdc/dynamic_probe.spl:225`, `pub fn`.
 - **Both import spellings resolve.** `use std.nogc_sync_mut.mcdc.dynamic_probe.{…}` and
   `use std.mcdc.dynamic_probe.{…}` each load and call cleanly from a file inside the project,
   at top level as well as inside `fn main()`.
-- **Not the generated MC/DC prelude's import, as first suspected.**
-  `test_executor_parsing.spl:793/815` emit that `use` and call, but only when `mcdc_enabled`,
-  which is `SIMPLE_MCDC_MODE in {on, dynamic}` (`test_runner_execute.spl:843`,
-  `test_executor_parsing.spl:772`). The failing run had that variable unset. Those `lines.push(...)`
-  occurrences are string literals and resolve nothing by themselves.
-- **Not the spec that imports it.** `test/01_unit/lib/mcdc_probe_protocol_spec.spl` runs to a
+- **Historical false reasoning — not a ruled-out item.** An earlier draft argued that the generated
+  MC/DC prelude could not be involved because `SIMPLE_MCDC_MODE` was unset on process entry. That is
+  false: `resolve_mcdc_mode_for_profile(...)` selects `on` for an unset mode at the normal/default
+  profile, and `propagate_env_vars` writes that effective value back before the later
+  `mcdc_enabled` checks. The `lines.push(...)` occurrences are string literals at runner load time,
+  but the generated prelude is active in the reported unset/default run.
+- **Reported importing-spec result.** `test/01_unit/lib/mcdc_probe_protocol_spec.spl` reached a
   verdict on its own (`9 total, 2 passed, 7 failed` — its own failures are a separate matter).
-- **Not single-spec MC/DC.** `bin/simple test <one spec> --mcdc --keep-artifacts` passes 3/3.
-- **Not an out-of-project path effect.** A probe under `/tmp` warns
+- **Reported single-spec MC/DC result.** `bin/simple test <one spec> --mcdc --keep-artifacts`
+  passed 3/3 in the cited run.
+- **Reported path probe.** A probe under `/tmp` warned
   `stdlib import … resolves from the project stdlib roots only` but still returns a value; the
   same probe inside the project is silent. Neither produces this hard error.
 
-## WORKING HYPOTHESIS (2026-08-27): co-compiled duplicates on the directory-only path
+## Evidence boundary for the 2026-08-27 experiments
 
-The same run that aborts emits **11** duplicate-definition warnings, including:
+The immutable original report commit is
+`5c88fb433fa00d8211262d8a6cf24fd2848aafb1`; its parent is
+`72a466dd6d3bbe02b6fd65ebac65458a19efa286`. The commit message says the experiments below used a
+clean `origin/main` worktree, but it does **not** retain the tested HEAD, binary digest, raw command
+transcripts, scratch-fixture contents, duplicate-rename patch, or MC/DC waiver values. The source
+facts about wrapper naming and cleanup described below are directly inspectable at the immutable
+parent with:
 
 ```
-warning: public function `discover_test_files` has 2 co-compiled definitions with 2 differing
-         signatures ((text)->[text] vs (text,TestOptions)->[text]); JIT call sites resolve ...
-warning: public function `env_get` has 4 co-compiled definitions with 2 differing signatures
-warning: public function `mcdc_condition_key` has 2 co-compiled definitions with 2 differing signatures
-warning: class `Trace32Adapter` has 2 co-compiled definitions across 2 modules; the interpreter
-         resolves class members by NAME across modules ...
+git grep -n 'simple_cov_' 72a466dd6d3bbe02b6fd65ebac65458a19efa286 -- \
+  src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl
+git grep -n 'not options.keep_artifacts' 72a466dd6d3bbe02b6fd65ebac65458a19efa286 -- \
+  src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl
 ```
 
-`discover_test_files` is **the directory-expansion function** — a directory target calls it, a file
-target does not. That makes its two differing co-compiled signatures a plausible explanation for
-the discriminator above, but it does **not** establish causation. `mcdc_condition_key` being
-doubled the same way puts the MC/DC machinery in the same blast radius as the symbol named in the
-abort; it remains correlation until a controlled change removes or selects the duplicate and the
-two-file directory repro stops aborting.
+The abort strings and refutation results below are operator-recorded observations, not immutable
+reproduction evidence. They should be re-run with a committed fixture or an evidence bundle before
+being used to close this bug.
 
-The interpreter resolving members **by name across modules** is a known defect class in this repo,
-and the warnings prove that class is present in the test runner's dependency graph. Evidence still
-needed for this specific abort: remove the duplicate `discover_test_files` definition or force the
-intended owner, then show the directory repro passes while an equivalent sabotage restores the
-failure. Until that experiment exists, the root cause remains **OPEN**.
+## Reported refuted hypotheses (2026-08-27) — read this before forming a new one
 
-Likely source of the duplication: facade modules that re-export a sibling family wholesale, e.g.
-`src/lib/nogc_async_mut/test_runner/test_runner_types.spl:1` is
-`export use std.nogc_sync_mut.test_runner.test_runner_types.*`. A wildcard re-export makes both
-copies co-compiled, so every name in the family exists twice.
+Four refutations were reported. Check the evidence boundary above before relying on or repeating one:
 
-**Not fixed here.** De-duplicating those module families is a real refactor with wide blast radius
-across the test runner, and doing it blind — while `bin/simple test` cannot run to give a
-regression signal — would be reckless. The right order is: fix the duplication (or make the
-interpreter's cross-module resolution deterministic), then re-run this repro, which is now a
-two-second check rather than a 15,000-file run.
+| # | hypothesis | test | result |
+|---|---|---|---|
+| 1 | stale `.smf` files shadow the source | parked all 8 under `gpu_runtime/` | no change |
+| 2 | a same-named class method collides | renamed `BrowserNavigator.gpu_available` | no change |
+| 3 | duplicate co-compiled `discover_test_files` | renamed the daemon's copy so the collision is gone | no change |
+| 4 | the deployed binary predates the symbol | built a seed from the CURRENT `origin/main` and re-ran | **no change** |
 
-## DISCRIMINATOR FOUND (2026-08-27): directory target aborts, file target does not
+Hypothesis 4 deserves a note because it looked airtight: the second failure mode is
+`unknown extern function: rt_process_run_owned_observed_bounded_value`, and that symbol *is*
+registered at `src/compiler_rust/common/src/runtime_symbols.rs:1901`, which reads exactly like a
+binary that predates its registration. The operator reported that a freshly built seed from the
+same tip failed identically. If reproduced with a pinned binary and committed fixture, "registered in
+`runtime_symbols.rs` but reported unknown at run time" would be the sharpest clue in this record;
+the retained report alone does not eliminate binary provenance as a cause.
 
-The same single spec, same binary, same tree:
+Also worth recording as a dead end: the failing `--keep-artifacts` run was checked for
+`.sspec_wrapped_entry_*.spl`, but that is not the path produced by this code. At the original report
+base, `build_coverage_wrapper` writes
+`$TMPDIR/simple_cov_<flattened-source-path>_spec.spl`
+(`test_executor_parsing.spl:804`), and every relevant cleanup branch is guarded by
+`not options.keep_artifacts` (`test_runner_execute.spl:249-324,830-832`). The earlier claim that the
+error path could remove the wrapper despite `--keep-artifacts` was false. The recorded directory
+check looked for the wrong filename, so it proves neither creation nor non-creation. A repeat must
+record the resolved temp directory and inspect the exact `simple_cov_...` path.
+
+## REFRAMED (2026-08-27): investigate the directory/file symbol-registration difference
+
+Two experiments were reported from a clean `origin/main` worktree with a two-file scratch repro:
+
+**1. The duplicate-`discover_test_files` hypothesis is reported REFUTED.** There really are two
+co-compiled definitions with different signatures —
+`src/lib/nogc_sync_mut/test_runner/test_runner_files.spl:410` `(base_path: text, options: TestOptions)`
+and `src/app/test_daemon/daemon.spl:515` `(filter: text)`. Renaming the daemon's copy to
+`daemon_discover_test_files` (so the collision is gone) changes nothing: the directory target still
+aborts with the identical error. That observation removes the duplication from the active
+investigation path; the missing patch and transcript prevent treating non-causation as sealed proof.
+
+**2. MC/DC mode changes the first reported unresolved symbol.** Here, `unset` describes process
+entry, not the mode used later: the runner resolves it to `on` and exports that value. Forcing the
+effective mode to `off` with waiver atoms was reported to make the directory target fail on a
+*different* symbol:
+
+| `SIMPLE_MCDC_MODE` | abort |
+|---|---|
+| unset (resolves to `on`) | `variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found` |
+| `off` + waivers | `unknown extern function: rt_process_run_owned_observed_bounded_value` |
+
+The original report says these used the same directory, binary, and specs, but it retained neither
+the binary digest nor the exact four non-empty `SIMPLE_MCDC_OFF_WAIVER_*` values. The reported
+mode-dependent change establishes no more than a lead: the MC/DC-on path reports the MC/DC symbol
+first, while the reportedly waived-off path reaches an extern symbol. It neither rules MC/DC in or
+out as a cause nor seals the second result without a replayable waiver command.
+
+**What the recorded observations support:** the directory and file paths behave differently during
+symbol resolution. The `unknown extern function` result makes module/extern registration the next
+family to test (see `unregistered_extern_silent_nil_2026-08-01.md` and
+`check-interpreter-extern-registry-gap.shs`); it does not by itself prove an extern-registration
+root cause.
+
+**Single next investigation:** commit a minimal two-file fixture, record the exact tested commit and
+binary digest, then trace/diff module and extern registration for the directory command versus the
+equivalent file command. Preserve stdout, stderr, exit status, resolved temp directory, and any
+waiver values in an evidence bundle. Do not spend another iteration changing MC/DC or duplicate
+definitions unless that trace shows they alter registration. Renaming this record once the mechanism
+is known would be reasonable — its current name points at the symptom.
+
+## Reported discriminator (2026-08-27): directory target aborts, file target does not
+
+The report recorded this command pair:
 
 ```
 bin/simple test test/zz_mini            --no-cover-check   ->  error: ... not found   (ABORTS)
 bin/simple test test/zz_mini/foo_spec.spl --no-cover-check ->  Results: 1 total       (RUNS)
 ```
 
-A **two-file** directory reproduces it, so this is fast to iterate on — no 15k-file run needed.
-The trigger is the *target being a directory*, not batch size and not any particular spec: the
-directory used here contains ordinary compiler specs with no MC/DC reference at all.
+The report says `test/zz_mini` contained two ordinary compiler specs with no MC/DC reference. That
+scratch directory, its second filename, and both file contents were not committed, so the exact
+fixture cannot be reconstructed from `5c88fb433fa`. Treat the directory/file distinction as the
+best recorded discriminator, not yet as a sealed reproduction.
 
-That narrows it to whatever the directory path does differently from the file path before the
-per-file loop — discovery/expansion and the session setup that follows it. It also explains the
-one fact that previously did not fit: a concurrent session's run was executing specs normally
-because of how it invoked the runner, not because the defect was intermittent.
+If reproduced, that would narrow the search to what the directory path does differently from the
+file path before the per-file loop — discovery/expansion and the session setup that follows it. It
+would also explain the one fact that previously did not fit: a concurrent session's run was
+executing specs normally because of how it invoked the runner, not because the defect was
+intermittent.
 
-## Earlier: no discriminator, and one false lead recorded
+## Earlier invalid `--no-mcdc` experiment and stale conclusion
 
 An earlier draft of this record claimed that adding `--no-mcdc` avoided the abort, and concluded
 MC/DC must be active by some non-env route. **That was wrong.** `--no-mcdc` is not a `test`
 option at all — the run rejected it instantly with `Error: unknown option: --no-mcdc` and never
 started, which was misread as "it got further". (`--no-mcdc` exists in
-`src/compiler/00.common/config.spl:200`, the *compiler* CLI, not the test runner.) There is
-therefore no evidence MC/DC is involved beyond the symbol named in the message, and the
-"ruled out" list above stands unchanged.
+`src/compiler/00.common/config.spl:200`, the *compiler* CLI, not the test runner.)
 
-Recording the false lead rather than deleting it: the failure mode is a run that dies so early it
-resembles a run that progressed, which is exactly how this class hides.
+The same draft then concluded there was no evidence of MC/DC involvement beyond the symbol name.
+That conclusion is also **historical and false**: the runner resolves the unset/default mode to
+`on`, and the operator reported a different first unresolved symbol after a waived `off`. Those
+facts show mode-dependent execution, not whether MC/DC is a root cause. The invalid flag episode is
+retained only to prevent its reuse as evidence.
 
-## Scope: ANY multi-file run, and it is PRE-EXISTING
+## Operator-reported scope: multiple multi-file runs; provenance remains unverified
 
-Not full-suite-specific. `bin/simple test test/01_unit/compiler --no-cover-check` (2253 files,
-**zero** of which reference MC/DC) aborts identically, right after `Session setup`, before a
-single per-file PASS/FAIL line. A single spec always succeeds — the same spec that is in that
-directory passes 3/3 on its own, including with `SIMPLE_MCDC_MODE=on --keep-artifacts`.
+The report indicates this was not full-suite-specific:
+`bin/simple test test/01_unit/compiler --no-cover-check` (2253 files, reportedly **zero** of which
+reference MC/DC) aborted after `Session setup` before a per-file PASS/FAIL line. In the recorded
+cases, the corresponding single-spec invocation reached a verdict and one cited spec passed 3/3,
+including with `SIMPLE_MCDC_MODE=on --keep-artifacts`; this does not establish that every multi-file
+run aborts or every single-spec run succeeds.
 
-**Proven independent of the 2026-08-26 seed redeploy.** The obvious worry was that registering
-`@always_inline` (which made these runs get this far at all) introduced this. It did not: with
-the decorator stripped from all 81 files that carry it, the **pre-redeploy** binary
-(`simple.pre-alwaysinline-20260826`) reaches the identical
-`variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found`. The defect was
-simply hidden behind the earlier abort — fix one startup blocker and the next one surfaces.
+**Reported pre-redeploy reproduction; not provenance proof.** The operator reported stripping
+`@always_inline` from 81 files and seeing the same missing-variable abort with a binary named
+`simple.pre-alwaysinline-20260826`. The modified tree, command transcript, and binary digest were
+not retained, so this observation does not prove independence from the redeploy or establish when
+the defect was introduced.
 
-Corroboration from a concurrent session: its `test/01_unit` run, started 00:36 on the old binary
-*before* the redeploy, is executing specs normally with zero occurrences of this error — because
-it never got past... no: it did get past, which is the one piece that does not fit and is worth
-chasing. That run and these differ in tree (shared vs. clean worktree) and invocation, so the
-difference is a live lead, not an explanation.
+The operator also reported a concurrent `test/01_unit` run, started at 00:36 on what was described
+as the old pre-redeploy binary, executing specs normally with zero occurrences of this error. No
+digest or transcript verifies that provenance. That run and these reportedly differed in tree
+(shared versus clean worktree) and invocation, so the comparison is a lead, not corroboration or an
+explanation.
 
 ## Additional facts
 
-- **MC/DC is on even with the env unset.** `test_runner_config.spl:249` calls
+- **At the recorded code revision, MC/DC resolves on when the mode enters unset.**
+  `test_runner_config.spl:249` calls
   `env_set("SIMPLE_MCDC_MODE", effective_mcdc_mode)` from `resolve_mcdc_mode_for_profile(...)`,
   so the two `mcdc_enabled` computations that read that variable see it set by the runner itself.
   This is why the earlier "MC/DC is not enabled here" reasoning was wrong.
-- **Not the import spelling.** The prelude's `use std.nogc_sync_mut.mcdc.dynamic_probe.{…}` is
-  the odd one out among its siblings, which use short forms. Rewriting it to
-  `use std.mcdc.dynamic_probe.{…}` changes nothing — same abort.
-- **No wrapper is ever written.** With `--keep-artifacts`, no fresh
-  `.sspec_wrapped_entry_*.spl` appears under the target directory, so the run dies at or before
-  the first file's wrapper generation, not while compiling a generated wrapper.
+- **Reported import-spelling probe.** The prelude's
+  `use std.nogc_sync_mut.mcdc.dynamic_probe.{…}` is the odd one out among its siblings, which use
+  short forms. The operator reported that rewriting it to `use std.mcdc.dynamic_probe.{…}` changed
+  nothing and produced the same abort.
+- **The wrapper check used the wrong path.** With `--keep-artifacts`, the run was checked for
+  `.sspec_wrapped_entry_*.spl` under the target directory. The relevant code writes a
+  `simple_cov_...` wrapper under the resolved temp directory and does not clean it when
+  `keep_artifacts` is true. No execution-stage conclusion follows from the recorded check.
 - The per-file loop begins immediately after the `Session setup: Nms` line
   (`src/app/test_runner_new/test_runner_main.spl:392-409`), so the failure is on the first file.
 
 ## Impact
 
-`bin/simple test` with no flags cannot produce a verdict for the tree. Any session reporting full
-suite results must be passing flags, using a different entry point, or reading a run that never
-executed. No workaround is known yet: the only flag tried, `--no-mcdc`, is not a valid `test`
-option, and the directory-scoped runs tested here abort too. A working workaround or alternate
-entry point has not been established.
+In the recorded no-flag and directory-scoped runs, `bin/simple test` did not produce a tree verdict.
+That evidence does not justify claims about every invocation or explain sessions that did execute
+specs. No replayable workaround was retained: `--no-mcdc` is not a valid `test` option, and the
+reported directory-scoped attempts also aborted. A working workaround or alternate entry point has
+not been established.
 
 (The `--no-cover-check` half is separate and benign — a documented preflight gate fires because
 2113 system tests lack `# @cover`, and it announces itself and its bypass properly.)
-
-## Where to look
-
-Whatever sets MC/DC on for a whole-suite run when `SIMPLE_MCDC_MODE` is unset, then
-`build_coverage_wrapper` (`test_executor_parsing.spl:771`) and the prelude it emits at :786-815.
-The mechanism was not pinned; everything above is what was measured, not inferred.
