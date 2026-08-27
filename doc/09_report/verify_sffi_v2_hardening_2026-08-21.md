@@ -346,3 +346,13 @@ a claim that SFFI v2 is complete.
 - FAIL (global admission): the runtime clock artifact is not signed/admitted
   with an exact evidence receipt. This closes a cross-lane contract defect but
   does not globally verify the provider.
+
+## Follow-up: TLS/OIDC clock cross-lane ABI repair (2026-08-27)
+
+- PASS (static/source): certificate and OIDC expiry validation now use the
+  shared integer microsecond ABI, each in a lexical unsafe scope. Clock failure
+  invalidates a certificate and returns an OIDC validation error.
+- PASS (performance shape): both validation paths retain one clock read and no
+  added allocation, lookup, lock, retry, or copy on successful reads.
+- FAIL (global admission): the clock provider has no exact signed artifact or
+  verification receipt, so this is not a provider-verification claim.
